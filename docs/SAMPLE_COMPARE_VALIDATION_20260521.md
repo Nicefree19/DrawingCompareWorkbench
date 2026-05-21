@@ -215,6 +215,71 @@ The first selected-zone crop now reports `renderer_backend =
 cad-background-image-crop`, `visual_fidelity = cad_render`, and
 `render_lifecycle = ready`.
 
+## Fast-Crop Release Package Validation
+
+Date: 2026-05-22 KST
+
+Validated commit: `51cea4c perf: reuse CAD viewer backgrounds for zone crops`.
+
+Environment check:
+
+```powershell
+python scripts\release_environment_check.py --json-output release\environment_check_fastcrop_20260522.json
+```
+
+Result: PASS.
+
+- ODA File Converter detected at
+  `C:\Program Files\ODA\ODAFileConverter 26.10.0\ODAFileConverter.exe`
+- PyInstaller detected on `PATH`
+
+Release command:
+
+```powershell
+python scripts\release_drawing_compare_workbench.py `
+  --out release\drawing_compare_fastcrop_build_20260522 `
+  --skip-realset
+```
+
+Result: PASS.
+
+- release manifest status: `passed`
+- compile step: `passed`
+- comparison unit tests: `passed`
+- PyInstaller build: `passed`
+- packaged app launch smoke: `passed`
+- customer shareable package path audit: `passed`
+- path leak count: 0
+- disallowed file count: 0
+
+Packaged executable diagnostic:
+
+```powershell
+release\drawing_compare_fastcrop_build_20260522\dist\DrawingCompareWorkbench\DrawingCompareWorkbench.exe --diagnose
+```
+
+Result: PASS, all required and optional runtime dependencies available.
+
+Customer-shareable ZIP:
+
+- path:
+  `release\drawing_compare_fastcrop_build_20260522\DrawingCompareWorkbench_customer_shareable.zip`
+- size: 509,041,664 bytes
+- SHA256:
+  `E9E9E5A4D5EC3EBE741ACA98DBAF44E23E1B0995A9823952FD40FC6E234C82D3`
+- ZIP entries: 8,620
+- required entries verified:
+  - `README_INTERNAL_PILOT.md`
+  - `customer_evidence_request_ko.md`
+  - `app/DrawingCompareWorkbench/DrawingCompareWorkbench.exe`
+  - `customer_package_manifest.json`
+  - `customer_package_path_audit.json`
+
+Scope note: this release build intentionally used `--skip-realset` because the
+sample compare and focused regression were already recorded above. Before wider
+pilot distribution, still run a clean Windows GUI smoke with actual operator
+input files.
+
 ## Next Recommended Step
 
 The next performance target is the remaining DWG artifact stage time. The
