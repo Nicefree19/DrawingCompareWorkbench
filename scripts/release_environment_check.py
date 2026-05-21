@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Environment gate for the limited-customer Windows release."""
+"""Environment gate for the Drawing Compare Workbench release."""
 
 from __future__ import annotations
 
@@ -8,31 +8,29 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_ROOT = SCRIPT_PATH.parent.parent
-if not (PROJECT_ROOT / "scripts" / "cli_converter.py").exists():
-    fallback_root = SCRIPT_PATH.parents[2]
-    if (fallback_root / "scripts" / "cli_converter.py").exists():
-        PROJECT_ROOT = fallback_root
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def _import_status(module_name: str) -> Dict[str, Any]:
+def _import_status(module_name: str) -> dict[str, Any]:
     try:
-        __import__(module_name)
-    except Exception as exc:  # pragma: no cover - defensive
+        module = __import__(module_name)
+    except Exception as exc:  # pragma: no cover - defensive/environmental
         return {"available": False, "error": str(exc)}
-    return {"available": True}
+    version = getattr(module, "__version__", None)
+    return {"available": True, "version": version}
 
 
-def _check_write_access(path: Path) -> Dict[str, Any]:
+def _check_write_access(path: Path) -> dict[str, Any]:
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".release-write-probe"
@@ -43,7 +41,7 @@ def _check_write_access(path: Path) -> Dict[str, Any]:
         return {"writable": False, "path": str(path), "error": str(exc)}
 
 
-def _check_vc_runtime() -> Dict[str, Any]:
+def _check_vc_runtime() -> dict[str, Any]:
     windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
     candidates = [
         windir / "System32" / "vcruntime140.dll",
@@ -53,58 +51,85 @@ def _check_vc_runtime() -> Dict[str, Any]:
     return {"available": bool(existing), "files": existing}
 
 
-def collect_environment_report() -> Dict[str, Any]:
-    from scripts.cli_converter import ConverterAPI
+def _oda_status() -> dict[str, Any]:
+    try:
+        from src.services.comparison.dwg_differ import DwgDiffer
 
-    temp_root = Path(tempfile.gettempdir()) / "conversion_workbench_release_gate"
+        status = DwgDiffer.get_status()
+        return {
+            "available": bool(status.get("oda_converter")),
+            "path": status.get("oda_path"),
+            "dwg_support": bool(status.get("dwg_support")),
+            "details": status,
+        }
+    except Exception as exc:  # pragma: no cover - defensive/environmental
+        return {"available": False, "error": str(exc)}
+
+
+def collect_environment_report() -> dict[str, Any]:
+    temp_root = Path(tempfile.gettempdir()) / "drawing_compare_release_gate"
+    output_root = PROJECT_ROOT / "release" / ".environment_probe"
     runtime_modules = {
         "PySide6": _import_status("PySide6"),
-        "pandas": _import_status("pandas"),
-        "numpy": _import_status("numpy"),
-        "openpyxl": _import_status("openpyxl"),
         "fitz": _import_status("fitz"),
         "ezdxf": _import_status("ezdxf"),
         "cv2": _import_status("cv2"),
+        "numpy": _import_status("numpy"),
+        "PIL": _import_status("PIL"),
+        "scipy": _import_status("scipy"),
+        "skimage": _import_status("skimage"),
+        "openpyxl": _import_status("openpyxl"),
     }
-    tekla_status = ConverterAPI().diagnose_tekla(force=True)
     return {
+        "project_root": str(PROJECT_ROOT),
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
             "version": platform.version(),
             "machine": platform.machine(),
             "python_version": platform.python_version(),
+            "python_executable": sys.executable,
             "is_frozen": bool(getattr(sys, "frozen", False)),
         },
-        "write_access": _check_write_access(temp_root),
+        "write_access": {
+            "temp": _check_write_access(temp_root),
+            "release_output": _check_write_access(output_root),
+        },
         "vc_runtime": _check_vc_runtime(),
         "runtime_modules": runtime_modules,
-        "tekla": tekla_status,
+        "oda_converter": _oda_status(),
+        "path_tools": {
+            "pyinstaller": shutil.which("pyinstaller") or shutil.which("pyinstaller.exe"),
+            "oda_file_converter": shutil.which("ODAFileConverter") or shutil.which("ODAFileConverter.exe"),
+        },
     }
 
 
-def _console_summary(report: Dict[str, Any]) -> str:
-    tekla = report.get("tekla", {})
-    status = tekla.get("status", {})
+def _console_summary(report: dict[str, Any]) -> str:
     module_summary = ", ".join(
         f"{name}={'OK' if info.get('available') else 'FAIL'}"
         for name, info in report.get("runtime_modules", {}).items()
     )
+    write_access = report.get("write_access", {})
+    oda = report.get("oda_converter", {})
     return "\n".join(
         [
-            "Conversion Workbench Release Environment Check",
+            "Drawing Compare Workbench Release Environment Check",
+            f"Project: {report['project_root']}",
             f"Platform: {report['platform']['system']} {report['platform']['release']} ({report['platform']['machine']})",
             f"Python: {report['platform']['python_version']} | frozen={report['platform']['is_frozen']}",
-            f"Write access: {'OK' if report['write_access']['writable'] else 'FAIL'} -> {report['write_access']['path']}",
+            f"Temp write access: {'OK' if write_access.get('temp', {}).get('writable') else 'FAIL'} -> {write_access.get('temp', {}).get('path')}",
+            f"Release write access: {'OK' if write_access.get('release_output', {}).get('writable') else 'FAIL'} -> {write_access.get('release_output', {}).get('path')}",
             f"VC runtime: {'OK' if report['vc_runtime']['available'] else 'MISSING'}",
             f"Modules: {module_summary}",
-            f"Tekla: api={status.get('api_available')} running={status.get('structures_running')} ready={tekla.get('connection_ready')}",
+            f"ODA Converter: {'OK' if oda.get('available') else 'MISSING'} -> {oda.get('path') or oda.get('error') or 'not found'}",
+            f"PyInstaller on PATH: {report['path_tools']['pyinstaller'] or 'not found'}",
         ]
     )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the limited-release environment gate.")
+    parser = argparse.ArgumentParser(description="Run the Drawing Compare Workbench release environment gate.")
     parser.add_argument("--json-output", help="Optional JSON output path")
     args = parser.parse_args()
 

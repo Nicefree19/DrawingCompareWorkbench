@@ -216,6 +216,7 @@ test_data/synthetic_*.mgt
 # Build & Output Artifacts
 # ============================================================
 build_onefile/
+release/
 test_output/
 *.exe
 
