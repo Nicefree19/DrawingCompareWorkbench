@@ -1,0 +1,15 @@
+{
+  "comment": "다수 cosmetic 변경 (4개 LINE color flip) + 실제 1개 추가 — dialog 추천 프리셋이 cosmetic noise 만 제거하고 real 변경은 보존함을 검증 (verify --compare 의 핵심 데모 케이스)",
+  "expected_changes": [
+    {
+      "location": [
+        500.0,
+        400.0
+      ],
+      "change_type": "added",
+      "layer": "DIAG",
+      "tolerance_mm": 50.0,
+      "notes": "대각선 LINE 추가 (real change — cosmetic noise 와 함께)"
+    }
+  ]
+}

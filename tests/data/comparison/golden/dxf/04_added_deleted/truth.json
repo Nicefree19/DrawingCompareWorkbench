@@ -1,0 +1,25 @@
+{
+  "comment": "LINE 1개 추가 (대각선) + LINE 1개 삭제 (내부 GRID)",
+  "expected_changes": [
+    {
+      "location": [
+        500.0,
+        400.0
+      ],
+      "change_type": "deleted",
+      "layer": "GRID",
+      "tolerance_mm": 50.0,
+      "notes": "GRID 라인 삭제 (중점 기준)"
+    },
+    {
+      "location": [
+        500.0,
+        400.0
+      ],
+      "change_type": "added",
+      "layer": "DIAG",
+      "tolerance_mm": 50.0,
+      "notes": "대각선 LINE 추가 (중점 기준)"
+    }
+  ]
+}

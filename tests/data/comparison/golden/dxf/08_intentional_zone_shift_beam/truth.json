@@ -1,0 +1,16 @@
+{
+  "comment": "한 zone (보 1개) 만 50mm 시프트 — Phase P 회복 검증. Phase O2 까지는 alignment artifact 로 흡수되어 silent drop 되던 회귀를 차단. structural layer (BEAM) 보호 가드가 핵심.",
+  "expected_changes": [
+    {
+      "location": [
+        500.0,
+        425.0
+      ],
+      "change_type": "modified",
+      "entity_type": "LINE",
+      "layer": "BEAM",
+      "tolerance_mm": 100.0,
+      "notes": "BEAM 1개 50mm 시프트 — 도면의 5/6 (외곽 4 + GRID 1) 는 그대로이므로 RANSAC inlier_ratio ≈ 0.83 < 0.85 → alignment 흡수 비활성. 보 layer 보호 가드도 함께 작동."
+    }
+  ]
+}

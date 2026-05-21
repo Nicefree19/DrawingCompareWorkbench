@@ -1,0 +1,15 @@
+{
+  "comment": "LINE 1개 (내부 BEAM) 의 끝점이 5mm 이동",
+  "expected_changes": [
+    {
+      "location": [
+        500.0,
+        402.5
+      ],
+      "change_type": "modified",
+      "layer": "BEAM",
+      "tolerance_mm": 50.0,
+      "notes": "내부 BEAM 5mm 평행이동 — modified 또는 deleted+added 페어"
+    }
+  ]
+}

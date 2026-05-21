@@ -1,0 +1,225 @@
+# Drawing Compare External Expert Review Prompt
+
+Date: 2026-05-13 KST
+Work item: WI-20260510-001
+Audience: independent senior reviewer or external structural/BIM software expert
+
+## Purpose
+
+Use this prompt when asking an external expert to review the Drawing Compare
+customer-deployment MVP from the Git repository. The review goal is not to
+rubber-stamp the current status. The goal is to find weak assumptions, missing
+evidence, performance risks, validation gaps, and whether the target metrics are
+appropriate for a customer-facing MVP.
+
+The current implementation is intentionally not declared complete. The audited
+gate is at `25/26 = 9.6/10`; the only remaining gate is real customer-grade
+evidence:
+
+- approved non-template `review_ground_truth.csv`
+- structural review lead/team lead `operator_dry_run_notes.md`
+- generated ready `customer_evidence_manifest.json`
+- final `--evidence-level customer_grade` audit with `status=passed`
+
+Do not treat synthetic audit success, templates, handoff ZIPs, or generated
+probe artifacts as final customer evidence.
+
+## Copy-Paste Prompt
+
+```text
+You are an independent senior reviewer for a Drawing Compare customer-deployment MVP.
+
+Repository context:
+- Project domain: structural/BIM automation, Tekla/MIDAS tooling, and Drawing Compare for DWG/DXF/PDF comparison.
+- Main work item: WI-20260510-001, Drawing Compare customer deployment MVP.
+- Current branch should contain the latest Drawing Compare changes and collaboration docs.
+- The repository is the source for code and review documentation. Large generated `tmp` artifacts may not be committed; if you need binary release artifacts or customer dry-run evidence, explicitly request them.
+
+Primary review objective:
+Assess whether the Drawing Compare customer-deployment MVP is genuinely ready for customer-grade release once external customer evidence is supplied. Review both the implementation and the success criteria. Identify any blockers, weak gates, missing tests, inaccurate metrics, or target thresholds that should be revised before claiming 10/10 readiness.
+
+Important current status:
+- The current audited gate is recorded as 25/26 = 9.6/10.
+- The only known failing check is `customer_grade_evidence_declared`.
+- This failure is expected until real external customer evidence is supplied.
+- Do not mark the MVP complete unless the final customer-grade audit passes with zero failed checks.
+
+Key files to inspect first:
+- docs/collab/DRAWING_COMPARE_MVP_SCORECARD.md
+- docs/collab/DRAWING_COMPARE_MVP_COMPLETION_AUDIT.md
+- docs/collab/DRAWING_COMPARE_CUSTOMER_GRADE_CLOSEOUT_RUNBOOK.md
+- docs/collab/DRAWING_COMPARE_CUSTOMER_EVIDENCE_REQUEST_KO.md
+- docs/collab/DRAWING_COMPARE_CUSTOMER_EVIDENCE_CANDIDATE_SCAN.md
+- scripts/audit_drawing_compare_mvp_exit.py
+- scripts/inventory_drawing_compare_customer_evidence.py
+- scripts/prepare_drawing_compare_customer_evidence.py
+- scripts/release_drawing_compare_workbench.py
+- scripts/validate_drawing_compare_realset.py
+- scripts/workbench_acceptance_smoke.py
+- src/gui/drawing_compare_workbench.py
+- src/services/comparison/dwg_differ.py
+- src/services/comparison/dxf_comparator.py
+- src/services/comparison/drawing_batch.py
+- src/services/comparison/folder_compare_pipeline.py
+- src/services/comparison/viewer_package.py
+- src/services/comparison/viewer_perf_summary.py
+- src/services/comparison/zone_render_service.py
+- src/services/comparison/workbench_subprocess.py
+- tests/unit/services/comparison/test_audit_drawing_compare_mvp_exit.py
+- tests/unit/services/comparison/test_inventory_drawing_compare_customer_evidence.py
+- tests/unit/services/comparison/test_prepare_drawing_compare_customer_evidence.py
+- tests/unit/services/comparison/test_release_drawing_compare_workbench.py
+- tests/unit/services/comparison/test_validate_drawing_compare_realset.py
+- tests/unit/services/comparison/test_workbench_subprocess.py
+
+Known current performance evidence to verify against code and docs:
+- Large DWG S20 probe completed in about 55.235 seconds.
+- It streamed 350,178 change-zone records.
+- It capped in-memory change records at 50,000.
+- It emitted/forwarded at least 6 progress events.
+- Current large-DWG gate target is elapsed <= 120 seconds, streamed records >= 100,000, in-memory records <= 50,000, progress events >= 5.
+- Current customer-grade sheet-count target is 20-50 completed pairs.
+- Current first-review-ready target is <= 1800 seconds.
+- Current selected-zone render targets are cold p95 <= 10,000 ms and cache-hit p95 <= 2,000 ms.
+
+Proposed customer MVP success criteria to challenge:
+1. Final audit:
+   - `audit_drawing_compare_mvp_exit.py --evidence-level customer_grade`
+   - `status=passed`
+   - failed checks = 0
+   - required large-DWG probe included with `--require-large-dwg-probe`
+2. Customer evidence:
+   - approved non-template `review_ground_truth.csv`
+   - structural review lead/team lead `operator_dry_run_notes.md`
+   - manifest generated by `prepare_drawing_compare_customer_evidence.py`
+   - no hand-written or template-based manifest accepted
+3. Functional coverage:
+   - DWG/DXF comparison supported
+   - PDF-PDF comparison supported
+   - CAD-PDF cross-comparison blocked with clear policy
+   - CAD block text is not silently detected without explicit expansion evidence
+4. Structural coverage:
+   - member add/delete/move
+   - section/dimension change
+   - D13 spacing change
+   - SHD13 spacing change
+   - grid change
+   - structural text change
+5. Review workflow:
+   - first screen shows structural-core Top 3-5 review queue before raw counts
+   - Korean change summary and reason text are usable for review
+   - selected-zone Before/After synchronized focus/window works
+   - confirmed, false_positive, and hold decisions are supported
+   - confirmed-only cloud/report export excludes false_positive and hold
+6. Release and security:
+   - customer-shareable package has no absolute/cache/temp path leakage
+   - no internal release manifest leaks into the customer ZIP
+   - no raw `.jsonl` or `.ndjson` streams in customer package
+   - package smoke and CLI audit tools are usable on Windows
+
+Please perform the review in this order:
+1. Summarize the architecture and the actual user workflow in your own words.
+2. Reconstruct the prompt-to-artifact checklist from the docs and scripts.
+3. Inspect whether the audit gate truly covers the stated customer MVP requirements.
+4. Inspect whether tests cover the riskiest code paths, especially large DWG streaming, progress reporting, selected-zone rendering, confirmed-only export, path leakage, and customer evidence anti-bypass behavior.
+5. Challenge the thresholds. Say whether the current targets are too loose, too strict, or missing key metrics.
+6. Identify any blocker that should prevent customer deployment even if the final customer evidence files arrive.
+7. Identify any weak-but-acceptable MVP risk that can be deferred with monitoring.
+8. Provide concrete recommended changes: code, tests, docs, audit gates, release process, and customer evidence instructions.
+
+Suggested local commands:
+- `git status --short`
+- `python -m py_compile scripts/audit_drawing_compare_mvp_exit.py scripts/inventory_drawing_compare_customer_evidence.py scripts/prepare_drawing_compare_customer_evidence.py scripts/release_drawing_compare_workbench.py scripts/validate_drawing_compare_realset.py`
+- `python -m pytest tests/unit/services/comparison/test_release_drawing_compare_workbench.py tests/unit/services/comparison/test_prepare_drawing_compare_customer_evidence.py tests/unit/services/comparison/test_inventory_drawing_compare_customer_evidence.py tests/unit/services/comparison/test_audit_drawing_compare_mvp_exit.py -q`
+- `python -m pytest tests/unit/services/comparison/test_dxf_comparator_large_mode.py tests/unit/services/comparison/test_drawing_batch.py tests/unit/services/comparison/test_zone_render_service.py tests/unit/services/comparison/test_viewer_perf_summary.py tests/unit/services/comparison/test_workbench_subprocess.py -q`
+
+If generated `tmp` artifacts are supplied separately, verify:
+- `tmp/dwg_s20_dwg_differ_after_fix.json`
+- `tmp/drawing_compare_mvp_exit_audit_customer_grade_gate_schema15_current.json`
+- `tmp/drawing_compare_mvp_exit_audit_synthetic_schema26_current.json`
+- `tmp/drawing_compare_customer_evidence_inventory_inbox_current_schema32_guard.json`
+- `tmp/drawing_compare_release_mvp_packaged_fix_large_dwg_request_ko_ascii_json_probe_filter_precise/`
+
+Required output format:
+
+1. Executive verdict:
+   - Go / No-Go / Go after external evidence / Go after fixes
+   - Confidence level and reasoning
+2. Findings:
+   - Severity: CRITICAL, HIGH, MEDIUM, LOW
+   - Impact
+   - Evidence: file path, line, command output, or reproducible scenario
+   - Recommendation
+   - Test or validation to prove the fix
+3. Metrics assessment:
+   - Current metric
+   - Current target
+   - Whether target is appropriate
+   - Recommended target
+   - Rationale
+4. Audit coverage assessment:
+   - Which MVP requirements are directly verified
+   - Which are indirectly inferred
+   - Which are not covered
+5. Customer evidence assessment:
+   - Whether the requested `review_ground_truth.csv` and `operator_dry_run_notes.md` are sufficient
+   - Any additional evidence the customer/operator should provide
+6. Final score:
+   - Current repository score out of 10
+   - Score after real customer evidence, assuming final audit passes
+   - Remaining conditions before 10/10 can be claimed
+
+Do not accept "tests passed" as sufficient proof unless the tests map to the customer MVP requirements. Do not accept generated templates or synthetic data as customer-grade evidence.
+```
+
+## Reviewer Scoring Rubric
+
+Suggested scoring for the external reviewer:
+
+| Area | Weight | What to verify |
+| --- | ---: | --- |
+| Functional workflow | 15 | input selection, automatic compare, review queue, selected-zone review, decisions, confirmed-only export |
+| Large DWG performance | 15 | streaming behavior, memory cap, progress events, elapsed time, cancellation/failure behavior |
+| Structural detection evidence | 15 | coverage of member, section, rebar spacing, grid, and structural text changes |
+| PDF and CAD handling | 10 | PDF-PDF support, DWG/DXF support, CAD-PDF block policy, no silent unsupported behavior |
+| Evidence integrity | 15 | real customer evidence only, anti-template guardrails, generated manifest readiness |
+| Release/package readiness | 10 | Windows package smoke, customer ZIP contents, CLI usability |
+| Security/privacy | 10 | path leakage, cache/state/temp exposure, raw stream exclusion |
+| Tests and maintainability | 10 | focused regression, audit coverage, code complexity, future operability |
+
+10/10 requires zero CRITICAL/HIGH findings, final customer-grade audit pass, and
+no unresolved evidence-integrity gap.
+
+## Questions For The Expert
+
+Ask the expert to answer these explicitly:
+
+1. Are the current large-DWG targets customer-realistic, or should the elapsed,
+   memory, and progress thresholds be changed?
+2. Is `20-50` sheet customer-grade evidence enough for MVP exit, or should a
+   larger/stratified validation set be required?
+3. Are the structural coverage buckets sufficient for actual structural drawing
+   review?
+4. Should the MVP require measured precision/recall thresholds beyond the
+   current approved ground-truth recall checks?
+5. Are there any unsafe assumptions in the CAD block-text, CAD-PDF block, or
+   selected-zone rendering policies?
+6. Does the evidence flow prevent accidental or intentional use of templates,
+   synthetic probes, or handoff files as final customer evidence?
+7. What is the minimum additional evidence needed before a customer pilot can
+   proceed?
+
+## Current Known Non-Completion Condition
+
+The final customer-grade target remains blocked until the user or customer
+provides:
+
+- `tmp/drawing_compare_customer_evidence_inbox_request_ko_ascii_json/review_ground_truth.csv`
+- `tmp/drawing_compare_customer_evidence_inbox_request_ko_ascii_json/operator_dry_run_notes.md`
+
+After those files are supplied, follow:
+
+- `docs/collab/DRAWING_COMPARE_CUSTOMER_GRADE_CLOSEOUT_RUNBOOK.md`
+
+The manifest must be generated by the preparation script, then the final
+customer-grade audit must pass with zero failed checks.

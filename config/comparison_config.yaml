@@ -1,0 +1,90 @@
+# 도면 비교 설정 파일
+# Phase 3 P3-2: 민감도 설정 분리
+#
+# 이 파일은 DXF/DWG 도면 비교 시 사용되는 기본 설정입니다.
+# 프로젝트 요구사항에 맞게 수정하여 사용할 수 있습니다.
+
+# 민감도 설정
+# 값이 작을수록 더 민감하게 변경을 감지합니다.
+sensitivity:
+  # 좌표 정밀도 (소수점 자릿수)
+  # 0 = 1mm, 1 = 0.1mm, 2 = 0.01mm
+  coordinate_precision: 1
+
+  # 치수 변경 임계값 (절대값, mm)
+  # 이 값 이상의 치수 변경이 있으면 변경으로 감지
+  dimension_abs_threshold: 1.0
+
+  # 치수 변경 임계값 (상대값, 비율)
+  # 0.001 = 0.1%, 0.01 = 1%
+  dimension_rel_threshold: 0.001
+
+  # 위치 변경 임계값 (mm)
+  # 엔티티 중심점 기준 이동 거리
+  position_threshold: 1.0
+
+  # 회전 변경 임계값 (degrees)
+  rotation_threshold: 0.1
+
+  # 스케일 변경 임계값 (비율)
+  # 0.01 = 1%, 0.05 = 5%
+  scale_threshold: 0.01
+
+  # 근접 매칭 검색 반경 (mm)
+  # MODIFIED 변경 감지 시 주변 검색 범위
+  near_match_radius: 10.0
+
+# 레이어 우선순위 설정
+# fnmatch 패턴 사용 가능 (* = 모든 문자, ? = 단일 문자)
+layer_priority:
+  # 높은 우선순위 레이어 (중요한 변경)
+  # 이 패턴과 일치하는 레이어의 변경은 우선적으로 보고됩니다.
+  high_priority_patterns:
+    - "DIM*"           # 치수 레이어
+    - "TEXT*"          # 텍스트 레이어
+    - "ANNO*"          # 주석 레이어
+    - "*DIMENSION*"    # 치수 포함 레이어
+    - "*ANNOTATION*"   # 주석 포함 레이어
+    - "BEAM*"          # 보 레이어 (구조)
+    - "COLUMN*"        # 기둥 레이어 (구조)
+
+  # 낮은 우선순위 레이어 (덜 중요한 변경)
+  low_priority_patterns:
+    - "DEFPOINTS"      # AutoCAD 기본 레이어
+    - "0"              # 기본 레이어
+    - "TEMP*"          # 임시 레이어
+    - "*_BACKUP"       # 백업 레이어
+    - "GUIDE*"         # 가이드 레이어
+    - "CONSTRUCTION*"  # 보조선 레이어
+
+  # 무시할 레이어 (비교에서 제외)
+  ignore_patterns:
+    - "HIDDEN*"        # 숨김 레이어
+    - "*_OLD"          # 이전 버전 레이어
+    - "*_DELETED"      # 삭제된 레이어
+    - "VIEWPORT*"      # 뷰포트 레이어
+    - "XREF*"          # 외부 참조 레이어
+
+# 블록 확장 설정
+# true: 블록을 개별 엔티티로 분해하여 비교
+# false: 블록을 단일 엔티티로 취급
+expand_blocks: true
+
+# 공간 인덱싱 사용 여부
+# true: R-tree 기반 빠른 검색 (권장)
+# false: 선형 검색 (R-tree 미설치 시 자동 전환)
+use_spatial_index: true
+
+# OCR 텍스트 인식 설정
+use_ocr: false
+ocr_language: "kor+eng"
+
+# 최대 처리 엔티티 수 (0 = 무제한)
+# 대용량 파일 처리 시 메모리 제한을 위해 설정
+max_entities: 0
+
+# 보고서 출력 형식
+# json: JSON 형식 (프로그래밍 처리용)
+# html: HTML 형식 (시각적 보고서)
+# excel: Excel 형식 (스프레드시트)
+report_format: "json"

@@ -1,0 +1,16 @@
+{
+  "comment": "Q4 회귀 가드 — CIRCLE extrusion (0,0,1)→(0,0,-1) flip. center_ocs 동일이지만 WCS 좌표는 X 반전. Q4 의 OCS→WCS 변환 + extrusion key 가 hash 에 포함되어 정확히 'modified' detect. Phase Q3 까지는 OCS 만 비교해 silent (false-equal).",
+  "expected_changes": [
+    {
+      "location": [
+        0.0,
+        200.0
+      ],
+      "change_type": "modified",
+      "entity_type": "CIRCLE",
+      "layer": "Q4_OCS",
+      "tolerance_mm": 200.0,
+      "notes": "Q4 OCS→WCS — extrusion flip 으로 WCS center 가 (100, 200) → (-100, 200). Q4 normalizer 가 _to_wcs 변환 + extrusion key 를 hash 에 포함하므로 deleted (extrusion +1) + added (extrusion -1) 분리 또는 modified 로 surface."
+    }
+  ]
+}

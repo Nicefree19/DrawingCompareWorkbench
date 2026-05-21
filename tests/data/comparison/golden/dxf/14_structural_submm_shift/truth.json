@@ -1,0 +1,16 @@
+{
+  "comment": "Q6 회귀 가드 — BEAM layer 의 LINE 이 0.5mm shift. default position_threshold=1.0mm 미만이지만 Q6 의 structural_position_threshold=0.1mm 가 적용되어 detect. Phase Q5 까지는 silent.",
+  "expected_changes": [
+    {
+      "location": [
+        500.0,
+        400.25
+      ],
+      "change_type": "modified",
+      "entity_type": "LINE",
+      "layer": "BEAM",
+      "tolerance_mm": 5.0,
+      "notes": "BEAM 0.5mm sub-mm shift — Q6 structural_position_threshold=0.1mm 적용 시 detect. default 1.0mm 만 사용하던 Phase Q5 까지는 silent (사용자 보고 누락 케이스 직접 재현)."
+    }
+  ]
+}

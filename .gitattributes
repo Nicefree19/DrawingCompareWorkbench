@@ -1,0 +1,40 @@
+# Git Attributes for TEKLA_MCP Project
+
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Explicitly declare text files with LF line endings
+.gitattributes text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.dxf text eol=lf
+*.txt text eol=lf
+*.sh text eol=lf
+
+# Windows-specific files with CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.pkl binary
+*.xlsx binary
+*.xls binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+
+# Markdown files for documentation (LF for consistency)
+docs/*.md text eol=lf
+out/*.md text eol=lf
+CLAUDE.md text eol=lf
+README.md text eol=lf
+
+# Note: This helps prevent CRLF/LF line count discrepancies
+# Git will normalize to LF in repository, but working copy may use CRLF on Windows
+# Use 'git diff --ignore-cr-at-eol' to ignore line ending differences in diffs

@@ -1,0 +1,16 @@
+{
+  "comment": "한국어 layer (\"기둥-1F\") + 단일 column 5mm 이동 — Phase P SSoT 회복 검증. Phase O 까지는 noise_score >= 0.7 + recommended (min_changes_per_zone=2) 결합으로 zone 폐기.",
+  "expected_changes": [
+    {
+      "location": [
+        302.5,
+        400.0
+      ],
+      "change_type": "modified",
+      "entity_type": "LINE",
+      "layer": "기둥-1F",
+      "tolerance_mm": 50.0,
+      "notes": "기둥(한국어) 단일 entity 5mm shift — Phase P 까지는 noise filter recommended 프리셋에서 silent drop. is_structural_layer SSoT 헬퍼 적용 후 회복."
+    }
+  ]
+}

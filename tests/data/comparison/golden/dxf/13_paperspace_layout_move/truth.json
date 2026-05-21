@@ -1,0 +1,16 @@
+{
+  "comment": "Q5 회귀 가드 — 같은 좌표의 CIRCLE 이 Layout1 (before) 에서 DETAIL_VIEW (after) 로 이동. extract_all_layouts=True 가 paperspace 추출 + layout namespace hash 가 layout 변경 detect.",
+  "expected_changes": [
+    {
+      "location": [
+        50.0,
+        50.0
+      ],
+      "change_type": "modified",
+      "entity_type": "CIRCLE",
+      "layer": "Q5_PSL",
+      "tolerance_mm": 100.0,
+      "notes": "Q5 paperspace 추출 + layout namespace 가 동작. comparator 의 modified detection 이 좌표/radius 동일 + _paperspace_layout 차이를 modified 로 surface."
+    }
+  ]
+}

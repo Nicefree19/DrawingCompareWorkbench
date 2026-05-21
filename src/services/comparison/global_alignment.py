@@ -1,0 +1,397 @@
+# -*- coding: utf-8 -*-
+"""Phase O2 — DXF entity rigid alignment (translation + rotation).
+
+도면 비교 시 실제 변경이 없는데도 원본 DXF가 (+0.5mm, +0.5mm) 같은
+미세 시프트만 가지고 있으면 모든 entity의 hash가 달라져 added/deleted
+폭증이 발생한다. 이 모듈은 entity 위치를 기반으로 (Δx, Δy, Δθ) rigid
+transform을 추정하고, 그것을 이용해 B 좌표계를 A 좌표계로 백투영하는
+단순한 도구를 제공한다.
+
+알고리즘 (보고서 §O2 참조):
+    1. (entity_type, layer) 그룹별로 candidate pair 모집
+       — 50mm 이내 nearest-neighbor (RANSAC가 outlier 제거)
+    2. ``cv2.estimateAffinePartial2D`` 로 RANSAC 기반 추정
+       — scale 고정, rotation+translation 만 (rigid)
+    3. inlier 비율 < 0.5 면 None (정렬 불신뢰)
+    4. shift 가 0.05mm 미만이면 None (적용 무의미)
+
+이 모듈은 pure — Qt/ezdxf I/O 없음. NumPy + OpenCV(선택) 만 의존.
+OpenCV 부재 시 median-shift fallback 사용.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
+
+# OpenCV는 drawing_differ에서 이미 사용 중. RANSAC affine 추정에 필요.
+try:
+    import cv2  # type: ignore
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
+
+try:
+    import numpy as np  # type: ignore
+    _NP_AVAILABLE = True
+except ImportError:
+    _NP_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Public dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RigidTransform:
+    """B → A 좌표계로 매핑하는 rigid 2D transform.
+
+    매핑 식:
+        x' = cos(θ)·x − sin(θ)·y + dx
+        y' = sin(θ)·x + cos(θ)·y + dy
+
+    Attributes:
+        dx: x 방향 평행이동 (mm).
+        dy: y 방향 평행이동 (mm).
+        theta_rad: 회전각 (radian, 반시계 방향 양수).
+        inlier_ratio: RANSAC inlier / 총 candidate 비율 (0~1).
+            품질 척도 — 0.5 미만이면 호출자가 신뢰성을 판단해야 함.
+        candidate_count: 추정에 사용된 candidate pair 개수.
+    """
+
+    dx: float
+    dy: float
+    theta_rad: float
+    inlier_ratio: float = 1.0
+    candidate_count: int = 0
+
+    @property
+    def translation_magnitude(self) -> float:
+        return math.hypot(self.dx, self.dy)
+
+    @property
+    def is_significant(self) -> bool:
+        """0.05mm 이상 시프트 또는 0.01° 이상 회전이면 적용 가치 있음."""
+        if self.translation_magnitude > 0.05:
+            return True
+        if abs(math.degrees(self.theta_rad)) > 0.01:
+            return True
+        return False
+
+    @property
+    def is_translation_only(self) -> bool:
+        """회전이 거의 없는 순수 평행이동인지 — fast-path 분기."""
+        return abs(self.theta_rad) < 1e-6
+
+    def apply(self, x: float, y: float) -> Tuple[float, float]:
+        """단일 좌표를 transform 한다 (B → A)."""
+        if self.is_translation_only:
+            return (x + self.dx, y + self.dy)
+        c = math.cos(self.theta_rad)
+        s = math.sin(self.theta_rad)
+        return (c * x - s * y + self.dx, s * x + c * y + self.dy)
+
+    def inverse(self) -> "RigidTransform":
+        """A → B 매핑 transform."""
+        if self.is_translation_only:
+            return RigidTransform(
+                dx=-self.dx,
+                dy=-self.dy,
+                theta_rad=0.0,
+                inlier_ratio=self.inlier_ratio,
+                candidate_count=self.candidate_count,
+            )
+        # rotation R(-θ), translation -R(-θ)·t
+        c = math.cos(-self.theta_rad)
+        s = math.sin(-self.theta_rad)
+        inv_dx = -(c * self.dx - s * self.dy)
+        inv_dy = -(s * self.dx + c * self.dy)
+        return RigidTransform(
+            dx=inv_dx,
+            dy=inv_dy,
+            theta_rad=-self.theta_rad,
+            inlier_ratio=self.inlier_ratio,
+            candidate_count=self.candidate_count,
+        )
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "dx": self.dx,
+            "dy": self.dy,
+            "theta_rad": self.theta_rad,
+            "theta_deg": math.degrees(self.theta_rad),
+            "translation_magnitude": self.translation_magnitude,
+            "inlier_ratio": self.inlier_ratio,
+            "candidate_count": self.candidate_count,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Candidate pair 수집
+# ---------------------------------------------------------------------------
+
+
+def _entities_to_pairs(
+    entities_a: Dict[str, List[Any]],
+    entities_b: Dict[str, List[Any]],
+    *,
+    search_radius: float,
+) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """양쪽 entity dict에서 candidate (loc_a, loc_b) 페어를 수집.
+
+    entities_a / entities_b 는 ``Dict[entity_type, List[NormalizedEntity]]``
+    형식. NormalizedEntity 는 ``.location: (x, y)``, ``.layer: str`` 만
+    필요 (duck-typed).
+
+    매칭 룰:
+    - 같은 entity_type 안에서만
+    - 같은 layer 만 매칭 (cross-layer 매칭 금지 — false pair 회피)
+    - search_radius (50mm 권장) 이내 nearest-neighbor
+    - 양쪽 모두 1:1 (한 entity는 한 페어에만)
+
+    이 단계에서 일부 noise pair 가 들어와도 RANSAC이 처리하므로 정확도는
+    중요하지 않다. recall 만 중요 (충분한 inlier 확보).
+    """
+    pairs: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+
+    for entity_type, list_a in entities_a.items():
+        list_b = entities_b.get(entity_type)
+        if not list_b:
+            continue
+
+        # layer 별로 한 번 더 그룹핑
+        by_layer_a: Dict[str, List[Any]] = {}
+        by_layer_b: Dict[str, List[Any]] = {}
+        for e in list_a:
+            by_layer_a.setdefault(e.layer, []).append(e)
+        for e in list_b:
+            by_layer_b.setdefault(e.layer, []).append(e)
+
+        for layer, group_a in by_layer_a.items():
+            group_b = by_layer_b.get(layer)
+            if not group_b:
+                continue
+
+            used_b: set[int] = set()
+            radius_sq = search_radius * search_radius
+
+            for entity_a in group_a:
+                xa, ya = entity_a.location
+                best_idx = -1
+                best_dist_sq = radius_sq
+
+                for j, entity_b in enumerate(group_b):
+                    if j in used_b:
+                        continue
+                    xb, yb = entity_b.location
+                    dx = xa - xb
+                    dy = ya - yb
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq <= best_dist_sq:
+                        best_dist_sq = dist_sq
+                        best_idx = j
+
+                if best_idx >= 0:
+                    used_b.add(best_idx)
+                    eb = group_b[best_idx]
+                    pairs.append(((xa, ya), (eb.location[0], eb.location[1])))
+
+    return pairs
+
+
+# ---------------------------------------------------------------------------
+# Estimation
+# ---------------------------------------------------------------------------
+
+
+def _estimate_with_cv2(
+    pairs: Sequence[Tuple[Tuple[float, float], Tuple[float, float]]],
+    *,
+    ransac_threshold: float,
+) -> Optional[RigidTransform]:
+    """cv2.estimateAffinePartial2D — RANSAC, scale 고정 (rigid)."""
+    if not _CV2_AVAILABLE or not _NP_AVAILABLE or len(pairs) < 4:
+        return None
+
+    pts_b = np.array([[b[0], b[1]] for (_, b) in pairs], dtype=np.float32)
+    pts_a = np.array([[a[0], a[1]] for (a, _) in pairs], dtype=np.float32)
+
+    # estimateAffinePartial2D estimates rotation + translation + uniform scale.
+    # We later normalise scale ≈ 1 by extracting rotation from the matrix.
+    matrix, mask = cv2.estimateAffinePartial2D(
+        pts_b, pts_a,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=ransac_threshold,
+        maxIters=2000,
+        confidence=0.99,
+        refineIters=10,
+    )
+    if matrix is None or mask is None:
+        return None
+
+    # Extract Δx, Δy, θ. cv2 returns a 2×3 affine of form:
+    #   [[ s·cosθ, -s·sinθ, dx],
+    #    [ s·sinθ,  s·cosθ, dy]]
+    a11, a12, dx = float(matrix[0][0]), float(matrix[0][1]), float(matrix[0][2])
+    a21, a22, dy = float(matrix[1][0]), float(matrix[1][1]), float(matrix[1][2])
+    scale = math.hypot(a11, a21)
+    if scale < 1e-9:
+        return None
+    theta = math.atan2(a21, a11)
+
+    # rigid 가 아닌 scale 변경이 큰 경우는 배제 (도면 비교에선 의도치 않음)
+    if abs(scale - 1.0) > 0.01:  # 1% 이상 scale 변화 → 거부
+        logger.info(
+            "alignment rejected — non-rigid scale (s=%.4f)",
+            scale,
+        )
+        return None
+
+    inliers = int(mask.sum())
+    total = len(pairs)
+    inlier_ratio = inliers / total if total else 0.0
+
+    return RigidTransform(
+        dx=dx,
+        dy=dy,
+        theta_rad=theta,
+        inlier_ratio=inlier_ratio,
+        candidate_count=total,
+    )
+
+
+def _estimate_median_shift(
+    pairs: Sequence[Tuple[Tuple[float, float], Tuple[float, float]]],
+) -> Optional[RigidTransform]:
+    """OpenCV 부재 시 fallback — median translation only (no rotation)."""
+    if len(pairs) < 4:
+        return None
+
+    deltas_x = sorted(a[0] - b[0] for (a, b) in pairs)
+    deltas_y = sorted(a[1] - b[1] for (a, b) in pairs)
+    n = len(deltas_x)
+    median_x = deltas_x[n // 2]
+    median_y = deltas_y[n // 2]
+
+    # inlier ratio: |delta - median| < 1mm 비율
+    tolerance = 1.0
+    inliers = sum(
+        1
+        for (a, b) in pairs
+        if abs((a[0] - b[0]) - median_x) < tolerance
+        and abs((a[1] - b[1]) - median_y) < tolerance
+    )
+    inlier_ratio = inliers / n if n else 0.0
+
+    return RigidTransform(
+        dx=median_x,
+        dy=median_y,
+        theta_rad=0.0,
+        inlier_ratio=inlier_ratio,
+        candidate_count=n,
+    )
+
+
+def estimate_rigid_transform(
+    entities_a: Dict[str, List[Any]],
+    entities_b: Dict[str, List[Any]],
+    *,
+    search_radius: float = 50.0,
+    ransac_threshold: float = 0.5,
+    min_inlier_ratio: float = 0.5,
+    min_candidate_count: int = 4,
+) -> Optional[RigidTransform]:
+    """B → A 매핑 rigid transform 을 추정한다.
+
+    Args:
+        entities_a / entities_b: ``Dict[entity_type, List[NormalizedEntity]]``
+        search_radius: candidate pair 수집 시 nearest-neighbor 반경 (mm).
+            너무 작으면 큰 시프트를 놓치고, 너무 크면 noise pair가 많아짐.
+            50mm는 일반 도면에서 안전한 기본값.
+        ransac_threshold: RANSAC reprojection threshold (mm).
+        min_inlier_ratio: 이 미만이면 alignment 신뢰 안 함 → None.
+        min_candidate_count: 후보 pair 가 이 미만이면 None.
+
+    Returns:
+        ``RigidTransform`` (B → A) 또는 None (정렬 불가/불신뢰/미세).
+        ``RigidTransform.is_significant`` 가 False 인 경우도 그대로 반환 —
+        호출자가 적용 여부 판단 (None vs insignificant 구분).
+    """
+    pairs = _entities_to_pairs(entities_a, entities_b, search_radius=search_radius)
+    if len(pairs) < min_candidate_count:
+        logger.debug(
+            "alignment skipped — only %d candidate pairs (< %d)",
+            len(pairs), min_candidate_count,
+        )
+        return None
+
+    transform: Optional[RigidTransform]
+    if _CV2_AVAILABLE and _NP_AVAILABLE:
+        transform = _estimate_with_cv2(pairs, ransac_threshold=ransac_threshold)
+    else:
+        logger.info("OpenCV unavailable — using median-shift fallback")
+        transform = _estimate_median_shift(pairs)
+
+    if transform is None:
+        return None
+
+    if transform.inlier_ratio < min_inlier_ratio:
+        logger.info(
+            "alignment rejected — low inlier ratio %.2f (< %.2f), candidates=%d",
+            transform.inlier_ratio, min_inlier_ratio, transform.candidate_count,
+        )
+        return None
+
+    logger.info(
+        "alignment estimated — dx=%.3fmm dy=%.3fmm theta=%.4f° "
+        "(inlier %.0f%% of %d pairs)",
+        transform.dx, transform.dy, math.degrees(transform.theta_rad),
+        transform.inlier_ratio * 100, transform.candidate_count,
+    )
+    return transform
+
+
+# ---------------------------------------------------------------------------
+# Application helpers
+# ---------------------------------------------------------------------------
+
+
+def apply_to_changes(
+    changes: Iterable[Any],
+    transform: RigidTransform,
+    *,
+    location_attr: str = "location",
+) -> None:
+    """주어진 change 객체 컬렉션의 location 을 in-place 업데이트.
+
+    DxfChange 와 같이 ``location: Optional[Tuple[float, float]]`` 필드가
+    있는 객체 컬렉션을 받아 location 을 transform.apply() 결과로 교체.
+    None 위치는 건너뜀.
+
+    inverse=True 의도로 사용할 경우 호출자가 ``transform.inverse()`` 를
+    먼저 적용한 결과를 전달.
+    """
+    for change in changes:
+        loc = getattr(change, location_attr, None)
+        if loc is None or not isinstance(loc, tuple) or len(loc) < 2:
+            continue
+        new_loc = transform.apply(float(loc[0]), float(loc[1]))
+        try:
+            setattr(change, location_attr, new_loc)
+        except (AttributeError, TypeError):
+            # frozen dataclass 등에 대한 보호 — 그런 경우는 호출자가 다른
+            # 필드 (e.g., applied_location) 를 이용해 따로 처리해야 함.
+            logger.debug("cannot mutate %r.%s — skipped", change, location_attr)
+            continue
+
+
+__all__ = [
+    "RigidTransform",
+    "estimate_rigid_transform",
+    "apply_to_changes",
+]

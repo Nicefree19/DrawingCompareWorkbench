@@ -1,0 +1,27 @@
+{
+  "comment": "Q3 회귀 가드 — block 정의 안의 LINE geometry 가 before (0,0)→(10,0) → after (0,0)→(20,0) 로 변경. expand_blocks=True (Q3 default) 가 block-internal 변경을 detect. Phase Q2 까지는 INSERT fingerprint 가 transform 만 봐서 silent.",
+  "expected_changes": [
+    {
+      "location": [
+        505.0,
+        400.0
+      ],
+      "change_type": "deleted",
+      "entity_type": "LINE",
+      "layer": "Q3_LAYER",
+      "tolerance_mm": 50.0,
+      "notes": "Q3 block-internal LINE (end=10) deleted — expand_blocks=True 가 block geometry 펼쳐서 ADDED+DELETED 페어로 surface."
+    },
+    {
+      "location": [
+        510.0,
+        400.0
+      ],
+      "change_type": "added",
+      "entity_type": "LINE",
+      "layer": "Q3_LAYER",
+      "tolerance_mm": 50.0,
+      "notes": "Q3 block-internal LINE (end=20) added."
+    }
+  ]
+}

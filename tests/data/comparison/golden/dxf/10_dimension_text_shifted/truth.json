@@ -1,0 +1,16 @@
+{
+  "comment": "TEXT entity 가 좌표 30mm 시프트 + 내용 변경 동시 — Phase P P3 text_near_match_radius 회복 검증. Phase O 까지는 added+deleted 분리 (사용자 보고: 치수가 두 개로 표시됨).",
+  "expected_changes": [
+    {
+      "location": [
+        215.0,
+        100.0
+      ],
+      "change_type": "modified",
+      "entity_type": "TEXT",
+      "layer": "DIM",
+      "tolerance_mm": 50.0,
+      "notes": "TEXT 좌표 30mm shift + 내용 1500→1550. Phase O 의 1mm tolerance 로는 added+deleted, Phase P 의 50mm text radius 로는 modified."
+    }
+  ]
+}

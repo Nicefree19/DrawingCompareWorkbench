@@ -1,0 +1,16 @@
+{
+  "comment": "Q7 회귀 가드 — REVERSE-PUMP layer 의 LINE 5mm 이동. *REV* fnmatch substring 이 'REVERSE' 까지 잡아 silent drop 하던 false-positive. Q7 의 word-boundary regex SSoT 가 REVERSE 를 title-block 으로 분류 안 함 → 정상 detect.",
+  "expected_changes": [
+    {
+      "location": [
+        500.0,
+        202.5
+      ],
+      "change_type": "modified",
+      "entity_type": "LINE",
+      "layer": "REVERSE-PUMP",
+      "tolerance_mm": 50.0,
+      "notes": "REVERSE-PUMP layer 의 5mm shift — Q7 까지는 *REV* fnmatch 가 REVERSE 까지 매칭해 ignore_title_block_layers=True 시 silent drop. Q7 SSoT 의 word-boundary regex 가 REVERSE 를 title-block 분류 안 함 → 정상 detect (사용자 보고 false-positive 케이스 재현)."
+    }
+  ]
+}

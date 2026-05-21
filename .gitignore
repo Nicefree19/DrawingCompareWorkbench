@@ -1,0 +1,278 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv
+.pytest_cache/
+
+# Logs
+logs/
+*.log
+build_logs/
+
+# 자동 생성 파일
+project_state.json
+work_history.json
+launcher_settings.json
+file_versions.json
+
+# 백업 파일
+*.bak
+*.bak2
+*.bak_*
+*.backup
+version_backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 테스트 출력
+test_results/
+*.test
+
+# 임시 파일
+*.tmp
+*.temp
+~$*
+nul
+
+# Excel 임시 파일
+~$*.xlsx
+~$*.xls
+
+# MGT 변환 임시 파일
+*.mgt.tmp
+*_converted_*.mgt
+test_encoding.txt
+node_modules
+
+# 🔒 보안 관련 파일 (절대 커밋 금지)
+.env
+.env.local
+.env.production
+.env.test
+*.key
+*.pem
+*.p12
+*.pfx
+*_token.txt
+*_credentials.json
+*_secrets.json
+config/secrets.json
+.secrets/
+
+# GitHub 토큰 및 민감 정보
+*token*
+*secret*
+*password*
+*credential*
+github_token.txt
+api_keys.txt
+
+# 대용량 결과 파일
+*.xlsx
+*.xls
+*.csv
+results/
+exports/
+output/
+tmp/
+DWG_DIFF_TEST/
+.playwright-mcp/
+check_v*_module_syntax.mjs
+smoke_v*_browser.py
+smoke_v*_playwright.js
+.claude/worktrees/*/
+*.json
+!.mcp.json
+*.pdf
+*.pptx
+*.zip
+
+# Phase O — accuracy baseline + golden fixtures must be tracked
+!tools/_phase_o_baseline.json
+!tests/data/comparison/golden/**/*.json
+
+# 백업 폴더
+backup_phase2_cleanup/
+src_legacy_backup/
+
+# 가상환경
+qt_env/
+tekla_venv/
+
+# 빌드 관련
+build/
+dist/
+*.spec
+!DrawingCompareWorkbench.spec
+
+# SuperClaude (임베디드 Git 저장소)
+SuperClaude/
+
+# 캐시 및 로그
+.mypy_cache/
+*.log.*
+mgt_floor_load_debug_*.log
+
+# AI 모델 파일 (대용량)
+ai_models/*.pkl
+
+# 보고서 및 임시 파일
+*_REPORT.md
+*_SUMMARY.md
+*_GUIDE.md
+*_PLAN.md
+*_STATUS.md
+*_SOLUTION.md
+*_ANALYSIS.md
+
+# 예외: docs/ 디렉토리의 중요 계획/가이드/분석 문서는 커밋 허용
+!docs/*_PLAN.md
+!docs/*_GUIDE.md
+!docs/*_ANALYSIS.md
+!docs/*_REPORT.md
+!docs/*_SUMMARY.md
+!docs/*_STRATEGY.md
+!docs/*_CHECKLIST.md
+!docs/PHASE*.md
+!docs/WEEK*.md
+*_REPORT_*.md
+*_FIX_REPORT.md
+*_FIX_SUMMARY.md
+PROJECT_FINAL_REPORT.md
+SYSTEMATIC_RECOVERY_COMPLETE.md
+UNIFIED_LAUNCHER_COMPLETION_REPORT.md
+debug_*.py
+fix_*.py
+/test_*.py
+run_*.py
+!src/services/comparison/run_contract.py
+launch_*.py
+analyze_*.py
+accurate_mgt_load_analyzer*.py
+grid_structure_analyzer*.py
+unified_mgt_launcher*.py
+mgt_floor_load_generator*.py
+launch_visualization_tool_integrated*.py
+mgt_model_info_integrated*.py
+mgt_to_excel_integrated*.py
+run_excel_to_mgt_integrated*.py
+run_mgt_load_analyzer_integrated*.py
+master_launcher*.py
+integrated_mgt_tools_launcher*.py
+windows_optimized_launcher*.py
+ultimate_mgt_cli_launcher*.py
+cli_integrated_launcher*.py
+quick_test_tools*.py
+*_202*.*
+*.mgt_analysis_*.json
+*.floadtype_final_test_*.json
+batch_element_query_*.xlsx
+mgt_section_analysis_*.xlsx
+COMPREHENSIVE_PROJECT_ANALYSIS.md
+UNIFIED_PARSER_IMPLEMENTATION_REPORT.md
+MODULAR_TOOLKIT_COMPLETION_REPORT.md
+LAUNCH_COMPLETION_REPORT.md
+
+# Temporary files from Phase 0 session (2025-10-21)
+MGT-Tekla-GUI-Handoff.md       # Handoff documentation (temporary)
+mgt-tekla-contrast-demo.html   # Demo HTML (temporary)
+pdf_extracted.txt              # PDF extraction output (temporary)
+
+# Test backup directories (created 2025-10-21 13:29 during test cleanup)
+# Contains: benchmark/, compatibility/, conftest.py, data/, e2e/ backups
+# Team agreement: Safe to ignore - original tests preserved in tests/ directory
+# Recovery possible from backup if needed before permanent deletion
+# Retention policy: Keep for 7 days, then manually delete if tests pass
+# Cleanup script: scripts/cleanup_legacy_tests.sh (run with --remove-backups flag)
+# Current backup: tests_backup_20251021_132921/ (created 2025-10-21 13:29)
+tests_backup_*/
+
+# ============================================================
+# Test Data Exceptions (Day 3 DXF Parser)
+# ============================================================
+# Allow DXF sample files and analysis results for team sharing
+# These are essential for validating DXF Parser implementation
+!test_data/dxf_samples/
+!test_data/dxf_samples/*.dxf
+!test_data/dxf_samples/*.grid_analysis.json
+
+# Large synthetic test files
+test_data/synthetic_*.mgt
+
+# ============================================================
+# Build & Output Artifacts
+# ============================================================
+build_onefile/
+test_output/
+*.exe
+
+# Large test data files (keep in local, not in repo)
+test_data/*.mgt
+test_data/*.dwg
+test_data/*.dxf
+!test_data/dxf_samples/*.dxf
+
+# Generated DXF files in root
+/*.dxf
+
+# Composite Beam Web release validation artifacts
+/tmp/composite_beam_web_release_validation.json
+/tmp/composite_beam_web_release_validation.md
+/tmp/composite_beam_web_smoke.json
+/tmp/composite_beam_context_3F_compact.dxf
+
+# Release guides that should be versioned despite the generic *_GUIDE.md ignore.
+!docs/composite_beam_interference/WEB_REVIEW_RELEASE_GUIDE.md
+/*.mgt
+
+# Agent cache
+.agent/
+
+# Zone editor backups
+gui/zone_editor_backup_*/
+
+# Test data simulation
+test_data_sim/
+
+# Build output folders (timestamped)
+build_*/
+dist_*/
+
+# Deployment logs
+deployment_logs/
+
+# Test outputs
+test_output_floor_plans/
+tests/gui/*.txt
+__pycache__/
+
+# Workbench acceptance smoke artifacts (DXF samples, caches, results)
+out/
+
+# Lint config JSONs are exempt from the broad *.json ignore above
+# (the *.json line targets large data exports, not project config)
+!.markdownlint.json
+!.github/markdown-link-check.json
+
+# Screenshots
+*.png
+!src/gui/assets/drawing_compare/*.png
+gui_screenshot*.png
+tekla_*.png
+debug_*.png
+
+# Claude Code runtime artifacts (per-session lock — auto-regenerated)
+.claude/scheduled_tasks.lock

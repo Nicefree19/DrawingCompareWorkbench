@@ -1,0 +1,16 @@
+{
+  "comment": "사용자 사례 — 블록 attribute (ATTRIB) text 변경 (DOWEL BAR (2)SHD13@100 → @200). LINE/coordinate 동일, INSERT 동일, ATTRIB tag/position 동일, ATTRIB text 만 다름. Phase O Commit 1+2 가 동작하면 1 MODIFIED ATTRIB 으로 surface, 동작 안하면 변경 0건 (사용자 보고 사례).",
+  "expected_changes": [
+    {
+      "location": [
+        500.0,
+        400.0
+      ],
+      "change_type": "modified",
+      "entity_type": "ATTRIB",
+      "layer": "TEXT_LAYER",
+      "tolerance_mm": 1.0,
+      "notes": "ATTRIB text @100 → @200 — 사용자 사례 직접 재현. Phase O Commit 1 (ATTRIB 정식 지원) 만으로 검출됨 — 이 fixture 는 ATTRIB-realized text 변경이라 Commit 1 만 필요. Commit 2 (INSERT block-internal text fingerprint) 는 ATTRIB 으로 realize 되지 않은 block 정의 내부 TEXT 변경 케이스용 (별도 시나리오)."
+    }
+  ]
+}

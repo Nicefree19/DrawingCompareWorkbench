@@ -1,0 +1,92 @@
+version: 1
+pairs:
+  - pair_id: 01_identical
+    format: dxf
+    before_path: dxf/01_identical/before.dxf
+    after_path: dxf/01_identical/after.dxf
+    expected_changes_path: dxf/01_identical/truth.json
+    comment: "동일 도면 — 변경 0건이 정답 (sanity check)"
+  - pair_id: 02_single_modification
+    format: dxf
+    before_path: dxf/02_single_modification/before.dxf
+    after_path: dxf/02_single_modification/after.dxf
+    expected_changes_path: dxf/02_single_modification/truth.json
+    comment: "LINE 1개 (내부 BEAM) 의 끝점이 5mm 이동"
+  - pair_id: 03_micro_shift_global
+    format: dxf
+    before_path: dxf/03_micro_shift_global/before.dxf
+    after_path: dxf/03_micro_shift_global/after.dxf
+    expected_changes_path: dxf/03_micro_shift_global/truth.json
+    comment: "전체 도면이 (+0.5, +0.5) mm 시프트 — Phase O2 alignment 효과 baseline"
+  - pair_id: 04_added_deleted
+    format: dxf
+    before_path: dxf/04_added_deleted/before.dxf
+    after_path: dxf/04_added_deleted/after.dxf
+    expected_changes_path: dxf/04_added_deleted/truth.json
+    comment: "LINE 1개 추가 (대각선) + LINE 1개 삭제 (내부 GRID)"
+  - pair_id: 05_cosmetic_only
+    format: dxf
+    before_path: dxf/05_cosmetic_only/before.dxf
+    after_path: dxf/05_cosmetic_only/after.dxf
+    expected_changes_path: dxf/05_cosmetic_only/truth.json
+    comment: "좌표 동일, color 만 변경 — Phase O3 cosmetic 분리 baseline"
+  - pair_id: 07_block_attribute_text_change
+    format: dxf
+    before_path: dxf/07_block_attribute_text_change/before.dxf
+    after_path: dxf/07_block_attribute_text_change/after.dxf
+    expected_changes_path: dxf/07_block_attribute_text_change/truth.json
+    comment: "사용자 사례 — 블록 attribute (ATTRIB) text 변경 (DOWEL BAR (2)SHD13@100 → @200). LINE/coordinate 동일, INSERT 동일, ATTRIB tag/position 동일, ATTRIB text 만 다름. Phase O Commit 1+2 가 동작하면 1 MODIFIED ATTRIB 으로 surface, 동작 안하면 변경 0건 (사용자 보고 사례)."
+  - pair_id: 08_intentional_zone_shift_beam
+    format: dxf
+    before_path: dxf/08_intentional_zone_shift_beam/before.dxf
+    after_path: dxf/08_intentional_zone_shift_beam/after.dxf
+    expected_changes_path: dxf/08_intentional_zone_shift_beam/truth.json
+    comment: "한 zone (보 1개) 만 50mm 시프트 — Phase P 회복 검증. Phase O2 까지는 alignment artifact 로 흡수되어 silent drop 되던 회귀를 차단. structural layer (BEAM) 보호 가드가 핵심."
+  - pair_id: 09_korean_layer_single_change
+    format: dxf
+    before_path: dxf/09_korean_layer_single_change/before.dxf
+    after_path: dxf/09_korean_layer_single_change/after.dxf
+    expected_changes_path: dxf/09_korean_layer_single_change/truth.json
+    comment: "한국어 layer (\"기둥-1F\") + 단일 column 5mm 이동 — Phase P SSoT 회복 검증. Phase O 까지는 noise_score >= 0.7 + recommended (min_changes_per_zone=2) 결합으로 zone 폐기."
+  - pair_id: 10_dimension_text_shifted
+    format: dxf
+    before_path: dxf/10_dimension_text_shifted/before.dxf
+    after_path: dxf/10_dimension_text_shifted/after.dxf
+    expected_changes_path: dxf/10_dimension_text_shifted/truth.json
+    comment: "TEXT entity 가 좌표 30mm 시프트 + 내용 변경 동시 — Phase P P3 text_near_match_radius 회복 검증. Phase O 까지는 added+deleted 분리 (사용자 보고: 치수가 두 개로 표시됨)."
+  - pair_id: 11_block_geometry_change
+    format: dxf
+    before_path: dxf/11_block_geometry_change/before.dxf
+    after_path: dxf/11_block_geometry_change/after.dxf
+    expected_changes_path: dxf/11_block_geometry_change/truth.json
+    comment: "Q3 회귀 가드 — block 정의 안의 LINE geometry 가 before (0,0)→(10,0) → after (0,0)→(20,0) 로 변경. expand_blocks=True (Q3 default) 가 block-internal 변경을 detect. Phase Q2 까지는 INSERT fingerprint 가 transform 만 봐서 silent."
+  - pair_id: 12_ocs_circle_extrusion_flip
+    format: dxf
+    before_path: dxf/12_ocs_circle_extrusion_flip/before.dxf
+    after_path: dxf/12_ocs_circle_extrusion_flip/after.dxf
+    expected_changes_path: dxf/12_ocs_circle_extrusion_flip/truth.json
+    comment: "Q4 회귀 가드 — CIRCLE extrusion (0,0,1)→(0,0,-1) flip. center_ocs 동일이지만 WCS 좌표는 X 반전. Q4 의 OCS→WCS 변환 + extrusion key 가 hash 에 포함되어 정확히 'modified' detect. Phase Q3 까지는 OCS 만 비교해 silent (false-equal)."
+  - pair_id: 13_paperspace_layout_move
+    format: dxf
+    before_path: dxf/13_paperspace_layout_move/before.dxf
+    after_path: dxf/13_paperspace_layout_move/after.dxf
+    expected_changes_path: dxf/13_paperspace_layout_move/truth.json
+    comment: "Q5 회귀 가드 — 같은 좌표의 CIRCLE 이 Layout1 (before) 에서 DETAIL_VIEW (after) 로 이동. extract_all_layouts=True 가 paperspace 추출 + layout namespace hash 가 layout 변경 detect."
+  - pair_id: 14_structural_submm_shift
+    format: dxf
+    before_path: dxf/14_structural_submm_shift/before.dxf
+    after_path: dxf/14_structural_submm_shift/after.dxf
+    expected_changes_path: dxf/14_structural_submm_shift/truth.json
+    comment: "Q6 회귀 가드 — BEAM layer 의 LINE 이 0.5mm shift. default position_threshold=1.0mm 미만이지만 Q6 의 structural_position_threshold=0.1mm 가 적용되어 detect. Phase Q5 까지는 silent."
+  - pair_id: 15_reverse_layer_false_positive_guard
+    format: dxf
+    before_path: dxf/15_reverse_layer_false_positive_guard/before.dxf
+    after_path: dxf/15_reverse_layer_false_positive_guard/after.dxf
+    expected_changes_path: dxf/15_reverse_layer_false_positive_guard/truth.json
+    comment: "Q7 회귀 가드 — REVERSE-PUMP layer 의 LINE 5mm 이동. *REV* fnmatch substring 이 'REVERSE' 까지 잡아 silent drop 하던 false-positive. Q7 의 word-boundary regex SSoT 가 REVERSE 를 title-block 으로 분류 안 함 → 정상 detect."
+  - pair_id: 06_cosmetic_heavy_with_real
+    format: dxf
+    before_path: dxf/06_cosmetic_heavy_with_real/before.dxf
+    after_path: dxf/06_cosmetic_heavy_with_real/after.dxf
+    expected_changes_path: dxf/06_cosmetic_heavy_with_real/truth.json
+    comment: "다수 cosmetic 변경 (4개 LINE color flip) + 실제 1개 추가 — dialog 추천 프리셋이 cosmetic noise 만 제거하고 real 변경은 보존함을 검증 (verify --compare 의 핵심 데모 케이스)"
