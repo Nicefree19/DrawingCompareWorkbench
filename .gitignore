@@ -262,6 +262,7 @@ __pycache__/
 
 # Workbench acceptance smoke artifacts (DXF samples, caches, results)
 out/
+**/.drawing_compare_cache/
 
 # Lint config JSONs are exempt from the broad *.json ignore above
 # (the *.json line targets large data exports, not project config)
