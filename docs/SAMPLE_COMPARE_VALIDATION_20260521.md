@@ -150,7 +150,73 @@ Result: PASS.
   be paired with a manual matches CSV. This is expected operator workflow for
   ambiguous file names.
 
+## DWG Selected-Zone Fast-Crop Follow-Up
+
+Change: `src/services/comparison/zone_render_service.py` now reuses
+pre-rendered viewer `before_image` / `after_image` backgrounds for CAD
+selected-zone crops when those backgrounds and transforms are already present.
+This avoids reopening and re-rendering the original DWG/DXF for the first
+selected-zone crop. If the background crop is unavailable or fails, the service
+falls back to the previous source render path.
+
+Regression test added:
+
+```powershell
+python -m pytest tests\unit\services\comparison\test_zone_render_service.py -q --tb=short --disable-warnings -o log_cli=false --capture=sys
+```
+
+Result: PASS, 20 passed.
+
+Broader focused regression:
+
+```powershell
+python -m pytest tests\unit\services\comparison\test_zone_render_service.py tests\unit\services\comparison\test_validate_drawing_compare_realset.py tests\unit\services\comparison\test_viewer_package.py tests\unit\services\comparison\test_viewer_perf_summary.py -q --tb=short --disable-warnings -o log_cli=false --capture=sys
+```
+
+Result: PASS, 75 passed.
+
+DWG sample rerun:
+
+```powershell
+python scripts\validate_drawing_compare_realset.py `
+  --a "D:\00.Work_AI_Tool\07.Dwg_diff\도면비교\1.dwg" `
+  --b "D:\00.Work_AI_Tool\07.Dwg_diff\도면비교\2.dwg" `
+  --out release\sample_compare_dwg_1_2_fastcrop `
+  --manual-matches release\sample_inputs\manual_matches_dwg_1_2.csv `
+  --dxf-cache-dir release\sample_dwg_cache `
+  --export-profile sharable `
+  --change-zone-report `
+  --executive-review `
+  --review-dashboard `
+  --export-viewer-package `
+  --viewer-render-policy top-issues `
+  --viewer-perf-log `
+  --render-selected-zone-evidence `
+  --selected-zone-evidence-per-pair 1 `
+  --export-cloud-marks `
+  --cloud-export-mode all `
+  --measure-runtime-budget `
+  --quality-gate `
+  --max-workers 1
+```
+
+Result: PASS.
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| selected-zone cold render | 54,142.289 ms | 31.171 ms |
+| selected-zone cache-hit render | 1.884 ms | 2.751 ms |
+| artifact stage | 134.414 s | 81.098 s |
+| total runtime | 183.746 s | 109.564 s |
+| first dashboard ready | 183.256 s | 109.166 s |
+| peak RSS | 720.328 MB | 717.828 MB |
+
+The first selected-zone crop now reports `renderer_backend =
+cad-background-image-crop`, `visual_fidelity = cad_render`, and
+`render_lifecycle = ready`.
+
 ## Next Recommended Step
 
-Prioritize DWG selected-zone cold-render optimization and then run the same DWG
-sample again to confirm cold render drops below the customer-facing target.
+The next performance target is the remaining DWG artifact stage time. The
+largest remaining costs are full background generation and DWG/DXF comparison,
+not selected-zone crop latency.

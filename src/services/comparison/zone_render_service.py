@@ -612,6 +612,69 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
             warnings=warnings,
             render_start_perf=_render_start_perf,
         )
+    if _can_render_background_image_crop(job):
+        before_transform = transform_for_window(
+            job.world_window,
+            output_width=job.output_width,
+            output_height=job.output_height,
+            renderer_backend="cad-background-image-crop",
+        )
+        after_transform = dict(before_transform)
+        try:
+            _render_background_image_crop(
+                Path(job.before_background_image),
+                before_image,
+                job.world_window,
+                before_transform,
+                job.before_background_transform or {},
+                warnings=warnings,
+            )
+            _render_background_image_crop(
+                Path(job.after_background_image),
+                after_image,
+                job.world_window,
+                after_transform,
+                job.after_background_transform or {},
+                warnings=warnings,
+            )
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "pair_uuid": job.pair_uuid,
+                "zone_id": job.zone_id,
+                "before_image": _cache_relative_path(before_image, job.cache_root),
+                "after_image": _cache_relative_path(after_image, job.cache_root),
+                "before_transform": before_transform,
+                "after_transform": after_transform,
+                "world_window": job.world_window.to_dict(),
+                "renderer_backend": "cad-background-image-crop",
+                "cache_key": cache_key,
+                "visual_fidelity": "cad_render",
+                "render_lifecycle": "ready",
+                "warnings": warnings,
+                "request_id": job.request_id,
+            }
+            _write_json(meta_path, payload)
+            return RenderResult(
+                pair_uuid=job.pair_uuid,
+                zone_id=job.zone_id,
+                before_image=str(before_image),
+                after_image=str(after_image),
+                before_transform=before_transform,
+                after_transform=after_transform,
+                world_window=job.world_window.to_dict(),
+                renderer_backend="cad-background-image-crop",
+                cache_key=cache_key,
+                cache_hit=False,
+                visual_fidelity="cad_render",
+                render_lifecycle="ready",
+                warnings=warnings,
+                request_id=job.request_id,
+                elapsed_ms=round((time.perf_counter() - _render_start_perf) * 1000.0, 3),
+            )
+        except Exception as exc:
+            warnings.append(
+                f"cad_background_crop:fallback_to_source:{type(exc).__name__}:{exc}"
+            )
     before_transform = transform_for_window(
         job.world_window,
         output_width=job.output_width,
@@ -702,6 +765,116 @@ def _render_source_crop(
             f"dxf_prefilter:applied:visible_entities={visible_count}/"
             f"{total_count}"
         )
+
+
+def _can_render_background_image_crop(job: RenderJob) -> bool:
+    """Return True when a pre-rendered CAD viewer background can be cropped.
+
+    The viewer package already renders full before/after CAD PNG backgrounds.
+    Reusing those images for selected-zone crops avoids re-opening a large DWG
+    or DXF for every first zone click while keeping the same visual source the
+    reviewer sees in the overview viewer.
+    """
+
+    if _requires_page_space_bbox(job.source_before) or _requires_page_space_bbox(job.source_after):
+        return False
+    if not job.before_background_image or not job.after_background_image:
+        return False
+    if not isinstance(job.before_background_transform, dict) or not isinstance(
+        job.after_background_transform, dict
+    ):
+        return False
+    try:
+        return Path(job.before_background_image).exists() and Path(job.after_background_image).exists()
+    except OSError:
+        return False
+
+
+def _render_background_image_crop(
+    background_image: Path,
+    output_path: Path,
+    window: WorldWindow,
+    output_transform: dict[str, Any],
+    background_transform: dict[str, Any],
+    *,
+    warnings: list[str],
+) -> None:
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError("Pillow is required for CAD background image crops") from exc
+
+    with Image.open(background_image) as image:
+        source = image.convert("RGB")
+        source_width, source_height = source.size
+        requested = _window_to_background_pixel_rect(window, background_transform, source_width, source_height)
+        req_left, req_top, req_right, req_bottom = requested
+        req_width = max(1e-9, req_right - req_left)
+        req_height = max(1e-9, req_bottom - req_top)
+        clip_left = max(0.0, min(float(source_width), req_left))
+        clip_top = max(0.0, min(float(source_height), req_top))
+        clip_right = max(0.0, min(float(source_width), req_right))
+        clip_bottom = max(0.0, min(float(source_height), req_bottom))
+        if clip_right <= clip_left or clip_bottom <= clip_top:
+            raise ValueError("CAD background crop window is outside the rendered image")
+
+        output_width = max(1, int(output_transform.get("img_width") or DEFAULT_OUTPUT_SIZE[0]))
+        output_height = max(1, int(output_transform.get("img_height") or DEFAULT_OUTPUT_SIZE[1]))
+        dest_left = int(round((clip_left - req_left) / req_width * output_width))
+        dest_top = int(round((clip_top - req_top) / req_height * output_height))
+        dest_right = int(round((clip_right - req_left) / req_width * output_width))
+        dest_bottom = int(round((clip_bottom - req_top) / req_height * output_height))
+        dest_left = max(0, min(output_width, dest_left))
+        dest_top = max(0, min(output_height, dest_top))
+        dest_right = max(0, min(output_width, dest_right))
+        dest_bottom = max(0, min(output_height, dest_bottom))
+        if dest_right <= dest_left or dest_bottom <= dest_top:
+            raise ValueError("CAD background crop could not be mapped into output pixels")
+
+        crop = source.crop(
+            (
+                int(round(clip_left)),
+                int(round(clip_top)),
+                int(round(clip_right)),
+                int(round(clip_bottom)),
+            )
+        )
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        crop = crop.resize((dest_right - dest_left, dest_bottom - dest_top), resampling)
+        canvas = Image.new("RGB", (output_width, output_height), "white")
+        canvas.paste(crop, (dest_left, dest_top))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(output_path)
+        warnings.append("cad_background_crop:source=viewer_background")
+        if (
+            clip_left > req_left
+            or clip_top > req_top
+            or clip_right < req_right
+            or clip_bottom < req_bottom
+        ):
+            warnings.append("cad_background_crop:clipped_to_background_bounds")
+
+
+def _window_to_background_pixel_rect(
+    window: WorldWindow,
+    transform: dict[str, Any],
+    image_width: int,
+    image_height: int,
+) -> tuple[float, float, float, float]:
+    min_x = float(transform.get("min_x", 0.0) or 0.0)
+    min_y = float(transform.get("min_y", 0.0) or 0.0)
+    scale_x = float(transform.get("scale_x") or 1.0)
+    scale_y = float(transform.get("scale_y") or 1.0)
+    height = float(transform.get("img_height") or image_height or 1)
+    x1 = (window.xmin - min_x) * scale_x
+    x2 = (window.xmax - min_x) * scale_x
+    if str(transform.get("coordinate_space") or "").lower() == "image_pixels":
+        y1 = (window.ymin - min_y) * scale_y
+        y2 = (window.ymax - min_y) * scale_y
+    else:
+        y1 = height - ((window.ymax - min_y) * scale_y)
+        y2 = height - ((window.ymin - min_y) * scale_y)
+    return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
 
 
 def get_drawing_render_index(dxf_path: Path, render_environment_hash: str = "unknown") -> DrawingRenderIndex:

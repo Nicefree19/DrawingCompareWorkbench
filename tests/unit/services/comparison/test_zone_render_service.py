@@ -52,6 +52,59 @@ def test_transform_round_trip_for_window_center() -> None:
     assert abs(round_trip_y - world_y) < 1e-6
 
 
+def test_cad_render_reuses_viewer_background_crop(tmp_path: Path) -> None:
+    image_mod = pytest.importorskip("PIL.Image")
+
+    before_source = tmp_path / "before.dxf"
+    after_source = tmp_path / "after.dxf"
+    before_source.write_text("stub", encoding="utf-8")
+    after_source.write_text("stub", encoding="utf-8")
+
+    before_bg = tmp_path / "before.png"
+    after_bg = tmp_path / "after.png"
+    image_mod.new("RGB", (100, 100), "white").save(before_bg)
+    image_mod.new("RGB", (100, 100), "white").save(after_bg)
+
+    background_transform = {
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "max_x": 100.0,
+        "max_y": 100.0,
+        "img_width": 100,
+        "img_height": 100,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "backend_used": "fast",
+    }
+    job = RenderJob(
+        pair_uuid="pair-bg",
+        zone_id="Z-1",
+        request_id="r-bg",
+        source_before=before_source,
+        source_after=after_source,
+        world_window=WorldWindow(20.0, 20.0, 80.0, 80.0),
+        cache_root=tmp_path / "cache",
+        dxf_cache_dir=tmp_path / "dxf_cache",
+        output_width=120,
+        output_height=80,
+        before_background_image=str(before_bg),
+        after_background_image=str(after_bg),
+        before_background_transform=background_transform,
+        after_background_transform=background_transform,
+    )
+
+    result = render_zone_pair(job)
+
+    assert result.renderer_backend == "cad-background-image-crop"
+    assert result.visual_fidelity == "cad_render"
+    assert result.render_lifecycle == "ready"
+    assert Path(result.before_image).exists()
+    assert Path(result.after_image).exists()
+    assert result.before_transform["renderer_backend"] == "cad-background-image-crop"
+    assert "cad_background_crop:source=viewer_background" in result.warnings
+    assert not any(w.startswith("dxf_prefilter:") for w in result.warnings)
+
+
 def test_union_bboxes_accepts_old_and_new_shapes() -> None:
     bbox = union_bboxes(
         {"min_x": 10, "min_y": 20, "max_x": 30, "max_y": 40},
