@@ -23,6 +23,7 @@ from src.services.comparison.viewer_package_proxy import (
     SubprocessRunReport,
     export_viewer_package_isolated,
 )
+from src.services.comparison.workbench_subprocess import VIEWER_PACKAGE_WORKER_FLAG
 
 
 class _FakePopen:
@@ -107,6 +108,62 @@ class TestSuccessPath:
         assert report.error_type is None
         assert report.last_memory_sample_mb == 2048.0
         assert report.progress_event_count == 4
+
+    def test_development_subprocess_uses_module_entrypoint(self, fake_artifact_dir):
+        viewer_package_payload = {"viewer_dir": "/tmp/viewer", "pair_count": 1}
+        fake = _FakePopen(_result_jsonl(viewer_package_payload), exit_code=0)
+        captured: dict[str, Any] = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return fake
+
+        with patch(
+            "src.services.comparison.viewer_package_proxy.subprocess.Popen",
+            side_effect=fake_popen,
+        ):
+            result, report = export_viewer_package_isolated(
+                fake_artifact_dir,
+                options={},
+                python_executable="python.exe",
+            )
+
+        assert result == viewer_package_payload
+        assert report.exit_code == 0
+        assert captured["cmd"] == [
+            "python.exe",
+            "-m",
+            "scripts.render_viewer_package_subprocess",
+        ]
+
+    def test_frozen_subprocess_uses_internal_worker_flag(
+        self, fake_artifact_dir, monkeypatch
+    ):
+        viewer_package_payload = {"viewer_dir": "/tmp/viewer", "pair_count": 1}
+        fake = _FakePopen(_result_jsonl(viewer_package_payload), exit_code=0)
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr("sys.frozen", True, raising=False)
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return fake
+
+        with patch(
+            "src.services.comparison.viewer_package_proxy.subprocess.Popen",
+            side_effect=fake_popen,
+        ):
+            result, report = export_viewer_package_isolated(
+                fake_artifact_dir,
+                options={},
+                python_executable=r"C:\Program Files\DrawingCompareWorkbench\DrawingCompareWorkbench.exe",
+            )
+
+        assert result == viewer_package_payload
+        assert report.exit_code == 0
+        assert captured["cmd"] == [
+            r"C:\Program Files\DrawingCompareWorkbench\DrawingCompareWorkbench.exe",
+            VIEWER_PACKAGE_WORKER_FLAG,
+        ]
 
     def test_progress_callback_receives_events(self, fake_artifact_dir):
         viewer_package_payload = {"viewer_dir": "/tmp/v", "pair_count": 1}

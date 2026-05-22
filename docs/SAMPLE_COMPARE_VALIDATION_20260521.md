@@ -280,6 +280,96 @@ sample compare and focused regression were already recorded above. Before wider
 pilot distribution, still run a clean Windows GUI smoke with actual operator
 input files.
 
+## Worker-Launch Regression Fix Validation
+
+Date: 2026-05-22 KST
+
+Issue: the fast-crop package could appear to relaunch the program during compare
+execution. Process inspection showed the GUI process spawning a child process
+with this command form:
+
+```text
+DrawingCompareWorkbench.exe -X utf8 ...\scripts\render_viewer_package_subprocess.py
+```
+
+In a PyInstaller build, invoking the same workbench exe with a Python script path
+can re-enter the GUI launcher instead of running only the intended worker. This
+made the background viewer-package worker look like a second app start and left
+a stale child process visible.
+
+Fix: `viewer_package_proxy` now uses the same internal worker-flag dispatch as
+the other packaged workers:
+
+```text
+DrawingCompareWorkbench.exe --drawing-compare-viewer-package-worker
+```
+
+Regression tests:
+
+```powershell
+python -m pytest `
+  tests\unit\services\comparison\test_workbench_subprocess.py `
+  tests\unit\services\comparison\test_viewer_package_proxy.py `
+  -q --tb=short --disable-warnings -o log_cli=false --capture=sys
+```
+
+Result: PASS, 20 passed.
+
+Focused release/viewer regression:
+
+```powershell
+python -m pytest `
+  tests\unit\services\comparison\test_workbench_subprocess.py `
+  tests\unit\services\comparison\test_viewer_package_proxy.py `
+  tests\unit\services\comparison\test_viewer_package.py `
+  tests\unit\services\comparison\test_release_drawing_compare_workbench.py `
+  -q --tb=short --disable-warnings -o log_cli=false --capture=sys
+```
+
+Result: PASS, 55 passed.
+
+Workerfix release command:
+
+```powershell
+python scripts\release_environment_check.py --json-output release\environment_check_workerfix_20260522.json
+python scripts\release_drawing_compare_workbench.py `
+  --out release\drawing_compare_workerfix_build_20260522 `
+  --skip-realset
+```
+
+Result: PASS.
+
+- release manifest status: `passed`
+- compile step: `passed`
+- comparison unit tests: `passed`
+- PyInstaller build: `passed`
+- packaged app launch smoke: `passed`
+- customer shareable package path audit: `passed`
+- path leak count: 0
+- disallowed file count: 0
+- packaged executable `--diagnose`: PASS
+
+Packaged worker verification:
+
+```powershell
+DrawingCompareWorkbench.exe --drawing-compare-viewer-package-worker
+```
+
+With empty stdin, the worker emitted JSONL `started` and `InvalidInput` events,
+then exited without opening a GUI window. This confirms the packaged worker no
+longer uses the `-X utf8 script.py` relaunch path.
+
+Current corrected package:
+
+- path:
+  `release\drawing_compare_workerfix_build_20260522\DrawingCompareWorkbench_customer_shareable.zip`
+- size: 509,046,108 bytes
+- SHA256:
+  `1DD1857A009FBFC5278E43123454EC939DE0CD33D526DC62D0AD83B603B691F2`
+
+Status: this workerfix package supersedes
+`release\drawing_compare_fastcrop_build_20260522` for further GUI testing.
+
 ## Next Recommended Step
 
 The next performance target is the remaining DWG artifact stage time. The

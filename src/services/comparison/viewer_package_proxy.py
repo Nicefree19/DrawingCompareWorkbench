@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .workbench_subprocess import VIEWER_PACKAGE_WORKER_MODULE, worker_command_for_module
+
 logger = logging.getLogger(__name__)
 
 SUBPROCESS_SCRIPT_REL = Path("scripts") / "render_viewer_package_subprocess.py"
@@ -172,8 +174,12 @@ def export_viewer_package_isolated(
     timed_out = False
 
     try:
+        program, worker_args = worker_command_for_module(
+            VIEWER_PACKAGE_WORKER_MODULE,
+            executable=interpreter,
+        )
         proc = subprocess.Popen(
-            [interpreter, "-X", "utf8", str(script_path)],
+            [program, *worker_args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
