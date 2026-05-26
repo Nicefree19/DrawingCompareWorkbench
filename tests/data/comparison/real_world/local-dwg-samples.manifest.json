@@ -1,0 +1,58 @@
+{
+  "schema_version": "cad-real-world-local/v1",
+  "description": "Local-only real DWG samples from the legacy Dwg_diff workspace. The DWG files are referenced, not copied, to avoid committing project drawings.",
+  "source_root": "D:/00.Work_AI_Tool/07.Dwg_diff/도면비교",
+  "cache_dir": "D:/00.Work_AI_Tool/07.Dwg_diff/도면비교/.drawing_compare_cache",
+  "samples": [
+    {
+      "id": "legacy_pair_1_old",
+      "path": "1.dwg",
+      "format": "dwg",
+      "expected_version": "AC1032",
+      "expected_size_bytes": 2369731,
+      "role": "old"
+    },
+    {
+      "id": "legacy_pair_1_new",
+      "path": "2.dwg",
+      "format": "dwg",
+      "expected_version": "AC1024",
+      "expected_size_bytes": 2120769,
+      "role": "new"
+    },
+    {
+      "id": "pleg_member_schedule_250217",
+      "path": "250217_P3 복합동 기준_PLEG 단면 설계 부재일람표.dwg",
+      "format": "dwg",
+      "expected_version": "AC1032",
+      "expected_size_bytes": 4091459,
+      "role": "old"
+    },
+    {
+      "id": "pleg_member_schedule_detail_250219",
+      "path": "250219_P3 복합동 기준_PLEG 단면 설계 부재일람표및 상세도.dwg",
+      "format": "dwg",
+      "expected_version": "AC1032",
+      "expected_size_bytes": 7006758,
+      "role": "new"
+    }
+  ],
+  "pairs": [
+    {
+      "id": "legacy_pair_1_vs_2",
+      "old_sample": "legacy_pair_1_old",
+      "new_sample": "legacy_pair_1_new",
+      "current_import_expectation": "unsupported_version_until_native_reader_expands_beyond_AC1015",
+      "descriptor_cache_files": [
+        "91a1aba28681f21eee2c0fefe965bf4a1a384d3f.json",
+        "9f60ce474b01127d0c8b7a7d4709676ccf483ab4.json"
+      ]
+    },
+    {
+      "id": "pleg_250217_vs_250219",
+      "old_sample": "pleg_member_schedule_250217",
+      "new_sample": "pleg_member_schedule_detail_250219",
+      "current_import_expectation": "unsupported_version_until_native_reader_expands_beyond_AC1015"
+    }
+  ]
+}

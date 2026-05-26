@@ -1,0 +1,86 @@
+{
+  "schema_version": "cad-real-world-golden/v1",
+  "source_policy": "local DWG files are referenced, not copied",
+  "native_dwg_supported_versions": [
+    "AC1015"
+  ],
+  "expected_unsupported_versions": [
+    "AC1024",
+    "AC1032"
+  ],
+  "samples": [
+    {
+      "id": "legacy_pair_1_old",
+      "expected_version": "AC1032",
+      "expected_size_bytes": 2369731,
+      "detected_version": "AC1032",
+      "detected_supported": false,
+      "expected_import_status": "failed",
+      "expected_import_error_code": "DWG_UNSUPPORTED_VERSION"
+    },
+    {
+      "id": "legacy_pair_1_new",
+      "expected_version": "AC1024",
+      "expected_size_bytes": 2120769,
+      "detected_version": "AC1024",
+      "detected_supported": false,
+      "expected_import_status": "failed",
+      "expected_import_error_code": "DWG_UNSUPPORTED_VERSION"
+    },
+    {
+      "id": "pleg_member_schedule_250217",
+      "expected_version": "AC1032",
+      "expected_size_bytes": 4091459,
+      "detected_version": "AC1032",
+      "detected_supported": false,
+      "expected_import_status": "failed",
+      "expected_import_error_code": "DWG_UNSUPPORTED_VERSION"
+    },
+    {
+      "id": "pleg_member_schedule_detail_250219",
+      "expected_version": "AC1032",
+      "expected_size_bytes": 7006758,
+      "detected_version": "AC1032",
+      "detected_supported": false,
+      "expected_import_status": "failed",
+      "expected_import_error_code": "DWG_UNSUPPORTED_VERSION"
+    }
+  ],
+  "pairs": [
+    {
+      "id": "legacy_pair_1_vs_2",
+      "current_import_expectation": "unsupported_version_until_native_reader_expands_beyond_AC1015",
+      "descriptor_cache_status": "ok",
+      "old_entity_count": 7177,
+      "new_entity_count": 7187,
+      "entity_count_delta": 10,
+      "entity_type_delta": {
+        "ARC": 0,
+        "CIRCLE": 0,
+        "DIMENSION": 0,
+        "ELLIPSE": 0,
+        "HATCH": 0,
+        "INSERT": 1,
+        "LEADER": 0,
+        "LINE": 3,
+        "LWPOLYLINE": 3,
+        "TEXT": 3
+      },
+      "old_layer_count": 1200,
+      "new_layer_count": 1200,
+      "content_fingerprint_changed": true
+    },
+    {
+      "id": "pleg_250217_vs_250219",
+      "current_import_expectation": "unsupported_version_until_native_reader_expands_beyond_AC1015",
+      "descriptor_cache_status": "not_configured",
+      "old_entity_count": null,
+      "new_entity_count": null,
+      "entity_count_delta": null,
+      "entity_type_delta": {},
+      "old_layer_count": null,
+      "new_layer_count": null,
+      "content_fingerprint_changed": null
+    }
+  ]
+}

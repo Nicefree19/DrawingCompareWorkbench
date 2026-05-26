@@ -12,7 +12,6 @@ import importlib.metadata
 import json
 import logging
 import os
-import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -466,7 +465,7 @@ def render_environment_signature(
         "schema_version": SCHEMA_VERSION,
         "renderer_backend": renderer_backend,
         "packages": package_versions,
-        "oda_converter": _oda_converter_signature(),
+        "legacy_dwg_converter": {"enabled": False},
         "dxf_cache_dir": str(Path(dxf_cache_dir).resolve()) if dxf_cache_dir else "",
         "font_support_dirs": [_directory_signature(Path(path)) for path in support_dirs],
     }
@@ -1406,21 +1405,6 @@ def _font_support_dirs_from_env() -> list[Path]:
         if raw:
             values.extend(part for part in raw.split(os.pathsep) if part)
     return [Path(value) for value in values]
-
-
-def _oda_converter_signature() -> dict[str, Any]:
-    candidates: list[str] = []
-    env_path = os.environ.get("ODA_CONVERTER_PATH")
-    if env_path:
-        candidates.append(env_path)
-    which_path = shutil.which("ODAFileConverter")
-    if which_path:
-        candidates.append(which_path)
-    for value in candidates:
-        path = Path(value)
-        if path.exists():
-            return _directory_signature(path)
-    return {"path": candidates[0] if candidates else "", "exists": False}
 
 
 def _directory_signature(path: Path) -> dict[str, Any]:

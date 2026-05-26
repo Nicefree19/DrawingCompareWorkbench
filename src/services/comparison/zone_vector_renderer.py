@@ -78,13 +78,10 @@ def resolve_dxf_path(
 ) -> Path:
     """Return a DXF path usable by ``ezdxf.readfile``.
 
-    Phase F P0 fix — the call site (workbench) used to pass the raw source
-    path to the vector renderer, which crashed with ``OSError: ... is not
-    a DXF file`` whenever the user compared real ``.dwg`` drawings (the
-    common case for Korean structural sheets). This helper transparently
-    routes ``.dwg`` inputs through :class:`DwgConverter` and caches the
-    converted file by ``(stem, mtime, size)`` so the same DWG isn't re-run
-    through ODA on every zone click.
+    The call site may pass a raw DWG path.  DWG inputs are normalized through
+    the ODA-free CanonicalDrawing import pipeline and exported to a temporary
+    R2000 DXF for the existing ezdxf SVG renderer.  The converted artifact is
+    cached by ``(stem, mtime, size)``.
 
     Args:
         source_path: Original path the workbench had on hand. May be DWG or DXF.
@@ -94,11 +91,11 @@ def resolve_dxf_path(
 
     Returns:
         A path to a usable DXF. For DXF inputs this is the input itself; for
-        DWG inputs it's the cached converted artifact.
+        DWG inputs it is a cached canonical debug-export artifact.
 
     Raises:
         FileNotFoundError: source doesn't exist.
-        OSError: DWG conversion failed and no cached fallback exists.
+        OSError: DWG import/export failed and no cached fallback exists.
     """
 
     src = Path(source_path)
@@ -113,7 +110,7 @@ def resolve_dxf_path(
         # downstream renderer raise a descriptive error rather than guess.
         return src
 
-    # DWG input — convert through ODA, with disk cache.
+    # DWG input: import through the native canonical pipeline, then export DXF.
     if cache_dir is None:
         from .cache_paths import normalize_cache_dir
         cache_dir = normalize_cache_dir()
@@ -130,29 +127,30 @@ def resolve_dxf_path(
         logger.info("Reusing cached DXF for %s -> %s", src.name, cached)
         return cached
 
-    from .dwg_converter import DwgConverter, DWGConversionError
     try:
-        converter = DwgConverter()
+        from .dxf_writer import DxfExportOptions, DxfWriter
+        from .import_pipeline import CadPipelineStatus, ImportPipeline, ImportPipelineOptions
+
+        result = ImportPipeline(
+            ImportPipelineOptions(
+                normalize=False,
+                allow_oda_fallback=False,
+            )
+        ).import_file(src)
+        if result.status == CadPipelineStatus.FAILED or not result.canonical_drawing:
+            raise OSError(
+                f"{result.error_code or 'DWG_IMPORT_FAILED'}: {result.user_message or result.message}"
+            )
+        DxfWriter(DxfExportOptions(acad_version="AC1015")).write_file(
+            result.canonical_drawing,
+            cached,
+        )
+        logger.info("Cached canonical DWG debug DXF: %s -> %s", src.name, cached)
+        return cached
     except Exception as exc:
         raise OSError(
-            f"DWG converter unavailable (ODA File Converter not found): {exc}"
+            f"DWG canonical import/export failed for {src.name}: {exc}"
         ) from exc
-
-    try:
-        converted = converter.convert(src, output_version="ACAD2018", timeout=180)
-    except DWGConversionError as exc:
-        raise OSError(f"DWG -> DXF conversion failed for {src.name}: {exc}") from exc
-
-    # Move into our cache so future calls hit. Conversion returned a path
-    # in a temp dir; copy here so the temp can be cleaned without losing it.
-    import shutil
-    try:
-        shutil.copy(converted, cached)
-        logger.info("Cached converted DXF: %s -> %s", src.name, cached)
-        return cached
-    except OSError as exc:
-        logger.warning("Failed to populate DXF cache, returning temp path: %s", exc)
-        return Path(converted)
 
 
 @dataclass(frozen=True)
@@ -248,10 +246,7 @@ def render_zone_svg(
             ),
         )
 
-    # Phase F P0 — transparently convert DWG inputs through DwgConverter.
-    # Without this guard ezdxf.readfile raises ``is not a DXF file`` for
-    # every comparison run on real Korean structural DWG sheets, which is
-    # what the user reported as "벡터 랜더 실패".
+    # DWG inputs are resolved to a cached canonical DXF debug export first.
     try:
         dxf_path = resolve_dxf_path(dxf_path)
     except (FileNotFoundError, OSError) as exc:

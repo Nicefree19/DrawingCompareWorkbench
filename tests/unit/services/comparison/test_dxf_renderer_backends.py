@@ -178,9 +178,6 @@ def test_renderer_produces_valid_output(tiny_dxf: Path, backend: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not PYMUPDF_AVAILABLE, reason="fallback test requires PyMuPDF importable"
-)
 def test_auto_falls_back_through_chain_when_primaries_raise(
     tiny_dxf: Path, monkeypatch
 ) -> None:
@@ -194,13 +191,11 @@ def test_auto_falls_back_through_chain_when_primaries_raise(
     """
 
     sentinel_fast = "synthetic fast failure for fallback test"
-    sentinel_pymupdf = "synthetic pymupdf failure for fallback test"
-
     def _fast_boom(self, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError(sentinel_fast)
 
     def _pymupdf_boom(self, **kwargs):  # type: ignore[no-untyped-def]
-        raise RuntimeError(sentinel_pymupdf)
+        raise AssertionError("PyMuPDF must not run in customer-safe auto mode")
 
     monkeypatch.setattr(DxfRenderer, "_render_fast", _fast_boom)
     monkeypatch.setattr(DxfRenderer, "_render_pymupdf", _pymupdf_boom)
@@ -211,12 +206,12 @@ def test_auto_falls_back_through_chain_when_primaries_raise(
 
     assert img.ndim == 3 and img.dtype == np.uint8
     assert transform["backend_used"] == "matplotlib", (
-        "expected fall-through to matplotlib after fast + pymupdf failed"
+        "expected fall-through to matplotlib after fast failed"
     )
     assert "fallback_reason" in transform
     # The reason should reference whichever backend failed last in the chain
     # before the final success — i.e., pymupdf's sentinel.
-    assert sentinel_pymupdf in transform["fallback_reason"]
+    assert sentinel_fast in transform["fallback_reason"]
 
 
 def test_auto_uses_fast_backend_by_default(tiny_dxf: Path) -> None:
@@ -245,6 +240,44 @@ def test_explicit_fast_backend_works_standalone(tiny_dxf: Path) -> None:
     assert transform["backend_used"] == "fast"
     assert img.shape[2] == 3 and img.dtype == np.uint8
     assert img.min() < 100  # something drawn
+
+
+def test_fast_renderer_recovers_extents_when_ezdxf_bbox_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Large DWG->DXF conversions can make ezdxf bbox fail.
+
+    The renderer must not fall back to the old 0..2000 default because that
+    clips real geometry and saves an all-white preview image.
+    """
+
+    import ezdxf
+
+    doc = ezdxf.new("R2010")
+    msp = doc.modelspace()
+    msp.add_line((100_000, -50_000), (101_000, -49_000))
+    msp.add_lwpolyline(
+        [(100_000, -50_000), (101_000, -50_000), (101_000, -49_000), (100_000, -50_000)]
+    )
+    path = tmp_path / "distant.dxf"
+    doc.saveas(str(path))
+
+    def _bbox_failure(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("synthetic bbox failure")
+
+    monkeypatch.setattr(renderer_mod.ezdxf_bbox, "extents", _bbox_failure)
+
+    img, transform = DxfRenderer(backend="fast").render_with_transform(
+        path, dpi=72, max_edge_px=512
+    )
+
+    assert transform["extent_source"] == "simple_entity_fallback"
+    assert transform["min_x"] == pytest.approx(100_000)
+    assert transform["min_y"] == pytest.approx(-50_000)
+    assert transform["max_x"] == pytest.approx(101_000)
+    assert transform["max_y"] == pytest.approx(-49_000)
+    assert img.ndim == 3 and img.dtype == np.uint8
+    assert img.min() < 100, "fallback extents should keep distant geometry visible"
 
 
 def test_explicit_pymupdf_does_not_fallback(tiny_dxf: Path, monkeypatch) -> None:

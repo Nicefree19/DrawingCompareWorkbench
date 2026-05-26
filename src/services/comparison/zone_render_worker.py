@@ -115,8 +115,8 @@ def render_zone_focus(
     """Render a zone-bounded primitive pack to ``output_dir / zone_focus.json``.
 
     Args:
-        source_path: A DXF or DWG file. DWG is auto-converted via Phase F's
-            ``resolve_dxf_path`` helper (DwgConverter cache).
+        source_path: A DXF or DWG file. DWG is resolved through
+            ``resolve_dxf_path`` as a canonical debug DXF export.
         zone_world_bbox: ``(min_x, min_y, max_x, max_y)`` in CAD world coords.
             Typically the bbox of one change zone.
         output_dir: Directory that will receive ``zone_focus.json``.

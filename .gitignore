@@ -96,6 +96,10 @@ smoke_v*_playwright.js
 .claude/worktrees/*/
 *.json
 !.mcp.json
+!docs/canonical-drawing.schema.json
+!docs/drawing-diff.schema.json
+!tests/data/comparison/cad_samples/golden-results.json
+!tests/data/comparison/real_world/*.json
 *.pdf
 *.pptx
 *.zip

@@ -109,6 +109,72 @@ def _make_light_filter(skip_types):
     return _filter
 
 
+def _valid_extents(min_x: float, min_y: float, max_x: float, max_y: float) -> bool:
+    values = (min_x, min_y, max_x, max_y)
+    return bool(np.all(np.isfinite(values)) and max_x > min_x and max_y > min_y)
+
+
+def _simple_entity_extents(msp) -> Optional[Tuple[float, float, float, float]]:
+    """Recover render extents without ezdxf's recursive bbox engine."""
+
+    xs: list[float] = []
+    ys: list[float] = []
+
+    def add_point(point) -> None:
+        try:
+            x = float(point[0] if not hasattr(point, "x") else point.x)
+            y = float(point[1] if not hasattr(point, "y") else point.y)
+        except Exception:
+            return
+        if np.isfinite(x) and np.isfinite(y):
+            xs.append(x)
+            ys.append(y)
+
+    def add_xy(x: float, y: float) -> None:
+        try:
+            xf = float(x)
+            yf = float(y)
+        except Exception:
+            return
+        if np.isfinite(xf) and np.isfinite(yf):
+            xs.append(xf)
+            ys.append(yf)
+
+    for entity in msp:
+        try:
+            entity_type = entity.dxftype()
+            if entity_type == "LINE":
+                add_point(entity.dxf.start)
+                add_point(entity.dxf.end)
+            elif entity_type == "LWPOLYLINE":
+                for point in entity.get_points("xy"):
+                    add_point(point)
+            elif entity_type == "POLYLINE":
+                for vertex in entity.vertices:
+                    add_point(vertex.dxf.location)
+            elif entity_type in {"CIRCLE", "ARC"}:
+                center = entity.dxf.center
+                radius = float(entity.dxf.radius)
+                add_xy(center.x - radius, center.y - radius)
+                add_xy(center.x + radius, center.y + radius)
+            elif entity_type in {"SPLINE", "ELLIPSE"}:
+                for point in entity.flattening(distance=1.0):
+                    add_point(point)
+            elif entity_type == "POINT":
+                add_point(entity.dxf.location)
+            elif hasattr(entity.dxf, "insert"):
+                add_point(entity.dxf.insert)
+        except Exception:
+            continue
+
+    if not xs or not ys:
+        return None
+    min_x, min_y, max_x, max_y = min(xs), min(ys), max(xs), max(ys)
+    if not _valid_extents(min_x, min_y, max_x, max_y):
+        return None
+    return (min_x, min_y, max_x, max_y)
+
+
 # --- ezdxf + PyMuPDF 백엔드 임포트 (선택적; 없으면 Matplotlib만 사용) ----
 try:
     from ezdxf.addons.drawing import layout as _ezdxf_layout
@@ -275,6 +341,7 @@ class DxfRenderer:
         msp = doc.modelspace()
 
         min_x, min_y, max_x, max_y = 0.0, 0.0, 2000.0, 1500.0
+        extent_source = "default"
         try:
             cache = ezdxf_bbox.Cache()
             bounding_box = ezdxf_bbox.extents(msp, cache=cache)
@@ -282,8 +349,16 @@ class DxfRenderer:
                 min_pt, max_pt = bounding_box.extmin, bounding_box.extmax
                 min_x, min_y = float(min_pt.x), float(min_pt.y)
                 max_x, max_y = float(max_pt.x), float(max_pt.y)
+                extent_source = "ezdxf_bbox"
         except Exception as exc:  # pragma: no cover - 방어 코드
             logger.warning("범위 계산 실패: %s", exc)
+
+        if extent_source == "default" or not _valid_extents(min_x, min_y, max_x, max_y):
+            fallback_extents = _simple_entity_extents(msp)
+            if fallback_extents is not None:
+                min_x, min_y, max_x, max_y = fallback_extents
+                extent_source = "simple_entity_fallback"
+                logger.info("DXF extents recovered from simple entities: %s", fallback_extents)
 
         width = max(max_x - min_x, 1.0)
         height = max(max_y - min_y, 1.0)
@@ -299,7 +374,7 @@ class DxfRenderer:
         # 마침. 실패/예외 시 PyMuPDF → Matplotlib 순으로 폴백.
         chosen = self.backend
         if chosen == "auto":
-            primary, fallback_chain = "fast", ["pymupdf", "matplotlib"]
+            primary, fallback_chain = "fast", ["matplotlib"]
         elif chosen == "fast":
             primary, fallback_chain = "fast", []
         elif chosen == "pymupdf":
@@ -338,6 +413,7 @@ class DxfRenderer:
             # 다운스트림 컨슈머에 호환성 영향 없음.
             "backend_used": backend_used,
             "render_elapsed_ms": elapsed_ms,
+            "extent_source": extent_source,
         }
         if fallback_reason:
             transform["fallback_reason"] = fallback_reason

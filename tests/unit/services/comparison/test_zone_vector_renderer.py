@@ -10,14 +10,17 @@ threshold that previously broke ezdxf-based renderers on industrial
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from src.services.comparison.dwg_importer import DwgJsonFixtureAdapter
 from src.services.comparison.zone_vector_renderer import (
     SVG_RENDERER_AVAILABLE,
     ZoneVectorRenderResult,
     render_zone_svg,
+    resolve_dxf_path,
     _pad_bbox,
 )
 
@@ -202,6 +205,37 @@ def test_handles_nonexistent_dxf_gracefully(tmp_path: Path) -> None:
     )
     assert result.svg_path == ""
     assert "not found" in result.skipped_reason.lower()
+
+
+def test_resolve_dwg_path_uses_canonical_debug_export_without_oda(tmp_path: Path) -> None:
+    source = tmp_path / "native-free.dwg"
+    source.write_bytes(
+        b"AC1015"
+        + DwgJsonFixtureAdapter.MARKER
+        + json.dumps(
+            {
+                "layers": [{"name": "BEAM", "color": 3}],
+                "model_space": [
+                    {
+                        "type": "LINE",
+                        "handle": "L1",
+                        "layer": "BEAM",
+                        "geometry": {
+                            "start": {"x": 0, "y": 0, "z": 0},
+                            "end": {"x": 100, "y": 0, "z": 0},
+                        },
+                    }
+                ],
+            }
+        ).encode("utf-8")
+    )
+
+    resolved = resolve_dxf_path(source, cache_dir=tmp_path / "cache")
+
+    assert resolved.suffix.lower() == ".dxf"
+    text = resolved.read_text(encoding="utf-8")
+    assert "0\nSECTION\n" in text
+    assert "0\nLINE\n" in text
 
 
 def test_padding_includes_neighbor_entities(quadrant_dxf: Path, tmp_path: Path) -> None:

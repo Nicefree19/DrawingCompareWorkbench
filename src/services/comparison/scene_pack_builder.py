@@ -360,7 +360,7 @@ def build_scene_pack(
 
     Args:
         source_path: A DXF or DWG file. DWG inputs are routed through the
-            Phase F P0 ``resolve_dxf_path`` helper (DwgConverter cache).
+            ``resolve_dxf_path`` helper as canonical debug DXF exports.
         output_dir: Directory that will receive ``scene_pack.json`` +
             ``primitive_index.*`` + ``overview_lod0.json``. Created if missing.
         max_primitives: Hard cap on flattened primitive count. ``None``

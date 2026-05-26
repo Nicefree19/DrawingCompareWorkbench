@@ -39,6 +39,7 @@ from src.services.comparison.comparison_config import (
     SensitivityConfig,
     LayerPriorityConfig,
 )
+from src.services.comparison.dwg_converter import ODAConverterNotFoundError
 from src.services.comparison.dwg_differ import DwgDiffer
 
 
@@ -139,6 +140,18 @@ class TestDwgDifferCleanup:
         assert first.exists()
         assert converter.convert.call_count == 1
 
+    def test_legacy_dwg_fallback_error_uses_opt_in_wording(self, mock_dwg_file, temp_dir):
+        for differ in (
+            DwgDiffer(config={"use_canonical_pipeline": False}),
+            DwgDiffer(config={"use_canonical_pipeline": False}, dxf_cache_dir=temp_dir / "cache"),
+        ):
+            with pytest.raises(ODAConverterNotFoundError) as exc_info:
+                differ._ensure_dxf(mock_dwg_file)
+            message = str(exc_info.value)
+            assert "Legacy DWG-to-DXF fallback is disabled or not configured" in message
+            assert "requires ODA" not in message
+            assert "requires ODA File Converter" not in message
+
     @patch("src.services.comparison.dwg_differ.ezdxf")
     @patch("src.services.comparison.dwg_differ.DwgConverter")
     def test_compare_cleanup_on_success(
@@ -173,7 +186,7 @@ class TestDwgDifferCleanup:
         # ezdxf.readfile이 예외를 발생시키도록 설정
         mock_ezdxf.readfile.side_effect = Exception("DXF read error")
 
-        differ = DwgDiffer()
+        differ = DwgDiffer(config={"use_canonical_pipeline": False})
 
         with patch.object(differ, "_cleanup_temp") as mock_cleanup:
             with pytest.raises(Exception, match="DXF read error"):

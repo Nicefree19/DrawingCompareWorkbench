@@ -3,16 +3,16 @@ requires = ["setuptools>=65", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tekla-mcp"
-version = "2.23.1"
-description = "MIDAS Gen MGT file parser and Tekla Structures integration tool"
+name = "drawing-compare-workbench"
+version = "0.1.0"
+description = "Standalone CAD drawing comparison workbench and CLI"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "MGT Tools Suite Team", email = "support@tekla-mcp.com"},
+    {name = "Drawing Compare Workbench Team"},
 ]
-keywords = ["midas", "tekla", "mgt", "parser", "structural-analysis", "engineering"]
+keywords = ["cad", "dxf", "dwg", "drawing-comparison", "engineering"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -27,20 +27,48 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
 ]
+dependencies = [
+    "ezdxf[draw]>=1.1.0,<2.0.0",
+    "jsonschema>=4.21.0,<5.0.0",
+    "numpy>=1.24.0,<3.0.0",
+    "openpyxl>=3.1.0,<4.0.0",
+    "opencv-python-headless>=4.8.0,<5.0.0",
+    "packaging>=21.0",
+    "pandas>=2.0.0,<3.0.0",
+    "Pillow>=10.0.0,<12.0.0",
+    "psutil>=5.9.0",
+    "pyyaml>=6.0.1",
+    "rich>=12.5.0",
+    "rtree>=1.0.0,<2.0.0",
+]
 
 [project.urls]
-Homepage = "https://github.com/your-repo/tekla-mcp"
-Documentation = "https://tekla-mcp.readthedocs.io/"
-Repository = "https://github.com/your-repo/tekla-mcp"
-Issues = "https://github.com/your-repo/tekla-mcp/issues"
+Homepage = "https://example.invalid/drawing-compare-workbench"
+Documentation = "docs/"
+Repository = "https://example.invalid/drawing-compare-workbench"
+Issues = "https://example.invalid/drawing-compare-workbench/issues"
 
 [project.scripts]
-tekla-mcp = "main:main"
-mgt-parser = "core.parsers.unified_mgt_parser:main"
-structure-analyzer = "services.analysis.structure_analyzer:main"
+cad-compare = "src.cli.cad_compare:main"
+drawing-compare-workbench = "start_drawing_compare_workbench:main"
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.5.0,<7.0.0",
+    "pyqtgraph>=0.13.3",
+]
+dev = [
+    "pytest>=7.3.1",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.11.0",
+]
 
 [tool.setuptools]
-packages = ["src"]
+py-modules = ["start_drawing_compare_workbench"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
 
 [tool.black]
 line-length = 100
