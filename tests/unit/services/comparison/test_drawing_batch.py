@@ -378,6 +378,32 @@ def test_batch_job_runs_confirmed_pairs(monkeypatch) -> None:
     assert summary.total_changes == 1
 
 
+def test_batch_job_marks_failed_comparison_result_as_failed(monkeypatch) -> None:
+    candidate = _confirmed_candidate("S-101")
+
+    def fake_compare(candidate, options):
+        result = ComparisonResult(source_a=candidate.source_a.path, source_b=candidate.source_b.path)
+        result.metadata.update(
+            {
+                "pipeline_status": "failed",
+                "error_code": "COMPARE_IMPORT_FAILED",
+                "message": "CAD compare import failed",
+            }
+        )
+        return result
+
+    monkeypatch.setattr(
+        "src.services.comparison.drawing_batch.compare_candidate",
+        fake_compare,
+    )
+
+    summary = BatchCompareJob([candidate]).run()
+
+    assert summary.completed_pairs == 0
+    assert summary.failed_pairs == 1
+    assert summary.items[0].error == "COMPARE_IMPORT_FAILED: CAD compare import failed"
+
+
 def test_batch_job_can_skip_full_compare_state_json(tmp_path, monkeypatch) -> None:
     candidate = _confirmed_candidate("S-101")
 
@@ -492,6 +518,52 @@ def test_cad_batch_compare_can_opt_into_legacy_ezdxf_engine(monkeypatch) -> None
         "use_canonical_pipeline": False,
         "use_legacy_ezdxf_pipeline": True,
     }
+
+
+def test_cad_batch_compare_falls_back_to_legacy_ezdxf_for_failed_cached_dxf(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    candidate = MatchCandidate(
+        source_a=_descriptor("S-101.dxf"),
+        source_b=_descriptor("S-101_REV1.dxf"),
+        score=0.9,
+        status=MatchStatus.AUTO_CONFIRMED,
+    )
+
+    class FakeDwgDiffer:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            calls.append(kwargs)
+
+        def compare(
+            self,
+            source_a,
+            source_b,
+            *,
+            progress_callback=None,
+            is_cancelled=None,
+        ) -> ComparisonResult:
+            result = ComparisonResult(source_a=str(source_a), source_b=str(source_b))
+            if self.kwargs["config"]["use_canonical_pipeline"]:
+                result.metadata.update(
+                    {
+                        "pipeline_status": "failed",
+                        "error_code": "COMPARE_IMPORT_FAILED",
+                        "message": "CAD compare import failed",
+                    }
+                )
+                return result
+            result.add_change(ChangeRecord(key="line_1", change_type=ChangeType.ADDED))
+            result.metadata["comparison_type"] = "DWG/DXF"
+            return result
+
+    monkeypatch.setattr("src.services.comparison.dwg_differ.DwgDiffer", FakeDwgDiffer)
+
+    result = compare_candidate(candidate, BatchCompareOptions())
+
+    assert result.total_changes == 1
+    assert result.metadata["canonical_fallback_used"] is True
+    assert result.metadata["canonical_error_code"] == "COMPARE_IMPORT_FAILED"
+    assert [call["config"]["use_canonical_pipeline"] for call in calls] == [True, False]
 
 
 def test_pair_uuid_distinguishes_same_label_in_different_folders() -> None:
