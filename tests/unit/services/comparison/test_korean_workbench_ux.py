@@ -126,6 +126,33 @@ def test_workbench_keeps_qthread_wrappers_until_native_thread_stops() -> None:
     assert "worker.deleteLater()" in SOURCE
 
 
+def test_pair_preview_worker_forwards_pdf_page_pair_to_lazy_renderer() -> None:
+    worker_start = SOURCE.index("class PairPreviewRenderWorker")
+    worker_end = SOURCE.index("class ZoneCropRenderWorker", worker_start)
+    worker_body = SOURCE[worker_start:worker_end]
+
+    assert "page_a = _int_value(" in worker_body
+    assert "page_b = _int_value(" in worker_body
+    assert "page_a=page_a" in worker_body
+    assert "page_b=page_b" in worker_body
+
+
+def test_lightweight_preview_fidelity_is_side_specific() -> None:
+    pdf_start = SOURCE.index("    def _load_lightweight_pdf_v2")
+    pdf_end = SOURCE.index("    def _transform_world_bbox_v2", pdf_start)
+    pdf_body = SOURCE[pdf_start:pdf_end]
+    raster_start = SOURCE.index("    def _load_lightweight_raster_preview_v2")
+    raster_end = SOURCE.index("    def _apply_session_state_to_viewport_v2", raster_start)
+    raster_body = SOURCE[raster_start:raster_end]
+
+    assert '("before", self.preview_before_lightweight_v2, loaded_before)' in pdf_body
+    assert '("after", self.preview_after_lightweight_v2, loaded_after)' in pdf_body
+    assert '"exact_world_render" if loaded else "relative_only"' in pdf_body
+    assert "(self.preview_before_lightweight_v2, loaded_before)" in raster_body
+    assert "(self.preview_after_lightweight_v2, loaded_after)" in raster_body
+    assert '"exact_world_render" if loaded else "relative_only"' in raster_body
+
+
 def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:
     light_source = Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
 
@@ -137,6 +164,21 @@ def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:
     assert "FOCUS_ONLY_CHANGE_OVERLAY_SOURCE_THRESHOLD = 300" in light_source
     assert "focus-only overlay mode" in light_source
     assert "selected zone, when present" in light_source
+
+
+def test_gui_compare_requests_at_least_one_static_preview() -> None:
+    request_start = SOURCE.index("request = FolderCompareRunRequest(")
+    request_end = SOURCE.index("        self._result = None", request_start)
+    request_body = SOURCE[request_start:request_end]
+
+    assert "max_preview_pairs=1" in request_body
+    assert "max_preview_pairs=0" not in request_body
+
+
+def test_workbench_backend_status_describes_native_dwg_scope_without_oda_requirement() -> None:
+    assert "DWG native import limited to" in SOURCE
+    assert "requires an approved adapter" in SOURCE
+    assert "ODA Converter not found; legacy DWG conversion is unavailable." not in SOURCE
 
 
 def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
@@ -181,6 +223,24 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     error_body = SOURCE[error_start:error_end]
     assert "self._retire_active_worker_v2()" in error_body
     assert "self._worker = None" not in error_body
+
+
+def test_one_sided_zone_selection_explains_blank_counterpart_view() -> None:
+    light_source = Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
+    qml_source = Path("src/gui/assets/drawing_compare/LightweightDrawingViewport.qml").read_text(encoding="utf-8")
+    focus_start = SOURCE.index("    def _focus_lightweight_on_zone_v2")
+    focus_end = SOURCE.index("    def _set_lightweight_zone_side_messages_v2", focus_start)
+    focus_body = SOURCE[focus_start:focus_end]
+
+    assert "def _set_lightweight_zone_side_messages_v2" in SOURCE
+    assert "이전 도면에는 대응 요소가 없습니다" in SOURCE
+    assert "변경 도면에는 대응 요소가 없습니다" in SOURCE
+    assert "sideMessage" in qml_source
+    assert "def set_side_message" in light_source
+    assert "side == \"before\" and match_side == \"b_only\"" in light_source
+    assert "side == \"after\" and match_side == \"a_only\"" in light_source
+    assert 'match_side == "b_only"' in focus_body
+    assert 'match_side == "a_only"' in focus_body
 
 
 def test_korean_light_stylesheet_uses_high_contrast_palette() -> None:

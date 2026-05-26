@@ -68,20 +68,32 @@ def render_pair_backgrounds(
             safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in pair_id)[:120] or "pair"
             before_image = image_dir / f"{safe}_before.png"
             after_image = image_dir / f"{safe}_after.png"
-            before_transform = _render_pdf_to_png(
-                source_a, before_image,
-                dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_a),
-            )
-            after_transform = _render_pdf_to_png(
-                source_b, after_image,
-                dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_b),
-            )
+            before_transform = None
+            after_transform = None
+            before_image_text = ""
+            after_image_text = ""
+            if int(page_a) >= 0:
+                before_transform = _render_pdf_to_png(
+                    source_a, before_image,
+                    dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_a),
+                )
+                before_image_text = str(before_image)
+            else:
+                warnings.append("before PDF side is unmatched for this page pair")
+            if int(page_b) >= 0:
+                after_transform = _render_pdf_to_png(
+                    source_b, after_image,
+                    dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_b),
+                )
+                after_image_text = str(after_image)
+            else:
+                warnings.append("after PDF side is unmatched for this page pair")
             return {
-                "before_image": str(before_image),
-                "after_image": str(after_image),
+                "before_image": before_image_text,
+                "after_image": after_image_text,
                 "before_transform": before_transform,
                 "after_transform": after_transform,
-                "render_status": "rendered",
+                "render_status": "rendered" if (before_transform or after_transform) else "render_failed",
                 "warnings": warnings,
             }
         except Exception as exc:
@@ -167,6 +179,7 @@ def _render_pdf_to_png(
         max_page_edge = max(float(page.rect.width), float(page.rect.height), 1.0)
         edge_scale = float(max_edge_px) / max_page_edge if max_edge_px and max_edge_px > 0 else requested_scale
         scale = min(requested_scale, edge_scale)
+        effective_dpi = scale * 72.0
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
         pixmap.save(str(output_path))
         return {
@@ -180,7 +193,11 @@ def _render_pdf_to_png(
             "scale_y": 1.0,
             "coordinate_space": "image_pixels",
             "page": safe_index,
-            "dpi": dpi,
+            "dpi": effective_dpi,
+            "pdf_dpi": effective_dpi,
+            "effective_dpi": effective_dpi,
+            "requested_dpi": float(dpi),
+            "render_scale": scale,
         }
     finally:
         doc.close()

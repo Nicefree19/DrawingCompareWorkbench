@@ -18,12 +18,11 @@
 // resampling artifacts.
 //
 // Performance note: Canvas paint is single-threaded but plenty fast for
-// the LOD0 skeleton (~few thousand line segments). Phase G3.2 will swap
-// the Canvas for a custom QQuickItem + QSGGeometryNode when we have
-// measured paint time on real customer drawings.
+// the LOD0 skeleton (~few thousand line segments). The QML must stay
+// loadable without optional native/QSG extensions so PDF previews still
+// render in packaged builds.
 
 import QtQuick
-import TeklaQSG 1.0
 
 Item {
     id: root
@@ -51,6 +50,10 @@ Item {
     property real overlayOpacityScale: 1.0
     // Empty-state notice when no primitives loaded yet.
     property string emptyNotice: "도면을 선택하면 빠르게 표시됩니다."
+    // Side-specific note for added/deleted zones where the opposite drawing
+    // has no corresponding detail. This avoids the "blank side is broken"
+    // interpretation while keeping the actual drawing visible underneath.
+    property string sideMessage: ""
     // Phase G2.7 — PDF / raster background. When set, an Image element
     // covers the canvas at the same world bbox, giving the viewport the
     // legacy "PNG behind, overlays on top" look while keeping all the
@@ -70,12 +73,11 @@ Item {
     // Zoom factor for UI (1.0 = fit to view). Internally we just adjust
     // unitsPerPixel.
 
-    // Phase G3 — pick which skeleton renderer Python uses.
-    //   "qsg"     — GPU-accelerated QSGLineItem (137-6500x faster)
-    //   "canvas"  — legacy QML Canvas (fallback when QSG unavailable)
-    // Python toggles this via root.setProperty("skeletonRenderer", ...)
-    // based on env var WORKBENCH_QSG and runtime capability detection.
-    property string skeletonRenderer: "qsg"
+    // Pick which skeleton renderer Python uses. This standalone QML is
+    // Canvas-safe by default; Python may still set the property, but an
+    // unavailable optional QSG module must never prevent the root item
+    // from loading.
+    property string skeletonRenderer: "canvas"
 
     signal viewportChanged(real centerX, real centerY, real upp)
     // Phase I4 — emitted when the user clicks a cloud or focus marker.
@@ -103,14 +105,14 @@ Item {
         visible: root.backgroundImageSource !== ""
             && root.backgroundImageWorldBbox && root.backgroundImageWorldBbox.length === 4
         source: root.backgroundImageSource
-        cache: false
+        cache: true
         // Re-rasterize on demand at high zoom — Qt picks a sourceSize
         // ≥ on-screen size to avoid blur. Cap to keep memory bounded.
         sourceSize.width: Math.min(8192, Math.max(width * 2, 1024))
         sourceSize.height: Math.min(8192, Math.max(height * 2, 1024))
         smooth: true
         fillMode: Image.Stretch
-        z: 5  // above the empty placeholder, below vectorCanvas (z:0 default)
+        z: 5  // above the empty placeholder, below vectorCanvas (z:10)
         x: {
             var bb = root.backgroundImageWorldBbox
             if (!bb || bb.length < 4) return 0
@@ -137,43 +139,18 @@ Item {
         }
     }
 
-    // ---- VECTOR LAYER (QSG / GPU path) ---------------------------------
-    // Phase G3 — QSGLineItem renders skeleton primitives via a single
-    // GPU vertex buffer. Lines arrive in WORLD coordinates; the parent
-    // Item applies the world→pixel affine via its `transform` list so
-    // the GPU does the math, not Python/JS. For 50K-line scenes this
-    // beats the Canvas path by ~6500× (PoC: tools/poc_qsg_lines.py).
+    // ---- VECTOR LAYER (optional QSG placeholder) -----------------------
+    // Older builds statically imported TeklaQSG here. That made the whole
+    // QML fail to load when the optional native module was absent, leaving
+    // PDF previews blank even though the rendered page PNG existed. Keep a
+    // harmless placeholder so object names remain stable, and let Canvas
+    // below be the guaranteed renderer.
     Item {
         id: qsgContainer
         anchors.fill: parent
-        visible: root.skeletonRenderer === "qsg"
-        // Apply world→pixel transform so QSGLineItem can stay in world
-        // units. QML transform list runs INNERMOST first; the order
-        // below maps a world point (wx, wy) to screen as:
-        //     screen = viewport_centre + scale(world_minus_camera) flipY
-        transform: [
-            Translate {
-                x: -root.cameraCenterX
-                y: -root.cameraCenterY
-            },
-            Scale {
-                xScale: 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                yScale: -1.0 / Math.max(0.0001, root.unitsPerPixel)
-            },
-            Translate {
-                x: qsgContainer.width / 2.0
-                y: qsgContainer.height / 2.0
-            }
-        ]
-
-        QSGLineItem {
-            id: qsgSkeleton
-            objectName: "qsgSkeleton"
-            anchors.fill: parent
-            // Lines pushed via Python on primitives change:
-            //   item = root.findChild(QSGLineItem, 'qsgSkeleton')
-            //   item.setPrimitives(root.primitives)
-        }
+        visible: false
+        z: 10
+        objectName: "qsgSkeletonPlaceholder"
     }
 
     // ---- VECTOR LAYER (Canvas — legacy fallback) -----------------------
@@ -182,6 +159,7 @@ Item {
         anchors.fill: parent
         antialiasing: true
         visible: root.skeletonRenderer !== "qsg"
+        z: 10
         // Repaint whenever any input the paint code reads changes — wired
         // via Connections on the root item so we catch every property
         // assignment from Python regardless of binding cycles.
@@ -513,6 +491,33 @@ Item {
                 visible: root.statusText !== ""
                 text: "· " + root.statusText
             }
+        }
+    }
+
+    // ---- SIDE MESSAGE --------------------------------------------------
+    Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        anchors.topMargin: 46
+        width: Math.min(parent.width - 48, sideMessageText.implicitWidth + 34)
+        height: sideMessageText.implicitHeight + 18
+        radius: 6
+        color: "#111827"
+        opacity: 0.88
+        visible: root.sideMessage !== ""
+        z: 8999
+
+        Text {
+            id: sideMessageText
+            anchors.fill: parent
+            anchors.margins: 9
+            text: root.sideMessage
+            color: "#FFFFFF"
+            font.pixelSize: 13
+            font.bold: true
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
         }
     }
 

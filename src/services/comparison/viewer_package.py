@@ -845,6 +845,38 @@ def _pdf_dpi_from_zone_rows(rows: Sequence[Dict[str, Any]]) -> float:
     return 0.0
 
 
+def _row_metadata_sources(row: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    yield row
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        yield metadata
+
+
+def _row_page_pair(row: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    if not isinstance(row, dict):
+        return None
+    for source in _row_metadata_sources(row):
+        if "page_a" not in source and "page_b" not in source:
+            continue
+        try:
+            return (
+                int(source.get("page_a", 0) or 0),
+                int(source.get("page_b", 0) or 0),
+            )
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _row_value(row: Dict[str, Any], key: str, default: Any = "") -> Any:
+    if key in row and row.get(key) not in (None, ""):
+        return row.get(key)
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict) and metadata.get(key) not in (None, ""):
+        return metadata.get(key)
+    return default
+
+
 def _primary_page_pair_for_pair(rows: Sequence[Dict[str, Any]]) -> Tuple[int, int]:
     """Phase H integration — return the matched (page_a, page_b) for the
     page that the viewer should render as the background.
@@ -855,32 +887,15 @@ def _primary_page_pair_for_pair(rows: Sequence[Dict[str, Any]]) -> Tuple[int, in
     matches the first batch of zones — singletons / DXF / single-page
     PDF runs all default to ``(0, 0)``.
 
-    The helper is intentionally tolerant: missing keys, non-int values,
-    and negative sentinels all collapse to 0 so the renderer never
-    sees an out-of-range index.
+    The helper is intentionally tolerant: missing keys and non-int values
+    are skipped. Negative sentinels are preserved because ``-1`` is the
+    contract for a missing before/after side in one-sided PDF page matches.
     """
 
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        # Some change-zone rows expose page indices at the top level
-        # (zone.metadata flattened into the row dict); others nest them
-        # under ``metadata``. Try both.
-        for source in (row, row.get("metadata") if isinstance(row.get("metadata"), dict) else None):
-            if not isinstance(source, dict):
-                continue
-            if "page_a" not in source and "page_b" not in source:
-                continue
-            try:
-                pa = int(source.get("page_a", 0) or 0)
-                pb = int(source.get("page_b", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if pa < 0:
-                pa = 0
-            if pb < 0:
-                pb = 0
-            return (pa, pb)
+        pair = _row_page_pair(row)
+        if pair is not None:
+            return pair
     return (0, 0)
 
 
@@ -899,25 +914,12 @@ def _all_page_pairs_for_pair(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, i
 
     seen: set[Tuple[int, int]] = set()
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        for source in (row, row.get("metadata") if isinstance(row.get("metadata"), dict) else None):
-            if not isinstance(source, dict):
-                continue
-            if "page_a" not in source and "page_b" not in source:
-                continue
-            try:
-                pa = int(source.get("page_a", 0) or 0)
-                pb = int(source.get("page_b", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            # Keep negative sentinels out — they mean "unmatched on this side"
-            # and shouldn't appear as a render target.
-            if pa < 0 or pb < 0:
-                continue
-            seen.add((pa, pb))
-            break  # one pair per row is enough; don't double-count
+        pair = _row_page_pair(row)
+        if pair is not None:
+            seen.add(pair)
     return [{"page_a": pa, "page_b": pb} for pa, pb in sorted(seen)]
+
+            # Keep negative sentinels out — they mean "unmatched on this side"
 
 
 def _pair_extents(rows: Sequence[Dict[str, str]]) -> Tuple[float, float, float, float]:
@@ -1087,7 +1089,8 @@ def _overlay_from_zone_row(
     severity = str(row.get("severity") or _severity_from_count(raw_count))
     priority_rank = priority.get("rank") if priority else None
     priority_score = priority.get("score") if priority else None
-    return {
+    page_pair = _row_page_pair(row)
+    overlay = {
         "schema_version": OVERLAY_SCHEMA_VERSION,
         "pair_id": str(row.get("pair_id") or row.get("drawing_number") or ""),
         "pair_uuid": str(row.get("pair_uuid") or row.get("pair_id") or row.get("drawing_number") or ""),
@@ -1114,6 +1117,14 @@ def _overlay_from_zone_row(
         "bbox_coordinate_space": bbox_coordinate_space,
         "pdf_dpi": pdf_dpi,
     }
+    if page_pair is not None:
+        page_a, page_b = page_pair
+        overlay["page_a"] = page_a
+        overlay["page_b"] = page_b
+        overlay["pdf_page"] = page_a if page_a >= 0 else None
+        overlay["page_match_status"] = _row_value(row, "page_match_status", "")
+        overlay["page_match_score"] = _row_value(row, "page_match_score", "")
+    return overlay
 
 
 def _sort_overlays(overlays: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1242,20 +1253,32 @@ def _render_pair_backgrounds(
             safe = _safe_name(pair_id)
             before_image = image_dir / f"{safe}_before.png"
             after_image = image_dir / f"{safe}_after.png"
-            before_transform = _render_pdf_to_png(
-                source_a, before_image,
-                dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_a),
-            )
-            after_transform = _render_pdf_to_png(
-                source_b, after_image,
-                dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_b),
-            )
+            before_transform = None
+            after_transform = None
+            before_image_text = ""
+            after_image_text = ""
+            if int(page_a) >= 0:
+                before_transform = _render_pdf_to_png(
+                    source_a, before_image,
+                    dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_a),
+                )
+                before_image_text = str(before_image)
+            else:
+                warnings.append("before PDF side is unmatched for this page pair")
+            if int(page_b) >= 0:
+                after_transform = _render_pdf_to_png(
+                    source_b, after_image,
+                    dpi=dpi, max_edge_px=max_edge_px, page_index=int(page_b),
+                )
+                after_image_text = str(after_image)
+            else:
+                warnings.append("after PDF side is unmatched for this page pair")
             return {
-                "before_image": str(before_image),
-                "after_image": str(after_image),
+                "before_image": before_image_text,
+                "after_image": after_image_text,
                 "before_transform": before_transform,
                 "after_transform": after_transform,
-                "render_status": "rendered",
+                "render_status": "rendered" if (before_transform or after_transform) else "render_failed",
                 "warnings": warnings,
             }
         except Exception as exc:
@@ -1371,6 +1394,7 @@ def _render_pdf_to_png(
         max_page_edge = max(float(page.rect.width), float(page.rect.height), 1.0)
         edge_scale = float(max_edge_px) / max_page_edge if max_edge_px and max_edge_px > 0 else requested_scale
         scale = min(requested_scale, edge_scale)
+        effective_dpi = scale * 72.0
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
         pixmap.save(str(output_path))
         return {
@@ -1384,7 +1408,11 @@ def _render_pdf_to_png(
             "scale_y": 1.0,
             "coordinate_space": "image_pixels",
             "page": safe_index,
-            "dpi": dpi,
+            "dpi": effective_dpi,
+            "pdf_dpi": effective_dpi,
+            "effective_dpi": effective_dpi,
+            "requested_dpi": float(dpi),
+            "render_scale": scale,
         }
     finally:
         doc.close()

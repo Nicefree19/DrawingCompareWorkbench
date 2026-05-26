@@ -149,6 +149,38 @@ def _page_height_points_from_world_bbox(
     return height if height > 0 else 0.0
 
 
+def _stop_pdf_rerender_timer(viewport: Any) -> None:
+    timer = getattr(viewport, "_pdf_rerender_timer", None)
+    if timer is None:
+        return
+    try:
+        timer.stop()
+    except Exception:
+        logger.debug("PDF rerender timer stop failed", exc_info=True)
+
+
+def _clear_pdf_background_state(viewport: Any, root: Any) -> None:
+    """Clear any raster/PDF background and stale PDF rerender state."""
+
+    root.setProperty("backgroundImageSource", "")
+    root.setProperty("backgroundImageWorldBbox", [])
+    viewport._pdf_render_state = None
+    _stop_pdf_rerender_timer(viewport)
+
+
+def _readable_pdf_notice(notice: str) -> str:
+    """Return a readable PDF notice even if an older literal is mojibake."""
+
+    text = str(notice or "")
+    if not any("\u4e00" <= char <= "\u9fff" or char == "\ufffd" for char in text):
+        return text
+    if "Qt PDF" in text:
+        return "Qt PDF module is unavailable; lightweight PDF preview cannot be shown."
+    if "PDF" in text:
+        return "PDF preview unavailable."
+    return "Preview unavailable."
+
+
 def _resolve_qml_asset(name: str) -> Path:
     """Same resolver pattern the existing Workbench uses for QML asset
     discovery — works in both the development tree and a PyInstaller
@@ -219,28 +251,29 @@ class LightweightDrawingViewport(QWidget):
         self._layout.setStackingMode(QStackedLayout.StackOne)
         self._layout.setContentsMargins(0, 0, 0, 0)
 
-        # Phase G3 — register the GPU-accelerated QSGLineItem with the
-        # QML engine BEFORE loading any QML that imports `TeklaQSG`.
-        # Idempotent (no-op on subsequent viewport instances).
+        # Optional QSG acceleration. The QML intentionally has no static
+        # `import TeklaQSG` dependency because packaged builds may omit the
+        # native extension; a missing QSG module must not blank PDF preview.
         try:
             from src.gui.qsg_line_item import register_qml_type
             register_qml_type()
             self._qsg_available = True
         except Exception as exc:  # noqa: BLE001
-            logger.warning("QSGLineItem registration failed (%s) — "
-                           "falling back to Canvas skeleton", exc)
+            logger.info(
+                "QSGLineItem unavailable (%s); using Canvas skeleton", exc
+            )
             self._qsg_available = False
 
-        # Resolve renderer choice from env var (operator override).
-        # Values: "qsg" (force GPU path), "canvas" (force fallback),
-        # "auto" or unset (use QSG when available).
+        # Resolve renderer choice from env var (operator override). This
+        # standalone QML is Canvas-safe; do not allow WORKBENCH_QSG=qsg to
+        # hide the Canvas when the optional QSG item is absent.
         env_choice = os.environ.get("WORKBENCH_QSG", "auto").strip().lower()
-        if env_choice == "canvas":
-            self._skeleton_renderer = "canvas"
-        elif env_choice == "qsg":
-            self._skeleton_renderer = "qsg"
-        else:
-            self._skeleton_renderer = "qsg" if self._qsg_available else "canvas"
+        if env_choice == "qsg":
+            logger.warning(
+                "WORKBENCH_QSG=qsg ignored in this build; using Canvas "
+                "skeleton so the lightweight viewer root remains loadable"
+            )
+        self._skeleton_renderer = "canvas"
 
         self._quick = QQuickWidget(self)
         self._quick.setResizeMode(QQuickWidget.SizeRootObjectToView)
@@ -341,6 +374,7 @@ class LightweightDrawingViewport(QWidget):
             return 0
 
         if pack_ref is None or not pack_ref.overview_lod0_path:
+            _clear_pdf_background_state(self, root)
             root.setProperty("primitives", [])
             root.setProperty("emptyNotice", empty_notice)
             self._loaded_pack_path = None
@@ -348,13 +382,15 @@ class LightweightDrawingViewport(QWidget):
             # Phase G2.7-FU2 — leaving PDF mode; clear the auto-rerender
             # state so a stale wheel-zoom event doesn't try to re-render
             # a PDF that's no longer the active source.
-            self._pdf_render_state = None
             return 0
 
         overview_path = Path(pack_ref.overview_lod0_path)
         if not overview_path.exists():
             logger.warning("LightweightViewport: overview LOD0 missing at %s", overview_path)
+            _clear_pdf_background_state(self, root)
             root.setProperty("primitives", [])
+            self._loaded_pack_path = None
+            self._primitive_count = 0
             root.setProperty("emptyNotice", "신형 뷰어 데이터가 아직 빌드되지 않았습니다.")
             return 0
 
@@ -362,7 +398,10 @@ class LightweightDrawingViewport(QWidget):
             data = json.loads(overview_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("LightweightViewport: failed to read overview: %s", exc)
+            _clear_pdf_background_state(self, root)
             root.setProperty("primitives", [])
+            self._loaded_pack_path = None
+            self._primitive_count = 0
             root.setProperty(
                 "emptyNotice", f"신형 뷰어 데이터 로드 실패:\n{exc}"
             )
@@ -378,7 +417,9 @@ class LightweightDrawingViewport(QWidget):
         except (TypeError, ValueError, IndexError):
             self._world_bbox = (0.0, 0.0, 1.0, 1.0)
 
-        # Push to QML: world bbox first (triggers fitToView), then primitives
+        # Push to QML: world bbox first (triggers fitToView), then primitives.
+        # Scene mode must clear any previous PDF/raster bitmap first.
+        _clear_pdf_background_state(self, root)
         root.setProperty("worldBbox", list(self._world_bbox))
         root.setProperty("primitives", primitives)
         root.setProperty("emptyNotice", "")
@@ -420,10 +461,9 @@ class LightweightDrawingViewport(QWidget):
             return False
 
         def _clear_background(notice: str) -> None:
-            root.setProperty("backgroundImageSource", "")
-            root.setProperty("backgroundImageWorldBbox", [])
+            _clear_pdf_background_state(self, root)
             root.setProperty("primitives", [])
-            root.setProperty("emptyNotice", notice)
+            root.setProperty("emptyNotice", _readable_pdf_notice(notice))
             self._pdf_render_state = None
 
         if image_path is None or not Path(image_path).exists():
@@ -495,14 +535,80 @@ class LightweightDrawingViewport(QWidget):
             return False
 
         def _clear_background(notice: str) -> None:
-            root.setProperty("backgroundImageSource", "")
-            root.setProperty("backgroundImageWorldBbox", [])
+            _clear_pdf_background_state(self, root)
             root.setProperty("primitives", [])
-            root.setProperty("emptyNotice", notice)
+            root.setProperty("emptyNotice", _readable_pdf_notice(notice))
 
         if pdf_path is None or not Path(pdf_path).exists():
             _clear_background(empty_notice)
             return False
+        source_path = Path(pdf_path)
+        if cache_dir is None:
+            import tempfile
+            cache_dir = Path(tempfile.gettempdir()) / "tekla_mcp_qtpdf_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        import hashlib
+        try:
+            stat = source_path.stat()
+            source_sig = f"{source_path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
+        except OSError as exc:
+            logger.warning("load_pdf_page: could not stat source %s: %s", source_path, exc)
+            _clear_background(f"PDF ?뚯씪 ?뺣낫瑜??쎌? 紐삵뻽?듬땲?? {source_path.name}")
+            return False
+        stem_key = hashlib.sha1(
+            f"{source_sig}|{page_index}|{int(target_dpi)}".encode("utf-8"),
+            usedforsecurity=False,
+        ).hexdigest()[:16]
+        cached_png = cache_dir / f"qtpdf_{stem_key}_dpi{int(target_dpi)}.png"
+
+        def _push_cached_background(
+            cached_path: Path,
+            w_pts: float,
+            h_pts: float,
+            *,
+            cache_hit: bool,
+            pixel_size: tuple[int, int] | None = None,
+        ) -> bool:
+            world_bbox = (0.0, 0.0, float(w_pts), float(h_pts))
+            self._world_bbox = world_bbox
+            root.setProperty("worldBbox", list(world_bbox))
+            root.setProperty("backgroundImageWorldBbox", list(world_bbox))
+            image_url = QUrl.fromLocalFile(str(cached_path.resolve())).toString()
+            root.setProperty("backgroundImageSource", "")
+            root.setProperty("backgroundImageSource", image_url)
+            root.setProperty("primitives", [])
+            root.setProperty("emptyNotice", "")
+            self._loaded_pack_path = None
+            self._primitive_count = 0
+
+            width, height = pixel_size or (0, 0)
+            logger.info(
+                "LightweightViewport(%s): loaded PDF page %d at %d DPI "
+                "(%s, %dx%d px, %.1fx%.1f pts, cache=%s)",
+                self._side, page_index, int(target_dpi),
+                "cache-hit" if cache_hit else "rendered",
+                width, height, w_pts, h_pts, cached_path.name,
+            )
+            try:
+                base_upp_now = float(root.property("unitsPerPixel") or 0.0)
+            except Exception:
+                base_upp_now = 0.0
+            existing = self._pdf_render_state or {}
+            self._pdf_render_state = {
+                "pdf_path": str(source_path),
+                "page_index": int(page_index),
+                "current_dpi": float(target_dpi),
+                "base_upp": existing.get("base_upp") or base_upp_now,
+                "base_dpi": existing.get("base_dpi") or float(target_dpi),
+                "cache_dir": str(cache_dir),
+                "cache_hit": bool(cache_hit),
+                "pending_dpi": None,
+            }
+            try:
+                prune_pdf_cache(cache_dir, max_bytes=200 * 1024 * 1024)
+            except Exception:
+                logger.debug("prune_pdf_cache raised", exc_info=True)
+            return True
 
         from src.services.comparison.qt_pdf_adapter import (
             PdfPageRenderer, is_qt_pdf_available, prune_pdf_cache,
@@ -542,6 +648,18 @@ class LightweightDrawingViewport(QWidget):
                 return False
 
             # Audit-gates §12.3 A4 — re-check existence right before render
+            try:
+                if cached_png.exists() and cached_png.stat().st_size > 0:
+                    renderer.close()
+                    return _push_cached_background(
+                        cached_png,
+                        float(w_pts),
+                        float(h_pts),
+                        cache_hit=True,
+                    )
+            except OSError:
+                logger.debug("PDF cache stat failed for %s", cached_png, exc_info=True)
+
             # to defuse the 7-second race observed in the 2026-05-15 Qt6Core
             # fast-fail crash. The user can move / delete / network-unmount
             # the source between the initial exists() (line 409) and this
@@ -570,15 +688,6 @@ class LightweightDrawingViewport(QWidget):
             # Write to a stable cache file so QML's Image can pick it up
             # via file://. Naming includes pdf hash + page + dpi so a
             # repeated render at the same DPI hits the file cache.
-            if cache_dir is None:
-                import tempfile
-                cache_dir = Path(tempfile.gettempdir()) / "tekla_mcp_qtpdf_cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            import hashlib
-            stem_key = hashlib.sha1(
-                f"{pdf_path}|{page_index}|{int(target_dpi)}".encode("utf-8")
-            ).hexdigest()[:16]
-            cached_png = cache_dir / f"qtpdf_{stem_key}_dpi{int(target_dpi)}.png"
             try:
                 # Save as PNG (lossless). Returns False on disk failure.
                 if not img.save(str(cached_png), "PNG"):
@@ -589,6 +698,14 @@ class LightweightDrawingViewport(QWidget):
                 _clear_background(f"PDF 캐시 저장 오류: {exc}")
                 return False
 
+            return _push_cached_background(
+                cached_png,
+                float(w_pts),
+                float(h_pts),
+                cache_hit=False,
+                pixel_size=(int(img.width()), int(img.height())),
+            )
+
             # Push the URL + world bbox to QML.
             world_bbox = (0.0, 0.0, float(w_pts), float(h_pts))
             self._world_bbox = world_bbox
@@ -596,7 +713,6 @@ class LightweightDrawingViewport(QWidget):
             root.setProperty("backgroundImageWorldBbox", list(world_bbox))
             # QML Image needs a file:// URL on Windows; QUrl.fromLocalFile
             # gives us the right form regardless of platform.
-            from PySide6.QtCore import QUrl
             image_url = QUrl.fromLocalFile(str(cached_png.resolve())).toString()
             # Force QML Image to reload even when the same PDF/page/DPI cache
             # path is re-used after a new compare run. Without clearing first,
@@ -662,6 +778,14 @@ class LightweightDrawingViewport(QWidget):
             return
         root.setProperty("overlaysCloud", list(cloud or []))
         root.setProperty("overlaysFocus", list(focus or []))
+
+    def set_side_message(self, message: str = "") -> None:
+        """Show a short side-specific explanation over the viewport."""
+
+        root = self._quick.rootObject()
+        if root is None:
+            return
+        root.setProperty("sideMessage", str(message or ""))
 
     def set_overlay_opacity_scale(self, scale: float) -> None:
         """Same clamp policy as the legacy viewport."""
@@ -867,7 +991,20 @@ class LightweightDrawingViewport(QWidget):
                 continue
             zid = str(ov.get("zone_id") or "")
             bbox_key = "old_bbox" if side == "before" else "bbox"
-            raw_bbox = ov.get(bbox_key) or ov.get("bbox") or ov.get("old_bbox")
+            change_type = str(ov.get("change_type") or "")
+            lowered_type = change_type.lower()
+            match_side = ""
+            if "delete" in lowered_type or "remove" in lowered_type:
+                match_side = "a_only"
+            elif "add" in lowered_type:
+                match_side = "b_only"
+            if side == "before" and match_side == "b_only":
+                continue
+            if side == "after" and match_side == "a_only":
+                continue
+            raw_bbox = ov.get(bbox_key)
+            if raw_bbox is None and not match_side:
+                raw_bbox = ov.get("bbox") or ov.get("old_bbox")
             # Phase G2.7-COORDFIX — convert PDF image_pixels → PDF points so
             # the marker lands on the correct spot of the page background.
             # DXF/DWG overlays pass through unchanged.
@@ -883,7 +1020,6 @@ class LightweightDrawingViewport(QWidget):
             if x1 <= x0 or y1 <= y0:
                 continue
 
-            change_type = str(ov.get("change_type") or "")
             color = "#DC2626"  # red default
             if change_type == "added":
                 color = "#16A34A"  # green

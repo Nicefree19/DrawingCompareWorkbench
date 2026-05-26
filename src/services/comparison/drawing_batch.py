@@ -292,6 +292,9 @@ class BatchCompareOptions:
     # (default), "high". Unknown values fall back to medium inside
     # DrawingDiffer (see drawing_differ._resolve_noise_profile).
     pdf_noise_filter_strength: str = "medium"
+    # CanonicalDrawing is the default CAD path. The legacy ezdxf/ODA path is
+    # retained only for explicitly approved internal fallback runs.
+    cad_compare_engine: Literal["canonical", "legacy_ezdxf"] = "canonical"
     # OCR is intentionally opt-in for PDF comparison. Some OCR stacks import
     # torch/paddle native DLLs and can terminate the GUI process on Windows.
     use_ocr_fallback: bool = False
@@ -1796,6 +1799,7 @@ def compare_candidate(
     if candidate.source_a.kind == DrawingKind.CAD:
         from .dwg_differ import DwgDiffer
 
+        cad_config = _cad_compare_config(options)
         stream_path = None
         stream_pair_id = ""
         if options.compare_state_dir:
@@ -1806,6 +1810,7 @@ def compare_candidate(
                 / f"{stream_pair_id}.jsonl"
             )
         return DwgDiffer(
+            config=cad_config,
             comparison_config=options.comparison_config,
             dxf_cache_dir=options.dxf_cache_dir,
             change_zone_stream_path=stream_path,
@@ -1840,6 +1845,24 @@ def compare_candidate(
         is_cancelled=is_cancelled,
         manual_page_overrides=pair_overrides,
     )
+
+
+def _cad_compare_config(options: BatchCompareOptions) -> Dict[str, Any]:
+    engine = (options.cad_compare_engine or "canonical").strip().lower()
+    if engine == "legacy_ezdxf":
+        return {
+            "use_canonical_pipeline": False,
+            "use_legacy_ezdxf_pipeline": True,
+        }
+    if engine != "canonical":
+        logger.warning(
+            "Unknown CAD compare engine %r; falling back to canonical",
+            options.cad_compare_engine,
+        )
+    return {
+        "use_canonical_pipeline": True,
+        "use_legacy_ezdxf_pipeline": False,
+    }
 
 
 def compare_pdf_documents(

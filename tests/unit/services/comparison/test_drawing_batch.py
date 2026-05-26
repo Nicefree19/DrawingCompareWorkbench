@@ -21,6 +21,7 @@ from src.services.comparison.drawing_batch import (
     MatchingOptions,
     apply_manual_matches,
     compare_pdf_documents,
+    compare_candidate,
     confirmed_pair_uniqueness_violations,
     match_drawing_sets,
     parse_filename_identity,
@@ -433,6 +434,64 @@ def test_batch_job_forwards_inner_cad_progress(monkeypatch) -> None:
 
     assert summary.completed_pairs == 1
     assert (80, 100, "inner CAD compare") in events
+
+
+def test_cad_batch_compare_uses_canonical_engine_by_default(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDwgDiffer:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def compare(
+            self,
+            source_a,
+            source_b,
+            *,
+            progress_callback=None,
+            is_cancelled=None,
+        ) -> ComparisonResult:
+            return ComparisonResult(source_a=str(source_a), source_b=str(source_b))
+
+    monkeypatch.setattr("src.services.comparison.dwg_differ.DwgDiffer", FakeDwgDiffer)
+
+    result = compare_candidate(_confirmed_candidate("S-101"), BatchCompareOptions())
+
+    assert result.source_a.endswith("S-101.dwg")
+    assert captured["config"] == {
+        "use_canonical_pipeline": True,
+        "use_legacy_ezdxf_pipeline": False,
+    }
+
+
+def test_cad_batch_compare_can_opt_into_legacy_ezdxf_engine(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDwgDiffer:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def compare(
+            self,
+            source_a,
+            source_b,
+            *,
+            progress_callback=None,
+            is_cancelled=None,
+        ) -> ComparisonResult:
+            return ComparisonResult(source_a=str(source_a), source_b=str(source_b))
+
+    monkeypatch.setattr("src.services.comparison.dwg_differ.DwgDiffer", FakeDwgDiffer)
+
+    compare_candidate(
+        _confirmed_candidate("S-101"),
+        BatchCompareOptions(cad_compare_engine="legacy_ezdxf"),
+    )
+
+    assert captured["config"] == {
+        "use_canonical_pipeline": False,
+        "use_legacy_ezdxf_pipeline": True,
+    }
 
 
 def test_pair_uuid_distinguishes_same_label_in_different_folders() -> None:

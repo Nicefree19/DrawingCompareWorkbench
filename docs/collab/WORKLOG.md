@@ -1,0 +1,9 @@
+- 2026-05-22 Codex: Added first-pass multi-frame CAD region hardening (LINE frame recovery, table filtering, safer region matching, outside-bbox cloud assignment guard, and guarded multi-frame feature mode status).
+- 2026-05-22 Codex: Extended multi-frame region detection with INSERT virtual-entity frame expansion and paperspace VIEWPORT fallback tests.
+- 2026-05-22 Codex: Added multi-frame validation output and review gate metrics for outside-region clouds, cross-region changes, and review-required region matches.
+- 2026-05-22 Codex: Added testable CAD region-local entity compare core that normalizes matched detail regions before comparing and maps changes back to world bboxes.
+- 2026-05-22 Codex: Added PDF preview page/effective-DPI hardening and opt-in DXF region-local compare result artifacts.
+- 2026-05-22 Codex: Preserved PDF page-pair metadata through change-zone CSV/viewer overlays and filtered GUI overlays from the full per-pair cache.
+- 2026-05-22 Codex: Added PDF lightweight page cache hits and cancellable viewer-package subprocess monitoring.
+- 2026-05-22 Codex: Hardened lightweight viewport state transitions so scene/empty/PDF-error paths clear stale PDF backgrounds and rerender state.
+- 2026-05-22 Codex: Aligned viewer render worker PDF transform metadata with in-process effective-DPI schema.

@@ -180,12 +180,16 @@ def _oda_check() -> PreflightCheck:
         installed = bool(status.get("oda_converter"))
         return PreflightCheck(
             "oda_converter",
-            "ok" if installed else "warning",
-            "ODA Converter available" if installed else "ODA Converter not found; DWG support is limited",
+            "warning" if installed else "ok",
+            (
+                "Legacy ODA fallback detected; customer builds must keep it disabled"
+                if installed
+                else "Legacy ODA fallback not found; canonical CAD pipeline remains ODA-free"
+            ),
             status,
         )
     except Exception as exc:
-        return PreflightCheck("oda_converter", "warning", f"could not check ODA Converter: {exc}")
+        return PreflightCheck("oda_converter", "warning", f"could not check legacy ODA fallback: {exc}")
 
 
 def _pymupdf_check() -> PreflightCheck:

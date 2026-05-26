@@ -650,7 +650,12 @@ def scale_pdf_bbox_to_render_pixels(
     except (TypeError, ValueError):
         bbox_dpi = 0.0
     try:
-        image_dpi = float(transform.get("dpi") or transform.get("pdf_dpi") or 0.0)
+        image_dpi = float(
+            transform.get("effective_dpi")
+            or transform.get("dpi")
+            or transform.get("pdf_dpi")
+            or 0.0
+        )
     except (TypeError, ValueError):
         image_dpi = 0.0
     if bbox_dpi <= 0 or image_dpi <= 0 or bbox_dpi == image_dpi:
@@ -1079,6 +1084,14 @@ class PairPreviewRenderWorker(QThread):
             source_a = self.viewer_pair.get("source_a")
             source_b = self.viewer_pair.get("source_b")
             image_dir = self.viewer_root / "images"
+            page_a = _int_value(
+                self.viewer_pair.get("page_a", self.viewer_pair.get("page", 0)),
+                0,
+            )
+            page_b = _int_value(
+                self.viewer_pair.get("page_b", self.viewer_pair.get("page", 0)),
+                0,
+            )
             rendered = _render_pair_backgrounds_with_timeout(
                 pair_id=self.pair_id,
                 source_a=Path(source_a) if source_a else None,
@@ -1088,6 +1101,8 @@ class PairPreviewRenderWorker(QThread):
                 dpi=80,
                 max_edge_px=2400,
                 timeout_seconds=GPU_VIEWER_RENDER_TIMEOUT_SECONDS,
+                page_a=page_a,
+                page_b=page_b,
             )
             render_ms = round((perf_counter() - started) * 1000.0, 3)
             render_status = str(rendered.get("render_status") or "render_failed")
@@ -2620,8 +2635,17 @@ class DrawingCompareWorkbench(QMainWindow):
             from src.services.comparison.dwg_differ import DwgDiffer
 
             status = DwgDiffer.get_status()
-            if not status.get("oda_converter"):
-                messages.append("ODA Converter not found; DWG inputs will be limited to DXF/PDF mode.")
+            if not status.get("dwg_support"):
+                messages.append("DWG importer unavailable; DWG inputs may fail before comparison.")
+            else:
+                supported = ", ".join(status.get("dwg_supported_versions") or [])
+                planned = ", ".join(status.get("dwg_planned_versions") or [])
+                if supported and planned:
+                    messages.append(
+                        f"DWG native import limited to {supported}; {planned} requires an approved adapter."
+                    )
+            if status.get("legacy_oda_required"):
+                messages.append("Legacy ODA fallback requires explicit internal configuration.")
         except Exception as exc:
             messages.append(f"DWG backend status unavailable: {exc}")
 
@@ -3768,6 +3792,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._zone_render_controller_v2.error.connect(self._on_zone_crop_render_error_v2)
         self._pending_zone_render_request_v2: Optional[tuple[str, str]] = None
         self._active_issue_by_zone: dict[str, dict] = {}
+        self._active_all_overlays_by_zone: dict[str, dict] = {}
         self._active_overlays_by_zone: dict[str, dict] = {}
         self._active_row: Optional[dict] = None
         self._active_zone_id = ""
@@ -6159,7 +6184,11 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             # affects PREVIEW sharpness; comparison accuracy stays anchored
             # at the proven baseline.
             pdf_compare_dpi=200,
-            max_preview_pairs=0,
+            # Keep at least the first completed pair's static preview
+            # available. 0 means "skip every preview" in
+            # export_preview_artifacts(), which made successful GUI runs show
+            # no drawing preview despite export_preview=True.
+            max_preview_pairs=1,
             viewer_engine="auto",
             viewer_cache_dir=_workbench_data_dir() / "viewer_cache",
             tile_size=GPU_VIEWER_TILE_SIZE,
@@ -6965,6 +6994,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._lightweight_raster_pairs = set()
         self._render_status_by_pair = {}
         self._active_issue_by_zone = {}
+        self._active_all_overlays_by_zone = {}
         self._active_overlays_by_zone = {}
         self._active_row = None
         self._active_zone_id = ""
@@ -7222,6 +7252,30 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             int(target.get("page_b", 0) or 0),
         )
 
+    def _visible_overlays_for_pdf_page_v2(
+        self,
+        pair_id: str,
+        viewer_pair: dict,
+        overlays: Optional[list[dict]] = None,
+    ) -> list[dict]:
+        base = list(overlays) if overlays is not None else list(
+            self._active_all_overlays_by_zone.values()
+        )
+        if not base:
+            base = self._viewer_overlays_for_pair_v2(pair_id)
+        if not _viewer_pair_is_pdf(viewer_pair):
+            return base
+        page_a = _int_value(viewer_pair.get("page_a", viewer_pair.get("page", 0)), 0)
+        page_b = _int_value(viewer_pair.get("page_b", viewer_pair.get("page", 0)), 0)
+        return _filter_overlays_by_pdf_pages(base, page_a, page_b)
+
+    def _set_active_overlays_v2(self, overlays: list[dict]) -> None:
+        self._active_overlays_by_zone = {
+            str(overlay.get("zone_id") or ""): overlay
+            for overlay in overlays
+            if isinstance(overlay, dict) and overlay.get("zone_id")
+        }
+
     def _show_pdf_page_pair_v2(self, page_a: int, page_b: int) -> None:
         """Phase H — Re-render backgrounds + filter overlays + re-push.
 
@@ -7248,13 +7302,16 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # match the displayed background. This rebuilds the zone tree
         # too — removing zones from other matched pages keeps the user
         # focused on the page they're currently looking at.
-        all_overlays = list(self._active_overlays_by_zone.values())
+        all_overlays = list(self._active_all_overlays_by_zone.values())
+        if not all_overlays:
+            all_overlays = self._viewer_overlays_for_pair_v2(pair_id)
+            self._active_all_overlays_by_zone = {
+                str(o.get("zone_id") or ""): o
+                for o in all_overlays
+                if isinstance(o, dict) and o.get("zone_id")
+            }
         filtered = _filter_overlays_by_pdf_pages(all_overlays, page_a, page_b)
-        self._active_overlays_by_zone = {
-            str(o.get("zone_id") or ""): o
-            for o in filtered
-            if isinstance(o, dict) and o.get("zone_id")
-        }
+        self._set_active_overlays_v2(filtered)
 
         # Refresh tree + summary so the user sees only this page's zones
         preview = self._preview_by_pair.get(pair_id)
@@ -7364,7 +7421,17 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
         loaded_before = False
         loaded_after = False
-        if before_pdf is not None:
+        if page_a < 0:
+            try:
+                self.preview_before_lightweight_v2.load_scene_pack(
+                    None,
+                    empty_notice="No before-side PDF page for this unmatched page.",
+                )
+                self.preview_before_lightweight_v2.set_overlays([], [])
+            except Exception:
+                logger.debug("Could not clear unmatched before PDF side", exc_info=True)
+            logger.info("[PDF lightweight] before-side blank: page_a=%d", page_a)
+        elif before_pdf is not None:
             try:
                 loaded_before = self.preview_before_lightweight_v2.load_pdf_page(
                     before_pdf, page_index=page_a, target_dpi=150.0,
@@ -7388,7 +7455,17 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 viewer_pair.get("before_page_pdf"),
                 viewer_pair.get("page_pdf"),
             )
-        if after_pdf is not None:
+        if page_b < 0:
+            try:
+                self.preview_after_lightweight_v2.load_scene_pack(
+                    None,
+                    empty_notice="No after-side PDF page for this unmatched page.",
+                )
+                self.preview_after_lightweight_v2.set_overlays([], [])
+            except Exception:
+                logger.debug("Could not clear unmatched after PDF side", exc_info=True)
+            logger.info("[PDF lightweight] after-side blank: page_b=%d", page_b)
+        elif after_pdf is not None:
             try:
                 loaded_after = self.preview_after_lightweight_v2.load_pdf_page(
                     after_pdf, page_index=page_b, target_dpi=150.0,
@@ -7419,20 +7496,28 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             # a logged warning and a graceful fallback to ``relative_only``
             # state. The previous code masked Qt6Core invariant errors that
             # would later resurface as a BEX64 fast-fail (0xc0000409).
-            for side, vp in (
-                ("before", self.preview_before_lightweight_v2),
-                ("after", self.preview_after_lightweight_v2),
+            for side, vp, loaded in (
+                ("before", self.preview_before_lightweight_v2, loaded_before),
+                ("after", self.preview_after_lightweight_v2, loaded_after),
             ):
                 try:
+                    fidelity_mode = "exact_world_render" if loaded else "relative_only"
+                    fidelity_text = (
+                        "PDF DPI 150"
+                        if loaded
+                        else "PDF preview unavailable on this side"
+                    )
                     vp.set_fidelity_state(
-                        "exact_world_render",
-                        status_text=f"PDF · DPI 150",
+                        fidelity_mode,
+                        status_text=fidelity_text,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "[PDF lightweight] %s-side set_fidelity_state(exact) "
+                        "[PDF lightweight] %s-side set_fidelity_state(%s) "
                         "failed (%s); falling back to relative_only state",
-                        side, exc,
+                        side,
+                        fidelity_mode,
+                        exc,
                     )
                     try:
                         vp.set_fidelity_state(
@@ -7533,14 +7618,20 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             loaded_after = loaded_after or (side == "after" and loaded)
         if loaded_before or loaded_after:
             self._lightweight_raster_pairs.add(pair_id)
-            for viewport in (
-                self.preview_before_lightweight_v2,
-                self.preview_after_lightweight_v2,
+            for viewport, loaded in (
+                (self.preview_before_lightweight_v2, loaded_before),
+                (self.preview_after_lightweight_v2, loaded_after),
             ):
                 try:
+                    fidelity_mode = "exact_world_render" if loaded else "relative_only"
+                    fidelity_text = (
+                        "raster preview"
+                        if loaded
+                        else "raster preview unavailable on this side"
+                    )
                     viewport.set_fidelity_state(
-                        "exact_world_render",
-                        status_text="raster preview",
+                        fidelity_mode,
+                        status_text=fidelity_text,
                     )
                 except Exception:
                     logger.debug("Failed to set raster fidelity state", exc_info=True)
@@ -7804,8 +7895,17 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
         if not pair_id:
             return
+        active_pair = ""
+        if isinstance(self._active_row, dict):
+            active_pair = str(self._active_row.get("pair_id") or "")
         try:
-            overlays = self._viewer_overlays_for_pair_v2(pair_id)
+            if active_pair == pair_id and self._active_overlays_by_zone:
+                overlays = list(self._active_overlays_by_zone.values())
+            else:
+                overlays = self._viewer_overlays_for_pair_v2(pair_id)
+                viewer_pair = self._viewer_pairs_by_id.get(pair_id, {})
+                if isinstance(viewer_pair, dict) and _viewer_pair_is_pdf(viewer_pair):
+                    overlays = self._visible_overlays_for_pdf_page_v2(pair_id, viewer_pair, overlays)
         except Exception as exc:
             logger.debug("overlay fetch failed for %s: %s", pair_id, exc)
             return
@@ -7913,6 +8013,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             overlay.get("bbox"), overlay.get("old_bbox"),
         )
 
+        match_side = resolve_overlay_match_side(str(overlay.get("change_type") or ""))
         any_focused = False
         for vp, key in (
             (self.preview_before_lightweight_v2, "old_bbox"),
@@ -7922,7 +8023,15 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             if vp is None:
                 logger.debug("[ZONE FOCUS DBG]   side=%s viewport=None", side_label)
                 continue
-            raw = overlay.get(key) or overlay.get("bbox") or overlay.get("old_bbox")
+            if side_label == "before" and match_side == "b_only":
+                logger.debug("[ZONE FOCUS DBG]   side=before skipped for added-only zone")
+                continue
+            if side_label == "after" and match_side == "a_only":
+                logger.debug("[ZONE FOCUS DBG]   side=after skipped for deleted-only zone")
+                continue
+            raw = overlay.get(key)
+            if raw is None and match_side in {"matched", "mixed"}:
+                raw = overlay.get("bbox") or overlay.get("old_bbox")
             if not raw:
                 logger.debug(
                     "[ZONE FOCUS DBG]   side=%s NO raw bbox (key=%r)", side_label, key,
@@ -7967,6 +8076,30 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             active_pair = str(self._active_row.get("pair_id") or "")
         if active_pair:
             self._push_overlays_to_lightweight_v2(active_pair, focus_zone_id=zone_id)
+
+    def _set_lightweight_zone_side_messages_v2(self, zone_id: str = "") -> None:
+        before_msg = ""
+        after_msg = ""
+        overlay = self._active_overlays_by_zone.get(str(zone_id or ""), {})
+        if isinstance(overlay, dict):
+            match_side = resolve_overlay_match_side(str(overlay.get("change_type") or ""))
+            if match_side == "b_only":
+                before_msg = "이전 도면에는 대응 요소가 없습니다"
+            elif match_side == "a_only":
+                after_msg = "변경 도면에는 대응 요소가 없습니다"
+            elif match_side == "mixed":
+                before_msg = "혼합 변경: 양쪽 위치를 함께 확인"
+                after_msg = "혼합 변경: 양쪽 위치를 함께 확인"
+        for viewport, message in (
+            (getattr(self, "preview_before_lightweight_v2", None), before_msg),
+            (getattr(self, "preview_after_lightweight_v2", None), after_msg),
+        ):
+            if viewport is None or not hasattr(viewport, "set_side_message"):
+                continue
+            try:
+                viewport.set_side_message(message)
+            except Exception:
+                logger.debug("Could not set lightweight side message", exc_info=True)
 
     def _on_toggle_lightweight_viewer_v2(self, checked: bool) -> None:
         """Phase G2.2 — Toggle visibility of the lightweight viewport.
@@ -8363,11 +8496,13 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         overlays = self._viewer_overlays_for_pair_v2(pair_id)
         if not overlays and preview:
             overlays = [overlay.to_dict() for overlay in preview.zone_overlays]
-        self._active_overlays_by_zone = {
+        self._active_all_overlays_by_zone = {
             str(overlay.get("zone_id") or ""): overlay
             for overlay in overlays
             if isinstance(overlay, dict) and overlay.get("zone_id")
         }
+        overlays = self._visible_overlays_for_pdf_page_v2(pair_id, viewer_pair, overlays)
+        self._set_active_overlays_v2(overlays)
         self._set_preview_status_v2(pair_id, self._render_status_by_pair.get(pair_id, "not_requested"))
         before_image = str(viewer_pair.get("before_image") or (preview.before_image if preview else ""))
         after_image = str(viewer_pair.get("after_image") or (preview.after_image if preview else ""))
@@ -9940,6 +10075,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not zone_id:
             self._active_zone_id = ""
             self._set_zone_action_buttons_enabled_v2(False)
+            self._set_lightweight_zone_side_messages_v2("")
             return
         self._active_zone_id = zone_id
         self._set_zone_action_buttons_enabled_v2(bool(zone_id))
@@ -9949,6 +10085,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # Phase G2.3 — also focus the lightweight viewport when active.
         # No-op when the legacy viewport is showing (toggle OFF).
         try:
+            self._set_lightweight_zone_side_messages_v2(zone_id)
             self._focus_lightweight_on_zone_v2(zone_id)
             self._request_zone_focus_v2(zone_id)
         except Exception:
@@ -10527,6 +10664,14 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if pattern_group:
             notice_lines.append(
                 f"이 변경은 '{pattern_group}' 그룹에 속합니다 - 좌측 '반복 패턴' 탭에서 함께 보기"
+            )
+        if resolve_overlay_match_side(change_type) == "b_only":
+            notice_lines.append(
+                "추가 영역: 이전 도면에는 같은 요소가 없어 왼쪽 뷰가 비어 보일 수 있습니다."
+            )
+        elif resolve_overlay_match_side(change_type) == "a_only":
+            notice_lines.append(
+                "삭제 영역: 변경 도면에는 같은 요소가 없어 오른쪽 뷰가 비어 보일 수 있습니다."
             )
         notice_block = "\n".join(notice_lines) + "\n"
 

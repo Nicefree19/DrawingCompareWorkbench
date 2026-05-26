@@ -8,10 +8,11 @@ import logging
 import os
 import gc
 import shutil
+import inspect
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,9 @@ ProgressCallback = Callable[[str, float, str], None]
 # can distinguish the retry tick from the regular post-process emit.
 CancelCallback = Callable[[], bool]
 AUTO_STRUCTURAL_CLOUD_CATEGORIES = {"member", "dimension", "rebar", "grid", "mixed"}
+MULTI_FRAME_MODE_ENV = "DRAWING_COMPARE_MULTI_FRAME"
+MULTI_FRAME_MODES = {"off", "sidecar_only", "review_gate", "auto"}
+AUTO_REGION_COMPARE_ENV = "DRAWING_COMPARE_AUTO_REGION_COMPARE"
 
 
 @dataclass
@@ -462,6 +466,13 @@ class FolderComparePipeline:
                 # surface even after the dialog "saves" min_changes_per_zone>=2.
                 zone_options=zone_options,
             )
+            region_paths = _export_region_aware_artifacts(
+                compare_summary=compare_summary,
+                artifact_package=artifact_package,
+                artifact_dir=artifact_dir,
+                dxf_cache_dir=dxf_cache_dir,
+            )
+            artifact_package.output_paths.update(region_paths)
             run_manifest.stage(
                 active_stage,
                 "completed",
@@ -469,6 +480,7 @@ class FolderComparePipeline:
                 zone_count=artifact_package.zone_count,
                 cloud_region_count=artifact_package.cloud_region_count,
                 cloud_omitted_zone_count=artifact_package.cloud_omitted_zone_count,
+                region_aware_output_count=len(region_paths),
             )
 
             active_stage = "preview"
@@ -627,11 +639,12 @@ class FolderComparePipeline:
             except Exception:
                 subprocess_fault_dir = None
 
-            viewer_package_dict, viewer_report = export_viewer_package_isolated(
+            viewer_package_dict, viewer_report = _export_viewer_package_isolated_compat(
                 artifact_dir,
                 options=viewer_options,
                 memory_cap_mb=viewer_memory_cap_mb,
                 progress_callback=_viewer_subprocess_progress,
+                cancel_callback=is_cancelled,
                 allow_inprocess_fallback=False,  # isolation is mandatory for S20-class
                 fault_log_dir=subprocess_fault_dir,
             )
@@ -730,11 +743,12 @@ class FolderComparePipeline:
                         97.5,
                         f"메모리 한계 — DPI {downgraded.dpi} 로 자동 하향 후 재시도 중",
                     )
-                    viewer_package_dict, viewer_report = export_viewer_package_isolated(
+                    viewer_package_dict, viewer_report = _export_viewer_package_isolated_compat(
                         artifact_dir,
                         options=viewer_options,
                         memory_cap_mb=viewer_memory_cap_mb,
                         progress_callback=_viewer_subprocess_progress,
+                        cancel_callback=is_cancelled,
                         allow_inprocess_fallback=False,
                         fault_log_dir=subprocess_fault_dir,
                     )
@@ -1050,6 +1064,52 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
+def _export_viewer_package_isolated_compat(*args: Any, **kwargs: Any) -> tuple[Any, SubprocessRunReport]:
+    """Call viewer export while tolerating older test doubles.
+
+    Production export accepts cancel_callback. Some tests monkeypatch it with
+    small doubles written before that parameter existed.
+    """
+
+    try:
+        params = inspect.signature(export_viewer_package_isolated).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "cancel_callback" not in params:
+        kwargs.pop("cancel_callback", None)
+    return export_viewer_package_isolated(*args, **kwargs)
+
+
+def _resolve_multi_frame_mode() -> tuple[str, str]:
+    raw = os.getenv(MULTI_FRAME_MODE_ENV, "review_gate").strip().lower()
+    if raw not in MULTI_FRAME_MODES:
+        logger.warning(
+            "Unknown %s=%r; using review_gate",
+            MULTI_FRAME_MODE_ENV,
+            raw,
+        )
+        return "review_gate", f"invalid {MULTI_FRAME_MODE_ENV} value; defaulted to review_gate"
+    if raw == "auto":
+        return (
+            "review_gate",
+            "auto region-local compare is not enabled in this build; downgraded to review_gate sidecars",
+        )
+    if raw == "sidecar_only":
+        return "sidecar_only", "region-aware output is diagnostic sidecar only"
+    if raw == "review_gate":
+        return "review_gate", "region-aware output requires review before automatic localized compare"
+    return "off", "region-aware multi-frame output disabled"
+
+
+def _auto_region_compare_requested() -> bool:
+    return os.getenv(AUTO_REGION_COMPARE_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _explicit_file_pair_candidates(
     source_a: Union[str, Path],
     source_b: Union[str, Path],
@@ -1095,6 +1155,495 @@ def _explicit_file_pair_candidates(
             component_scores={"explicit_file_pair": 1.0},
         )
     ]
+
+
+def _export_region_aware_artifacts(
+    *,
+    compare_summary: BatchCompareSummary,
+    artifact_package: Any,
+    artifact_dir: Path,
+    dxf_cache_dir: Path,
+) -> dict[str, str]:
+    """Write region-aware side-car summaries for multi-detail drawings.
+
+    These summaries are diagnostic/UX aids for now. They deliberately do not
+    mutate the raw comparison result so existing review/export behaviour stays
+    stable while the workbench gains enough context to explain added/deleted
+    detail regions and future localized comparison decisions.
+    """
+
+    paths: dict[str, str] = {}
+    feature_mode, fallback_reason = _resolve_multi_frame_mode()
+    if feature_mode == "off":
+        return {}
+    try:
+        from .detail_region_matcher import (
+            RegionMatchSummary,
+            match_sheet_regions,
+            write_region_match_summary,
+        )
+        from .localized_compare import (
+            LocalizedCompareSummary,
+            localize_change_zones,
+            read_change_zones,
+            serialize_localized_region_result,
+            write_localized_region_compare_results,
+            write_localized_compare_summary,
+            compare_localized_region_entities,
+        )
+        from .dxf_entity_extractor import DxfEntityExtractor
+        from .pair_identity import candidate_pair_uuid
+        from .sheet_region_detector import (
+            RegionDetectionResult,
+            detect_sheet_regions,
+            write_region_detection_summary,
+        )
+
+        change_zones_value = artifact_package.output_paths.get("change_zones_json", "")
+        change_zones_path = Path(change_zones_value) if change_zones_value else None
+        zones = (
+            read_change_zones(change_zones_path)
+            if change_zones_path is not None and change_zones_path.is_file()
+            else []
+        )
+        detection_results: list[RegionDetectionResult] = []
+        match_summaries: list[RegionMatchSummary] = []
+        localized_summaries: list[LocalizedCompareSummary] = []
+        pair_contexts: list[dict[str, Any]] = []
+
+        for item in getattr(compare_summary, "items", []) or []:
+            candidate = getattr(item, "candidate", None)
+            if not candidate or not getattr(candidate, "source_a", None) or not getattr(candidate, "source_b", None):
+                continue
+            if str(getattr(item, "status", "")).lower() not in {"completed", "success", "passed"}:
+                continue
+            pair_id = candidate_pair_uuid(candidate)
+            before_result = detect_sheet_regions(
+                candidate.source_a.path_obj,
+                side="before",
+                dxf_cache_dir=dxf_cache_dir,
+            )
+            after_result = detect_sheet_regions(
+                candidate.source_b.path_obj,
+                side="after",
+                dxf_cache_dir=dxf_cache_dir,
+            )
+            detection_results.extend([before_result, after_result])
+            match_summary = match_sheet_regions(
+                before_result.regions,
+                after_result.regions,
+                pair_id=pair_id,
+            )
+            match_summaries.append(match_summary)
+            localized_summary = localize_change_zones(
+                zones,
+                before_regions=before_result.regions,
+                after_regions=after_result.regions,
+                match_summary=match_summary,
+                pair_id=pair_id,
+            )
+            localized_summaries.append(localized_summary)
+            pair_contexts.append(
+                {
+                    "pair_id": pair_id,
+                    "source_a": candidate.source_a.path_obj,
+                    "source_b": candidate.source_b.path_obj,
+                    "before_result": before_result,
+                    "after_result": after_result,
+                    "match_summary": match_summary,
+                    "localized_summary": localized_summary,
+                }
+            )
+
+        if not detection_results and not match_summaries and not localized_summaries:
+            return {}
+        status_path = artifact_dir / "region_aware_status.json"
+        localized_total_zones = sum(summary.total_zones for summary in localized_summaries)
+        localized_assigned_zones = sum(summary.assigned_zones for summary in localized_summaries)
+        unassigned_zone_count = sum(
+            summary.unassigned_zone_count for summary in localized_summaries
+        )
+        cross_region_zone_count = sum(
+            summary.cross_region_zone_count for summary in localized_summaries
+        )
+        review_required_zone_count = sum(
+            summary.review_required_zone_count for summary in localized_summaries
+        )
+        localized_gate_status = (
+            "review_required"
+            if any(summary.gate_status != "passed" for summary in localized_summaries)
+            else "passed"
+        )
+        auto_region_requested = _auto_region_compare_requested()
+        auto_region_payload: dict[str, Any] = {
+            "automatic_localized_compare_requested": auto_region_requested,
+            "automatic_localized_compare_enabled": False,
+            "status": "not_requested",
+            "gate_reasons": [],
+        }
+        if auto_region_requested:
+            auto_region_payload = _build_auto_region_compare_payload(
+                pair_contexts,
+                extractor=DxfEntityExtractor(),
+                compare_localized_region_entities=compare_localized_region_entities,
+                serialize_localized_region_result=serialize_localized_region_result,
+            )
+            auto_region_path = write_localized_region_compare_results(
+                auto_region_payload,
+                artifact_dir / "localized_region_compare_results.json",
+            )
+            paths["localized_region_compare_results_json"] = str(auto_region_path)
+        _write_json_atomic(
+            status_path,
+            {
+                "schema_version": 1,
+                "feature_mode": feature_mode,
+                "fallback_reason": fallback_reason,
+                "automatic_localized_compare_requested": auto_region_requested,
+                "automatic_localized_compare_enabled": bool(
+                    auto_region_payload.get("automatic_localized_compare_enabled")
+                ),
+                "automatic_localized_compare_status": str(
+                    auto_region_payload.get("status") or "not_requested"
+                ),
+                "pair_count": len(match_summaries),
+                "region_detection_source_count": len(detection_results),
+                "auto_matched_count": sum(
+                    summary.auto_matched_count for summary in match_summaries
+                ),
+                "review_required_count": sum(
+                    summary.review_required_count for summary in match_summaries
+                ),
+                "unmatched_before_count": sum(
+                    summary.unmatched_before_count for summary in match_summaries
+                ),
+                "unmatched_after_count": sum(
+                    summary.unmatched_after_count for summary in match_summaries
+                ),
+                "localized_total_zones": localized_total_zones,
+                "localized_assigned_zones": localized_assigned_zones,
+                "localized_assignment_rate": (
+                    localized_assigned_zones / localized_total_zones
+                    if localized_total_zones
+                    else 0.0
+                ),
+                "unassigned_zone_count": unassigned_zone_count,
+                "cross_region_zone_count": cross_region_zone_count,
+                "review_required_zone_count": review_required_zone_count,
+                "localized_gate_status": localized_gate_status,
+            },
+        )
+        region_detection_path = write_region_detection_summary(
+            detection_results,
+            artifact_dir / "region_detection_summary.json",
+        )
+        region_match_path = write_region_match_summary(
+            match_summaries,
+            artifact_dir / "region_match_summary.json",
+        )
+        localized_path = write_localized_compare_summary(
+            localized_summaries,
+            artifact_dir / "localized_compare_summary.json",
+        )
+        validation_path = artifact_dir / "multi_frame_validation.json"
+        _write_json_atomic(
+            validation_path,
+            _build_multi_frame_validation_payload(
+                feature_mode=feature_mode,
+                fallback_reason=fallback_reason,
+                detection_results=detection_results,
+                match_summaries=match_summaries,
+                localized_summaries=localized_summaries,
+                auto_region_payload=auto_region_payload,
+            ),
+        )
+        paths.update(
+            {
+                "region_detection_summary_json": str(region_detection_path),
+                "region_match_summary_json": str(region_match_path),
+                "localized_compare_summary_json": str(localized_path),
+                "region_aware_status_json": str(status_path),
+                "multi_frame_validation_json": str(validation_path),
+            }
+        )
+        _merge_artifact_manifest_paths(
+            artifact_package.output_paths.get("artifact_manifest_json"),
+            paths,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Region-aware artifact export failed: %s", exc, exc_info=True)
+        try:
+            artifact_package.warnings.append(f"region-aware export failed: {exc}")
+        except Exception:
+            pass
+        warning_path = artifact_dir / "region_aware_warning.json"
+        _write_json_atomic(
+            warning_path,
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "message": str(exc),
+            },
+        )
+        paths["region_aware_warning_json"] = str(warning_path)
+    return paths
+
+
+def _build_auto_region_compare_payload(
+    pair_contexts: Sequence[Mapping[str, Any]],
+    *,
+    extractor: Any,
+    compare_localized_region_entities: Callable[..., Any],
+    serialize_localized_region_result: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    """Build opt-in region-local DXF compare results without mutating main output."""
+
+    pairs: list[dict[str, Any]] = []
+    gate_reasons: list[str] = []
+    compared_region_count = 0
+    total_changes = 0
+    unsupported_pair_count = 0
+    skipped_pair_count = 0
+
+    for context in pair_contexts:
+        pair_id = str(context.get("pair_id") or "")
+        source_a = Path(context.get("source_a") or "")
+        source_b = Path(context.get("source_b") or "")
+        match_summary = context.get("match_summary")
+        localized_summary = context.get("localized_summary")
+        before_result = context.get("before_result")
+        after_result = context.get("after_result")
+        pair_reasons: list[str] = []
+        pair_results: list[dict[str, Any]] = []
+
+        if source_a.suffix.lower() != ".dxf" or source_b.suffix.lower() != ".dxf":
+            unsupported_pair_count += 1
+            pair_reasons.append("automatic region-local compare currently supports direct DXF pairs only")
+        if getattr(match_summary, "review_required_count", 0):
+            pair_reasons.append("one or more region matches require manual review")
+        if getattr(match_summary, "unmatched_before_count", 0) or getattr(match_summary, "unmatched_after_count", 0):
+            pair_reasons.append("one or more detected regions are unmatched")
+        if getattr(localized_summary, "gate_status", "passed") != "passed":
+            pair_reasons.extend(str(reason) for reason in getattr(localized_summary, "gate_reasons", ()) or ())
+        if pair_reasons:
+            skipped_pair_count += 1
+            gate_reasons.extend(f"{pair_id}: {reason}" for reason in pair_reasons)
+            pairs.append(
+                {
+                    "pair_id": pair_id,
+                    "status": "skipped",
+                    "gate_reasons": pair_reasons,
+                    "region_results": [],
+                }
+            )
+            continue
+
+        before_regions = {
+            region.region_id: region
+            for region in getattr(before_result, "regions", ()) or ()
+        }
+        after_regions = {
+            region.region_id: region
+            for region in getattr(after_result, "regions", ()) or ()
+        }
+        try:
+            entities_before = extractor.extract_from_file(source_a)
+            entities_after = extractor.extract_from_file(source_b)
+        except Exception as exc:  # noqa: BLE001
+            skipped_pair_count += 1
+            reason = f"DXF entity extraction failed: {exc}"
+            gate_reasons.append(f"{pair_id}: {reason}")
+            pairs.append(
+                {
+                    "pair_id": pair_id,
+                    "status": "skipped",
+                    "gate_reasons": [reason],
+                    "region_results": [],
+                }
+            )
+            continue
+
+        for match in getattr(match_summary, "matches", ()) or ():
+            if getattr(match, "status", "") != "auto_matched":
+                continue
+            before_region = before_regions.get(getattr(match, "before_region_id", ""))
+            after_region = after_regions.get(getattr(match, "after_region_id", ""))
+            if before_region is None or after_region is None:
+                continue
+            region_result = compare_localized_region_entities(
+                entities_before,
+                entities_after,
+                before_region=before_region,
+                after_region=after_region,
+                match_id=str(getattr(match, "match_id", "")),
+            )
+            serialized = serialize_localized_region_result(
+                region_result,
+                match_id=str(getattr(match, "match_id", "")),
+                before_region=before_region,
+                after_region=after_region,
+            )
+            pair_results.append(serialized)
+            compared_region_count += 1
+            total_changes += int(serialized.get("total_changes") or 0)
+
+        pair_status = "passed" if pair_results else "skipped"
+        if not pair_results:
+            skipped_pair_count += 1
+            reason = "no auto-matched regions were eligible for localized compare"
+            gate_reasons.append(f"{pair_id}: {reason}")
+            pair_reasons.append(reason)
+        pairs.append(
+            {
+                "pair_id": pair_id,
+                "status": pair_status,
+                "gate_reasons": pair_reasons,
+                "region_result_count": len(pair_results),
+                "total_changes": sum(int(item.get("total_changes") or 0) for item in pair_results),
+                "region_results": pair_results,
+            }
+        )
+
+    enabled = compared_region_count > 0 and not gate_reasons
+    return {
+        "schema_version": 1,
+        "automatic_localized_compare_requested": True,
+        "automatic_localized_compare_enabled": enabled,
+        "status": "passed" if enabled else "review_required",
+        "gate_reasons": gate_reasons,
+        "pair_count": len(pair_contexts),
+        "compared_region_count": compared_region_count,
+        "unsupported_pair_count": unsupported_pair_count,
+        "skipped_pair_count": skipped_pair_count,
+        "total_changes": total_changes,
+        "pairs": pairs,
+    }
+
+
+def _build_multi_frame_validation_payload(
+    *,
+    feature_mode: str,
+    fallback_reason: str,
+    detection_results: Sequence[Any],
+    match_summaries: Sequence[Any],
+    localized_summaries: Sequence[Any],
+    auto_region_payload: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    """Return a hard-gate oriented summary for multi-frame review decisions."""
+
+    total_zones = sum(int(getattr(summary, "total_zones", 0)) for summary in localized_summaries)
+    assigned_zones = sum(int(getattr(summary, "assigned_zones", 0)) for summary in localized_summaries)
+    unassigned_zones = sum(
+        int(getattr(summary, "unassigned_zone_count", 0)) for summary in localized_summaries
+    )
+    cross_region_zones = sum(
+        int(getattr(summary, "cross_region_zone_count", 0)) for summary in localized_summaries
+    )
+    review_required_zones = sum(
+        int(getattr(summary, "review_required_zone_count", 0)) for summary in localized_summaries
+    )
+    match_review_required = sum(
+        int(getattr(summary, "review_required_count", 0)) for summary in match_summaries
+    )
+    unmatched_before = sum(
+        int(getattr(summary, "unmatched_before_count", 0)) for summary in match_summaries
+    )
+    unmatched_after = sum(
+        int(getattr(summary, "unmatched_after_count", 0)) for summary in match_summaries
+    )
+
+    gate_reasons: list[str] = []
+    if feature_mode != "review_gate":
+        gate_reasons.append(f"feature mode is {feature_mode}")
+    if unassigned_zones:
+        gate_reasons.append("one or more change bboxes are outside detected detail regions")
+    if cross_region_zones:
+        gate_reasons.append("one or more changes span unmatched before/after regions")
+    if review_required_zones:
+        gate_reasons.append("one or more changed regions require manual review")
+    if match_review_required:
+        gate_reasons.append("one or more region matches require manual review")
+    if unmatched_before or unmatched_after:
+        gate_reasons.append("one or more detected regions are unmatched")
+    auto_requested = bool(
+        auto_region_payload
+        and auto_region_payload.get("automatic_localized_compare_requested")
+    )
+    auto_enabled = bool(
+        auto_region_payload
+        and auto_region_payload.get("automatic_localized_compare_enabled")
+    )
+    auto_status = str(
+        (auto_region_payload or {}).get("status") or "not_requested"
+    )
+    if auto_requested and auto_status != "passed":
+        reasons = list((auto_region_payload or {}).get("gate_reasons") or [])
+        gate_reasons.extend(reasons or ["automatic region-local compare did not pass"])
+
+    pair_summaries = []
+    for summary in localized_summaries:
+        pair_summaries.append(
+            {
+                "pair_id": str(getattr(summary, "pair_id", "")),
+                "total_zones": int(getattr(summary, "total_zones", 0)),
+                "assigned_zones": int(getattr(summary, "assigned_zones", 0)),
+                "assignment_rate": (
+                    float(getattr(summary, "assigned_zones", 0))
+                    / float(getattr(summary, "total_zones", 0))
+                    if int(getattr(summary, "total_zones", 0))
+                    else 0.0
+                ),
+                "unassigned_zone_count": int(getattr(summary, "unassigned_zone_count", 0)),
+                "cross_region_zone_count": int(getattr(summary, "cross_region_zone_count", 0)),
+                "review_required_zone_count": int(getattr(summary, "review_required_zone_count", 0)),
+                "gate_status": str(getattr(summary, "gate_status", "passed")),
+                "gate_reasons": list(getattr(summary, "gate_reasons", ())),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "feature_mode": feature_mode,
+        "fallback_reason": fallback_reason,
+        "automatic_localized_compare_requested": auto_requested,
+        "automatic_localized_compare_enabled": auto_enabled,
+        "automatic_localized_compare_status": auto_status,
+        "automatic_localized_compare_compared_region_count": int(
+            (auto_region_payload or {}).get("compared_region_count") or 0
+        ),
+        "gate_status": "review_required" if gate_reasons else "passed",
+        "gate_reasons": gate_reasons,
+        "detection_source_count": len(detection_results),
+        "pair_count": len(match_summaries),
+        "total_zones": total_zones,
+        "assigned_zones": assigned_zones,
+        "assignment_rate": assigned_zones / total_zones if total_zones else 0.0,
+        "unassigned_zone_count": unassigned_zones,
+        "cross_region_zone_count": cross_region_zones,
+        "review_required_zone_count": review_required_zones,
+        "match_review_required_count": match_review_required,
+        "unmatched_before_count": unmatched_before,
+        "unmatched_after_count": unmatched_after,
+        "pairs": pair_summaries,
+    }
+
+
+def _merge_artifact_manifest_paths(
+    manifest_path: Any,
+    output_paths: dict[str, str],
+) -> None:
+    if not manifest_path or not output_paths:
+        return
+    path = Path(manifest_path)
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    current = payload.setdefault("output_paths", {})
+    current.update(output_paths)
+    _write_json_atomic(path, payload)
 
 
 def _apply_export_profile_outputs(
