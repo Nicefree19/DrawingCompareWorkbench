@@ -49,7 +49,7 @@ def _passing_budget(
     time_to_first_stream_record_ms: float | None = 250.0,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 4,
         "peak_working_set_mb": peak_working_set_mb,
         "peak_rss_mb": peak_rss_mb,
         "peak_disk_spool_mb": peak_disk_spool_mb,
@@ -62,6 +62,26 @@ def _passing_budget(
         # Plan §16 Phase C-2.3 — comparator-derived fields
         "peak_comparator_changes": peak_comparator_changes,
         "time_to_first_stream_record_ms": time_to_first_stream_record_ms,
+        "native_resource_platform": "windows",
+        "native_resource_available": True,
+        "native_resource_sample_count": 2,
+        "start_process_handle_count": 10,
+        "final_process_handle_count": 10,
+        "peak_process_handle_count": 10,
+        "process_handle_positive_delta": 0,
+        "start_gdi_handle_count": 5,
+        "final_gdi_handle_count": 5,
+        "peak_gdi_handle_count": 5,
+        "gdi_handle_positive_delta": 0,
+        "start_user_handle_count": 6,
+        "final_user_handle_count": 6,
+        "peak_user_handle_count": 6,
+        "user_handle_positive_delta": 0,
+        "start_worker_process_count": 0,
+        "final_worker_process_count": 0,
+        "peak_worker_process_count": 0,
+        "worker_process_positive_delta": 0,
+        "native_resource_notes": [],
     }
 
 
@@ -145,6 +165,50 @@ class TestRuntimeBudgetRequireFlag:
         )
         assert result.passed is False
         assert "sample_count=0" in result.detail
+
+    def test_require_fails_when_native_resource_missing(self):
+        budget = _passing_budget()
+        budget["native_resource_available"] = False
+        budget["native_resource_sample_count"] = 0
+        summary = _summary_with_budget(runtime_budget=budget)
+        result = audit._check_runtime_budget(
+            [summary],
+            require_runtime_budget=True,
+            max_peak_working_set_mb=None,
+            max_runtime_first_review_ready_s=None,
+            max_peak_disk_spool_mb=None,
+        )
+        assert result.passed is False
+        assert "native_resource_available=false" in result.detail
+        assert "native_resource_sample_count=0" in result.detail
+
+    def test_require_fails_when_worker_process_left_after_cleanup(self):
+        budget = _passing_budget()
+        budget["final_worker_process_count"] = 1
+        summary = _summary_with_budget(runtime_budget=budget)
+        result = audit._check_runtime_budget(
+            [summary],
+            require_runtime_budget=True,
+            max_peak_working_set_mb=None,
+            max_runtime_first_review_ready_s=None,
+            max_peak_disk_spool_mb=None,
+        )
+        assert result.passed is False
+        assert "final_worker_process_count=1" in result.detail
+
+    def test_native_positive_delta_over_cap_fails(self):
+        budget = _passing_budget()
+        budget["process_handle_positive_delta"] = audit.STRICT_MAX_PROCESS_HANDLE_POSITIVE_DELTA + 1
+        summary = _summary_with_budget(runtime_budget=budget)
+        result = audit._check_runtime_budget(
+            [summary],
+            require_runtime_budget=True,
+            max_peak_working_set_mb=None,
+            max_runtime_first_review_ready_s=None,
+            max_peak_disk_spool_mb=None,
+        )
+        assert result.passed is False
+        assert "process_handle_positive_delta" in result.detail
 
 
 class TestPeakWorkingSetThreshold:

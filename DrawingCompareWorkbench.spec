@@ -37,6 +37,10 @@ hiddenimports = [
     "src.services.comparison.runtime_budget",
     "src.services.comparison.adaptive_quality",
     "src.services.comparison.viewer_package_proxy",
+    "src.services.comparison.cad_visual_backend",
+    "src.services.comparison.cad_visual_conversion_worker",
+    "src.services.comparison.render_backend_registry",
+    "src.services.comparison.visual_asset",
 ]
 
 for package_name in ("ezdxf", "cv2", "fitz", "openpyxl", "PIL", "scipy"):

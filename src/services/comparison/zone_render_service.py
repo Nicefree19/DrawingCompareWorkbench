@@ -13,9 +13,13 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
+
+from .cache_budget import process_rss_mb, resolve_cache_byte_limit
+from .perf_events import append_perf_event
+from .source_signature import build_source_signature
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,8 @@ class RenderJob:
     after_background_image: str = ""
     before_background_transform: Optional[dict[str, Any]] = None
     after_background_transform: Optional[dict[str, Any]] = None
+    perf_event_root: Optional[Path] = None
+    perf_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class RenderResult:
     render_lifecycle: str
     warnings: list[str]
     request_id: str = ""
+    reason_code: str = ""
     # Plan §17 Phase B-1 (GPT Pro F3 follow-up) — wall time of the
     # ``render_zone_pair`` call. Without this, the GUI handler at
     # ``drawing_compare_workbench.py`` was reading
@@ -94,9 +101,11 @@ class RenderResult:
     # Defaults to 0.0 for backward compatibility with JSONL consumers
     # that don't yet read the field.
     elapsed_ms: float = 0.0
+    pdf_display_list_cache: dict[str, Any] = field(default_factory=dict)
+    dxf_index_cache: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "pair_uuid": self.pair_uuid,
             "zone_id": self.zone_id,
             "before_image": self.before_image,
@@ -111,8 +120,90 @@ class RenderResult:
             "render_lifecycle": self.render_lifecycle,
             "warnings": self.warnings,
             "request_id": self.request_id,
+            "reason_code": self.reason_code,
+            "fallback_reason_code": self.reason_code,
             "elapsed_ms": self.elapsed_ms,
         }
+        payload.update(_flatten_pdf_display_list_cache(self.pdf_display_list_cache))
+        payload.update(_flatten_dxf_index_cache(self.dxf_index_cache))
+        return payload
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _flatten_pdf_display_list_cache(stats: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(stats, dict) or not stats:
+        return {}
+    flattened: dict[str, Any] = {"pdf_display_list_cache": dict(stats)}
+    for key, value in stats.items():
+        if key == "pil_fallback_count":
+            flattened["pdf_pil_fallback_count"] = _safe_int(value)
+        elif key == "worker_rss_mb":
+            flattened["pdf_display_list_worker_rss_mb"] = _safe_float(value)
+        else:
+            flattened[f"pdf_display_list_{key}"] = value
+    return flattened
+
+
+def _flatten_dxf_index_cache(stats: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(stats, dict) or not stats:
+        return {}
+    flattened: dict[str, Any] = {"dxf_index_cache": dict(stats)}
+    for key, value in stats.items():
+        if key == "worker_rss_mb":
+            flattened["dxf_index_cache_worker_rss_mb"] = _safe_float(value)
+        else:
+            flattened[f"dxf_index_cache_{key}"] = value
+    return flattened
+
+
+def _aggregate_pdf_display_list_cache(*items: dict[str, Any] | None) -> dict[str, Any]:
+    telemetry = [item for item in items if isinstance(item, dict)]
+    if not telemetry:
+        return {}
+    display_items = [item for item in telemetry if bool(item.get("used_display_list"))]
+    lookup_hit_count = sum(1 for item in display_items if item.get("lookup_cache_hit") is True)
+    lookup_miss_count = sum(1 for item in display_items if item.get("lookup_cache_hit") is False)
+    lookup_count = lookup_hit_count + lookup_miss_count
+    pil_fallback_count = sum(1 for item in telemetry if bool(item.get("pil_fallback")))
+    cache_total = max((_safe_int(item.get("total_estimated_bytes")) for item in telemetry), default=0)
+    byte_limit = max((_safe_int(item.get("byte_limit")) for item in telemetry), default=0)
+    entry_bytes_max = max((_safe_int(item.get("entry_estimated_bytes")) for item in telemetry), default=0)
+    worker_rss = max((_safe_float(item.get("process_rss_mb")) for item in telemetry), default=0.0)
+    result: dict[str, Any] = {
+        "render_count": len(display_items),
+        "cache_lookup_count": lookup_count,
+        "cache_hit_count": lookup_hit_count,
+        "cache_miss_count": lookup_miss_count,
+        "cache_hit_rate": round(lookup_hit_count / lookup_count, 4) if lookup_count else 0.0,
+        "cache_eviction_count": max(
+            (_safe_int(item.get("eviction_count")) for item in telemetry),
+            default=0,
+        ),
+        "cache_evicted_estimated_bytes": max(
+            (_safe_int(item.get("evicted_estimated_bytes")) for item in telemetry),
+            default=0,
+        ),
+        "cache_total_estimated_bytes": cache_total,
+        "cache_byte_limit": byte_limit,
+        "cache_entry_estimated_bytes_max": entry_bytes_max,
+        "pil_fallback_count": pil_fallback_count,
+    }
+    if worker_rss > 0:
+        result["worker_rss_mb"] = round(worker_rss, 3)
+    return result
 
 
 @dataclass(frozen=True)
@@ -139,15 +230,24 @@ class DrawingRenderIndex:
     # build, not on cache-hit).
     entity_count: int = 0
     render_time_ms: float = 0.0
+    estimated_bytes: int = 0
 
 
 _INDEX_CACHE: dict[str, DrawingRenderIndex] = {}
 _INDEX_CACHE_ORDER: list[str] = []
 _INDEX_CACHE_SIZE_ENV_VAR = "DRAWING_COMPARE_INDEX_CACHE_SIZE"
+_INDEX_CACHE_MB_ENV_VAR = "DRAWING_COMPARE_DXF_INDEX_CACHE_MB"
+_DEFAULT_INDEX_CACHE_MB = 512
 # Default (4) preserves the original behaviour for callers that do not opt
 # into the adaptive resize. Plan §15 Phase A-3 expands this when the
 # process has enough free memory; see ``_resolve_max_cache_entries()``.
 _MAX_INDEX_CACHE_ENTRIES = 4
+_INDEX_CACHE_TOTAL_ESTIMATED_BYTES = 0
+_INDEX_CACHE_HIT_COUNT = 0
+_INDEX_CACHE_MISS_COUNT = 0
+_INDEX_CACHE_EVICTION_COUNT = 0
+_INDEX_CACHE_EVICTED_ESTIMATED_BYTES = 0
+_INDEX_CACHE_LAST_EVICTION_REASON = ""
 
 
 def _resolve_max_cache_entries() -> int:
@@ -191,7 +291,55 @@ def _resolve_max_cache_entries() -> int:
     return _MAX_INDEX_CACHE_ENTRIES
 
 
-def _evict_to_capacity(capacity: int) -> None:
+def _resolve_index_cache_byte_limit() -> int:
+    return resolve_cache_byte_limit(
+        specific_env_var=_INDEX_CACHE_MB_ENV_VAR,
+        default_mb=_DEFAULT_INDEX_CACHE_MB,
+    )
+
+
+def _estimate_render_index_bytes(index: DrawingRenderIndex) -> int:
+    """Estimate retained bytes for a cached DXF render index."""
+
+    try:
+        source_size = int((index.source_signature or {}).get("size") or 0)
+    except (TypeError, ValueError):
+        source_size = 0
+    entity_count = max(0, int(index.entity_count or len(index.envelopes or [])))
+    envelope_count = max(entity_count, len(index.envelopes or []))
+    # Envelope objects retain bbox/layer/type strings and the index also
+    # keeps ezdxf doc/modelspace/bbox-cache references. This is a
+    # conservative accounting proxy, not an exact native heap measurement.
+    return max(
+        256 * 1024,
+        source_size,
+        envelope_count * 768 + entity_count * 256,
+    )
+
+
+def _index_cache_cost(index: DrawingRenderIndex) -> float:
+    return float(index.entity_count or 0) * float(index.render_time_ms or 0.0)
+
+
+def _evict_index_cache_key(key: str, *, reason: str) -> None:
+    global _INDEX_CACHE_TOTAL_ESTIMATED_BYTES
+    global _INDEX_CACHE_EVICTION_COUNT
+    global _INDEX_CACHE_EVICTED_ESTIMATED_BYTES
+    global _INDEX_CACHE_LAST_EVICTION_REASON
+
+    entry = _INDEX_CACHE.pop(key, None)
+    if entry is None:
+        return
+    _INDEX_CACHE_TOTAL_ESTIMATED_BYTES = max(
+        0,
+        _INDEX_CACHE_TOTAL_ESTIMATED_BYTES - int(entry.estimated_bytes or 0),
+    )
+    _INDEX_CACHE_EVICTION_COUNT += 1
+    _INDEX_CACHE_EVICTED_ESTIMATED_BYTES += int(entry.estimated_bytes or 0)
+    _INDEX_CACHE_LAST_EVICTION_REASON = str(reason or "unknown")
+
+
+def _evict_to_capacity(capacity: int, byte_limit: Optional[int] = None) -> None:
     """Evict cache entries until at most ``capacity`` remain.
 
     Plan §15 Phase A-3 — original FIFO-on-build is preserved as the
@@ -202,6 +350,7 @@ def _evict_to_capacity(capacity: int) -> None:
     The list is mutated in place. Safe to call with capacity > current
     size (no-op).
     """
+    byte_limit = max(1, int(byte_limit or _resolve_index_cache_byte_limit()))
     while len(_INDEX_CACHE_ORDER) > capacity:
         # Examine up to the 3 oldest entries; evict the cheapest.
         # If any have unknown cost (legacy entries), evict them first.
@@ -213,18 +362,34 @@ def _evict_to_capacity(capacity: int) -> None:
             if entry is None:
                 cheapest_key = key
                 break
-            cost = float(entry.entity_count) * float(entry.render_time_ms or 1.0)
+            cost = _index_cache_cost(entry)
             if cost < cheapest_cost:
                 cheapest_cost = cost
                 cheapest_key = key
         _INDEX_CACHE_ORDER.remove(cheapest_key)
-        _INDEX_CACHE.pop(cheapest_key, None)
+        _evict_index_cache_key(cheapest_key, reason="entry_capacity")
+    while len(_INDEX_CACHE_ORDER) > 1 and _INDEX_CACHE_TOTAL_ESTIMATED_BYTES > byte_limit:
+        oldest = _INDEX_CACHE_ORDER.pop(0)
+        _evict_index_cache_key(oldest, reason="byte_capacity")
 
 
 def _clear_index_cache() -> None:
     """Test hook — wipe the in-process cache so each test starts clean."""
+    global _INDEX_CACHE_TOTAL_ESTIMATED_BYTES
+    global _INDEX_CACHE_HIT_COUNT
+    global _INDEX_CACHE_MISS_COUNT
+    global _INDEX_CACHE_EVICTION_COUNT
+    global _INDEX_CACHE_EVICTED_ESTIMATED_BYTES
+    global _INDEX_CACHE_LAST_EVICTION_REASON
+
     _INDEX_CACHE.clear()
     _INDEX_CACHE_ORDER.clear()
+    _INDEX_CACHE_TOTAL_ESTIMATED_BYTES = 0
+    _INDEX_CACHE_HIT_COUNT = 0
+    _INDEX_CACHE_MISS_COUNT = 0
+    _INDEX_CACHE_EVICTION_COUNT = 0
+    _INDEX_CACHE_EVICTED_ESTIMATED_BYTES = 0
+    _INDEX_CACHE_LAST_EVICTION_REASON = ""
 
 
 def bbox_from_value(value: object) -> Optional[tuple[float, float, float, float]]:
@@ -417,11 +582,14 @@ def bbox_to_pixel_rect(bbox: object, transform: dict[str, Any]) -> Optional[dict
 
 
 def file_signature(path: Path) -> dict[str, Any]:
-    try:
-        stat = Path(path).stat()
-        return {"path": str(Path(path).resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-    except OSError:
-        return {"path": str(path), "size": 0, "mtime_ns": 0}
+    signature = build_source_signature(path)
+    return {
+        "path": signature["source_path"],
+        "size": signature["file_size"],
+        "mtime_ns": signature["mtime_ns"],
+        "source_hash": signature["source_hash"],
+        "schema_version": signature["schema_version"],
+    }
 
 
 def render_cache_key(job: RenderJob) -> str:
@@ -474,12 +642,78 @@ def render_environment_signature(
 
 
 def clear_render_index_cache() -> None:
-    _INDEX_CACHE.clear()
-    _INDEX_CACHE_ORDER.clear()
+    _clear_index_cache()
 
 
-def render_index_cache_stats() -> dict[str, int]:
-    return {"entries": len(_INDEX_CACHE)}
+def render_index_cache_stats() -> dict[str, Any]:
+    lookup_count = int(_INDEX_CACHE_HIT_COUNT + _INDEX_CACHE_MISS_COUNT)
+    entry_estimated_bytes_max = max(
+        (int(entry.estimated_bytes or 0) for entry in _INDEX_CACHE.values()),
+        default=0,
+    )
+    stats: dict[str, Any] = {
+        "entries": len(_INDEX_CACHE),
+        "capacity_entries": _resolve_max_cache_entries(),
+        "byte_limit": _resolve_index_cache_byte_limit(),
+        "entry_estimated_bytes_max": entry_estimated_bytes_max,
+        "total_estimated_bytes": int(_INDEX_CACHE_TOTAL_ESTIMATED_BYTES),
+        "lookup_count": lookup_count,
+        "hit_count": int(_INDEX_CACHE_HIT_COUNT),
+        "miss_count": int(_INDEX_CACHE_MISS_COUNT),
+        "hit_rate": round(_INDEX_CACHE_HIT_COUNT / lookup_count, 4) if lookup_count else 0.0,
+        "eviction_count": int(_INDEX_CACHE_EVICTION_COUNT),
+        "evicted_estimated_bytes": int(_INDEX_CACHE_EVICTED_ESTIMATED_BYTES),
+        "last_eviction_reason": _INDEX_CACHE_LAST_EVICTION_REASON,
+    }
+    rss_mb = process_rss_mb()
+    if rss_mb > 0:
+        stats["worker_rss_mb"] = rss_mb
+    return stats
+
+
+def _diff_index_cache_stats(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(after, dict) or not after:
+        return {}
+    before_payload = before if isinstance(before, dict) else {}
+    hit_count = max(
+        0,
+        _safe_int(after.get("hit_count")) - _safe_int(before_payload.get("hit_count")),
+    )
+    miss_count = max(
+        0,
+        _safe_int(after.get("miss_count")) - _safe_int(before_payload.get("miss_count")),
+    )
+    lookup_count = hit_count + miss_count
+    eviction_count = max(
+        0,
+        _safe_int(after.get("eviction_count")) - _safe_int(before_payload.get("eviction_count")),
+    )
+    evicted_estimated_bytes = max(
+        0,
+        _safe_int(after.get("evicted_estimated_bytes"))
+        - _safe_int(before_payload.get("evicted_estimated_bytes")),
+    )
+    result: dict[str, Any] = {
+        "entries": _safe_int(after.get("entries")),
+        "capacity_entries": _safe_int(after.get("capacity_entries")),
+        "byte_limit": _safe_int(after.get("byte_limit")),
+        "entry_estimated_bytes_max": _safe_int(after.get("entry_estimated_bytes_max")),
+        "total_estimated_bytes": _safe_int(after.get("total_estimated_bytes")),
+        "lookup_count": lookup_count,
+        "hit_count": hit_count,
+        "miss_count": miss_count,
+        "hit_rate": round(hit_count / lookup_count, 4) if lookup_count else 0.0,
+        "eviction_count": eviction_count,
+        "evicted_estimated_bytes": evicted_estimated_bytes,
+        "last_eviction_reason": str(after.get("last_eviction_reason") or "") if eviction_count else "",
+    }
+    worker_rss = _safe_float(after.get("worker_rss_mb"))
+    if worker_rss > 0:
+        result["worker_rss_mb"] = worker_rss
+    return result
 
 
 def render_zone_pair(job: RenderJob) -> RenderResult:
@@ -494,6 +728,10 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
     _render_start_perf = time.perf_counter()
 
     cache_key = render_cache_key(job)
+    def _with_perf(result: RenderResult) -> RenderResult:
+        _append_zone_perf_event(job, result)
+        return result
+
     pair_dir = job.cache_root / "zone_crops" / _safe_name(job.pair_uuid) / cache_key
     before_image = pair_dir / f"{_safe_name(job.zone_id)}_before.png"
     after_image = pair_dir / f"{_safe_name(job.zone_id)}_after.png"
@@ -501,7 +739,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
     if before_image.exists() and after_image.exists() and meta_path.exists():
         payload = _read_json(meta_path)
         if payload:
-            return RenderResult(
+            return _with_perf(RenderResult(
                 pair_uuid=job.pair_uuid,
                 zone_id=job.zone_id,
                 before_image=str(before_image),
@@ -513,11 +751,22 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 cache_key=cache_key,
                 cache_hit=True,
                 visual_fidelity=str(payload.get("visual_fidelity") or "cad_render"),
-                render_lifecycle="ready",
+                render_lifecycle=str(payload.get("render_lifecycle") or "ready"),
                 warnings=[str(item) for item in payload.get("warnings", [])],
                 request_id=job.request_id,
+                reason_code=str(payload.get("reason_code") or ""),
                 elapsed_ms=round((time.perf_counter() - _render_start_perf) * 1000.0, 3),
-            )
+                pdf_display_list_cache=(
+                    payload.get("pdf_display_list_cache")
+                    if isinstance(payload.get("pdf_display_list_cache"), dict)
+                    else {}
+                ),
+                dxf_index_cache=(
+                    payload.get("dxf_index_cache")
+                    if isinstance(payload.get("dxf_index_cache"), dict)
+                    else {}
+                ),
+            ))
 
     pair_dir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
@@ -548,7 +797,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
             before_bg_h = int(before_bg_xform.get("img_height", 0) or 0)
             after_bg_w = int(after_bg_xform.get("img_width", 0) or 0)
             after_bg_h = int(after_bg_xform.get("img_height", 0) or 0)
-            _render_pdf_image_crop(
+            before_pdf_cache = _render_pdf_image_crop(
                 Path(job.before_background_image),
                 before_image,
                 job.world_window,
@@ -559,7 +808,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 background_img_width=before_bg_w,
                 background_img_height=before_bg_h,
             )
-            _render_pdf_image_crop(
+            after_pdf_cache = _render_pdf_image_crop(
                 Path(job.after_background_image),
                 after_image,
                 job.world_window,
@@ -569,6 +818,11 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 page_index=after_page,
                 background_img_width=after_bg_w,
                 background_img_height=after_bg_h,
+            )
+            reason_code = _zone_reason_code_from_warnings(warnings)
+            pdf_display_list_cache = _aggregate_pdf_display_list_cache(
+                before_pdf_cache,
+                after_pdf_cache,
             )
             payload = {
                 "schema_version": SCHEMA_VERSION,
@@ -583,11 +837,13 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 "cache_key": cache_key,
                 "visual_fidelity": "pdf_render",
                 "render_lifecycle": "ready",
+                "reason_code": reason_code,
                 "warnings": warnings,
                 "request_id": job.request_id,
             }
+            payload.update(_flatten_pdf_display_list_cache(pdf_display_list_cache))
             _write_json(meta_path, payload)
-            return RenderResult(
+            return _with_perf(RenderResult(
                 pair_uuid=job.pair_uuid,
                 zone_id=job.zone_id,
                 before_image=str(before_image),
@@ -602,14 +858,18 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 render_lifecycle="ready",
                 warnings=warnings,
                 request_id=job.request_id,
+                reason_code=reason_code,
                 elapsed_ms=round((time.perf_counter() - _render_start_perf) * 1000.0, 3),
+                pdf_display_list_cache=pdf_display_list_cache,
+            ))
+        return _with_perf(
+            _skipped_pdf_crop_result(
+                job,
+                meta_path=meta_path,
+                cache_key=cache_key,
+                warnings=warnings,
+                render_start_perf=_render_start_perf,
             )
-        return _skipped_pdf_crop_result(
-            job,
-            meta_path=meta_path,
-            cache_key=cache_key,
-            warnings=warnings,
-            render_start_perf=_render_start_perf,
         )
     if _can_render_background_image_crop(job):
         before_transform = transform_for_window(
@@ -649,11 +909,12 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 "cache_key": cache_key,
                 "visual_fidelity": "cad_render",
                 "render_lifecycle": "ready",
+                "reason_code": _zone_reason_code_from_warnings(warnings),
                 "warnings": warnings,
                 "request_id": job.request_id,
             }
             _write_json(meta_path, payload)
-            return RenderResult(
+            return _with_perf(RenderResult(
                 pair_uuid=job.pair_uuid,
                 zone_id=job.zone_id,
                 before_image=str(before_image),
@@ -668,8 +929,9 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 render_lifecycle="ready",
                 warnings=warnings,
                 request_id=job.request_id,
+                reason_code=_zone_reason_code_from_warnings(warnings),
                 elapsed_ms=round((time.perf_counter() - _render_start_perf) * 1000.0, 3),
-            )
+            ))
         except Exception as exc:
             warnings.append(
                 f"cad_background_crop:fallback_to_source:{type(exc).__name__}:{exc}"
@@ -681,24 +943,47 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
         renderer_backend=job.renderer_backend,
     )
     after_transform = dict(before_transform)
-    _render_source_crop(
-        job.source_before,
-        before_image,
-        job.world_window,
-        before_transform,
-        dxf_cache_dir=job.dxf_cache_dir,
-        render_environment_hash=job.render_environment_hash or job.font_manifest_hash or "unknown",
-        warnings=warnings,
-    )
-    _render_source_crop(
-        job.source_after,
-        after_image,
-        job.world_window,
-        after_transform,
-        dxf_cache_dir=job.dxf_cache_dir,
-        render_environment_hash=job.render_environment_hash or job.font_manifest_hash or "unknown",
-        warnings=warnings,
-    )
+    index_cache_before = render_index_cache_stats()
+    try:
+        _render_source_crop(
+            job.source_before,
+            before_image,
+            job.world_window,
+            before_transform,
+            dxf_cache_dir=job.dxf_cache_dir,
+            render_environment_hash=job.render_environment_hash or job.font_manifest_hash or "unknown",
+            warnings=warnings,
+        )
+        _render_source_crop(
+            job.source_after,
+            after_image,
+            job.world_window,
+            after_transform,
+            dxf_cache_dir=job.dxf_cache_dir,
+            render_environment_hash=job.render_environment_hash or job.font_manifest_hash or "unknown",
+            warnings=warnings,
+        )
+    except Exception as exc:
+        warnings.append(f"zone_render_fallback:source_render_failed:{type(exc).__name__}")
+        return _with_perf(
+            _visible_fallback_result(
+                job,
+                before_image=before_image,
+                after_image=after_image,
+                before_transform=before_transform,
+                after_transform=after_transform,
+                meta_path=meta_path,
+                cache_key=cache_key,
+                warnings=warnings,
+                reason_code="source_render_failed",
+                render_start_perf=_render_start_perf,
+                dxf_index_cache=_diff_index_cache_stats(
+                    index_cache_before,
+                    render_index_cache_stats(),
+                ),
+            )
+        )
+    dxf_index_cache = _diff_index_cache_stats(index_cache_before, render_index_cache_stats())
     payload = {
         "schema_version": SCHEMA_VERSION,
         "pair_uuid": job.pair_uuid,
@@ -712,11 +997,13 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
         "cache_key": cache_key,
         "visual_fidelity": "cad_render",
         "render_lifecycle": "ready",
+        "reason_code": "",
         "warnings": warnings,
         "request_id": job.request_id,
     }
+    payload.update(_flatten_dxf_index_cache(dxf_index_cache))
     _write_json(meta_path, payload)
-    return RenderResult(
+    return _with_perf(RenderResult(
         pair_uuid=job.pair_uuid,
         zone_id=job.zone_id,
         before_image=str(before_image),
@@ -731,8 +1018,61 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
         render_lifecycle="ready",
         warnings=warnings,
         request_id=job.request_id,
+        reason_code="",
         elapsed_ms=round((time.perf_counter() - _render_start_perf) * 1000.0, 3),
-    )
+        dxf_index_cache=dxf_index_cache,
+    ))
+
+
+def _append_zone_perf_event(job: RenderJob, result: RenderResult) -> None:
+    if job.perf_event_root is None:
+        return
+    try:
+        append_perf_event(
+            Path(job.perf_event_root) / "perf_events.jsonl",
+            run_id=job.perf_run_id,
+            pair_id=job.pair_uuid,
+            stage="zone_render",
+            event="completed",
+            elapsed_ms=result.elapsed_ms,
+            cache_namespace="zone_render",
+            cache_key=result.cache_key,
+            cache_hit=result.cache_hit,
+            cache_hit_reason="existing_render_result" if result.cache_hit else "",
+            cache_miss_reason="" if result.cache_hit else _zone_cache_miss_reason(result),
+            warning_count=len(result.warnings),
+            render_mode=result.render_lifecycle,
+            fidelity=result.visual_fidelity,
+            zone_id=job.zone_id,
+            renderer_backend=result.renderer_backend,
+            reason_code=result.reason_code,
+            **_flatten_pdf_display_list_cache(result.pdf_display_list_cache),
+            **_flatten_dxf_index_cache(result.dxf_index_cache),
+        )
+    except Exception:
+        logger.debug("Failed to append zone render perf event", exc_info=True)
+
+
+def _zone_cache_miss_reason(result: RenderResult) -> str:
+    if result.reason_code:
+        return result.reason_code
+    if result.render_lifecycle.startswith("skipped_"):
+        return result.render_lifecycle
+    if any("outside_background_bounds" in warning for warning in result.warnings):
+        return "outside_background_bounds"
+    if any("outside_output_bounds" in warning for warning in result.warnings):
+        return "outside_output_bounds"
+    return "artifact_missing"
+
+
+def _zone_reason_code_from_warnings(warnings: Sequence[str]) -> str:
+    if any("renderer:pdf-pil-fallback" in warning for warning in warnings):
+        return "pdf_pil_fallback"
+    if any("outside_background_bounds" in warning for warning in warnings):
+        return "outside_background_bounds"
+    if any("outside_output_bounds" in warning for warning in warnings):
+        return "outside_output_bounds"
+    return ""
 
 
 def _render_source_crop(
@@ -815,7 +1155,9 @@ def _render_background_image_crop(
         clip_right = max(0.0, min(float(source_width), req_right))
         clip_bottom = max(0.0, min(float(source_height), req_bottom))
         if clip_right <= clip_left or clip_bottom <= clip_top:
-            raise ValueError("CAD background crop window is outside the rendered image")
+            _write_blank_crop(output_path, output_transform)
+            warnings.append("cad_background_crop:outside_background_bounds")
+            return
 
         output_width = max(1, int(output_transform.get("img_width") or DEFAULT_OUTPUT_SIZE[0]))
         output_height = max(1, int(output_transform.get("img_height") or DEFAULT_OUTPUT_SIZE[1]))
@@ -828,7 +1170,9 @@ def _render_background_image_crop(
         dest_right = max(0, min(output_width, dest_right))
         dest_bottom = max(0, min(output_height, dest_bottom))
         if dest_right <= dest_left or dest_bottom <= dest_top:
-            raise ValueError("CAD background crop could not be mapped into output pixels")
+            _write_blank_crop(output_path, output_transform)
+            warnings.append("cad_background_crop:outside_output_bounds")
+            return
 
         crop = source.crop(
             (
@@ -854,6 +1198,15 @@ def _render_background_image_crop(
             warnings.append("cad_background_crop:clipped_to_background_bounds")
 
 
+def _write_blank_crop(output_path: Path, output_transform: dict[str, Any]) -> None:
+    from PIL import Image
+
+    output_width = max(1, int(output_transform.get("img_width") or DEFAULT_OUTPUT_SIZE[0]))
+    output_height = max(1, int(output_transform.get("img_height") or DEFAULT_OUTPUT_SIZE[1]))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (output_width, output_height), "white").save(output_path)
+
+
 def _window_to_background_pixel_rect(
     window: WorldWindow,
     transform: dict[str, Any],
@@ -877,6 +1230,10 @@ def _window_to_background_pixel_rect(
 
 
 def get_drawing_render_index(dxf_path: Path, render_environment_hash: str = "unknown") -> DrawingRenderIndex:
+    global _INDEX_CACHE_TOTAL_ESTIMATED_BYTES
+    global _INDEX_CACHE_HIT_COUNT
+    global _INDEX_CACHE_MISS_COUNT
+
     from .dxf_renderer import RENDERER_AVAILABLE
 
     if not RENDERER_AVAILABLE:
@@ -894,15 +1251,23 @@ def get_drawing_render_index(dxf_path: Path, render_environment_hash: str = "unk
     cache_key = hashlib.sha256(json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")).hexdigest()
     cached = _INDEX_CACHE.get(cache_key)
     if cached is not None:
+        _INDEX_CACHE_HIT_COUNT += 1
         if cache_key in _INDEX_CACHE_ORDER:
             _INDEX_CACHE_ORDER.remove(cache_key)
         _INDEX_CACHE_ORDER.append(cache_key)
         return cached
+    _INDEX_CACHE_MISS_COUNT += 1
 
     # Plan §15 Phase A-3 — capture build wall-time so the eviction policy
     # can keep expensive rebuilds in cache when capacity is tight.
     build_started = time.perf_counter()
-    doc = dxf_module.ezdxf.readfile(str(dxf_path))
+    from .dxf_read import read_dxf_document_result
+
+    read_result = read_dxf_document_result(dxf_path, ezdxf_module=dxf_module.ezdxf)
+    read_warning = read_result.diagnostics.warning()
+    if read_warning:
+        logger.warning("Render index using sanitized DXF %s: %s", dxf_path, read_warning)
+    doc = read_result.doc
     msp = doc.modelspace()
     bbox_cache = dxf_module.ezdxf_bbox.Cache()
     envelopes = _build_entity_envelopes(msp, bbox_cache)
@@ -918,9 +1283,11 @@ def get_drawing_render_index(dxf_path: Path, render_environment_hash: str = "unk
         entity_count=len(envelopes),
         render_time_ms=build_elapsed_ms,
     )
+    render_index.estimated_bytes = _estimate_render_index_bytes(render_index)
     _INDEX_CACHE[cache_key] = render_index
     _INDEX_CACHE_ORDER.append(cache_key)
-    _evict_to_capacity(_resolve_max_cache_entries())
+    _INDEX_CACHE_TOTAL_ESTIMATED_BYTES += int(render_index.estimated_bytes or 0)
+    _evict_to_capacity(_resolve_max_cache_entries(), _resolve_index_cache_byte_limit())
     return render_index
 
 
@@ -1074,19 +1441,31 @@ def _skipped_pdf_crop_result(
     render_start_perf: float | None = None,
 ) -> RenderResult:
     warnings.append("PDF page-space bbox/background is unavailable; selected-zone PDF crop was skipped.")
+    before_image = meta_path.parent / f"{_safe_name(job.zone_id)}_before.png"
+    after_image = meta_path.parent / f"{_safe_name(job.zone_id)}_after.png"
+    before_transform = transform_for_window(
+        job.world_window,
+        output_width=job.output_width,
+        output_height=job.output_height,
+        renderer_backend="relative-overlay-fallback",
+    )
+    after_transform = dict(before_transform)
+    _write_blank_crop(before_image, before_transform)
+    _write_blank_crop(after_image, after_transform)
     skipped_payload = {
         "schema_version": SCHEMA_VERSION,
         "pair_uuid": job.pair_uuid,
         "zone_id": job.zone_id,
-        "before_image": "",
-        "after_image": "",
-        "before_transform": {},
-        "after_transform": {},
+        "before_image": _cache_relative_path(before_image, job.cache_root),
+        "after_image": _cache_relative_path(after_image, job.cache_root),
+        "before_transform": before_transform,
+        "after_transform": after_transform,
         "world_window": job.world_window.to_dict(),
         "renderer_backend": "pdf-page-bbox-required",
         "cache_key": cache_key,
         "visual_fidelity": "relative_overlay",
         "render_lifecycle": "skipped_missing_page_bbox",
+        "reason_code": "missing_page_bbox",
         "warnings": warnings,
         "request_id": job.request_id,
     }
@@ -1099,10 +1478,10 @@ def _skipped_pdf_crop_result(
     return RenderResult(
         pair_uuid=job.pair_uuid,
         zone_id=job.zone_id,
-        before_image="",
-        after_image="",
-        before_transform={},
-        after_transform={},
+        before_image=str(before_image),
+        after_image=str(after_image),
+        before_transform=before_transform,
+        after_transform=after_transform,
         world_window=job.world_window.to_dict(),
         renderer_backend="pdf-page-bbox-required",
         cache_key=cache_key,
@@ -1111,7 +1490,68 @@ def _skipped_pdf_crop_result(
         render_lifecycle="skipped_missing_page_bbox",
         warnings=warnings,
         request_id=job.request_id,
+        reason_code="missing_page_bbox",
         elapsed_ms=elapsed_ms,
+    )
+
+
+def _visible_fallback_result(
+    job: RenderJob,
+    *,
+    before_image: Path,
+    after_image: Path,
+    before_transform: dict[str, Any],
+    after_transform: dict[str, Any],
+    meta_path: Path,
+    cache_key: str,
+    warnings: list[str],
+    reason_code: str,
+    render_start_perf: float,
+    dxf_index_cache: Optional[dict[str, Any]] = None,
+) -> RenderResult:
+    fallback_before_transform = dict(before_transform)
+    fallback_after_transform = dict(after_transform)
+    fallback_before_transform["renderer_backend"] = "relative-overlay-fallback"
+    fallback_after_transform["renderer_backend"] = "relative-overlay-fallback"
+    _write_blank_crop(before_image, fallback_before_transform)
+    _write_blank_crop(after_image, fallback_after_transform)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "pair_uuid": job.pair_uuid,
+        "zone_id": job.zone_id,
+        "before_image": _cache_relative_path(before_image, job.cache_root),
+        "after_image": _cache_relative_path(after_image, job.cache_root),
+        "before_transform": fallback_before_transform,
+        "after_transform": fallback_after_transform,
+        "world_window": job.world_window.to_dict(),
+        "renderer_backend": "relative-overlay-fallback",
+        "cache_key": cache_key,
+        "visual_fidelity": "relative_overlay",
+        "render_lifecycle": "fallback_visible",
+        "reason_code": reason_code,
+        "warnings": warnings,
+        "request_id": job.request_id,
+    }
+    payload.update(_flatten_dxf_index_cache(dxf_index_cache))
+    _write_json(meta_path, payload)
+    return RenderResult(
+        pair_uuid=job.pair_uuid,
+        zone_id=job.zone_id,
+        before_image=str(before_image),
+        after_image=str(after_image),
+        before_transform=fallback_before_transform,
+        after_transform=fallback_after_transform,
+        world_window=job.world_window.to_dict(),
+        renderer_backend="relative-overlay-fallback",
+        cache_key=cache_key,
+        cache_hit=False,
+        visual_fidelity="relative_overlay",
+        render_lifecycle="fallback_visible",
+        warnings=warnings,
+        request_id=job.request_id,
+        reason_code=reason_code,
+        elapsed_ms=round((time.perf_counter() - render_start_perf) * 1000.0, 3),
+        dxf_index_cache=dxf_index_cache or {},
     )
 
 
@@ -1126,7 +1566,7 @@ def _render_pdf_image_crop(
     page_index: int = 0,
     background_img_width: Optional[int] = None,
     background_img_height: Optional[int] = None,
-) -> None:
+) -> dict[str, Any]:
     """Render the requested zone crop into ``output_path``.
 
     Plan §17 Phase B-1b — GPT Pro F3 (HIGH) follow-up. When the source
@@ -1184,11 +1624,11 @@ def _render_pdf_image_crop(
     # warning so the caller can still surface the result.
     # -----------------------------------------------------------------
     used_display_list = False
+    fallback_reason = ""
     if source_pdf is not None and Path(source_pdf).exists():
         try:
             from .pdf_display_list_cache import (
-                get_display_list,
-                get_page_rect,
+                get_display_list_entry,
                 render_clip_to_png,
             )
 
@@ -1207,8 +1647,10 @@ def _render_pdf_image_crop(
                     bg_w = bg_h = 0
 
             if bg_w > 0 and bg_h > 0:
-                display_list = get_display_list(Path(source_pdf), int(page_index))
-                page_w, page_h = get_page_rect(Path(source_pdf), int(page_index))
+                display_list, page_w, page_h, cache_stats = get_display_list_entry(
+                    Path(source_pdf),
+                    int(page_index),
+                )
                 # image_pixels -> page_points scale. The pre-rendered
                 # PNG covers exactly the page rect, so the scale is
                 # uniform on each axis. We don't assume the two axes
@@ -1256,8 +1698,9 @@ def _render_pdf_image_crop(
                 # canvas to preserve the destination coordinate space,
                 # which the existing PIL path does via ``target.paste``.
                 tmp_clip_png = output_path.with_suffix(".clip.tmp.png")
+                clip_result: dict[str, Any] = {}
                 try:
-                    render_clip_to_png(
+                    clip_result = render_clip_to_png(
                         display_list,
                         (clip_left, clip_top, clip_right, clip_bottom),
                         tmp_clip_png,
@@ -1313,17 +1756,18 @@ def _render_pdf_image_crop(
                     warnings.append("PDF crop was clipped to rendered page bounds.")
         except ImportError:
             # PyMuPDF unavailable — silently fall through to PIL.
-            pass
-        except (FileNotFoundError, IndexError, ValueError, RuntimeError):
+            fallback_reason = "ImportError"
+        except (FileNotFoundError, IndexError, ValueError, RuntimeError) as exc:
             # IndexError = bad page_index; ValueError = empty clip /
             # mapping failure; RuntimeError = thread-safety guard.
             # In all of these the PIL fallback below produces a
             # usable, if slower, result.
-            pass
+            fallback_reason = type(exc).__name__
         except Exception as exc:
             # Defensive net — any unexpected fitz failure must not
             # break the render. We log at debug because the fallback
             # still produces a valid crop.
+            fallback_reason = type(exc).__name__
             logger.debug(
                 "DisplayList PDF crop failed for %s page=%s: %s; "
                 "falling back to PIL",
@@ -1331,7 +1775,23 @@ def _render_pdf_image_crop(
             )
 
     if used_display_list:
-        return
+        return {
+            "used_display_list": True,
+            "pil_fallback": False,
+            "lookup_cache_hit": bool(cache_stats.get("lookup_cache_hit")),
+            "entries": _safe_int(cache_stats.get("entries")),
+            "capacity_entries": _safe_int(cache_stats.get("capacity_entries", cache_stats.get("capacity"))),
+            "byte_limit": _safe_int(cache_stats.get("byte_limit")),
+            "total_estimated_bytes": _safe_int(cache_stats.get("total_estimated_bytes")),
+            "entry_estimated_bytes": _safe_int(cache_stats.get("entry_estimated_bytes")),
+            "hit_count": _safe_int(cache_stats.get("hit_count")),
+            "miss_count": _safe_int(cache_stats.get("miss_count")),
+            "eviction_count": _safe_int(cache_stats.get("eviction_count")),
+            "evicted_estimated_bytes": _safe_int(cache_stats.get("evicted_estimated_bytes")),
+            "process_rss_mb": _safe_float(cache_stats.get("process_rss_mb")),
+            "render_wall_ms": _safe_float(clip_result.get("wall_ms")),
+            "output_bytes": _safe_int(clip_result.get("output_bytes")),
+        }
 
     # -----------------------------------------------------------------
     # Legacy PIL fallback — open the full-page PNG, crop, paste.
@@ -1366,6 +1826,11 @@ def _render_pdf_image_crop(
     warnings.append("renderer:pdf-pil-fallback")
     if left > window.xmin or top > window.ymin or right < window.xmax or bottom < window.ymax:
         warnings.append("PDF crop was clipped to rendered page bounds.")
+    return {
+        "used_display_list": False,
+        "pil_fallback": True,
+        "fallback_reason": fallback_reason or "display_list_unavailable",
+    }
 
 
 def _render_pdf_placeholder(source: Path, output_path: Path, transform: dict[str, Any], *, warnings: list[str]) -> None:

@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
+from .dxf_read import read_dxf_document_result
+from .region_profile import RegionProfile
+
 logger = logging.getLogger(__name__)
 
 BBox = tuple[float, float, float, float]
@@ -42,10 +45,12 @@ class SheetRegion:
     entity_histogram: dict[str, int] = field(default_factory=dict)
     title_text: str = ""
     drawing_number: str = ""
+    title_block_bbox: Optional[BBox] = None
     confidence: float = 0.0
     detection_method: str = "unknown"
     region_kind: str = "detail"
     frame_score: float = 0.0
+    identity_evidence: tuple[str, ...] = tuple()
     confidence_reasons: tuple[str, ...] = tuple()
     warnings: tuple[str, ...] = tuple()
 
@@ -67,10 +72,12 @@ class SheetRegion:
             "entity_histogram": dict(self.entity_histogram),
             "title_text": self.title_text,
             "drawing_number": self.drawing_number,
+            "title_block_bbox": list(self.title_block_bbox) if self.title_block_bbox else None,
             "confidence": self.confidence,
             "detection_method": self.detection_method,
             "region_kind": self.region_kind,
             "frame_score": self.frame_score,
+            "identity_evidence": list(self.identity_evidence),
             "confidence_reasons": list(self.confidence_reasons),
             "warnings": list(self.warnings),
         }
@@ -105,6 +112,7 @@ def detect_sheet_regions(
     side: str = "",
     dxf_cache_dir: str | Path | None = None,
     max_regions: int = 80,
+    region_profile: RegionProfile | str | Path | None = None,
 ) -> RegionDetectionResult:
     """Detect review regions for a PDF, DXF, or DWG source.
 
@@ -123,6 +131,7 @@ def detect_sheet_regions(
             side=side,
             dxf_cache_dir=dxf_cache_dir,
             max_regions=max_regions,
+            region_profile=region_profile,
         )
     return RegionDetectionResult(
         source_path=str(path),
@@ -229,7 +238,9 @@ def _detect_cad_regions(
     side: str,
     dxf_cache_dir: str | Path | None,
     max_regions: int,
+    region_profile: RegionProfile | str | Path | None = None,
 ) -> RegionDetectionResult:
+    profile = RegionProfile.load(region_profile)
     try:
         dxf_path = _ensure_dxf_path(path, dxf_cache_dir=dxf_cache_dir)
     except Exception as exc:  # noqa: BLE001
@@ -242,7 +253,7 @@ def _detect_cad_regions(
         )
 
     try:
-        import ezdxf
+        read_result = read_dxf_document_result(dxf_path)
     except ImportError:
         return RegionDetectionResult(
             source_path=str(path),
@@ -251,8 +262,6 @@ def _detect_cad_regions(
             status="failed",
             warnings=("ezdxf unavailable",),
         )
-    try:
-        doc = ezdxf.readfile(str(dxf_path))
     except Exception as exc:  # noqa: BLE001
         return RegionDetectionResult(
             source_path=str(path),
@@ -261,9 +270,16 @@ def _detect_cad_regions(
             status="failed",
             warnings=(f"DXF read failed: {exc}",),
         )
+    doc = read_result.doc
 
     entities = _collect_entity_signatures(doc.modelspace(), layout_name="Model")
-    regions = _regions_from_frames(path, side, entities, max_regions=max_regions)
+    regions = _regions_from_frames(
+        path,
+        side,
+        entities,
+        max_regions=max_regions,
+        region_profile=profile,
+    )
     if not regions:
         paper_regions: list[SheetRegion] = []
         for layout_name, layout in _paper_space_layouts(doc):
@@ -275,6 +291,7 @@ def _detect_cad_regions(
                 layout_name=layout_name,
                 start_index=len(paper_regions) + 1,
                 max_regions=max_regions - len(paper_regions),
+                region_profile=profile,
             )
             paper_regions.extend(viewport_regions)
             if len(paper_regions) >= max_regions:
@@ -286,6 +303,7 @@ def _detect_cad_regions(
             side,
             entities,
             max_regions=max_regions,
+            region_profile=profile,
         )
     if not regions and entities:
         bbox = _union_bbox([entity["bbox"] for entity in entities])
@@ -299,9 +317,13 @@ def _detect_cad_regions(
                     entities=entities,
                     detection_method="whole_modelspace",
                     confidence=0.45,
+                    region_profile=profile,
                 )
             ]
     warnings: list[str] = []
+    read_warning = read_result.diagnostics.warning()
+    if read_warning:
+        warnings.append(read_warning)
     if not regions:
         warnings.append("no renderable CAD entities found")
     elif len(regions) >= max_regions:
@@ -565,14 +587,87 @@ def _is_closed_rectangular_entity(entity: Any, bbox: BBox) -> bool:
     height = bbox[3] - bbox[1]
     if width <= 0 or height <= 0:
         return False
+    points = _polyline_points(entity)
     try:
         closed = bool(getattr(entity, "closed", False)) or bool(entity.is_closed)
     except Exception:
         closed = False
-    if not closed:
+    if not closed and not _polyline_points_are_nearly_closed(points, bbox):
         return False
     ratio = max(width, height) / max(1.0, min(width, height))
-    return 1.1 <= ratio <= 12.0
+    if not 1.1 <= ratio <= 12.0:
+        return False
+    return _polyline_points_form_rectangle(points, bbox)
+
+
+def _polyline_points_are_nearly_closed(points: Sequence[Any], bbox: BBox) -> bool:
+    if len(points) < 5:
+        return False
+    first = _point_xy(points[0])
+    last = _point_xy(points[-1])
+    if first is None or last is None:
+        return False
+    diag = math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    return _distance(first, last) <= max(diag * 0.002, 1e-6)
+
+
+def _point_xy(point: Any) -> Optional[tuple[float, float]]:
+    try:
+        return (
+            float(point[0] if isinstance(point, tuple) else point.x),
+            float(point[1] if isinstance(point, tuple) else point.y),
+        )
+    except Exception:
+        return None
+
+
+def _polyline_points_form_rectangle(points: Sequence[Any], bbox: BBox) -> bool:
+    if len(points) < 4:
+        return False
+    x0, y0, x1, y1 = bbox
+    width = x1 - x0
+    height = y1 - y0
+    diag = math.hypot(width, height)
+    tol = max(diag * 0.002, 1e-6)
+    corners = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+    matched_corners: set[int] = set()
+    corner_sequence: list[int] = []
+    cleaned: list[tuple[float, float]] = []
+    for point in points:
+        xy = _point_xy(point)
+        if xy is None:
+            continue
+        px, py = xy
+        cleaned.append((px, py))
+        if not (
+            abs(px - x0) <= tol
+            or abs(px - x1) <= tol
+            or abs(py - y0) <= tol
+            or abs(py - y1) <= tol
+        ):
+            return False
+        for index, corner in enumerate(corners):
+            if abs(px - corner[0]) <= tol and abs(py - corner[1]) <= tol:
+                matched_corners.add(index)
+                if not corner_sequence or corner_sequence[-1] != index:
+                    corner_sequence.append(index)
+                break
+    if len(cleaned) < 4 or len(matched_corners) < 4:
+        return False
+    return _corner_sequence_is_rectangular(corner_sequence)
+
+
+def _corner_sequence_is_rectangular(corner_sequence: Sequence[int]) -> bool:
+    sequence = list(corner_sequence)
+    if len(sequence) >= 2 and sequence[0] == sequence[-1]:
+        sequence.pop()
+    if len(sequence) < 4 or set(sequence) != {0, 1, 2, 3}:
+        return False
+    deltas = [
+        (sequence[(index + 1) % len(sequence)] - sequence[index]) % 4
+        for index in range(len(sequence))
+    ]
+    return all(delta == 1 for delta in deltas) or all(delta == 3 for delta in deltas)
 
 
 @dataclass(frozen=True)
@@ -583,12 +678,42 @@ class _FrameCandidate:
     reasons: tuple[str, ...] = tuple()
 
 
+def _score_frame_candidate(
+    entity: dict[str, Any],
+    *,
+    whole_area: float,
+    region_profile: RegionProfile,
+    base_confidence: float = 0.82,
+) -> Optional[_FrameCandidate]:
+    if not entity.get("is_frame"):
+        return None
+    bbox = entity["bbox"]
+    area = _bbox_area(bbox)
+    if whole_area > 0 and area < whole_area * 0.01:
+        return None
+    confidence = base_confidence
+    reasons = ["closed rectangular polyline"]
+    if region_profile.matches_frame_layer(str(entity.get("layer") or "")):
+        confidence = min(0.95, confidence + 0.04)
+        reasons.append("frame layer profile match")
+    if _has_table_keywords([entity], region_profile=region_profile):
+        confidence = max(0.0, confidence - 0.15)
+        reasons.append("table/title keyword penalty")
+    return _FrameCandidate(
+        bbox=bbox,
+        detection_method="cad_frame",
+        confidence=confidence,
+        reasons=tuple(reasons),
+    )
+
+
 def _regions_from_frames(
     path: Path,
     side: str,
     entities: Sequence[dict[str, Any]],
     *,
     max_regions: int,
+    region_profile: RegionProfile,
 ) -> list[SheetRegion]:
     if not entities:
         return []
@@ -596,17 +721,16 @@ def _regions_from_frames(
     if whole is None:
         return []
     whole_area = _bbox_area(whole)
-    candidates = [
-        _FrameCandidate(
-            bbox=entity["bbox"],
-            detection_method="cad_frame",
-            confidence=0.82,
-            reasons=("closed rectangular polyline",),
+    candidates: list[_FrameCandidate] = []
+    for entity in entities:
+        candidate = _score_frame_candidate(
+            entity,
+            whole_area=whole_area,
+            region_profile=region_profile,
         )
-        for entity in entities
-        if entity.get("is_frame") and _bbox_area(entity["bbox"]) >= whole_area * 0.01
-    ]
-    candidates.extend(_line_frame_candidates(entities, whole))
+        if candidate is not None:
+            candidates.append(candidate)
+    candidates.extend(_line_frame_candidates(entities, whole, region_profile=region_profile))
     regions: list[SheetRegion] = []
     seen: list[BBox] = []
     for candidate in sorted(candidates, key=lambda item: _bbox_area(item.bbox), reverse=True):
@@ -616,7 +740,12 @@ def _regions_from_frames(
         inside = [entity for entity in entities if _bbox_contains(bbox, _bbox_center(entity["bbox"]))]
         if len(inside) < 3:
             continue
-        if _is_probable_table_region(bbox, inside, whole_area=whole_area):
+        if _is_probable_table_region(
+            bbox,
+            inside,
+            whole_area=whole_area,
+            region_profile=region_profile,
+        ):
             continue
         seen.append(bbox)
         regions.append(
@@ -631,6 +760,7 @@ def _regions_from_frames(
                 region_kind="detail_frame",
                 frame_score=candidate.confidence,
                 confidence_reasons=candidate.reasons,
+                region_profile=region_profile,
             )
         )
         if len(regions) >= max_regions:
@@ -646,6 +776,7 @@ def _regions_from_viewports(
     layout_name: str,
     start_index: int,
     max_regions: int,
+    region_profile: RegionProfile,
 ) -> list[SheetRegion]:
     if max_regions <= 0:
         return []
@@ -666,7 +797,12 @@ def _regions_from_viewports(
         if any(_bbox_iou(bbox, other) > 0.85 for other in seen):
             continue
         inside = [candidate for candidate in entities if _bbox_contains(bbox, _bbox_center(candidate["bbox"]))]
-        if _is_probable_table_region(bbox, inside, whole_area=max(whole_area, _bbox_area(bbox))):
+        if _is_probable_table_region(
+            bbox,
+            inside,
+            whole_area=max(whole_area, _bbox_area(bbox)),
+            region_profile=region_profile,
+        ):
             continue
         seen.append(bbox)
         regions.append(
@@ -682,6 +818,7 @@ def _regions_from_viewports(
                 frame_score=0.86,
                 confidence_reasons=(f"paperspace viewport in {layout_name}",),
                 layout_name=layout_name,
+                region_profile=region_profile,
             )
         )
         if len(regions) >= max_regions:
@@ -692,6 +829,8 @@ def _regions_from_viewports(
 def _line_frame_candidates(
     entities: Sequence[dict[str, Any]],
     whole: BBox,
+    *,
+    region_profile: RegionProfile,
 ) -> list[_FrameCandidate]:
     """Recover rectangular frames drawn as four or more LINE entities."""
 
@@ -751,13 +890,42 @@ def _line_frame_candidates(
                         continue
                     if any(_bbox_iou(bbox, other) > 0.85 for other in seen):
                         continue
+                    candidate_entities = [
+                        entity
+                        for entity in entities
+                        if _bbox_contains(bbox, _bbox_center(entity["bbox"]))
+                    ]
+                    confidence = 0.78
+                    reasons = ["assembled from LINE border segments"]
+                    virtual_entities = [
+                        entity
+                        for entity in candidate_entities
+                        if str(entity.get("source") or "") == "insert_virtual"
+                    ]
+                    if virtual_entities:
+                        reasons.append("expanded from INSERT block virtual entities")
+                        block_names = sorted(
+                            {
+                                str(entity.get("block_name") or "").strip()
+                                for entity in virtual_entities
+                                if str(entity.get("block_name") or "").strip()
+                            }
+                        )
+                        if block_names:
+                            reasons.append(f"insert block {', '.join(block_names[:3])}")
+                    if any(
+                        region_profile.matches_frame_layer(str(entity.get("layer") or ""))
+                        for entity in candidate_entities
+                    ):
+                        confidence = min(0.95, confidence + 0.04)
+                        reasons.append("frame layer profile match")
                     seen.append(bbox)
                     candidates.append(
                         _FrameCandidate(
                             bbox=bbox,
                             detection_method="cad_line_frame",
-                            confidence=0.78,
-                            reasons=("assembled from LINE border segments",),
+                            confidence=confidence,
+                            reasons=tuple(reasons),
                         )
                     )
     return candidates
@@ -833,9 +1001,28 @@ def _is_probable_table_region(
     entities: Sequence[dict[str, Any]],
     *,
     whole_area: float,
+    region_profile: RegionProfile | None = None,
 ) -> bool:
+    return bool(
+        _table_rejection_reasons(
+            bbox,
+            entities,
+            whole_area=whole_area,
+            region_profile=region_profile,
+        )
+    )
+
+
+def _table_rejection_reasons(
+    bbox: BBox,
+    entities: Sequence[dict[str, Any]],
+    *,
+    whole_area: float,
+    region_profile: RegionProfile | None = None,
+) -> tuple[str, ...]:
     if not entities:
-        return False
+        return tuple()
+    profile = region_profile or RegionProfile.default()
     area = _bbox_area(bbox)
     text_count = sum(1 for entity in entities if str(entity.get("text") or "").strip())
     line_like_count = sum(
@@ -846,56 +1033,77 @@ def _is_probable_table_region(
     structural_count = sum(
         1
         for entity in entities
-        if _looks_structural_entity(entity)
+        if _looks_structural_entity(entity, region_profile=profile)
     )
-    keyword_hit = _has_table_keywords(entities)
+    keyword_hit = _has_table_keywords(entities, region_profile=profile)
     small_relative = whole_area > 0 and area <= whole_area * 0.08
     text_heavy = text_count >= max(4, int(len(entities) * 0.35))
     grid_like = line_like_count >= 6 and structural_count <= max(2, int(len(entities) * 0.20))
+    structural_dominant = (
+        structural_count >= max(10, int(len(entities) * 0.35))
+        and not text_heavy
+        and not grid_like
+    )
+    if structural_dominant:
+        return tuple()
+    reasons: list[str] = []
+    if keyword_hit:
+        reasons.append("table keyword")
+    if small_relative:
+        reasons.append("small relative area")
+    if text_heavy:
+        reasons.append("text heavy")
+    if grid_like:
+        reasons.append("grid-like table")
     if keyword_hit and (small_relative or text_heavy or grid_like):
-        return True
-    return bool(small_relative and text_heavy and grid_like)
+        return tuple(reasons)
+    if small_relative and text_heavy and grid_like:
+        return tuple(reasons)
+    return tuple()
 
 
-def _looks_structural_entity(entity: dict[str, Any]) -> bool:
+def _looks_structural_entity(
+    entity: dict[str, Any],
+    *,
+    region_profile: RegionProfile | None = None,
+) -> bool:
+    profile = region_profile or RegionProfile.default()
     layer = str(entity.get("layer") or "").upper()
     entity_type = str(entity.get("entity_type") or "").upper()
     if entity_type in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
         return False
-    if any(token in layer for token in ("BEAM", "COL", "SLAB", "WALL", "GRID", "REBAR")):
-        return True
-    if any(token in layer for token in ("TITLE", "TABLE", "REV", "BOM", "BLOCK INFO")):
+    if (
+        profile.matches_title_layer(layer)
+        or profile.matches_table_layer(layer)
+        or profile.contains_nonstructural_token(layer)
+    ):
         return False
+    if profile.contains_structural_token(layer):
+        return True
     return entity_type in {"LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC", "ELLIPSE"}
 
 
-def _has_table_keywords(entities: Sequence[dict[str, Any]]) -> bool:
-    keywords = (
-        "BLOCK INFO",
-        "BLOCKINFO",
-        "TITLE",
-        "TITLEBLOCK",
-        "REV",
-        "REVISION",
-        "TABLE",
-        "SCHEDULE",
-        "BOM",
-        "MATERIAL",
-        "DWG",
-        "SHEET",
-        "SCALE",
-        "DATE",
-        "DRAWN",
-        "CHECK",
-        "APPROVED",
-    )
+def _has_table_keywords(
+    entities: Sequence[dict[str, Any]],
+    *,
+    region_profile: RegionProfile | None = None,
+) -> bool:
+    profile = region_profile or RegionProfile.default()
     values: list[str] = []
     for entity in entities:
-        values.append(str(entity.get("layer") or ""))
+        layer = str(entity.get("layer") or "")
+        block_name = str(entity.get("block_name") or "")
+        values.append(layer)
         values.append(str(entity.get("text") or ""))
-        values.append(str(entity.get("block_name") or ""))
+        values.append(block_name)
+        if (
+            profile.matches_table_layer(layer)
+            or profile.matches_title_layer(layer)
+            or profile.matches_table_layer(block_name)
+        ):
+            return True
     combined = " ".join(values).upper()
-    return any(keyword in combined for keyword in keywords)
+    return any(keyword.upper() in combined for keyword in profile.table_reject_keywords)
 
 
 def _regions_from_spatial_clusters(
@@ -904,22 +1112,72 @@ def _regions_from_spatial_clusters(
     entities: Sequence[dict[str, Any]],
     *,
     max_regions: int,
+    region_profile: RegionProfile,
 ) -> list[SheetRegion]:
     if not entities:
-        return []
-    if len(entities) > 8000:
-        logger.warning(
-            "Skipping CAD spatial region clustering for %s entities; frame detection or whole-model fallback will be used",
-            len(entities),
-        )
         return []
     whole = _union_bbox([entity["bbox"] for entity in entities])
     if whole is None:
         return []
     diag = math.hypot(whole[2] - whole[0], whole[3] - whole[1])
     gap = max(diag * 0.035, 100.0)
-    expanded = [_expand_bbox(entity["bbox"], gap) for entity in entities]
+    buckets, diagnostics = _spatial_cluster_buckets(entities, gap=gap)
+
+    min_entities = max(3, min(12, len(entities) // 60))
+    cluster_items: list[tuple[BBox, list[dict[str, Any]]]] = []
+    for bucket in buckets.values():
+        bbox = _union_bbox([entity["bbox"] for entity in bucket])
+        if bbox is None or len(bucket) < min_entities:
+            continue
+        if _bbox_area(bbox) <= 0:
+            continue
+        cluster_items.append((bbox, bucket))
+    cluster_items.sort(key=lambda item: (item[0][1], item[0][0]))
+    if diagnostics["capped_entity_count"] or len(cluster_items) > max_regions:
+        logger.info(
+            "CAD spatial grid clustering diagnostics: entities=%s cells=%s buckets=%s candidates=%s capped_entities=%s max_regions=%s",
+            len(entities),
+            diagnostics["cell_count"],
+            len(buckets),
+            len(cluster_items),
+            diagnostics["capped_entity_count"],
+            max_regions,
+        )
+    regions: list[SheetRegion] = []
+    for bbox, bucket in cluster_items[:max_regions]:
+        if _is_probable_table_region(
+            bbox,
+            bucket,
+            whole_area=_bbox_area(whole),
+            region_profile=region_profile,
+        ):
+            continue
+        regions.append(
+            _region_from_entities(
+                path,
+                side,
+                region_id=f"{side or 'cad'}-cluster-{len(regions) + 1}",
+                bbox=bbox,
+                entities=bucket,
+                detection_method="cad_spatial_cluster",
+                confidence=0.68,
+                confidence_reasons=("grid spatial clustering",),
+                region_profile=region_profile,
+            )
+        )
+    return regions
+
+
+def _spatial_cluster_buckets(
+    entities: Sequence[dict[str, Any]],
+    *,
+    gap: float,
+    max_cells_per_entity: int = 64,
+) -> tuple[dict[int, list[dict[str, Any]]], dict[str, int]]:
     parent = list(range(len(entities)))
+    cell_representatives: dict[tuple[int, int], int] = {}
+    capped_entity_count = 0
+    cell_size = max(float(gap), 1.0)
 
     def find(index: int) -> int:
         while parent[index] != index:
@@ -933,41 +1191,60 @@ def _regions_from_spatial_clusters(
         if root_left != root_right:
             parent[root_right] = root_left
 
-    for i, bbox_i in enumerate(expanded):
-        for j in range(i + 1, len(expanded)):
-            if _bbox_intersects(bbox_i, expanded[j]):
-                union(i, j)
+    for index, entity in enumerate(entities):
+        expanded = _expand_bbox(entity["bbox"], gap)
+        cells = _grid_cells_for_bbox(
+            expanded,
+            cell_size=cell_size,
+            max_cells=max_cells_per_entity,
+        )
+        if cells is None:
+            capped_entity_count += 1
+            center = _bbox_center(expanded)
+            cells = (
+                (
+                    math.floor(center[0] / cell_size),
+                    math.floor(center[1] / cell_size),
+                ),
+            )
+        for cell in cells:
+            representative = cell_representatives.get(cell)
+            if representative is None:
+                cell_representatives[cell] = index
+            else:
+                union(index, representative)
 
     buckets: dict[int, list[dict[str, Any]]] = {}
     for index, entity in enumerate(entities):
         buckets.setdefault(find(index), []).append(entity)
+    return buckets, {
+        "cell_count": len(cell_representatives),
+        "capped_entity_count": capped_entity_count,
+    }
 
-    min_entities = max(3, min(12, len(entities) // 60))
-    cluster_items: list[tuple[BBox, list[dict[str, Any]]]] = []
-    for bucket in buckets.values():
-        bbox = _union_bbox([entity["bbox"] for entity in bucket])
-        if bbox is None or len(bucket) < min_entities:
-            continue
-        if _bbox_area(bbox) <= 0:
-            continue
-        cluster_items.append((bbox, bucket))
-    cluster_items.sort(key=lambda item: (item[0][1], item[0][0]))
-    regions: list[SheetRegion] = []
-    for bbox, bucket in cluster_items[:max_regions]:
-        if _is_probable_table_region(bbox, bucket, whole_area=_bbox_area(whole)):
-            continue
-        regions.append(
-            _region_from_entities(
-                path,
-                side,
-                region_id=f"{side or 'cad'}-cluster-{len(regions) + 1}",
-                bbox=bbox,
-                entities=bucket,
-                detection_method="cad_spatial_cluster",
-                confidence=0.68,
-            )
-        )
-    return regions
+
+def _grid_cells_for_bbox(
+    bbox: BBox,
+    *,
+    cell_size: float,
+    max_cells: int,
+) -> Optional[tuple[tuple[int, int], ...]]:
+    x0 = math.floor(bbox[0] / cell_size)
+    y0 = math.floor(bbox[1] / cell_size)
+    x1 = math.floor(bbox[2] / cell_size)
+    y1 = math.floor(bbox[3] / cell_size)
+    cell_count = (x1 - x0 + 1) * (y1 - y0 + 1)
+    if cell_count > max_cells:
+        return None
+    return tuple((x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1))
+
+
+@dataclass(frozen=True)
+class _RegionIdentity:
+    title_text: str = ""
+    drawing_number: str = ""
+    title_block_bbox: Optional[BBox] = None
+    evidence: tuple[str, ...] = tuple()
 
 
 def _region_from_entities(
@@ -983,12 +1260,20 @@ def _region_from_entities(
     frame_score: float = 0.0,
     confidence_reasons: Sequence[str] = (),
     layout_name: str = "",
+    region_profile: RegionProfile | None = None,
 ) -> SheetRegion:
     layer_hist = Counter(str(entity.get("layer") or "0") for entity in entities)
     entity_hist = Counter(str(entity.get("entity_type") or "") for entity in entities)
-    texts = [str(entity.get("text") or "").strip() for entity in entities if entity.get("text")]
-    joined_text = " | ".join(texts[:8])
-    drawing_number = _extract_drawing_number(texts)
+    profile = region_profile or RegionProfile.default()
+    identity = _extract_region_identity(
+        bbox,
+        entities,
+        region_profile=profile,
+    )
+    adjusted_confidence = confidence
+    if not identity.title_text:
+        adjusted_confidence = max(0.0, confidence - 0.05)
+    merged_reasons = tuple(confidence_reasons) + identity.evidence
     return _make_region(
         region_id=region_id,
         path=path,
@@ -998,15 +1283,95 @@ def _region_from_entities(
         entity_count=len(entities),
         layer_histogram=dict(layer_hist.most_common(12)),
         entity_histogram=dict(entity_hist.most_common(12)),
-        title_text=joined_text[:240],
-        drawing_number=drawing_number,
+        title_text=identity.title_text,
+        drawing_number=identity.drawing_number,
+        title_block_bbox=identity.title_block_bbox,
         detection_method=detection_method,
-        confidence=confidence,
+        confidence=adjusted_confidence,
         region_kind=region_kind,
         frame_score=frame_score,
-        confidence_reasons=confidence_reasons,
+        identity_evidence=identity.evidence,
+        confidence_reasons=merged_reasons,
         layout_name=layout_name,
     )
+
+
+def _extract_region_identity(
+    bbox: BBox,
+    entities: Sequence[dict[str, Any]],
+    *,
+    region_profile: RegionProfile,
+) -> _RegionIdentity:
+    text_entities = [
+        entity
+        for entity in entities
+        if str(entity.get("text") or "").strip()
+        and str(entity.get("entity_type") or "").upper() in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "INSERT"}
+    ]
+    if not text_entities:
+        return _RegionIdentity(evidence=("no title text found",))
+
+    title_bboxes = _title_area_bboxes(bbox, region_profile.title_area_policy)
+    preferred = [
+        entity
+        for entity in text_entities
+        if any(_bbox_contains(title_bbox, _bbox_center(entity["bbox"])) for title_bbox in title_bboxes)
+    ]
+    evidence = [f"title area policy: {region_profile.title_area_policy}"]
+    source_entities = preferred or text_entities
+    if preferred:
+        evidence.append("title text from title area")
+        title_bbox = _union_bbox([entity["bbox"] for entity in preferred])
+    else:
+        evidence.append("title area empty; used all region text")
+        title_bbox = None
+
+    source_texts = [
+        str(entity.get("text") or "").strip()
+        for entity in source_entities
+        if str(entity.get("text") or "").strip()
+    ]
+    all_texts = [
+        str(entity.get("text") or "").strip()
+        for entity in text_entities
+        if str(entity.get("text") or "").strip()
+    ]
+    drawing_number = _extract_drawing_number(source_texts, region_profile=region_profile)
+    if drawing_number:
+        evidence.append("drawing number from title area" if preferred else "drawing number from region text")
+    elif preferred:
+        drawing_number = _extract_drawing_number(all_texts, region_profile=region_profile)
+        if drawing_number:
+            evidence.append("drawing number fallback to full region text")
+
+    title_text = " | ".join(source_texts[:8])[:240]
+    return _RegionIdentity(
+        title_text=title_text,
+        drawing_number=drawing_number,
+        title_block_bbox=title_bbox,
+        evidence=tuple(evidence),
+    )
+
+
+def _title_area_bboxes(bbox: BBox, policy: str) -> tuple[BBox, ...]:
+    x0, y0, x1, y1 = bbox
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    if width <= 0 or height <= 0:
+        return tuple()
+    normalized = str(policy or "").lower()
+    bottom = (x0, y0, x1, y0 + height * 0.25)
+    right = (x1 - width * 0.35, y0, x1, y1)
+    top = (x0, y1 - height * 0.25, x1, y1)
+    if normalized == "right_title_band":
+        return (right,)
+    if normalized == "bottom_title_band":
+        return (bottom,)
+    if normalized == "top_title_band":
+        return (top,)
+    if normalized == "bottom_or_right_title_band":
+        return (bottom, right)
+    return tuple()
 
 
 def _make_region(
@@ -1023,10 +1388,12 @@ def _make_region(
     entity_histogram: Optional[dict[str, int]] = None,
     title_text: str = "",
     drawing_number: str = "",
+    title_block_bbox: Optional[BBox] = None,
     detection_method: str,
     confidence: float,
     region_kind: str = "detail",
     frame_score: float = 0.0,
+    identity_evidence: Sequence[str] = (),
     confidence_reasons: Sequence[str] = (),
     warnings: Sequence[str] = (),
 ) -> SheetRegion:
@@ -1050,26 +1417,46 @@ def _make_region(
         entity_histogram=entity_histogram or {},
         title_text=title_text,
         drawing_number=drawing_number,
+        title_block_bbox=title_block_bbox,
         detection_method=detection_method,
         confidence=confidence,
         region_kind=region_kind,
         frame_score=frame_score,
+        identity_evidence=tuple(identity_evidence),
         confidence_reasons=tuple(confidence_reasons),
         warnings=tuple(warnings),
     )
 
 
-def _extract_drawing_number(texts: Sequence[str]) -> str:
-    patterns = [
-        re.compile(r"\b[A-Z]{1,4}[-_]?\d{1,4}(?:[-_][A-Z0-9]{1,6})?\b", re.I),
-        re.compile(r"\b\d{1,4}[-_][A-Z]{1,4}[-_]?\d{1,4}\b", re.I),
-    ]
+def _extract_drawing_number(
+    texts: Sequence[str],
+    *,
+    region_profile: RegionProfile | None = None,
+) -> str:
+    profile = region_profile or RegionProfile.default()
+    patterns = []
+    for raw_pattern in profile.drawing_number_patterns:
+        try:
+            patterns.append(re.compile(raw_pattern, re.I))
+        except re.error as exc:
+            logger.warning(
+                "Skipping invalid drawing number pattern in region profile %s: %s (%s)",
+                profile.name,
+                raw_pattern,
+                exc,
+            )
     for text in texts:
         for pattern in patterns:
             match = pattern.search(text)
             if match:
-                return match.group(0).upper()
+                return _normalize_drawing_number(match.group(0))
     return ""
+
+
+def _normalize_drawing_number(value: str) -> str:
+    normalized = re.sub(r"[\s._]+", "-", str(value or "").strip().upper())
+    normalized = re.sub(r"-{2,}", "-", normalized)
+    return normalized.strip("-")
 
 
 def _union_bbox(boxes: Iterable[BBox]) -> Optional[BBox]:

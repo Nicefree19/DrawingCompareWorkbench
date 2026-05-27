@@ -98,6 +98,9 @@ smoke_v*_playwright.js
 !.mcp.json
 !docs/canonical-drawing.schema.json
 !docs/drawing-diff.schema.json
+!docs/schemas/
+!docs/schemas/structural-drawing-evidence-v0.1.schema.json
+!docs/structural_evidence_fixture_matrix_v0_1.json
 !tests/data/comparison/cad_samples/golden-results.json
 !tests/data/comparison/real_world/*.json
 *.pdf
@@ -147,6 +150,7 @@ ai_models/*.pkl
 !docs/*_GUIDE.md
 !docs/*_ANALYSIS.md
 !docs/*_REPORT.md
+!docs/collab/MULTI_DETAIL_REGION_COMPARE_PILOT_REPORT.md
 !docs/*_SUMMARY.md
 !docs/*_STRATEGY.md
 !docs/*_CHECKLIST.md
@@ -266,6 +270,7 @@ __pycache__/
 
 # Workbench acceptance smoke artifacts (DXF samples, caches, results)
 out/
+.benchmarks/
 **/.drawing_compare_cache/
 
 # Lint config JSONs are exempt from the broad *.json ignore above

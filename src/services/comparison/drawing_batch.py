@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 
 from .base import ChangeRecord, ChangeType, ComparisonResult
 from .comparison_config import ComparisonConfig
+from .dxf_read import read_dxf_document
 from .pair_identity import candidate_display_label, candidate_pair_uuid
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ from .drawing_id_pattern import (
     PROJECT_DRAWING_NUMBER_PATTERN,
 )  # noqa: E402,F401  (re-export for back-compat)
 LARGE_CAD_FILE_BYTES = 50 * 1024 * 1024
+LARGE_DXF_LEGACY_FALLBACK_BYTES = 25 * 1024 * 1024
 DESCRIPTOR_CACHE_VERSION = 3  # Phase O Commit 3 — INSERT/ATTRIB hash 변경으로 인한 cache invalidation
 MANUAL_MATCH_CSV_COLUMNS = ("a_path", "b_path", "status")
 MANUAL_MATCH_STATUSES = {
@@ -1808,6 +1810,26 @@ def compare_candidate(
         from .dwg_differ import DwgDiffer
 
         cad_config = _cad_compare_config(options)
+        legacy_preselect_reason = ""
+        if (
+            options.cad_compare_engine == "canonical"
+            and options.cad_legacy_fallback_on_failure
+        ):
+            legacy_preselect_reason = _large_cached_dxf_legacy_preselect_reason(
+                path_a,
+                path_b,
+                options.dxf_cache_dir,
+            )
+            if legacy_preselect_reason:
+                logger.warning(
+                    "Using cached ezdxf directly for %s: %s",
+                    _candidate_label(candidate),
+                    legacy_preselect_reason,
+                )
+                cad_config = {
+                    "use_canonical_pipeline": False,
+                    "use_legacy_ezdxf_pipeline": True,
+                }
         stream_path = None
         stream_pair_id = ""
         if options.compare_state_dir:
@@ -1830,6 +1852,17 @@ def compare_candidate(
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
         )
+        if legacy_preselect_reason:
+            result.metadata.update(
+                {
+                    "legacy_ezdxf_preselected": True,
+                    "legacy_ezdxf_preselected_reason": legacy_preselect_reason,
+                }
+            )
+            result.warnings.append(
+                f"Used cached ezdxf directly for large CAD input: {legacy_preselect_reason}"
+            )
+            return result
         failure_message = _comparison_result_failure_message(result)
         if (
             failure_message
@@ -1954,11 +1987,88 @@ def _legacy_ezdxf_fallback_available(
             if suffix != ".dwg":
                 return False
             cache_path = differ._dxf_cache_path(path)
-            if not cache_path.exists() or cache_path.stat().st_size <= 0:
+            compatible_cache_path = differ._compatible_dxf_cache_path(
+                path,
+                exact_path=cache_path,
+            )
+            if compatible_cache_path is None:
                 return False
     except OSError:
         return False
     return True
+
+
+def _large_cached_dxf_legacy_preselect_reason(
+    path_a: Path,
+    path_b: Path,
+    dxf_cache_dir: Optional[Union[str, Path]],
+) -> str:
+    """Skip canonical import for large DXF inputs that would fallback anyway."""
+
+    threshold = _large_dxf_legacy_fallback_bytes()
+    if threshold <= 0:
+        return ""
+    try:
+        resolved_paths = _resolve_legacy_dxf_paths(path_a, path_b, dxf_cache_dir)
+        if not resolved_paths:
+            return ""
+        largest = max(path.stat().st_size for path in resolved_paths)
+    except OSError:
+        return ""
+    if largest < threshold:
+        return ""
+    threshold_mb = threshold / (1024 * 1024)
+    largest_mb = largest / (1024 * 1024)
+    return (
+        f"largest cached/input DXF is {largest_mb:.1f} MB "
+        f"(threshold {threshold_mb:.1f} MB); skipped canonical import"
+    )
+
+
+def _resolve_legacy_dxf_paths(
+    path_a: Path,
+    path_b: Path,
+    dxf_cache_dir: Optional[Union[str, Path]],
+) -> list[Path]:
+    paths = (Path(path_a), Path(path_b))
+    resolved: list[Path] = []
+    differ = None
+    for path in paths:
+        suffix = path.suffix.lower()
+        if suffix == ".dxf":
+            if not path.exists() or path.stat().st_size <= 0:
+                return []
+            resolved.append(path)
+            continue
+        if suffix != ".dwg" or not dxf_cache_dir:
+            return []
+        if differ is None:
+            from .dwg_differ import DwgDiffer
+
+            differ = DwgDiffer(
+                config={
+                    "use_canonical_pipeline": False,
+                    "use_legacy_ezdxf_pipeline": True,
+                },
+                dxf_cache_dir=dxf_cache_dir,
+            )
+        exact_path = differ._dxf_cache_path(path)
+        cache_path = differ._compatible_dxf_cache_path(path, exact_path=exact_path)
+        if cache_path is None:
+            return []
+        resolved.append(cache_path)
+    return resolved
+
+
+def _large_dxf_legacy_fallback_bytes() -> int:
+    raw_value = os.environ.get("DRAWING_COMPARE_LEGACY_DXF_DIRECT_MB", "25")
+    try:
+        value_mb = float(raw_value)
+    except (TypeError, ValueError):
+        return LARGE_DXF_LEGACY_FALLBACK_BYTES
+    if value_mb <= 0:
+        return 0
+    return int(value_mb * 1024 * 1024)
 
 
 def compare_pdf_documents(
@@ -2387,7 +2497,7 @@ def _fill_cad_descriptor(
         dxf_path = temp_differ._ensure_dxf(source_path)
 
     try:
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = read_dxf_document(dxf_path, ezdxf_module=ezdxf)
         descriptor.layers = tuple(sorted(layer.dxf.name for layer in doc.layers))
         descriptor.layouts = tuple(sorted(layout.name for layout in doc.layouts))
 

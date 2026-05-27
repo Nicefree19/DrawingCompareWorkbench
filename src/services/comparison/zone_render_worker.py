@@ -151,6 +151,7 @@ def render_zone_focus(
             warnings=[],
         )
 
+    from src.services.comparison.dxf_read import read_dxf_document_result
     from src.services.comparison.zone_vector_renderer import resolve_dxf_path
 
     output_dir = Path(output_dir)
@@ -172,7 +173,11 @@ def render_zone_focus(
 
     # 2. Open the doc.
     try:
-        doc = ezdxf.readfile(str(dxf_path))
+        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        doc = read_result.doc
+        read_warning = read_result.diagnostics.warning()
+        if read_warning:
+            warnings.append(read_warning)
     except Exception as exc:
         return ZoneFocusResult(
             output_path="",

@@ -30,6 +30,8 @@ def _write_validation_summary(
     workbench_item9b: bool = True,
     workbench_item9c: bool = True,
     cad_block_text_no_expand: bool = True,
+    forced_tile_eviction: bool = False,
+    tile_cache_mb: float = 0.25,
 ) -> None:
     if source_extensions is None:
         source_extensions = ("dwg", "dxf") if kind == "cad" else (kind, kind)
@@ -136,6 +138,31 @@ def _write_validation_summary(
                     ),
                 }
             ],
+        }
+    if forced_tile_eviction:
+        byte_limit = int(tile_cache_mb * 1024 * 1024)
+        summary["p5_g3_realset_gate"] = {
+            "requested": True,
+            "status": "passed",
+            "failures": [],
+            "evidence": {
+                "tile_manifest": {
+                    "status": "passed",
+                    "require_eviction": True,
+                    "evicted_pair_count": 2,
+                    "min_evicted_pair_count": 1,
+                    "evicted_estimated_bytes": 4096,
+                    "min_evicted_estimated_bytes": 1,
+                    "configured_tile_cache_mb": tile_cache_mb,
+                    "tile_cache_env_mb": str(tile_cache_mb),
+                    "byte_limit": byte_limit,
+                    "retained_estimated_bytes": max(1, byte_limit // 2),
+                    "stale_manifest_count": 0,
+                    "missing_pair_payload_count": 0,
+                    "orphan_payload_bytes": 0,
+                    "max_orphan_payload_bytes": 0,
+                }
+            },
         }
     (path / "validation_summary.json").write_text(json.dumps(summary), encoding="utf-8")
     if cad_pdf_blocked_pairs:
@@ -256,12 +283,50 @@ def _write_large_dwg_probe(path: Path) -> None:
     )
 
 
+def _write_p5_g16_replay(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_id": "p5_g16_real_corpus_replay",
+                "profile": "real_corpus_artifact_replay",
+                "status": "passed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_p5_g22_gui_soak(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_id": "p5_g22_actual_gui_soak",
+                "profile": "actual_gui_customer_corpus_soak",
+                "status": "passed",
+                "summary": {
+                    "native_resource_summary": {"measurement_available": True},
+                    "worker_tree_summary": {"cleanup_ok": True, "orphan_worker_count": 0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _run_prepare_ready_fixture(
     tmp_path: Path,
     *,
     review_decision_truth: Path | None = None,
     dataset_strata: Path | None = None,
     large_dwg_probe: Path | None = None,
+    p5_g7_tile_eviction_proof_dirs: list[Path] | None = None,
+    p5_g7_tile_eviction_release_manifests: list[Path] | None = None,
+    require_p5_g7_tile_eviction_proof: bool = False,
+    p5_g6_tile_cache_mb: float | None = None,
+    p5_g16_benchmark_json: list[Path] | None = None,
+    p5_g22_gui_soak_json: list[Path] | None = None,
 ) -> dict:
     cad_dir = tmp_path / "cad"
     pdf_dir = tmp_path / "pdf"
@@ -307,6 +372,12 @@ def _run_prepare_ready_fixture(
         review_decision_truth=review_decision_truth,
         dataset_strata=dataset_strata,
         large_dwg_probe=large_dwg_probe,
+        p5_g7_tile_eviction_proof_dirs=p5_g7_tile_eviction_proof_dirs,
+        p5_g7_tile_eviction_release_manifests=p5_g7_tile_eviction_release_manifests,
+        require_p5_g7_tile_eviction_proof=require_p5_g7_tile_eviction_proof,
+        p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
+        p5_g16_benchmark_json=p5_g16_benchmark_json,
+        p5_g22_gui_soak_json=p5_g22_gui_soak_json,
     )
 
 
@@ -439,6 +510,227 @@ def test_prepare_customer_evidence_manifest_ready(tmp_path: Path) -> None:
     assert manifest["readiness"]["issues"] == []
     assert result["summary"]["cad_policy_evidence"]["block_text_detection_without_expansion"] is True
     assert (tmp_path / "sharable_path_audit_summary.json").exists()
+
+
+def test_prepare_preserves_p5_g7_forced_tile_eviction_proof_without_counting_as_customer_corpus(
+    tmp_path: Path,
+) -> None:
+    proof_dir = tmp_path / "p5_g7_tile_eviction_proof"
+    release_manifest = tmp_path / "p5_g7_release_manifest.json"
+    _write_validation_summary(
+        proof_dir,
+        kind="pdf",
+        completed_pairs=3,
+        queue_summary="forced tile eviction proof",
+        forced_tile_eviction=True,
+        tile_cache_mb=0.25,
+    )
+    release_manifest.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "name": "realset_validation",
+                        "env_overrides": {"DRAWING_COMPARE_TILE_CACHE_MB": "0.25"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g7_tile_eviction_proof_dirs=[proof_dir],
+        p5_g7_tile_eviction_release_manifests=[release_manifest],
+        require_p5_g7_tile_eviction_proof=True,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g7 = manifest["p5_g7_forced_tile_eviction"]
+    assert result["status"] == "ready"
+    assert result["summary"]["completed_pairs"] == 21
+    assert result["summary"]["sheet_count"] == 21
+    assert p5_g7["status"] == "passed"
+    assert p5_g7["required"] is True
+    assert p5_g7["proof_count"] == 1
+    assert p5_g7["proofs"][0]["configured_tile_cache_mb"] == 0.25
+    assert p5_g7["proofs"][0]["evicted_pair_count"] == 2
+    assert p5_g7["release_manifests"][0]["tile_cache_env_mb_values"] == [0.25]
+    assert "p5_g7_tile_eviction_proof" in p5_g7["proofs"][0]["result_dir"]
+
+
+def test_prepare_records_p5_g16_replay_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    replay_json = tmp_path / "pdf" / "p5_g16_real_corpus_replay.json"
+    replay_json.parent.mkdir(parents=True)
+    _write_p5_g16_replay(replay_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g16_benchmark_json=[replay_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g16_real_corpus_replay.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g16_real_corpus_replay_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g16_real_corpus_replay_jsons"] == [expected_ref]
+    p5_g16 = manifest["performance_benchmarks"]["p5_g16_real_corpus_replay"]
+    assert p5_g16["status"] == "passed"
+    assert p5_g16["benchmark_json"] == expected_ref
+    assert result["summary"]["p5_g16_real_corpus_replay"]["passed_count"] == 1
+
+
+def test_prepare_records_p5_g22_gui_soak_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g22_actual_gui_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g22_gui_soak(soak_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g22_gui_soak_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g22_actual_gui_soak.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g22_actual_gui_soak_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g22_actual_gui_soak_jsons"] == [expected_ref]
+    p5_g22 = manifest["performance_benchmarks"]["p5_g22_actual_gui_soak"]
+    assert p5_g22["status"] == "passed"
+    assert p5_g22["benchmark_json"] == expected_ref
+    assert p5_g22["native_resource_summary"]["measurement_available"] is True
+    assert p5_g22["worker_tree_summary"]["cleanup_ok"] is True
+    assert p5_g22["shared_summary_count"] == 1
+    assert result["summary"]["p5_g22_actual_gui_soak"]["passed_count"] == 1
+
+
+def test_prepare_rejects_p5_g22_gui_soak_without_shared_summaries(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g22_actual_gui_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    soak_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_id": "p5_g22_actual_gui_soak",
+                "profile": "actual_gui_customer_corpus_soak",
+                "status": "passed",
+                "summary": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g22_gui_soak_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g22 = manifest["performance_benchmarks"]["p5_g22_actual_gui_soak"]
+    assert result["status"] == "incomplete"
+    assert p5_g22["status"] == "failed"
+    assert p5_g22["shared_summary_count"] == 0
+    assert (
+        "p5_g22_actual_gui_soak shared native/worker summaries are required for all provided artifacts"
+        in result["issues"]
+    )
+
+
+def test_prepare_requires_p5_g7_forced_tile_eviction_when_requested(tmp_path: Path) -> None:
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        require_p5_g7_tile_eviction_proof=True,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    assert result["status"] == "incomplete"
+    assert manifest["p5_g7_forced_tile_eviction"]["status"] == "failed"
+    assert "p5_g7_forced_tile_eviction.status must be passed when required" in result["issues"]
+
+
+def test_prepare_rejects_p5_g7_tile_cache_cap_mismatch(tmp_path: Path) -> None:
+    proof_dir = tmp_path / "p5_g7_tile_eviction_proof"
+    _write_validation_summary(
+        proof_dir,
+        kind="pdf",
+        completed_pairs=3,
+        queue_summary="forced tile eviction proof",
+        forced_tile_eviction=True,
+        tile_cache_mb=0.5,
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g7_tile_eviction_proof_dirs=[proof_dir],
+        require_p5_g7_tile_eviction_proof=True,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    p5_g7 = result["summary"]["p5_g7_forced_tile_eviction"]
+    assert result["status"] == "incomplete"
+    assert p5_g7["status"] == "failed"
+    assert "configured_tile_cache_mb=0.5 != 0.25" in "\n".join(p5_g7["issues"])
+    assert "p5_g7_forced_tile_eviction.status must be passed when required" in result["issues"]
+
+
+def test_prepare_rejects_p5_g7_proof_in_results_dir(tmp_path: Path) -> None:
+    proof_dir = tmp_path / "p5_g7_tile_eviction_proof"
+    _write_validation_summary(
+        proof_dir,
+        kind="pdf",
+        completed_pairs=5,
+        queue_summary="forced tile eviction proof",
+        forced_tile_eviction=True,
+        tile_cache_mb=0.25,
+    )
+
+    cad_dir = tmp_path / "cad"
+    pdf_dir = tmp_path / "pdf"
+    blocked_dir = tmp_path / "blocked"
+    manifest_path = tmp_path / "customer_evidence_manifest.json"
+    truth_csv = tmp_path / "review_ground_truth.csv"
+    notes = tmp_path / "operator_notes.md"
+    confirmed = pdf_dir / "artifacts" / "confirmed_clouds" / "pair_confirmed.png"
+    _write_validation_summary(cad_dir, kind="cad", completed_pairs=1, queue_summary="member structural text")
+    _write_validation_summary(
+        pdf_dir,
+        kind="pdf",
+        completed_pairs=20,
+        queue_summary="section dimension D13@100 D13@200 SHD13@100 SHD13@200 grid",
+        review_truth_rows=6,
+    )
+    _write_validation_summary(blocked_dir, kind="cad", completed_pairs=0, cad_pdf_blocked_pairs=1)
+    _write_truth_csv(truth_csv)
+    _write_operator_notes(notes)
+    confirmed.parent.mkdir(parents=True)
+    confirmed.write_bytes(b"png")
+
+    result = prepare.prepare_manifest(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir, proof_dir],
+        out_path=manifest_path,
+        dataset_id="customer-grade-fixture",
+        dataset_source_kind="customer_grade",
+        dataset_source_description="Approved customer-grade fixture for MVP exit.",
+        dataset_approval_status="approved_for_mvp_exit",
+        dataset_approver="structural-review-lead",
+        validation_date="2026-05-11",
+        ground_truth_owner="structural-review-lead",
+        review_ground_truth=truth_csv,
+        ground_truth_status="approved",
+        operator_reviewer_role="structural_review_lead",
+        operator_notes_file=notes,
+        operator_screenshots_dir=None,
+        confirmed_export_artifact=confirmed,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    assert result["status"] == "incomplete"
+    assert result["summary"]["completed_pairs"] == 26
+    assert result["summary"]["p5_g7_forced_tile_eviction_results_dir_rejections"]
+    assert any("must be passed via --p5-g7-tile-eviction-proof-dir" in issue for issue in result["issues"])
 
 
 def test_prepare_customer_evidence_rejects_invalid_review_decision_truth_enum(tmp_path: Path) -> None:

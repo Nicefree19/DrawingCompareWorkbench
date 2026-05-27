@@ -242,6 +242,19 @@ def test_explicit_fast_backend_works_standalone(tiny_dxf: Path) -> None:
     assert img.min() < 100  # something drawn
 
 
+def test_renderer_sanitizes_missing_lwpolyline_subclass_before_dispatch() -> None:
+    source = Path("tests/data/comparison/cad_samples/dxf/simple_base.dxf")
+
+    img, transform = DxfRenderer(backend="fast").render_with_transform(
+        source, dpi=72, max_edge_px=512
+    )
+
+    assert img.ndim == 3 and img.dtype == np.uint8
+    assert img.min() < 255
+    assert transform["dxf_read_sanitized"] is True
+    assert transform["dxf_read_repair_count"] >= 1
+
+
 def test_fast_renderer_recovers_extents_when_ezdxf_bbox_fails(
     tmp_path: Path, monkeypatch
 ) -> None:

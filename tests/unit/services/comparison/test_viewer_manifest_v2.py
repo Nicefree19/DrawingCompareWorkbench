@@ -61,17 +61,46 @@ def test_artifact_ref_from_affine_params_carries_quality() -> None:
     assert ref.pixel_size == (200, 200)
     assert len(ref.world_to_pixel) == 6
     assert len(ref.pixel_to_world) == 6
+    assert ref.bbox_coordinate_space == "cad_wcs_mm"
+    assert ref.source_truth == "cad_entity"
+    assert ref.y_axis == "up"
 
 
 def test_artifact_ref_to_dict_round_trip() -> None:
-    params = fit_world_to_pixels((0.0, 0.0, 50.0, 50.0), (100, 100), quality="estimated")
+    params = fit_world_to_pixels(
+        (0.0, 0.0, 50.0, 50.0),
+        (100, 100),
+        quality="estimated",
+        coordinate_space="image_pixels",
+    )
     ref = ArtifactRef.from_affine_params(image_uri="x.png", params=params)
     payload = ref.to_dict()
     assert payload["transform_quality"] == "estimated"
+    assert payload["coordinate_contract_version"] == "coordinate_contract.v1"
+    assert payload["bbox_coordinate_space"] == "image_pixels_tl"
+    assert payload["source_truth"] == "pdf_visual"
+    assert payload["y_axis"] == "down"
     assert payload["world_bbox"] == [0.0, 0.0, 50.0, 50.0]
     rebuilt = ArtifactRef.from_dict(payload)
     assert rebuilt.transform_quality == "estimated"
+    assert rebuilt.bbox_coordinate_space == "image_pixels_tl"
+    assert rebuilt.source_truth == "pdf_visual"
+    assert rebuilt.y_axis == "down"
     assert rebuilt.world_bbox == (0.0, 0.0, 50.0, 50.0)
+
+
+def test_artifact_ref_from_old_payload_defaults_coordinate_contract() -> None:
+    rebuilt = ArtifactRef.from_dict({
+        "image_uri": "legacy.png",
+        "world_bbox": [0.0, 0.0, 10.0, 10.0],
+        "pixel_size": [100, 100],
+        "transform_quality": "exact",
+    })
+
+    assert rebuilt.coordinate_contract_version == "coordinate_contract.v1"
+    assert rebuilt.bbox_coordinate_space == "cad_wcs_mm"
+    assert rebuilt.source_truth == "cad_entity"
+    assert rebuilt.y_axis == "up"
 
 
 def test_artifact_ref_rejects_unknown_transform_quality() -> None:
@@ -300,6 +329,10 @@ def test_v1_to_v2_translation_pdf_pair_image_pixels() -> None:
     )
     assert out.source_kind == "pdf"
     assert out.pairs[0].background_fidelity == "exact_world_tile_sparse"
+    assert out.pairs[0].after is not None
+    assert out.pairs[0].after.bbox_coordinate_space == "pdf_page_points_bl"
+    assert out.pairs[0].after.source_truth == "pdf_visual"
+    assert out.pairs[0].after.y_axis == "up"
 
 
 def test_v1_to_v2_translation_relative_overlay_forces_relative_only() -> None:

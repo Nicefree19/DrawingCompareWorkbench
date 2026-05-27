@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://senvex.local/schemas/structural-drawing-evidence-v0.1.schema.json",
+  "title": "Structural Drawing Evidence Packet v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "source",
+    "question",
+    "intent",
+    "summary",
+    "issue_suggestions",
+    "evidence",
+    "diagnostics",
+    "unsupported_counts",
+    "artifact_paths"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "structural-drawing-evidence/v0.1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "partial", "failed"]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "format",
+        "importer",
+        "import_status",
+        "source_health",
+        "entity_count",
+        "layer_count"
+      ],
+      "properties": {
+        "path": {"type": "string"},
+        "format": {"type": "string"},
+        "importer": {"type": "string"},
+        "import_status": {"type": "string"},
+        "source_health": {
+          "type": "string",
+          "enum": ["parsed", "partial", "failed", "unsupported", "missing"]
+        },
+        "version": {"type": ["object", "null"]},
+        "entity_count": {"type": "integer", "minimum": 0},
+        "layer_count": {"type": "integer", "minimum": 0},
+        "bbox": {"type": ["object", "null"]},
+        "elapsed_ms": {"type": "number", "minimum": 0}
+      }
+    },
+    "question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "keywords", "checklist"],
+      "properties": {
+        "text": {"type": "string"},
+        "keywords": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "checklist": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "confidence", "method"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "find",
+            "check_missing",
+            "check_mismatch",
+            "check_reference",
+            "general_review"
+          ]
+        },
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "method": {"type": "string"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "answer",
+        "confidence",
+        "source_health",
+        "judgment_level",
+        "requires_human_review",
+        "evidence_count",
+        "notes"
+      ],
+      "properties": {
+        "answer": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "source_health": {"type": "string"},
+        "judgment_level": {"const": "issue_suggestion_only"},
+        "requires_human_review": {"type": "boolean"},
+        "evidence_count": {"type": "integer", "minimum": 0},
+        "notes": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "issue_suggestions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "suggestion_id",
+          "kind",
+          "title",
+          "rationale",
+          "evidence_ids",
+          "confidence",
+          "next_action",
+          "human_review_required",
+          "judgment_level"
+        ],
+        "properties": {
+          "suggestion_id": {"type": "string"},
+          "kind": {
+            "type": "string",
+            "enum": [
+              "evidence_review",
+              "missing_reference_review",
+              "mismatch_review",
+              "reference_review",
+              "comparison_diff_review",
+              "unsupported_content_review",
+              "source_health_review"
+            ]
+          },
+          "title": {"type": "string"},
+          "rationale": {"type": "string"},
+          "evidence_ids": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string"}
+          },
+          "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+          "next_action": {"type": "string"},
+          "human_review_required": {"type": "boolean"},
+          "judgment_level": {"const": "issue_suggestion_only"}
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidence_id",
+          "anchor_text",
+          "anchor_type",
+          "entity_id",
+          "entity_type",
+          "layer",
+          "layout",
+          "bbox",
+          "center",
+          "nearby_entities",
+          "domain_tags",
+          "pattern_matches",
+          "relevance_score",
+          "confidence",
+          "source_status",
+          "reason"
+        ],
+        "properties": {
+          "evidence_id": {"type": "string"},
+          "anchor_text": {"type": "string"},
+          "anchor_type": {"type": "string"},
+          "entity_id": {"type": "string"},
+          "entity_type": {"type": "string"},
+          "layer": {"type": ["string", "null"]},
+          "layout": {"type": ["string", "null"]},
+          "block": {"type": ["string", "null"]},
+          "bbox": {"type": ["object", "null"]},
+          "center": {"type": ["object", "null"]},
+          "nearby_entities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["entity_id", "entity_type", "layer", "distance", "bbox"],
+              "properties": {
+                "entity_id": {"type": "string"},
+                "entity_type": {"type": "string"},
+                "layer": {"type": ["string", "null"]},
+                "distance": {"type": "number", "minimum": 0},
+                "bbox": {"type": ["object", "null"]},
+                "text": {"type": ["string", "null"]}
+              }
+            }
+          },
+          "domain_tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "grid",
+                "member_tag",
+                "section_reference",
+                "dimension",
+                "note",
+                "structural_layer"
+              ]
+            }
+          },
+          "pattern_matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "value", "confidence"],
+              "properties": {
+                "kind": {"type": "string"},
+                "value": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
+              }
+            }
+          },
+          "relevance_score": {"type": "number", "minimum": 0},
+          "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+          "source_status": {"type": "string"},
+          "reason": {"type": "string"},
+          "source_kind": {
+            "type": "string",
+            "enum": ["drawing_anchor", "comparison_diff", "import_diagnostic"]
+          },
+          "diff_context": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": [
+              "change_type",
+              "old_entity_id",
+              "new_entity_id",
+              "field_changes"
+            ],
+            "properties": {
+              "change_type": {
+                "type": "string",
+                "enum": ["added", "removed", "modified", "unchanged"]
+              },
+              "old_entity_id": {"type": ["string", "null"]},
+              "new_entity_id": {"type": ["string", "null"]},
+              "old_bbox": {"type": ["object", "null"]},
+              "new_bbox": {"type": ["object", "null"]},
+              "field_changes": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "old", "new"],
+                  "properties": {
+                    "path": {"type": "string"},
+                    "old": {},
+                    "new": {},
+                    "delta": {"type": ["number", "null"]},
+                    "tolerance": {"type": ["number", "null"]}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object"
+    },
+    "unsupported_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "artifact_paths": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    }
+  }
+}

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .region_match_overrides import RegionMatchOverride
 from .sheet_region_detector import SheetRegion
 
 
@@ -59,6 +60,10 @@ class RegionMatchSummary:
         return sum(1 for match in self.matches if match.status == "review_required")
 
     @property
+    def manual_matched_count(self) -> int:
+        return sum(1 for match in self.matches if match.status == "manual_matched")
+
+    @property
     def unmatched_before_count(self) -> int:
         return sum(1 for match in self.matches if match.status == "unmatched_before")
 
@@ -73,6 +78,7 @@ class RegionMatchSummary:
             "before_count": self.before_count,
             "after_count": self.after_count,
             "auto_matched_count": self.auto_matched_count,
+            "manual_matched_count": self.manual_matched_count,
             "review_required_count": self.review_required_count,
             "unmatched_before_count": self.unmatched_before_count,
             "unmatched_after_count": self.unmatched_after_count,
@@ -89,6 +95,7 @@ def match_sheet_regions(
     auto_threshold: float = 0.82,
     review_threshold: float = 0.60,
     auto_margin: float = 0.12,
+    overrides: Sequence[RegionMatchOverride] | None = None,
 ) -> RegionMatchSummary:
     """Greedily match logical before/after detail regions.
 
@@ -96,21 +103,45 @@ def match_sheet_regions(
     the matcher useful for structural details with weak title text.
     """
 
+    used_before: set[int] = set()
+    used_after: set[int] = set()
+    matches: list[RegionMatch] = []
+    warnings: list[str] = []
+    if overrides:
+        override_matches, override_warnings = _apply_region_match_overrides(
+            before_regions,
+            after_regions,
+            overrides,
+            pair_id=pair_id,
+            used_before=used_before,
+            used_after=used_after,
+        )
+        matches.extend(override_matches)
+        warnings.extend(override_warnings)
+
     scored: list[tuple[float, int, int, dict[str, float], tuple[str, ...]]] = []
     for i, before in enumerate(before_regions):
+        if i in used_before:
+            continue
         for j, after in enumerate(after_regions):
+            if j in used_after:
+                continue
             score, components, reasons = _score_region_pair(before, after)
             scored.append((score, i, j, components, reasons))
     scored.sort(key=lambda item: item[0], reverse=True)
 
-    used_before: set[int] = set()
-    used_after: set[int] = set()
-    matches: list[RegionMatch] = []
     for score, i, j, components, reasons in scored:
         if i in used_before or j in used_after:
             continue
         if score < review_threshold:
-            continue
+            if not _should_emit_low_score_review_candidate(
+                before_regions[i],
+                after_regions[j],
+                scored,
+                used_before=used_before,
+                used_after=used_after,
+            ):
+                continue
         used_before.add(i)
         used_after.add(j)
         components = dict(components)
@@ -118,6 +149,10 @@ def match_sheet_regions(
         components["ambiguity_margin"] = margin
         status = "review_required"
         reasons_list = list(reasons)
+        if score < review_threshold:
+            reasons_list.append(
+                "unique region pair below review threshold; manual review required"
+            )
         if score >= auto_threshold:
             if margin >= auto_margin and _allows_auto_match(components):
                 status = "auto_matched"
@@ -156,9 +191,8 @@ def match_sheet_regions(
                 )
             )
 
-    warnings: list[str] = []
     if before_regions and after_regions and not any(
-        match.status in {"auto_matched", "review_required"} for match in matches
+        match.status in {"auto_matched", "manual_matched", "review_required"} for match in matches
     ):
         warnings.append("no detail regions reached review threshold")
     return RegionMatchSummary(
@@ -169,6 +203,87 @@ def match_sheet_regions(
         status="passed",
         warnings=tuple(warnings),
     )
+
+
+def _apply_region_match_overrides(
+    before_regions: Sequence[SheetRegion],
+    after_regions: Sequence[SheetRegion],
+    overrides: Sequence[RegionMatchOverride],
+    *,
+    pair_id: str,
+    used_before: set[int],
+    used_after: set[int],
+) -> tuple[list[RegionMatch], list[str]]:
+    before_index = {region.region_id: index for index, region in enumerate(before_regions)}
+    after_index = {region.region_id: index for index, region in enumerate(after_regions)}
+    matches: list[RegionMatch] = []
+    warnings: list[str] = []
+    for override in overrides:
+        if override.pair_id and pair_id and override.pair_id != pair_id:
+            continue
+        status = override.normalized_status()
+        before_id = override.before_region_id
+        after_id = override.after_region_id
+        reason = override.reason or "manual region match override"
+        if status == "manual_match":
+            if before_id not in before_index or after_id not in after_index:
+                warnings.append(f"manual region match references unknown region: {before_id} -> {after_id}")
+                continue
+            before_i = before_index[before_id]
+            after_i = after_index[after_id]
+            if before_i in used_before or after_i in used_after:
+                warnings.append(f"manual region match conflicts with an earlier override: {before_id} -> {after_id}")
+                continue
+            used_before.add(before_i)
+            used_after.add(after_i)
+            matches.append(
+                RegionMatch(
+                    match_id=f"{pair_id or 'pair'}-manual-{len(matches) + 1}",
+                    before_region_id=before_id,
+                    after_region_id=after_id,
+                    status="manual_matched",
+                    score=1.0,
+                    component_scores={"manual_override": 1.0},
+                    reasons=(reason,),
+                )
+            )
+        elif status == "unmatched_before":
+            if before_id not in before_index:
+                warnings.append(f"manual unmatched-before references unknown region: {before_id}")
+                continue
+            before_i = before_index[before_id]
+            if before_i in used_before:
+                warnings.append(f"manual unmatched-before conflicts with an earlier override: {before_id}")
+                continue
+            used_before.add(before_i)
+            matches.append(
+                RegionMatch(
+                    match_id=f"{pair_id or 'pair'}-manual-before-unmatched-{len(matches) + 1}",
+                    before_region_id=before_id,
+                    status="unmatched_before",
+                    reasons=(reason,),
+                )
+            )
+        elif status == "unmatched_after":
+            if after_id not in after_index:
+                warnings.append(f"manual unmatched-after references unknown region: {after_id}")
+                continue
+            after_i = after_index[after_id]
+            if after_i in used_after:
+                warnings.append(f"manual unmatched-after conflicts with an earlier override: {after_id}")
+                continue
+            used_after.add(after_i)
+            matches.append(
+                RegionMatch(
+                    match_id=f"{pair_id or 'pair'}-manual-after-unmatched-{len(matches) + 1}",
+                    after_region_id=after_id,
+                    status="unmatched_after",
+                    reasons=(reason,),
+                )
+            )
+        else:
+            warnings.append(f"unsupported manual region override status: {override.status}")
+    return matches, warnings
 
 
 def write_region_match_summary(
@@ -277,6 +392,31 @@ def _ambiguity_margin(
     ]
     next_best = max(alternatives) if alternatives else 0.0
     return max(0.0, score - next_best)
+
+
+def _should_emit_low_score_review_candidate(
+    before: SheetRegion,
+    after: SheetRegion,
+    scored: Sequence[tuple[float, int, int, dict[str, float], tuple[str, ...]]],
+    *,
+    used_before: set[int],
+    used_after: set[int],
+) -> bool:
+    """Keep the only possible weak pair visible so a user can approve it."""
+
+    if before.drawing_number and after.drawing_number and before.drawing_number != after.drawing_number:
+        return False
+    remaining_before = {
+        before_index
+        for _score, before_index, _after_index, _components, _reasons in scored
+        if before_index not in used_before
+    }
+    remaining_after = {
+        after_index
+        for _score, _before_index, after_index, _components, _reasons in scored
+        if after_index not in used_after
+    }
+    return len(remaining_before) == 1 and len(remaining_after) == 1
 
 
 def _allows_auto_match(components: dict[str, float]) -> bool:

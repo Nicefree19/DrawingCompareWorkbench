@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -78,6 +79,18 @@ except ImportError:
             hit_ms = [_to_float_local(event.get("render_ms")) for event in hit if event.get("render_ms") is not None]
             cold_ms = [_to_float_local(event.get("render_ms")) for event in cold if event.get("render_ms") is not None]
             summary["zone_crop_cache_hit_rate"] = round(len(hit) / len(zone_events), 4)
+            summary["render_lifecycle_counts"] = _count_values_local(
+                event.get("render_lifecycle") for event in zone_events
+            )
+            summary["fidelity_counts"] = _count_values_local(
+                event.get("visual_fidelity") for event in zone_events
+            )
+            summary["renderer_backend_counts"] = _count_values_local(
+                event.get("renderer_backend") for event in zone_events
+            )
+            summary["reason_code_counts"] = _count_values_local(
+                event.get("reason_code") for event in zone_events
+            )
             if all_ms:
                 summary["zone_crop_ms"] = _percentile_summary_local([value for value in all_ms if value >= 0])
             if hit_ms:
@@ -97,6 +110,10 @@ except ImportError:
             "zone_crop_ms": dict(empty_latency),
             "zone_crop_cold_ms": dict(empty_latency),
             "zone_crop_cache_hit_ms": dict(empty_latency),
+            "render_lifecycle_counts": {},
+            "fidelity_counts": {},
+            "renderer_backend_counts": {},
+            "reason_code_counts": {},
         }
 
     def _percentile_summary_local(values: Iterable[float]) -> dict[str, float]:
@@ -132,6 +149,15 @@ except ImportError:
         if isinstance(value, bool):
             return value
         return str(value or "").strip().lower() in {"1", "true", "yes", "y", "hit"}
+
+    def _count_values_local(values: Iterable[Any]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for value in values:
+            key = str(value or "").strip()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
 
 # Plan §17 F6 (GPT Pro deep-research review) — manifest integrity verifier.
@@ -364,6 +390,13 @@ STRICT_MAX_CACHE_HIT_ZONE_RENDER_MS = 500.0
 STRICT_REQUIRE_PRECISION_THRESHOLD = 0.85
 STRICT_REQUIRE_BURDEN_THRESHOLD = 2.0
 STRICT_MAX_PEAK_RSS_MB = 2048.0
+STRICT_MAX_PERF_SUMMARY_ELAPSED_MS = 1000.0
+STRICT_MAX_PROCESS_HANDLE_POSITIVE_DELTA = 32
+STRICT_MAX_OPEN_FILE_DESCRIPTOR_POSITIVE_DELTA = 32
+STRICT_MAX_GDI_HANDLE_POSITIVE_DELTA = 16
+STRICT_MAX_USER_HANDLE_POSITIVE_DELTA = 16
+STRICT_MAX_WORKER_PROCESS_POSITIVE_DELTA = 0
+STRICT_MAX_FINAL_WORKER_PROCESS_COUNT = 0
 REQUIRED_CUSTOMER_PACKAGE_CONTENTS = (
     "app/DrawingCompareWorkbench/DrawingCompareWorkbench.exe",
     "cli/audit_drawing_compare_mvp_exit.py",
@@ -420,6 +453,86 @@ class AuditCheck:
     passed: bool
     detail: str
     evidence: list[str]
+
+
+P5_G3_REALSET_GATE_REQUIRED_DOMAINS = (
+    "comparison",
+    "runtime_budget",
+    "viewer_perf_summary",
+    "selected_zone_evidence",
+    "nonblank",
+    "tile_manifest",
+)
+
+P5_G3_REALSET_GATE_TRIAGE = {
+    "comparison": "realset matching/comparison completion",
+    "runtime_budget": "RuntimeBudgetSampler or long-running pipeline budget",
+    "viewer_perf_summary": "viewer telemetry JSONL/summary emission",
+    "selected_zone_evidence": "selected-zone render worker/fallback pipeline",
+    "nonblank": "screenshot/nonblank pixel evidence capture",
+    "tile_manifest": "viewer package manifest materialisation or disk tile cache retention",
+}
+
+P5_G16_BENCHMARK_ID = "p5_g16_real_corpus_replay"
+P5_G16_PROFILE = "real_corpus_artifact_replay"
+P5_G16_REQUIRED_GATES = {
+    "validation_summary_present",
+    "viewer_root_present",
+    "p5_g16_real_corpus_declared",
+    "p5_g16_customer_manifest_present",
+    "p5_g16_customer_sheet_count_min",
+    "p5_g16_customer_sheet_count_max",
+    "p5_g16_customer_format_dwg_dxf",
+    "p5_g16_customer_format_pdf_pdf",
+    "zone_render_artifact_count",
+    "replay_completed",
+    "artifact_replay_p95_ms",
+    "artifact_replay_gap_max_ms",
+    "blank_zone_output_count",
+    "missing_zone_image_count",
+    "stale_result_visible_count",
+    "fallback_missing_reason_count",
+    "timeout_count",
+    "cancel_count",
+    "rss_measurement_available",
+    "rss_slope_mb_per_100_visits",
+    "rss_positive_end_delta_mb",
+    "rss_tail_peak_delta_mb",
+}
+
+P5_G22_BENCHMARK_ID = "p5_g22_actual_gui_soak"
+P5_G22_PROFILE = "actual_gui_customer_corpus_soak"
+P5_G22_REQUIRED_GATES = {
+    "p5_g22_validation_summary_present",
+    "p5_g22_viewer_root_present",
+    "p5_g22_viewer_manifest_present",
+    "p5_g22_customer_manifest_present",
+    "p5_g22_real_corpus_declared",
+    "p5_g22_customer_sheet_count_min",
+    "p5_g22_customer_sheet_count_max",
+    "p5_g22_pair_count",
+    "p5_g22_gui_soak_completed",
+    "p5_g22_drawing_selection_p95_ms",
+    "p5_g22_page_navigation_count",
+    "p5_g22_zone_selection_count",
+    "p5_g22_zone_selection_p95_ms",
+    "p5_g22_event_loop_gap_max_ms",
+    "p5_g22_blank_view_count",
+    "p5_g22_stale_active_pair_count",
+    "p5_g22_stale_active_zone_count",
+    "p5_g22_viewer_perf_stale_count",
+    "p5_g22_worker_cleanup_ok",
+    "p5_g22_orphan_worker_count",
+    "p5_g22_rss_measurement_available",
+    "p5_g22_rss_slope_mb_per_100_visits",
+    "p5_g22_rss_positive_end_delta_mb",
+    "p5_g22_rss_tail_peak_delta_mb",
+    "p5_g22_native_resource_measurement_available",
+    "p5_g22_process_handle_positive_end_delta",
+    "p5_g22_open_file_descriptor_positive_end_delta",
+    "p5_g22_gdi_handle_positive_end_delta",
+    "p5_g22_user_handle_positive_end_delta",
+}
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -569,6 +682,108 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Fail the audit unless validation_summary contains a runtime_budget "
             "block measured by RuntimeBudgetSampler (recommendation #1 from the "
             "external audit review -- proxy metric reinforcement)."
+        ),
+    )
+    parser.add_argument(
+        "--require-perf-events-summary",
+        action="store_true",
+        help=(
+            "Fail the audit unless validation_summary contains a non-empty "
+            "perf_events_summary block. Enabled automatically for customer_grade."
+        ),
+    )
+    parser.add_argument(
+        "--require-p5-g3-realset-gate",
+        action="store_true",
+        help=(
+            "Fail the audit unless every completed validation_summary contains "
+            "a passed p5_g3_realset_gate block. Enabled automatically for "
+            "customer_grade."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g16-benchmark-json",
+        "--p5-g16-real-corpus-replay",
+        dest="p5_g16_benchmark_json",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Optional p5_g16_real_corpus_replay.json artifact. Repeatable. "
+            "If omitted, the audit searches release/customer manifest "
+            "references, validation summary fields, and each results-dir."
+        ),
+    )
+    parser.add_argument(
+        "--require-p5-g16-real-corpus-replay",
+        action="store_true",
+        help=(
+            "Fail the audit unless a passed P5-G16 real-corpus replay benchmark "
+            "is available. Enabled automatically for customer_grade."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g22-gui-soak-json",
+        "--p5-g22-actual-gui-soak",
+        dest="p5_g22_gui_soak_json",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Optional p5_g22_actual_gui_soak.json artifact. Repeatable. "
+            "If omitted, the audit searches release/customer manifest "
+            "references, validation summary fields, and each results-dir."
+        ),
+    )
+    parser.add_argument(
+        "--require-p5-g22-actual-gui-soak",
+        action="store_true",
+        help=(
+            "Fail the audit unless a passed P5-G22 actual GUI soak benchmark "
+            "is available. Enabled automatically for customer_grade."
+        ),
+    )
+    parser.add_argument(
+        "--require-p5-g3-tile-eviction",
+        "--require-p5-g6-tile-eviction",
+        dest="require_p5_g3_tile_eviction",
+        action="store_true",
+        help=(
+            "Fail the audit unless P5-G3 evidence proves tile-cache eviction "
+            "was explicitly required and observed. Use for controlled "
+            "low-byte-cap release-candidate probes, not routine customer-grade."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g3-min-tile-evicted-pairs",
+        "--p5-g6-min-tile-evicted-pairs",
+        dest="p5_g3_min_tile_evicted_pairs",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--p5-g3-min-tile-evicted-bytes",
+        "--p5-g6-min-tile-evicted-bytes",
+        dest="p5_g3_min_tile_evicted_bytes",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--p5-g6-tile-cache-mb",
+        type=float,
+        default=None,
+        help=(
+            "When tile eviction is required, also require validation evidence "
+            "to show this exact DRAWING_COMPARE_TILE_CACHE_MB cap."
+        ),
+    )
+    parser.add_argument(
+        "--max-perf-summary-elapsed-ms",
+        type=float,
+        default=None,
+        help=(
+            "Maximum allowed perf_events summary aggregation time in milliseconds. "
+            "customer_grade defaults to 1000 ms when the value is omitted."
         ),
     )
     parser.add_argument(
@@ -722,7 +937,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "failing. Has no effect when --require-dataset-composition is off."
         ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.p5_g6_tile_cache_mb is not None and args.p5_g6_tile_cache_mb <= 0:
+        parser.error("--p5-g6-tile-cache-mb must be greater than 0")
+    return args
 
 
 def _resolve_zone_render_budget(
@@ -783,6 +1001,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_peak_rss_mb=getattr(args, "max_peak_rss_mb", None),
         max_runtime_first_review_ready_s=args.max_runtime_first_review_ready_s,
         max_peak_disk_spool_mb=args.max_peak_disk_spool_mb,
+        require_perf_events_summary=getattr(args, "require_perf_events_summary", False),
+        require_p5_g3_realset_gate=getattr(args, "require_p5_g3_realset_gate", False),
+        p5_g16_benchmark_json=[path.resolve() for path in args.p5_g16_benchmark_json],
+        require_p5_g16_real_corpus_replay=getattr(args, "require_p5_g16_real_corpus_replay", False),
+        p5_g22_gui_soak_json=[path.resolve() for path in args.p5_g22_gui_soak_json],
+        require_p5_g22_actual_gui_soak=getattr(args, "require_p5_g22_actual_gui_soak", False),
+        require_p5_g3_tile_eviction=getattr(args, "require_p5_g3_tile_eviction", False),
+        p5_g3_min_tile_evicted_pairs=getattr(args, "p5_g3_min_tile_evicted_pairs", 1),
+        p5_g3_min_tile_evicted_bytes=getattr(args, "p5_g3_min_tile_evicted_bytes", 1),
+        p5_g6_tile_cache_mb=getattr(args, "p5_g6_tile_cache_mb", None),
+        max_perf_summary_elapsed_ms=getattr(args, "max_perf_summary_elapsed_ms", None),
         # Plan §16 Phase C-2.3 — comparator-derived gates (getattr keeps older
         # CLI configurations working when these flags aren't supplied).
         max_peak_comparator_changes=getattr(args, "max_peak_comparator_changes", None),
@@ -840,6 +1069,19 @@ def run_audit(
     max_peak_rss_mb: float | None = None,
     max_runtime_first_review_ready_s: float | None = None,
     max_peak_disk_spool_mb: float | None = None,
+    require_perf_events_summary: bool = False,
+    require_p5_g3_realset_gate: bool = False,
+    p5_g16_benchmark_json: Sequence[Path] | None = None,
+    p5_g16_real_corpus_replay: Path | None = None,
+    require_p5_g16_real_corpus_replay: bool = False,
+    p5_g22_gui_soak_json: Sequence[Path] | None = None,
+    p5_g22_actual_gui_soak: Path | None = None,
+    require_p5_g22_actual_gui_soak: bool = False,
+    require_p5_g3_tile_eviction: bool = False,
+    p5_g3_min_tile_evicted_pairs: int = 1,
+    p5_g3_min_tile_evicted_bytes: int = 1,
+    p5_g6_tile_cache_mb: float | None = None,
+    max_perf_summary_elapsed_ms: float | None = None,
     # Plan §16 Phase C-2.3 — comparator-derived gates
     max_peak_comparator_changes: int | None = None,
     max_time_to_first_stream_record_ms: float | None = None,
@@ -900,6 +1142,15 @@ def run_audit(
             for summary in summaries
         ):
             max_peak_rss_mb = STRICT_MAX_PEAK_RSS_MB
+        require_runtime_budget = True
+        require_perf_events_summary = True
+        require_p5_g3_realset_gate = True
+        require_p5_g16_real_corpus_replay = True
+        require_p5_g22_actual_gui_soak = True
+        if max_perf_summary_elapsed_ms is None:
+            max_perf_summary_elapsed_ms = STRICT_MAX_PERF_SUMMARY_ELAPSED_MS
+    if require_p5_g3_tile_eviction:
+        require_p5_g3_realset_gate = True
 
     checks = [
         _check_customer_grade_evidence(
@@ -922,6 +1173,10 @@ def run_audit(
             evidence_level=evidence_level,
             customer_manifest=customer_manifest,
             manifest_path=customer_evidence_manifest,
+        ),
+        _check_p5_g7_forced_tile_eviction_manifest(
+            evidence_level=evidence_level,
+            customer_manifest=customer_manifest,
         ),
         _check_review_queue_precision(
             evidence_level,
@@ -950,6 +1205,44 @@ def run_audit(
         _check_validation_outputs_loaded(loaded),
         _check_success_sentinels(loaded),
         _check_quality_gates(summaries),
+        _check_p5_g3_realset_gate(
+            summaries,
+            require_p5_g3_realset_gate=require_p5_g3_realset_gate,
+            require_p5_g3_tile_eviction=require_p5_g3_tile_eviction,
+            min_tile_evicted_pairs=p5_g3_min_tile_evicted_pairs,
+            min_tile_evicted_bytes=p5_g3_min_tile_evicted_bytes,
+            expected_tile_cache_mb=p5_g6_tile_cache_mb,
+        ),
+        _check_p5_g16_real_corpus_replay(
+            explicit_paths=[
+                *(p5_g16_benchmark_json or []),
+                *([p5_g16_real_corpus_replay] if p5_g16_real_corpus_replay else []),
+            ],
+            customer_manifest=customer_manifest,
+            customer_manifest_path=customer_evidence_manifest,
+            release=release,
+            release_manifest=release_manifest,
+            loaded=loaded,
+            evidence_level=evidence_level,
+            require_p5_g16_real_corpus_replay=require_p5_g16_real_corpus_replay,
+            min_total_pairs=min_total_pairs,
+            max_total_pairs=max_total_pairs,
+        ),
+        _check_p5_g22_actual_gui_soak(
+            explicit_paths=[
+                *(p5_g22_gui_soak_json or []),
+                *([p5_g22_actual_gui_soak] if p5_g22_actual_gui_soak else []),
+            ],
+            customer_manifest=customer_manifest,
+            customer_manifest_path=customer_evidence_manifest,
+            release=release,
+            release_manifest=release_manifest,
+            loaded=loaded,
+            evidence_level=evidence_level,
+            require_p5_g22_actual_gui_soak=require_p5_g22_actual_gui_soak,
+            min_total_pairs=min_total_pairs,
+            max_total_pairs=max_total_pairs,
+        ),
         _check_preflight(summaries),
         _check_ai_optional_fallback(summaries),
         _check_sharable_audit(summaries),
@@ -978,6 +1271,7 @@ def run_audit(
             max_first_review_ready_s=max_first_review_ready_s,
         ),
         _check_viewer_metadata_first_policy(summaries),
+        _check_visual_asset_policy(loaded, evidence_level=evidence_level),
         _check_selected_zone_perf(
             loaded,
             summaries,
@@ -1020,6 +1314,14 @@ def run_audit(
                 max_peak_disk_spool_mb=max_peak_disk_spool_mb,
                 max_peak_comparator_changes=max_peak_comparator_changes,
                 max_time_to_first_stream_record_ms=max_time_to_first_stream_record_ms,
+            )
+        )
+    if require_perf_events_summary or max_perf_summary_elapsed_ms is not None:
+        checks.append(
+            _check_perf_events_summary(
+                summaries,
+                require_perf_events_summary=require_perf_events_summary,
+                max_perf_summary_elapsed_ms=max_perf_summary_elapsed_ms,
             )
         )
     if (
@@ -1298,6 +1600,80 @@ def _customer_gate_missing_manifest(name: str, manifest: dict[str, Any] | None) 
         passed=True,
         detail="deferred: customer_grade_evidence_declared reports the missing manifest",
         evidence=[],
+    )
+
+
+def _check_p5_g7_forced_tile_eviction_manifest(
+    *,
+    evidence_level: str,
+    customer_manifest: dict[str, Any] | None,
+) -> AuditCheck:
+    name = "p5_g7_forced_tile_eviction_manifest"
+    if evidence_level != "customer_grade":
+        return _customer_gate_not_required(name, evidence_level)
+    missing = _customer_gate_missing_manifest(name, customer_manifest)
+    if missing:
+        return missing
+
+    block = customer_manifest.get("p5_g7_forced_tile_eviction")
+    if not isinstance(block, dict):
+        return AuditCheck(
+            name=name,
+            passed=True,
+            detail=(
+                "P5-G7 forced tile-eviction proof not supplied; optional for "
+                "routine customer_grade evidence unless the release claims realset tile eviction"
+            ),
+            evidence=["p5_g7_forced_tile_eviction=<missing>"],
+        )
+
+    status = str(block.get("status") or "").strip()
+    required = block.get("required") is True
+    proof_count = _int(block.get("proof_count"))
+    passed_proof_count = _int(block.get("passed_proof_count"))
+    expected_tile_cache_mb = _optional_float(block.get("expected_tile_cache_mb"))
+    issues = [
+        str(issue)
+        for issue in block.get("issues") or []
+        if str(issue).strip()
+    ]
+    failures: list[str] = []
+    if required and status != "passed":
+        failures.append(
+            "p5_g7_forced_tile_eviction.required=true requires status=passed"
+        )
+    if status == "passed":
+        if proof_count < 1:
+            failures.append("p5_g7_forced_tile_eviction.proof_count must be >= 1 when status=passed")
+        if passed_proof_count < 1:
+            failures.append(
+                "p5_g7_forced_tile_eviction.passed_proof_count must be >= 1 when status=passed"
+            )
+        if issues:
+            failures.append("p5_g7_forced_tile_eviction.issues must be empty when status=passed")
+    if proof_count > 0 and passed_proof_count > proof_count:
+        failures.append(
+            "p5_g7_forced_tile_eviction.passed_proof_count cannot exceed proof_count"
+        )
+
+    evidence = [
+        f"status={status or '<missing>'}",
+        f"required={required}",
+        f"proof_count={proof_count}",
+        f"passed_proof_count={passed_proof_count}",
+    ]
+    if expected_tile_cache_mb is not None:
+        evidence.append(f"expected_tile_cache_mb={expected_tile_cache_mb:g}")
+    evidence.extend(f"issue:{issue}" for issue in issues[:5])
+    return AuditCheck(
+        name=name,
+        passed=not failures,
+        detail=(
+            "P5-G7 forced tile-eviction manifest block is consistent"
+            if not failures
+            else "; ".join(failures)
+        ),
+        evidence=evidence,
     )
 
 
@@ -1889,6 +2265,760 @@ def _check_quality_gates(summaries: Sequence[dict[str, Any]]) -> AuditCheck:
         detail="all quality gates passed" if not failures else f"failed quality gates: {failures}",
         evidence=[str(_nested(summary, "outputs", "quality_gate_json") or "") for summary in summaries],
     )
+
+
+def _check_p5_g3_realset_gate(
+    summaries: Sequence[dict[str, Any]],
+    *,
+    require_p5_g3_realset_gate: bool,
+    require_p5_g3_tile_eviction: bool,
+    min_tile_evicted_pairs: int,
+    min_tile_evicted_bytes: int,
+    expected_tile_cache_mb: float | None,
+) -> AuditCheck:
+    failures: list[str] = []
+    evidence: list[str] = []
+    completed_outputs = 0
+    gated_outputs = 0
+
+    for summary in summaries:
+        completed_pairs = _int(_nested(summary, "comparison", "completed_pairs"))
+        if completed_pairs <= 0:
+            continue
+        completed_outputs += 1
+        label = str(summary.get("output_dir") or "<validation_summary>")
+        gate = summary.get("p5_g3_realset_gate")
+        if not isinstance(gate, dict) or not gate:
+            if require_p5_g3_realset_gate:
+                failures.append(f"{label}: p5_g3_realset_gate block missing")
+            evidence.append(f"{label}: p5_g3_realset_gate=missing")
+            continue
+
+        status = str(gate.get("status") or "")
+        requested = gate.get("requested") is True
+        gate_failures = [str(item) for item in (gate.get("failures") or [])]
+        if not requested:
+            if require_p5_g3_realset_gate:
+                failures.append(f"{label}: p5_g3_realset_gate.requested is not true")
+            evidence.append(
+                f"{label}: requested={requested}, status={status or '<missing>'}"
+            )
+            continue
+
+        gated_outputs += 1
+        gate_evidence = gate.get("evidence")
+        if not isinstance(gate_evidence, dict):
+            gate_evidence = {}
+        domain_statuses: dict[str, str] = {}
+        failed_domains: set[str] = set()
+        for domain in P5_G3_REALSET_GATE_REQUIRED_DOMAINS:
+            domain_payload = gate_evidence.get(domain)
+            domain_status = (
+                str(domain_payload.get("status") or "")
+                if isinstance(domain_payload, dict)
+                else ""
+            )
+            domain_statuses[domain] = domain_status or "missing"
+            if domain_status != "passed":
+                failed_domains.add(domain)
+                failures.append(
+                    f"{label}: p5_g3_realset_gate.{domain}.status="
+                    f"{domain_status or '<missing>'}"
+                )
+        evidence.append(
+            f"{label}: requested={requested}, status={status or '<missing>'}, "
+            f"domains={domain_statuses}, failures={gate_failures}"
+        )
+        if status != "passed":
+            failures.append(
+                f"{label}: p5_g3_realset_gate.status={status or '<missing>'}"
+            )
+        failures.extend(f"{label}: {item}" for item in gate_failures)
+        tile_evidence = gate_evidence.get("tile_manifest")
+        if require_p5_g3_tile_eviction:
+            if not isinstance(tile_evidence, dict):
+                failures.append(f"{label}: p5_g3_realset_gate.tile_manifest missing")
+                failed_domains.add("tile_manifest")
+            else:
+                evidence.append(
+                    f"{label}: tile_eviction_evidence="
+                    f"require_eviction={tile_evidence.get('require_eviction')}, "
+                    f"evicted_pairs={_int(tile_evidence.get('evicted_pair_count'))}, "
+                    f"evicted_bytes={_int(tile_evidence.get('evicted_estimated_bytes'))}, "
+                    f"byte_limit={_int(tile_evidence.get('byte_limit'))}, "
+                    f"configured_tile_cache_mb={tile_evidence.get('configured_tile_cache_mb')}, "
+                    f"tile_cache_env_mb={tile_evidence.get('tile_cache_env_mb')}"
+                )
+                if tile_evidence.get("require_eviction") is not True:
+                    failures.append(
+                        f"{label}: p5_g3_realset_gate.tile_manifest.require_eviction "
+                        "is not true"
+                    )
+                    failed_domains.add("tile_manifest")
+                evicted_pairs = _int(tile_evidence.get("evicted_pair_count"))
+                evicted_bytes = _int(tile_evidence.get("evicted_estimated_bytes"))
+                if evicted_pairs < max(1, min_tile_evicted_pairs):
+                    failures.append(
+                        f"{label}: p5_g3_realset_gate.tile_manifest.evicted_pair_count="
+                        f"{evicted_pairs} < {max(1, min_tile_evicted_pairs)}"
+                    )
+                    failed_domains.add("tile_manifest")
+                if evicted_bytes < max(1, min_tile_evicted_bytes):
+                    failures.append(
+                        f"{label}: p5_g3_realset_gate.tile_manifest.evicted_estimated_bytes="
+                        f"{evicted_bytes} < {max(1, min_tile_evicted_bytes)}"
+                    )
+                    failed_domains.add("tile_manifest")
+                if expected_tile_cache_mb is not None:
+                    configured_mb = _optional_float(tile_evidence.get("configured_tile_cache_mb"))
+                    env_mb = _optional_float(tile_evidence.get("tile_cache_env_mb"))
+                    byte_limit = _int(tile_evidence.get("byte_limit"))
+                    expected_bytes = int(float(expected_tile_cache_mb) * 1024 * 1024)
+                    if not _float_close(configured_mb, expected_tile_cache_mb):
+                        failures.append(
+                            f"{label}: p5_g3_realset_gate.tile_manifest.configured_tile_cache_mb="
+                            f"{configured_mb} != {expected_tile_cache_mb}"
+                        )
+                        failed_domains.add("tile_manifest")
+                    if not _float_close(env_mb, expected_tile_cache_mb):
+                        failures.append(
+                            f"{label}: p5_g3_realset_gate.tile_manifest.tile_cache_env_mb="
+                            f"{env_mb} != {expected_tile_cache_mb}"
+                        )
+                        failed_domains.add("tile_manifest")
+                    if byte_limit <= 0:
+                        failures.append(
+                            f"{label}: p5_g3_realset_gate.tile_manifest.byte_limit missing for "
+                            f"expected tile cache cap {expected_tile_cache_mb} MB"
+                        )
+                        failed_domains.add("tile_manifest")
+                    elif abs(byte_limit - expected_bytes) > 1:
+                        failures.append(
+                            f"{label}: p5_g3_realset_gate.tile_manifest.byte_limit="
+                            f"{byte_limit} != {expected_bytes}"
+                        )
+                        failed_domains.add("tile_manifest")
+        if failed_domains or gate_failures:
+            triage = {
+                domain: P5_G3_REALSET_GATE_TRIAGE.get(domain, "unknown")
+                for domain in sorted(failed_domains)
+            }
+            evidence.append(f"{label}: triage_hints={triage}")
+
+    if require_p5_g3_realset_gate and completed_outputs == 0:
+        failures.append("require_p5_g3_realset_gate enforced but no completed outputs found")
+
+    detail_parts = [
+        f"completed_outputs={completed_outputs}",
+        f"with_p5_g3_realset_gate={gated_outputs}",
+    ]
+    if require_p5_g3_tile_eviction:
+        detail_parts.append(
+            "require_tile_eviction="
+            f"pairs>={max(1, min_tile_evicted_pairs)}, "
+            f"bytes>={max(1, min_tile_evicted_bytes)}"
+        )
+    if expected_tile_cache_mb is not None:
+        detail_parts.append(f"expected_tile_cache_mb={expected_tile_cache_mb}")
+    if failures:
+        detail_parts.append("failures=" + "; ".join(failures))
+    ok = (
+        not failures
+        and (
+            gated_outputs > 0
+            or not require_p5_g3_realset_gate
+        )
+    )
+    return AuditCheck(
+        name="p5_g3_realset_release_gate",
+        passed=ok,
+        detail=", ".join(detail_parts),
+        evidence=evidence,
+    )
+
+
+def _check_p5_g16_real_corpus_replay(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+    evidence_level: str,
+    require_p5_g16_real_corpus_replay: bool,
+    min_total_pairs: int,
+    max_total_pairs: int,
+) -> AuditCheck:
+    name = "p5_g16_real_corpus_replay"
+    candidates = _p5_g16_candidate_paths(
+        explicit_paths=explicit_paths,
+        customer_manifest=customer_manifest,
+        customer_manifest_path=customer_manifest_path,
+        release=release,
+        release_manifest=release_manifest,
+        loaded=loaded,
+    )
+    evidence = [str(path) for path in candidates]
+    if not require_p5_g16_real_corpus_replay and not explicit_paths and not candidates:
+        return AuditCheck(
+            name=name,
+            passed=True,
+            detail="P5-G16 replay evidence is advisory outside customer_grade",
+            evidence=[],
+        )
+    if not candidates:
+        detail = "p5_g16_real_corpus_replay artifact missing"
+        return AuditCheck(
+            name=name,
+            passed=not require_p5_g16_real_corpus_replay,
+            detail=detail,
+            evidence=[],
+        )
+
+    benchmark_path = candidates[0]
+    payload = _load_json(benchmark_path)
+    failures = _p5_g16_payload_failures(
+        payload,
+        loaded=loaded,
+        customer_manifest_path=customer_manifest_path,
+        min_total_pairs=min_total_pairs,
+        max_total_pairs=max_total_pairs,
+        require_customer_grade=evidence_level == "customer_grade" or require_p5_g16_real_corpus_replay,
+    )
+    detail_parts = [f"path={benchmark_path}"]
+    if isinstance(payload, dict):
+        detail_parts.append(f"status={payload.get('status') or '<missing>'}")
+        detail_parts.append(f"benchmark_id={payload.get('benchmark_id') or '<missing>'}")
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        detail_parts.append(f"visits={_int(summary.get('completed_visit_count'))}/{_int(summary.get('visit_count'))}")
+    if failures:
+        detail_parts.append("failures=" + "; ".join(failures))
+    return AuditCheck(
+        name=name,
+        passed=not failures,
+        detail=", ".join(detail_parts),
+        evidence=evidence,
+    )
+
+
+def _p5_g16_candidate_paths(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve() if path.exists() else path
+        if resolved not in candidates:
+            candidates.append(resolved)
+
+    for path in explicit_paths:
+        add(path)
+    if isinstance(release, dict):
+        artifacts = release.get("artifacts") if isinstance(release.get("artifacts"), dict) else {}
+        for key in ("p5_g16_real_corpus_replay_json", "p5_g16_real_corpus_replay", "real_corpus_replay"):
+            add(_manifest_reference_path(release_manifest, str(artifacts.get(key) or "").strip()))
+        jsons = artifacts.get("p5_g16_real_corpus_replay_jsons")
+        if isinstance(jsons, list):
+            for value in jsons:
+                add(_manifest_reference_path(release_manifest, str(value or "").strip()))
+    if isinstance(customer_manifest, dict):
+        for value in _p5_g16_manifest_path_values(customer_manifest):
+            add(_manifest_reference_path(customer_manifest_path, value))
+    for item in loaded:
+        summary = item.get("summary")
+        if isinstance(summary, dict):
+            add(_result_reference_path(item, str(_nested(summary, "outputs", "p5_g16_real_corpus_replay_json") or "")))
+            add(_result_reference_path(item, str(_nested(summary, "benchmarks", "p5_g16_real_corpus_replay", "output_json") or "")))
+        root = item.get("path")
+        if isinstance(root, Path):
+            candidate = root / "p5_g16_real_corpus_replay.json"
+            if candidate.exists():
+                add(candidate)
+    return candidates
+
+
+def _p5_g16_manifest_path_values(manifest: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+    for key in ("p5_g16_real_corpus_replay_json", "p5_g16_real_corpus_replay", "real_corpus_replay"):
+        text = str(artifacts.get(key) or "").strip()
+        if text:
+            values.append(text)
+    jsons = artifacts.get("p5_g16_real_corpus_replay_jsons")
+    if isinstance(jsons, list):
+        values.extend(str(item).strip() for item in jsons if str(item or "").strip())
+    for key in ("p5_g16_real_corpus_replay", "real_corpus_replay", "performance_replay"):
+        section = manifest.get(key)
+        if isinstance(section, dict):
+            text = str(section.get("path") or section.get("json") or section.get("artifact") or "").strip()
+            if text:
+                values.append(text)
+    performance = manifest.get("performance_benchmarks")
+    if isinstance(performance, dict):
+        section = performance.get("p5_g16_real_corpus_replay")
+        if isinstance(section, dict):
+            text = str(
+                section.get("benchmark_json")
+                or section.get("path")
+                or section.get("json")
+                or section.get("artifact")
+                or ""
+            ).strip()
+            if text:
+                values.append(text)
+            benchmark_jsons = section.get("benchmark_jsons")
+            if isinstance(benchmark_jsons, list):
+                values.extend(
+                    str(item).strip()
+                    for item in benchmark_jsons
+                    if str(item or "").strip()
+                )
+        elif isinstance(section, str) and section.strip():
+            values.append(section.strip())
+    return values
+
+
+def _p5_g16_payload_failures(
+    payload: dict[str, Any] | None,
+    *,
+    loaded: Sequence[dict[str, Any]],
+    customer_manifest_path: Path | None,
+    min_total_pairs: int,
+    max_total_pairs: int,
+    require_customer_grade: bool,
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["p5_g16_real_corpus_replay JSON missing or unreadable"]
+    failures: list[str] = []
+    if payload.get("schema_version") != 1:
+        failures.append("schema_version must be 1")
+    if payload.get("benchmark_id") != P5_G16_BENCHMARK_ID:
+        failures.append(f"benchmark_id must be {P5_G16_BENCHMARK_ID}")
+    if payload.get("profile") != P5_G16_PROFILE:
+        failures.append(f"profile must be {P5_G16_PROFILE}")
+    if payload.get("status") != "passed":
+        failures.append(f"status={payload.get('status') or '<missing>'}")
+
+    gates = payload.get("gates")
+    if not isinstance(gates, list):
+        failures.append("gates[] missing")
+        gate_by_name: dict[str, dict[str, Any]] = {}
+    else:
+        gate_by_name = {
+            str(gate.get("name") or ""): gate
+            for gate in gates
+            if isinstance(gate, dict) and str(gate.get("name") or "")
+        }
+        missing = sorted(P5_G16_REQUIRED_GATES - set(gate_by_name))
+        if missing:
+            failures.append("required gates missing: " + ", ".join(missing))
+        failed = sorted(
+            gate_name
+            for gate_name, gate in gate_by_name.items()
+            if gate.get("required") is not False and gate.get("passed") is not True
+        )
+        if failed:
+            failures.append("required gates failed: " + ", ".join(failed))
+
+    args_payload = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    environment = payload.get("environment") if isinstance(payload.get("environment"), dict) else {}
+    corpus = payload.get("corpus") if isinstance(payload.get("corpus"), dict) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    native_summary = (
+        summary.get("native_resource_summary")
+        if isinstance(summary.get("native_resource_summary"), dict)
+        else {}
+    )
+    worker_summary = (
+        summary.get("worker_tree_summary")
+        if isinstance(summary.get("worker_tree_summary"), dict)
+        else {}
+    )
+
+    if require_customer_grade:
+        if args_payload.get("require_customer_corpus") is not True:
+            failures.append("args.require_customer_corpus must be true")
+        if corpus.get("evidence_level") != "customer_grade":
+            failures.append("corpus.evidence_level must be customer_grade")
+        sheet_count = _int(corpus.get("sheet_count"))
+        if sheet_count < int(min_total_pairs) or sheet_count > int(max_total_pairs):
+            failures.append(f"corpus.sheet_count={sheet_count} outside {min_total_pairs}-{max_total_pairs}")
+        if corpus.get("has_dwg_dxf") is not True:
+            failures.append("corpus.has_dwg_dxf must be true")
+        if corpus.get("has_pdf_pdf") is not True:
+            failures.append("corpus.has_pdf_pdf must be true")
+        if environment.get("allow_missing_psutil") is True:
+            failures.append("environment.allow_missing_psutil must be false")
+        if environment.get("psutil_available") is not True:
+            failures.append("environment.psutil_available must be true")
+        source_validation = source.get("validation_summary") if isinstance(source.get("validation_summary"), dict) else {}
+        validation_sha = str(source_validation.get("sha256") or "").strip()
+        current_validation_hashes = {
+            _file_sha256(item.get("summary_path"))
+            for item in loaded
+            if isinstance(item.get("summary_path"), Path)
+        }
+        current_validation_hashes.discard("")
+        if not validation_sha:
+            failures.append("source.validation_summary.sha256 missing")
+        elif validation_sha not in current_validation_hashes:
+            failures.append("source.validation_summary.sha256 does not match audited validation_summary.json")
+        manifest_sha = str(corpus.get("manifest_sha256") or "").strip()
+        current_manifest_sha = _file_sha256(customer_manifest_path)
+        if current_manifest_sha:
+            if not manifest_sha:
+                failures.append("corpus.manifest_sha256 missing")
+            elif manifest_sha != current_manifest_sha:
+                failures.append("corpus.manifest_sha256 does not match customer evidence manifest")
+
+    if summary.get("rss_measurement_available") is not True:
+        failures.append("summary.rss_measurement_available must be true")
+    for key in (
+        "blank_zone_output_count",
+        "missing_zone_image_count",
+        "stale_result_visible_count",
+        "fallback_missing_reason_count",
+        "timeout_count",
+        "cancel_count",
+    ):
+        value = _int(summary.get(key))
+        if value != 0:
+            failures.append(f"summary.{key}={value} must be 0")
+    if summary.get("replay_completed") is not True:
+        failures.append("summary.replay_completed must be true")
+    if _int(summary.get("zone_render_artifact_count")) <= 0:
+        failures.append("summary.zone_render_artifact_count must be > 0")
+    return failures
+
+
+def _check_p5_g22_actual_gui_soak(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+    evidence_level: str,
+    require_p5_g22_actual_gui_soak: bool,
+    min_total_pairs: int,
+    max_total_pairs: int,
+) -> AuditCheck:
+    name = "p5_g22_actual_gui_soak"
+    candidates = _p5_g22_candidate_paths(
+        explicit_paths=explicit_paths,
+        customer_manifest=customer_manifest,
+        customer_manifest_path=customer_manifest_path,
+        release=release,
+        release_manifest=release_manifest,
+        loaded=loaded,
+    )
+    evidence = [str(path) for path in candidates]
+    if not require_p5_g22_actual_gui_soak and not explicit_paths and not candidates:
+        return AuditCheck(
+            name=name,
+            passed=True,
+            detail="P5-G22 actual GUI soak evidence is advisory outside customer_grade",
+            evidence=[],
+        )
+    if not candidates:
+        return AuditCheck(
+            name=name,
+            passed=not require_p5_g22_actual_gui_soak,
+            detail="p5_g22_actual_gui_soak artifact missing",
+            evidence=[],
+        )
+
+    benchmark_path = candidates[0]
+    payload = _load_json(benchmark_path)
+    failures = _p5_g22_payload_failures(
+        payload,
+        loaded=loaded,
+        customer_manifest_path=customer_manifest_path,
+        min_total_pairs=min_total_pairs,
+        max_total_pairs=max_total_pairs,
+        require_customer_grade=evidence_level == "customer_grade" or require_p5_g22_actual_gui_soak,
+    )
+    detail_parts = [f"path={benchmark_path}"]
+    if isinstance(payload, dict):
+        detail_parts.append(f"status={payload.get('status') or '<missing>'}")
+        detail_parts.append(f"benchmark_id={payload.get('benchmark_id') or '<missing>'}")
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        detail_parts.append(f"visits={_int(summary.get('completed_visit_count'))}/{_int(summary.get('visit_count'))}")
+        detail_parts.append(f"blank_views={_int(summary.get('blank_view_count'))}")
+        detail_parts.append(f"orphan_workers={_int(summary.get('orphan_worker_count'))}")
+    if failures:
+        detail_parts.append("failures=" + "; ".join(failures))
+    return AuditCheck(
+        name=name,
+        passed=not failures,
+        detail=", ".join(detail_parts),
+        evidence=evidence,
+    )
+
+
+def _p5_g22_candidate_paths(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve() if path.exists() else path
+        if resolved not in candidates:
+            candidates.append(resolved)
+
+    for path in explicit_paths:
+        add(path)
+    if isinstance(release, dict):
+        artifacts = release.get("artifacts") if isinstance(release.get("artifacts"), dict) else {}
+        for key in ("p5_g22_actual_gui_soak_json", "p5_g22_actual_gui_soak", "actual_gui_soak"):
+            add(_manifest_reference_path(release_manifest, str(artifacts.get(key) or "").strip()))
+        jsons = artifacts.get("p5_g22_actual_gui_soak_jsons")
+        if isinstance(jsons, list):
+            for value in jsons:
+                add(_manifest_reference_path(release_manifest, str(value or "").strip()))
+    if isinstance(customer_manifest, dict):
+        for value in _p5_g22_manifest_path_values(customer_manifest):
+            add(_manifest_reference_path(customer_manifest_path, value))
+    for item in loaded:
+        summary = item.get("summary")
+        if isinstance(summary, dict):
+            add(_result_reference_path(item, str(_nested(summary, "outputs", "p5_g22_actual_gui_soak_json") or "")))
+            add(_result_reference_path(item, str(_nested(summary, "benchmarks", "p5_g22_actual_gui_soak", "output_json") or "")))
+        root = item.get("path")
+        if isinstance(root, Path):
+            candidate = root / "p5_g22_actual_gui_soak.json"
+            if candidate.exists():
+                add(candidate)
+    return candidates
+
+
+def _p5_g22_manifest_path_values(manifest: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+    for key in ("p5_g22_actual_gui_soak_json", "p5_g22_actual_gui_soak", "actual_gui_soak"):
+        text = str(artifacts.get(key) or "").strip()
+        if text:
+            values.append(text)
+    jsons = artifacts.get("p5_g22_actual_gui_soak_jsons")
+    if isinstance(jsons, list):
+        values.extend(str(item).strip() for item in jsons if str(item or "").strip())
+    for key in ("p5_g22_actual_gui_soak", "actual_gui_soak", "gui_soak"):
+        section = manifest.get(key)
+        if isinstance(section, dict):
+            text = str(section.get("path") or section.get("json") or section.get("artifact") or "").strip()
+            if text:
+                values.append(text)
+        elif isinstance(section, str) and section.strip():
+            values.append(section.strip())
+    performance = manifest.get("performance_benchmarks")
+    if isinstance(performance, dict):
+        section = performance.get("p5_g22_actual_gui_soak")
+        if isinstance(section, dict):
+            text = str(
+                section.get("benchmark_json")
+                or section.get("path")
+                or section.get("json")
+                or section.get("artifact")
+                or ""
+            ).strip()
+            if text:
+                values.append(text)
+            benchmark_jsons = section.get("benchmark_jsons")
+            if isinstance(benchmark_jsons, list):
+                values.extend(
+                    str(item).strip()
+                    for item in benchmark_jsons
+                    if str(item or "").strip()
+                )
+        elif isinstance(section, str) and section.strip():
+            values.append(section.strip())
+    return values
+
+
+def _p5_g22_payload_failures(
+    payload: dict[str, Any] | None,
+    *,
+    loaded: Sequence[dict[str, Any]],
+    customer_manifest_path: Path | None,
+    min_total_pairs: int,
+    max_total_pairs: int,
+    require_customer_grade: bool,
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["p5_g22_actual_gui_soak JSON missing or unreadable"]
+    failures: list[str] = []
+    if payload.get("schema_version") != 1:
+        failures.append("schema_version must be 1")
+    if payload.get("benchmark_id") != P5_G22_BENCHMARK_ID:
+        failures.append(f"benchmark_id must be {P5_G22_BENCHMARK_ID}")
+    if payload.get("profile") != P5_G22_PROFILE:
+        failures.append(f"profile must be {P5_G22_PROFILE}")
+    if payload.get("status") != "passed":
+        failures.append(f"status={payload.get('status') or '<missing>'}")
+
+    gates = payload.get("gates")
+    if not isinstance(gates, list):
+        failures.append("gates[] missing")
+        gate_by_name: dict[str, dict[str, Any]] = {}
+    else:
+        gate_by_name = {
+            str(gate.get("name") or ""): gate
+            for gate in gates
+            if isinstance(gate, dict) and str(gate.get("name") or "")
+        }
+        missing = sorted(P5_G22_REQUIRED_GATES - set(gate_by_name))
+        if missing:
+            failures.append("required gates missing: " + ", ".join(missing))
+        failed = sorted(
+            gate_name
+            for gate_name, gate in gate_by_name.items()
+            if gate.get("required") is not False and gate.get("passed") is not True
+        )
+        if failed:
+            failures.append("required gates failed: " + ", ".join(failed))
+
+    args_payload = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    environment = payload.get("environment") if isinstance(payload.get("environment"), dict) else {}
+    corpus = payload.get("corpus") if isinstance(payload.get("corpus"), dict) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    native_summary = (
+        summary.get("native_resource_summary")
+        if isinstance(summary.get("native_resource_summary"), dict)
+        else {}
+    )
+    worker_summary = (
+        summary.get("worker_tree_summary")
+        if isinstance(summary.get("worker_tree_summary"), dict)
+        else {}
+    )
+
+    if require_customer_grade:
+        if args_payload.get("require_customer_corpus") is not True:
+            failures.append("args.require_customer_corpus must be true")
+        if args_payload.get("skip_zone_render_workers") is True:
+            failures.append("args.skip_zone_render_workers must be false for customer_grade")
+        if corpus.get("evidence_level") != "customer_grade":
+            failures.append("corpus.evidence_level must be customer_grade")
+        sheet_count = _int(corpus.get("sheet_count"))
+        if sheet_count < int(min_total_pairs) or sheet_count > int(max_total_pairs):
+            failures.append(f"corpus.sheet_count={sheet_count} outside {min_total_pairs}-{max_total_pairs}")
+        if environment.get("allow_missing_psutil") is True:
+            failures.append("environment.allow_missing_psutil must be false")
+        if environment.get("psutil_available") is not True:
+            failures.append("environment.psutil_available must be true")
+        if environment.get("allow_missing_native_resources") is True:
+            failures.append("environment.allow_missing_native_resources must be false")
+        if not native_summary:
+            failures.append("summary.native_resource_summary missing")
+        elif native_summary.get("measurement_available") is not True:
+            failures.append("summary.native_resource_summary.measurement_available must be true")
+        if not worker_summary:
+            failures.append("summary.worker_tree_summary missing")
+        else:
+            if worker_summary.get("cleanup_ok") is not True:
+                failures.append("summary.worker_tree_summary.cleanup_ok must be true")
+            if _int(worker_summary.get("orphan_worker_count")) != 0:
+                failures.append(
+                    "summary.worker_tree_summary.orphan_worker_count="
+                    f"{_int(worker_summary.get('orphan_worker_count'))} must be 0"
+                )
+        source_validation = source.get("validation_summary") if isinstance(source.get("validation_summary"), dict) else {}
+        validation_sha = str(source_validation.get("sha256") or "").strip()
+        current_validation_hashes = {
+            _file_sha256(item.get("summary_path"))
+            for item in loaded
+            if isinstance(item.get("summary_path"), Path)
+        }
+        current_validation_hashes.discard("")
+        if not validation_sha:
+            failures.append("source.validation_summary.sha256 missing")
+        elif validation_sha not in current_validation_hashes:
+            failures.append("source.validation_summary.sha256 does not match audited validation_summary.json")
+        manifest_sha = str(corpus.get("manifest_sha256") or "").strip()
+        current_manifest_sha = _file_sha256(customer_manifest_path)
+        if current_manifest_sha:
+            if not manifest_sha:
+                failures.append("corpus.manifest_sha256 missing")
+            elif manifest_sha != current_manifest_sha:
+                failures.append("corpus.manifest_sha256 does not match customer evidence manifest")
+
+    if summary.get("gui_soak_completed") is not True:
+        failures.append("summary.gui_soak_completed must be true")
+    if summary.get("rss_measurement_available") is not True:
+        failures.append("summary.rss_measurement_available must be true")
+    if summary.get("native_resource_measurement_available") is not True:
+        failures.append("summary.native_resource_measurement_available must be true")
+    if native_summary and native_summary.get("measurement_available") is not summary.get("native_resource_measurement_available"):
+        failures.append("summary.native_resource_summary contradicts native_resource_measurement_available")
+    if summary.get("worker_cleanup_ok") is not True:
+        failures.append("summary.worker_cleanup_ok must be true")
+    if worker_summary and worker_summary.get("cleanup_ok") is not summary.get("worker_cleanup_ok"):
+        failures.append("summary.worker_tree_summary.cleanup_ok contradicts worker_cleanup_ok")
+    if _int(summary.get("completed_visit_count")) < _int(summary.get("visit_count")):
+        failures.append("summary.completed_visit_count must be >= summary.visit_count")
+    for key in (
+        "blank_view_count",
+        "stale_active_pair_count",
+        "stale_active_zone_count",
+        "viewer_perf_stale_count",
+        "orphan_worker_count",
+    ):
+        value = _int(summary.get(key))
+        if value != 0:
+            failures.append(f"summary.{key}={value} must be 0")
+    if worker_summary and _int(worker_summary.get("orphan_worker_count")) != _int(summary.get("orphan_worker_count")):
+        failures.append("summary.worker_tree_summary.orphan_worker_count contradicts orphan_worker_count")
+    if _int(summary.get("zone_selection_count")) <= 0:
+        failures.append("summary.zone_selection_count must be > 0")
+    event_loop_gap = summary.get("event_loop_gap_ms") if isinstance(summary.get("event_loop_gap_ms"), dict) else {}
+    if _int(event_loop_gap.get("over_500ms_count")) != 0:
+        failures.append(f"summary.event_loop_gap_ms.over_500ms_count={_int(event_loop_gap.get('over_500ms_count'))} must be 0")
+    return failures
+
+
+def _result_reference_path(item: dict[str, Any], value: str) -> Path | None:
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        root = item.get("path")
+        if not isinstance(root, Path):
+            return None
+        path = root / path
+    return path if path.exists() else None
+
+
+def _file_sha256(path: Any) -> str:
+    if not isinstance(path, Path) or not path.exists():
+        return ""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
 def _check_preflight(summaries: Sequence[dict[str, Any]]) -> AuditCheck:
@@ -2571,13 +3701,30 @@ def _check_runtime_budget(
         time_to_first_stream_record_ms = _optional_float_value(
             budget.get("time_to_first_stream_record_ms")
         )
+        native_available = budget.get("native_resource_available") is True
+        native_sample_count = _int(budget.get("native_resource_sample_count"))
+        native_platform = str(budget.get("native_resource_platform") or "").lower()
+        peak_process_handle_count = _optional_int_value(budget.get("peak_process_handle_count"))
+        peak_open_fd_count = _optional_int_value(budget.get("peak_open_file_descriptor_count"))
+        peak_gdi_handle_count = _optional_int_value(budget.get("peak_gdi_handle_count"))
+        peak_user_handle_count = _optional_int_value(budget.get("peak_user_handle_count"))
+        final_worker_process_count = _optional_int_value(budget.get("final_worker_process_count"))
+        process_handle_delta = _optional_int_value(budget.get("process_handle_positive_delta"))
+        open_fd_delta = _optional_int_value(budget.get("open_file_descriptor_positive_delta"))
+        gdi_delta = _optional_int_value(budget.get("gdi_handle_positive_delta"))
+        user_delta = _optional_int_value(budget.get("user_handle_positive_delta"))
+        worker_delta = _optional_int_value(budget.get("worker_process_positive_delta"))
 
         evidence.append(
             f"{label}: peak_ws_mb={peak_ws}, peak_rss_mb={peak_rss}, "
             f"peak_spool_mb={peak_spool}, first_review_ready_s={first_ready}, "
             f"sampler_active={sampler_active}, sample_count={sample_count}, "
             f"peak_comparator_changes={peak_comparator_changes}, "
-            f"time_to_first_stream_record_ms={time_to_first_stream_record_ms}"
+            f"time_to_first_stream_record_ms={time_to_first_stream_record_ms}, "
+            f"native_available={native_available}, native_sample_count={native_sample_count}, "
+            f"peak_process_handles={peak_process_handle_count}, peak_fds={peak_open_fd_count}, "
+            f"peak_gdi={peak_gdi_handle_count}, peak_user={peak_user_handle_count}, "
+            f"final_worker_process_count={final_worker_process_count}"
         )
 
         if require_runtime_budget and not sampler_active:
@@ -2588,6 +3735,45 @@ def _check_runtime_budget(
             failures.append(
                 f"{label}: runtime_budget.sample_count={sample_count} (require >0 when enforced)"
             )
+        if require_runtime_budget:
+            if not native_available:
+                failures.append(
+                    f"{label}: runtime_budget.native_resource_available=false "
+                    "(require_runtime_budget enforced)"
+                )
+            if native_sample_count <= 0:
+                failures.append(
+                    f"{label}: runtime_budget.native_resource_sample_count="
+                    f"{native_sample_count} (require >0 when enforced)"
+                )
+            if peak_process_handle_count is None and peak_open_fd_count is None:
+                failures.append(
+                    f"{label}: runtime_budget peak process handle/fd metric missing"
+                )
+            if native_platform == "windows":
+                if peak_process_handle_count is None:
+                    failures.append(f"{label}: peak_process_handle_count missing on Windows")
+                if peak_gdi_handle_count is None:
+                    failures.append(f"{label}: peak_gdi_handle_count missing on Windows")
+                if peak_user_handle_count is None:
+                    failures.append(f"{label}: peak_user_handle_count missing on Windows")
+            if final_worker_process_count is None:
+                failures.append(f"{label}: final_worker_process_count missing")
+            elif final_worker_process_count > STRICT_MAX_FINAL_WORKER_PROCESS_COUNT:
+                failures.append(
+                    f"{label}: final_worker_process_count={final_worker_process_count} > "
+                    f"{STRICT_MAX_FINAL_WORKER_PROCESS_COUNT}"
+                )
+
+        for metric_name, value, limit in (
+            ("process_handle_positive_delta", process_handle_delta, STRICT_MAX_PROCESS_HANDLE_POSITIVE_DELTA),
+            ("open_file_descriptor_positive_delta", open_fd_delta, STRICT_MAX_OPEN_FILE_DESCRIPTOR_POSITIVE_DELTA),
+            ("gdi_handle_positive_delta", gdi_delta, STRICT_MAX_GDI_HANDLE_POSITIVE_DELTA),
+            ("user_handle_positive_delta", user_delta, STRICT_MAX_USER_HANDLE_POSITIVE_DELTA),
+            ("worker_process_positive_delta", worker_delta, STRICT_MAX_WORKER_PROCESS_POSITIVE_DELTA),
+        ):
+            if value is not None and value > limit:
+                failures.append(f"{label}: {metric_name}={value} > {limit}")
 
         if max_peak_working_set_mb is not None:
             effective_ws = peak_ws if peak_ws is not None else peak_rss
@@ -2698,11 +3884,99 @@ def _check_runtime_budget(
     )
 
 
+def _check_perf_events_summary(
+    summaries: Sequence[dict[str, Any]],
+    *,
+    require_perf_events_summary: bool,
+    max_perf_summary_elapsed_ms: float | None,
+) -> AuditCheck:
+    failures: list[str] = []
+    evidence: list[str] = []
+    completed_outputs_total = 0
+    completed_outputs_with_perf = 0
+
+    for summary in summaries:
+        completed_pairs = _int(_nested(summary, "comparison", "completed_pairs"))
+        if completed_pairs <= 0:
+            continue
+        completed_outputs_total += 1
+        label = str(summary.get("output_dir") or "<validation_summary>")
+        perf = _nested(summary, "perf_events_summary")
+        if not isinstance(perf, dict) or not perf:
+            if require_perf_events_summary:
+                failures.append(f"{label}: perf_events_summary block missing")
+            evidence.append(f"{label}: perf_events_summary=missing")
+            continue
+
+        status = str(perf.get("status") or "")
+        event_count = _int(perf.get("event_count"))
+        summary_elapsed_ms = _optional_float_value(perf.get("summary_elapsed_ms"))
+        summary_input_bytes = _int(perf.get("summary_input_bytes"))
+        evidence.append(
+            f"{label}: status={status}, event_count={event_count}, "
+            f"summary_elapsed_ms={summary_elapsed_ms}, "
+            f"summary_input_bytes={summary_input_bytes}"
+        )
+
+        if status != "ready":
+            failures.append(f"{label}: perf_events_summary.status={status or '<missing>'}")
+            continue
+        if event_count <= 0:
+            failures.append(f"{label}: perf_events_summary.event_count must be > 0")
+            continue
+        completed_outputs_with_perf += 1
+        if max_perf_summary_elapsed_ms is not None:
+            if summary_elapsed_ms is None:
+                failures.append(
+                    f"{label}: perf_events_summary.summary_elapsed_ms missing "
+                    f"(required <= {max_perf_summary_elapsed_ms})"
+                )
+            elif summary_elapsed_ms > max_perf_summary_elapsed_ms:
+                failures.append(
+                    f"{label}: perf_events_summary.summary_elapsed_ms="
+                    f"{summary_elapsed_ms} > {max_perf_summary_elapsed_ms}"
+                )
+
+    if require_perf_events_summary and completed_outputs_total == 0:
+        failures.append("require_perf_events_summary enforced but no completed outputs found")
+
+    detail_chunks = [
+        f"completed_outputs={completed_outputs_total}",
+        f"with_perf_events_summary={completed_outputs_with_perf}",
+    ]
+    if max_perf_summary_elapsed_ms is not None:
+        detail_chunks.append(f"max_perf_summary_elapsed_ms={max_perf_summary_elapsed_ms}")
+    if failures:
+        detail_chunks.append("failures=" + "; ".join(failures))
+    ok = (
+        not failures
+        and (
+            completed_outputs_with_perf > 0
+            or not require_perf_events_summary
+        )
+    )
+    return AuditCheck(
+        name="perf_events_summary_measurement",
+        passed=ok,
+        detail=", ".join(detail_chunks),
+        evidence=evidence,
+    )
+
+
 def _optional_float_value(value: Any) -> float | None:
     if value is None:
         return None
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int_value(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return None
 
@@ -3100,6 +4374,175 @@ def _check_viewer_metadata_first_policy(summaries: Sequence[dict[str, Any]]) -> 
     )
 
 
+def _check_visual_asset_policy(
+    loaded: Sequence[dict[str, Any]],
+    *,
+    evidence_level: str,
+) -> AuditCheck:
+    if evidence_level != "customer_grade":
+        return AuditCheck(
+            name="p5_g24_visual_asset_policy",
+            passed=True,
+            detail="P5-G24 visual asset policy is advisory outside customer_grade",
+            evidence=[],
+        )
+
+    failures: list[str] = []
+    evidence: list[str] = []
+    completed_output_count = 0
+    outputs_with_manifests = 0
+    manifest_count = 0
+    for item in loaded:
+        summary = item.get("summary") or {}
+        completed_pairs = _int(_nested(summary, "comparison", "completed_pairs"))
+        if completed_pairs <= 0:
+            continue
+        completed_output_count += 1
+        label = str(item.get("path") or "<validation_output>")
+        viewer_manifest_path = _viewer_manifest_path_for_loaded_item(item)
+        if viewer_manifest_path is None:
+            failures.append(f"{label}: viewer_manifest_json missing or unreadable")
+            evidence.append(f"{label}: visual_asset_manifests=missing_viewer_manifest")
+            continue
+        viewer_manifest = _load_json(viewer_manifest_path)
+        if not isinstance(viewer_manifest, dict):
+            failures.append(f"{viewer_manifest_path}: viewer manifest JSON missing or unreadable")
+            evidence.append(f"{label}: visual_asset_manifests=missing_viewer_manifest")
+            continue
+        manifest_refs = _visual_asset_manifest_refs(viewer_manifest)
+        if not manifest_refs:
+            failures.append(f"{viewer_manifest_path}: no visual asset manifest references")
+            evidence.append(f"{label}: visual_asset_manifests=0")
+            continue
+        outputs_with_manifests += 1
+        evidence.append(
+            f"{label}: visual_asset_manifests={len(manifest_refs)}, viewer_manifest={viewer_manifest_path}"
+        )
+        for ref in manifest_refs:
+            manifest_path = _resolve_viewer_manifest_ref(
+                ref,
+                result_root=item.get("path"),
+                viewer_root=viewer_manifest_path.parent,
+            )
+            manifest_count += 1
+            if manifest_path is None:
+                failures.append(f"{viewer_manifest_path}: visual asset manifest not found: {ref}")
+                continue
+            payload = _load_json(manifest_path)
+            if not isinstance(payload, dict):
+                failures.append(f"{manifest_path}: visual asset manifest JSON missing or unreadable")
+                continue
+            policy_issues = _visual_asset_policy_issues(payload, customer_grade=True)
+            if policy_issues:
+                failures.append(f"{manifest_path}: " + "; ".join(policy_issues))
+
+    if completed_output_count <= 0:
+        failures.append("customer_grade visual asset policy requires completed validation outputs")
+    if outputs_with_manifests < completed_output_count:
+        failures.append(
+            "customer_grade visual asset manifests must be present for every completed validation output"
+        )
+    ok = completed_output_count > 0 and manifest_count > 0 and not failures
+    return AuditCheck(
+        name="p5_g24_visual_asset_policy",
+        passed=ok,
+        detail=(
+            f"P5-G24 visual asset policy passed for {manifest_count} manifest(s)"
+            if ok
+            else "; ".join(failures)
+        ),
+        evidence=evidence[:20],
+    )
+
+
+def _viewer_manifest_path_for_loaded_item(item: dict[str, Any]) -> Path | None:
+    summary = item.get("summary") or {}
+    for value in (
+        _nested(summary, "outputs", "viewer_manifest_json"),
+        _nested(summary, "viewer_package", "viewer_manifest"),
+    ):
+        path = _result_reference_path(item, str(value or ""))
+        if path is not None:
+            return path
+    return None
+
+
+def _visual_asset_manifest_refs(viewer_manifest: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in refs:
+            refs.append(text)
+
+    manifest_paths = viewer_manifest.get("visual_asset_manifest_paths")
+    if isinstance(manifest_paths, list):
+        for value in manifest_paths:
+            add(value)
+    pairs = viewer_manifest.get("pairs")
+    if isinstance(pairs, list):
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            pair_paths = pair.get("visual_asset_manifest_paths")
+            if isinstance(pair_paths, list):
+                for value in pair_paths:
+                    add(value)
+            visual_assets = pair.get("visual_assets")
+            if isinstance(visual_assets, dict):
+                _collect_visual_asset_refs(visual_assets, add)
+    return refs
+
+
+def _collect_visual_asset_refs(node: Any, add: Any) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in {"manifest_path", "manifest"}:
+                add(value)
+            else:
+                _collect_visual_asset_refs(value, add)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_visual_asset_refs(value, add)
+
+
+def _resolve_viewer_manifest_ref(
+    value: str,
+    *,
+    result_root: Any,
+    viewer_root: Path,
+) -> Path | None:
+    if not value:
+        return None
+    path = Path(value)
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        if isinstance(result_root, Path):
+            candidates.append(result_root / path)
+        candidates.append(viewer_root / path)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _visual_asset_policy_issues(
+    payload: dict[str, Any],
+    *,
+    customer_grade: bool,
+) -> list[str]:
+    try:
+        from src.services.comparison.visual_asset import validate_visual_asset_policy
+    except Exception as exc:
+        return [f"visual asset policy validator unavailable: {exc}"]
+    try:
+        return validate_visual_asset_policy(payload, customer_grade=customer_grade)
+    except Exception as exc:
+        return [f"visual asset policy validation failed: {exc}"]
+
+
 def _check_selected_zone_perf(
     loaded: Sequence[dict[str, Any]],
     summaries: Sequence[dict[str, Any]],
@@ -3125,9 +4568,14 @@ def _check_selected_zone_perf(
         hit_p95 = _float(_nested(perf, "zone_crop_cache_hit_ms", "p95"))
         if zone_count:
             telemetry_count += 1
+            reason_counts = perf.get("reason_code_counts") if isinstance(perf, dict) else {}
+            renderer_counts = perf.get("renderer_backend_counts") if isinstance(perf, dict) else {}
+            reason_suffix = f", reason_codes={reason_counts}" if reason_counts else ""
+            renderer_suffix = f", renderers={renderer_counts}" if renderer_counts else ""
             evidence.append(
                 f"{item['path']}: completed_pairs={completed_pairs}, "
                 f"zone_count={zone_count}, cold_p95={cold_p95}, hit_p95={hit_p95}"
+                f"{reason_suffix}{renderer_suffix}"
             )
             if cold_p95 and cold_p95 > max_cold_zone_render_ms:
                 failures.append(f"{item['path']}: cold_p95={cold_p95} > {max_cold_zone_render_ms}")
@@ -3924,6 +5372,19 @@ def _float(value: Any) -> float:
         return float(value or 0.0)
     except Exception:
         return 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _float_close(actual: float | None, expected: float, tolerance: float = 1e-9) -> bool:
+    return actual is not None and abs(float(actual) - float(expected)) <= tolerance
 
 
 def _string_list(value: Any) -> list[str]:

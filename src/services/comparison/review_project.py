@@ -254,12 +254,20 @@ def collect_review_zones(
         result: ComparisonResult = item.result
         pair_id = pair_id_for_candidate(candidate, index)
         display_label = drawing_label_for_candidate(candidate, pair_id)
-        zones = build_change_zones(
+        drawing_number = drawing_number_for_candidate(candidate)
+        zones = _zones_from_result_metadata(
             result,
             pair_id=pair_id,
-            drawing_number=drawing_number_for_candidate(candidate),
-            options=zone_options,
+            display_label=display_label,
+            drawing_number=drawing_number,
         )
+        if zones is None:
+            zones = build_change_zones(
+                result,
+                pair_id=pair_id,
+                drawing_number=drawing_number,
+                options=zone_options,
+            )
         for zone in zones:
             zone.pair_uuid = pair_id
             zone.display_label = display_label
@@ -274,6 +282,85 @@ def collect_review_zones(
         apply_review_state(zones, records)
         by_pair[pair_id] = zones
     return by_pair
+
+
+def _zones_from_result_metadata(
+    result: ComparisonResult,
+    *,
+    pair_id: str,
+    display_label: str,
+    drawing_number: str,
+) -> Optional[list[DrawingChangeZone]]:
+    """Reuse zones already built by export_change_artifacts.
+
+    FolderComparePipeline exports the main artifacts before preview generation.
+    Rebuilding zones from tens of thousands of CAD changes in the preview step
+    is pure duplicate work and was a major large-drawing slowdown.
+    """
+
+    metadata = getattr(result, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    raw_zones = metadata.get("change_zones")
+    if not isinstance(raw_zones, list) or not raw_zones:
+        return None
+    zones: list[DrawingChangeZone] = []
+    try:
+        for raw in raw_zones:
+            if not isinstance(raw, dict):
+                return None
+            bbox = _tuple4(raw.get("bbox"))
+            centroid = _tuple2(raw.get("centroid"))
+            if bbox is None or centroid is None:
+                return None
+            old_bbox = _tuple4(raw.get("old_bbox"))
+            zones.append(
+                DrawingChangeZone(
+                    zone_id=str(raw.get("zone_id") or ""),
+                    pair_id=str(raw.get("pair_id") or pair_id),
+                    pair_uuid=str(raw.get("pair_uuid") or pair_id),
+                    display_label=str(raw.get("display_label") or display_label),
+                    drawing_number=str(raw.get("drawing_number") or drawing_number),
+                    change_type=str(raw.get("change_type") or "mixed"),
+                    severity=str(raw.get("severity") or "medium"),
+                    bbox=bbox,
+                    old_bbox=old_bbox,
+                    centroid=centroid,
+                    raw_change_count=int(raw.get("raw_change_count") or 0),
+                    added_count=int(raw.get("added_count") or 0),
+                    deleted_count=int(raw.get("deleted_count") or 0),
+                    modified_count=int(raw.get("modified_count") or 0),
+                    layers=tuple(str(item) for item in (raw.get("layers") or [])),
+                    entity_types=tuple(str(item) for item in (raw.get("entity_types") or [])),
+                    representative_change_keys=tuple(
+                        str(item) for item in (raw.get("representative_change_keys") or [])
+                    ),
+                    status=str(raw.get("status") or "needs_review"),
+                    reasons=tuple(str(item) for item in (raw.get("reasons") or [])),
+                    metadata=dict(raw.get("metadata") or {}),
+                )
+            )
+    except (TypeError, ValueError):
+        return None
+    return zones
+
+
+def _tuple4(value: Any) -> Optional[tuple[float, float, float, float]]:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        return (float(value[0]), float(value[1]), float(value[2]), float(value[3]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _tuple2(value: Any) -> Optional[tuple[float, float]]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        return (float(value[0]), float(value[1]))
+    except (TypeError, ValueError):
+        return None
 
 
 def export_preview_artifacts(

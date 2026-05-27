@@ -28,6 +28,7 @@ from src.services.comparison.drawing_batch import (
     scan_drawing_inputs,
     score_match,
     write_manual_match_csv,
+    _legacy_ezdxf_fallback_available,
 )
 from src.services.comparison.pair_identity import candidate_pair_uuid
 
@@ -564,6 +565,79 @@ def test_cad_batch_compare_falls_back_to_legacy_ezdxf_for_failed_cached_dxf(monk
     assert result.metadata["canonical_fallback_used"] is True
     assert result.metadata["canonical_error_code"] == "COMPARE_IMPORT_FAILED"
     assert [call["config"]["use_canonical_pipeline"] for call in calls] == [True, False]
+
+
+def test_large_dxf_batch_compare_preselects_legacy_ezdxf(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_a = tmp_path / "S-101.dxf"
+    source_b = tmp_path / "S-101_REV1.dxf"
+    source_a.write_bytes(b"0\nSECTION\n")
+    source_b.write_bytes(b"0\nSECTION\n")
+    calls: list[dict[str, object]] = []
+
+    def descriptor_for(path: Path) -> DrawingFileDescriptor:
+        return DrawingFileDescriptor(
+            path=str(path),
+            kind=DrawingKind.CAD,
+            extension=".dxf",
+            relative_path=path.name,
+            identity=parse_filename_identity(path.name),
+        )
+
+    candidate = MatchCandidate(
+        source_a=descriptor_for(source_a),
+        source_b=descriptor_for(source_b),
+        score=0.9,
+        status=MatchStatus.AUTO_CONFIRMED,
+    )
+
+    class FakeDwgDiffer:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            calls.append(kwargs)
+
+        def compare(
+            self,
+            source_a,
+            source_b,
+            *,
+            progress_callback=None,
+            is_cancelled=None,
+        ) -> ComparisonResult:
+            result = ComparisonResult(source_a=str(source_a), source_b=str(source_b))
+            result.add_change(ChangeRecord(key="line_1", change_type=ChangeType.ADDED))
+            return result
+
+    monkeypatch.setenv("DRAWING_COMPARE_LEGACY_DXF_DIRECT_MB", "0.000001")
+    monkeypatch.setattr("src.services.comparison.dwg_differ.DwgDiffer", FakeDwgDiffer)
+
+    result = compare_candidate(candidate, BatchCompareOptions())
+
+    assert result.total_changes == 1
+    assert result.metadata["legacy_ezdxf_preselected"] is True
+    assert result.warnings
+    assert len(calls) == 1
+    assert calls[0]["config"] == {
+        "use_canonical_pipeline": False,
+        "use_legacy_ezdxf_pipeline": True,
+    }
+
+
+def test_legacy_ezdxf_fallback_available_accepts_same_stem_cache(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "dxf_cache"
+    cache_dir.mkdir()
+    source_a = tmp_path / "source_a" / "large_detail.dwg"
+    source_b = tmp_path / "source_b" / "large_detail_R1.dwg"
+    source_a.parent.mkdir()
+    source_b.parent.mkdir()
+    source_a.write_bytes(b"dwg-a")
+    source_b.write_bytes(b"dwg-b")
+    (cache_dir / "large_detail.oldhash.dxf").write_text("0\nEOF\n", encoding="utf-8")
+    (cache_dir / "large_detail_R1.oldhash.dxf").write_text("0\nEOF\n", encoding="utf-8")
+
+    assert _legacy_ezdxf_fallback_available(source_a, source_b, cache_dir) is True
 
 
 def test_pair_uuid_distinguishes_same_label_in_different_folders() -> None:

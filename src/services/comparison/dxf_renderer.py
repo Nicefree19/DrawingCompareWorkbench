@@ -26,6 +26,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from .dxf_read import read_dxf_document, read_dxf_document_result
+
 logger = logging.getLogger(__name__)
 
 
@@ -305,7 +307,7 @@ class DxfRenderer:
     ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         """DXF 파일의 도면 범위를 ((min_x,min_y),(max_x,max_y))로 반환."""
 
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = read_dxf_document(dxf_path, ezdxf_module=ezdxf)
         msp = doc.modelspace()
         extents = msp.extents()
         if extents is None or extents[0] is None:
@@ -337,7 +339,8 @@ class DxfRenderer:
         dpi = float(dpi or self.dpi)
 
         # DXF 로드 + 범위 계산은 백엔드 독립적으로 한 번만 수행
-        doc = ezdxf.readfile(str(dxf_path))
+        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        doc = read_result.doc
         msp = doc.modelspace()
 
         min_x, min_y, max_x, max_y = 0.0, 0.0, 2000.0, 1500.0
@@ -415,6 +418,11 @@ class DxfRenderer:
             "render_elapsed_ms": elapsed_ms,
             "extent_source": extent_source,
         }
+        read_warning = read_result.diagnostics.warning()
+        if read_warning:
+            transform["dxf_read_sanitized"] = True
+            transform["dxf_read_repair_count"] = read_result.diagnostics.repair_count
+            transform["dxf_read_warning"] = read_warning
         if fallback_reason:
             transform["fallback_reason"] = fallback_reason
 

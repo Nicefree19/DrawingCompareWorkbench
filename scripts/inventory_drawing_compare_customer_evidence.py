@@ -30,6 +30,7 @@ try:  # Running from release ``cli/`` next to the evidence tools.
         summarize_dataset_strata_csv,
         summarize_first_interactive_readiness,
         summarize_large_dwg_resource_probe,
+        summarize_p5_g7_forced_tile_eviction_proof,
         summarize_review_decision_truth_csv,
     )
 except ImportError:  # Running from source checkout.
@@ -45,6 +46,7 @@ except ImportError:  # Running from source checkout.
         summarize_dataset_strata_csv,
         summarize_first_interactive_readiness,
         summarize_large_dwg_resource_probe,
+        summarize_p5_g7_forced_tile_eviction_proof,
         summarize_review_decision_truth_csv,
     )
 
@@ -94,6 +96,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not skip large generated/runtime directories such as _internal or site-packages.",
     )
+    parser.add_argument(
+        "--require-p5-g7-forced-tile-eviction",
+        "--require-p5-g7-tile-eviction-proof",
+        dest="require_p5_g7_forced_tile_eviction",
+        action="store_true",
+        help="Require a passing P5-G7 forced tile-cache eviction proof in the inventory.",
+    )
+    parser.add_argument(
+        "--p5-g6-tile-cache-mb",
+        type=float,
+        help="Expected DRAWING_COMPARE_TILE_CACHE_MB cap for the P5-G7 forced tile-eviction proof.",
+    )
     return parser.parse_args(argv)
 
 
@@ -107,6 +121,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         large_dwg_probe=args.large_dwg_probe,
         include_ignored_dirs=args.include_ignored_dirs,
         portable_paths=args.portable_paths,
+        require_p5_g7_forced_tile_eviction=args.require_p5_g7_forced_tile_eviction,
+        p5_g6_tile_cache_mb=args.p5_g6_tile_cache_mb,
     )
     text = json.dumps(report, ensure_ascii=True, indent=2)
     if args.out:
@@ -124,32 +140,54 @@ def inventory_roots(
     large_dwg_probe: Path | None = None,
     include_ignored_dirs: bool = False,
     portable_paths: bool = False,
+    require_p5_g7_forced_tile_eviction: bool = False,
+    p5_g6_tile_cache_mb: float | None = None,
 ) -> dict[str, Any]:
     scan = _scan_paths(roots, include_ignored_dirs=include_ignored_dirs)
-    validations = [_summarize_validation(path) for path in sorted(scan["validation_summaries"])]
-    completed_validations = [item for item in validations if item["completed_pairs"] > 0]
+    validations = [
+        _summarize_validation(path, expected_tile_cache_mb=p5_g6_tile_cache_mb)
+        for path in sorted(scan["validation_summaries"])
+    ]
+    p5_g7_forced_tile_eviction_outputs = [
+        item
+        for item in validations
+        if item["p5_g7_forced_tile_eviction"].get("candidate") is True
+    ]
+    p5_g7_forced_tile_eviction_passed_outputs = [
+        item
+        for item in p5_g7_forced_tile_eviction_outputs
+        if item["p5_g7_forced_tile_eviction"].get("status") == "passed"
+    ]
+    customer_validations = [
+        item
+        for item in validations
+        if item["p5_g7_forced_tile_eviction"].get("candidate") is not True
+    ]
+    completed_validations = [item for item in customer_validations if item["completed_pairs"] > 0]
 
-    completed_pairs = sum(int(item["completed_pairs"]) for item in validations)
+    completed_pairs = sum(int(item["completed_pairs"]) for item in customer_validations)
     cad_source_extensions = {
         ext
-        for item in validations
+        for item in customer_validations
         if item["format"] == "cad" and item["completed_pairs"] > 0
         for ext in item["source_extensions"]
     }
     has_dwg_dxf = {"dwg", "dxf"}.issubset(cad_source_extensions)
-    has_pdf_pdf = any(item["format"] == "pdf" and item["has_pdf_pdf"] for item in validations)
-    has_cad_pdf_block = any(item["cad_pdf_blocked"] for item in validations)
-    has_cad_block_text_no_expand = any(item["cad_block_text_no_expand"] for item in validations)
+    has_pdf_pdf = any(item["format"] == "pdf" and item["has_pdf_pdf"] for item in customer_validations)
+    has_cad_pdf_block = any(item["cad_pdf_blocked"] for item in customer_validations)
+    has_cad_block_text_no_expand = any(item["cad_block_text_no_expand"] for item in customer_validations)
     selected_zone_complete = bool(completed_validations) and all(
         item["selected_zone_telemetry"] for item in completed_validations
     )
     first_screen_complete = bool(completed_validations) and all(
         item["top_review_queue_first"] for item in completed_validations
     )
-    sharable_audit_complete = bool(validations) and all(item["sharable_path_leakage_zero"] for item in validations)
-    has_workbench_acceptance = any(item["workbench_acceptance_passed"] for item in validations)
+    sharable_audit_complete = bool(customer_validations) and all(
+        item["sharable_path_leakage_zero"] for item in customer_validations
+    )
+    has_workbench_acceptance = any(item["workbench_acceptance_passed"] for item in customer_validations)
     ground_truths = [_summarize_truth_csv(path) for path in sorted(scan["review_ground_truth_csvs"])]
-    audited_truth_rows = sum(int(item["review_ground_truth_rows"]) for item in validations)
+    audited_truth_rows = sum(int(item["review_ground_truth_rows"]) for item in customer_validations)
     non_empty_ground_truths = [item for item in ground_truths if int(item["rows"]) > 0]
     schema_valid_ground_truths = [
         item for item in non_empty_ground_truths if bool(item.get("schema_valid"))
@@ -171,8 +209,8 @@ def inventory_roots(
         for path in sorted(scan["dataset_strata_csvs"])
     ]
     valid_dataset_strata = [item for item in dataset_strata if item.get("status") == "passed"]
-    first_interactive_readiness = _summarize_first_interactive_from_validations(validations)
-    bbox_quality = _summarize_bbox_from_validations(validations)
+    first_interactive_readiness = _summarize_first_interactive_from_validations(customer_validations)
+    bbox_quality = _summarize_bbox_from_validations(customer_validations)
     operator_notes = [_summarize_operator_notes(path) for path in sorted(scan["operator_notes"])]
     operator_notes_all_required = any(item["all_required_checked"] for item in operator_notes)
     operator_notes_with_approved_role = any(
@@ -186,6 +224,14 @@ def inventory_roots(
     )
     confirmed_artifacts = sorted(str(path) for path in scan["confirmed_artifacts"])
     release_manifests = sorted(str(path) for path in scan["release_manifests"])
+    p5_g16_replay_jsons = sorted(str(path) for path in scan["p5_g16_replay_jsons"])
+    p5_g16_replays = [
+        _summarize_p5_g16_replay(path) for path in sorted(scan["p5_g16_replay_jsons"])
+    ]
+    p5_g22_gui_soak_jsons = sorted(str(path) for path in scan["p5_g22_gui_soak_jsons"])
+    p5_g22_gui_soaks = [
+        _summarize_p5_g22_gui_soak(path) for path in sorted(scan["p5_g22_gui_soak_jsons"])
+    ]
     customer_manifests = sorted(str(path) for path in scan["customer_manifests"])
     customer_manifest_summaries = [
         _summarize_customer_manifest(path) for path in sorted(scan["customer_manifests"])
@@ -249,10 +295,12 @@ def inventory_roots(
         )
     if not large_dwg_probe_summary["passed"]:
         issues.append("missing passing large-DWG performance/progress probe")
+    if require_p5_g7_forced_tile_eviction and not p5_g7_forced_tile_eviction_passed_outputs:
+        issues.append("missing passing P5-G7 forced tile-eviction proof validation output")
 
     status = "ready_for_manifest" if not issues else "incomplete"
     commands = _recommended_commands(
-        validations=validations,
+        validations=customer_validations,
         ground_truths=ground_truths,
         valid_ground_truths=valid_ground_truths,
         review_decision_truths=review_decision_truths,
@@ -266,9 +314,15 @@ def inventory_roots(
         large_dwg_probe=large_dwg_probe_summary["path"],
         min_total_pairs=min_total_pairs,
         max_total_pairs=max_total_pairs,
+        p5_g7_forced_tile_eviction_outputs=p5_g7_forced_tile_eviction_outputs,
+        p5_g7_forced_tile_eviction_passed_outputs=p5_g7_forced_tile_eviction_passed_outputs,
+        require_p5_g7_forced_tile_eviction=require_p5_g7_forced_tile_eviction,
+        p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
+        p5_g16_replay_jsons=p5_g16_replay_jsons,
+        p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
     )
     diagnostics = _diagnostics(
-        validations=validations,
+        validations=customer_validations,
         ground_truths=ground_truths,
         audited_truth_rows=audited_truth_rows,
         valid_ground_truths=valid_ground_truths,
@@ -287,6 +341,12 @@ def inventory_roots(
         has_workbench_acceptance=has_workbench_acceptance,
         customer_manifest_summaries=customer_manifest_summaries,
         large_dwg_probe_summary=large_dwg_probe_summary,
+        p5_g7_forced_tile_eviction_outputs=p5_g7_forced_tile_eviction_outputs,
+        p5_g7_forced_tile_eviction_passed_outputs=p5_g7_forced_tile_eviction_passed_outputs,
+        require_p5_g7_forced_tile_eviction=require_p5_g7_forced_tile_eviction,
+        p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
+        p5_g16_replays=p5_g16_replays,
+        p5_g22_gui_soaks=p5_g22_gui_soaks,
     )
     report = {
         "schema_version": 1,
@@ -295,6 +355,7 @@ def inventory_roots(
         "summary": {
             "completed_pairs": completed_pairs,
             "validation_output_count": len(validations),
+            "customer_validation_output_count": len(customer_validations),
             "completed_validation_output_count": len(completed_validations),
             "audited_review_ground_truth_rows": audited_truth_rows,
             "has_dwg_dxf": has_dwg_dxf,
@@ -310,6 +371,19 @@ def inventory_roots(
             "first_interactive_ready_passed": first_interactive_readiness.get("status") == "passed",
             "bbox_quality_passed": bbox_quality.get("status") == "passed",
             "large_dwg_probe_passed": large_dwg_probe_summary["passed"],
+            "p5_g7_forced_tile_eviction_required": require_p5_g7_forced_tile_eviction,
+            "p5_g7_forced_tile_eviction_proof_count": len(p5_g7_forced_tile_eviction_outputs),
+            "p5_g7_forced_tile_eviction_passed_count": len(p5_g7_forced_tile_eviction_passed_outputs),
+            "p5_g7_forced_tile_eviction_passed": bool(p5_g7_forced_tile_eviction_passed_outputs),
+            "p5_g6_tile_cache_mb": p5_g6_tile_cache_mb,
+            "p5_g16_real_corpus_replay_count": len(p5_g16_replays),
+            "p5_g16_real_corpus_replay_passed_count": len(
+                [item for item in p5_g16_replays if item.get("status") == "passed"]
+            ),
+            "p5_g22_actual_gui_soak_count": len(p5_g22_gui_soaks),
+            "p5_g22_actual_gui_soak_passed_count": len(
+                [item for item in p5_g22_gui_soaks if item.get("status") == "passed"]
+            ),
         },
         "validation_outputs": validations,
         "drawing_file_groups": _summarize_drawing_groups(scan["drawing_files"]),
@@ -321,6 +395,10 @@ def inventory_roots(
         "customer_evidence_manifests": customer_manifests,
         "customer_evidence_manifest_summaries": customer_manifest_summaries,
         "release_manifests": release_manifests,
+        "p5_g16_real_corpus_replay_jsons": p5_g16_replay_jsons,
+        "p5_g16_real_corpus_replays": p5_g16_replays,
+        "p5_g22_actual_gui_soak_jsons": p5_g22_gui_soak_jsons,
+        "p5_g22_actual_gui_soaks": p5_g22_gui_soaks,
         "large_dwg_probe": large_dwg_probe_summary,
         "first_interactive_readiness": first_interactive_readiness,
         "bbox_quality": bbox_quality,
@@ -378,6 +456,8 @@ def _scan_paths(roots: Sequence[Path], *, include_ignored_dirs: bool) -> dict[st
         "confirmed_artifacts": set(),
         "customer_manifests": set(),
         "release_manifests": set(),
+        "p5_g16_replay_jsons": set(),
+        "p5_g22_gui_soak_jsons": set(),
     }
     for root in roots:
         if root.is_file():
@@ -417,6 +497,10 @@ def _classify_file(path: Path, found: dict[str, set[Path]]) -> None:
         found["customer_manifests"].add(path)
     elif lower == "release_manifest.json":
         found["release_manifests"].add(path)
+    elif lower == "p5_g16_real_corpus_replay.json":
+        found["p5_g16_replay_jsons"].add(path)
+    elif lower == "p5_g22_actual_gui_soak.json":
+        found["p5_g22_gui_soak_jsons"].add(path)
     elif path.stem.endswith("_confirmed") and suffix in CONFIRMED_EXPORT_SUFFIXES:
         found["confirmed_artifacts"].add(path)
 
@@ -461,7 +545,11 @@ def _is_probe_artifact_part(part: str) -> bool:
     )
 
 
-def _summarize_validation(summary_path: Path) -> dict[str, Any]:
+def _summarize_validation(
+    summary_path: Path,
+    *,
+    expected_tile_cache_mb: float | None = None,
+) -> dict[str, Any]:
     root = summary_path.parent
     summary = _load_json(summary_path) or {}
     completed_pairs = _int(_nested(summary, "comparison", "completed_pairs"))
@@ -487,6 +575,12 @@ def _summarize_validation(summary_path: Path) -> dict[str, Any]:
         "review_ground_truth_rows": _int(_nested(summary, "review_ground_truth", "rows")),
         "workbench_acceptance_summary": str(workbench_path) if workbench_path.exists() else "",
         "workbench_acceptance_passed": workbench_acceptance_passed,
+        "p5_g7_forced_tile_eviction": summarize_p5_g7_forced_tile_eviction_proof(
+            summary,
+            result_dir=root,
+            summary_path=summary_path,
+            expected_tile_cache_mb=expected_tile_cache_mb,
+        ),
     }
 
 
@@ -506,8 +600,18 @@ def _recommended_commands(
     large_dwg_probe: str,
     min_total_pairs: int,
     max_total_pairs: int,
+    p5_g7_forced_tile_eviction_outputs: Sequence[dict[str, Any]],
+    p5_g7_forced_tile_eviction_passed_outputs: Sequence[dict[str, Any]],
+    require_p5_g7_forced_tile_eviction: bool,
+    p5_g6_tile_cache_mb: float | None,
+    p5_g16_replay_jsons: Sequence[str],
+    p5_g22_gui_soak_jsons: Sequence[str],
 ) -> dict[str, str]:
     result_args = " ".join(f'--results-dir "{item["path"]}"' for item in validations)
+    p5_g7_proof_args = " ".join(
+        f'--p5-g7-tile-eviction-proof-dir "{item["path"]}"'
+        for item in p5_g7_forced_tile_eviction_passed_outputs
+    )
     truth = next(
         (item["path"] for item in valid_ground_truths),
         next(
@@ -550,6 +654,26 @@ def _recommended_commands(
     release_manifest = release_manifests[0] if release_manifests else "<release_manifest.json>"
     large_probe = large_dwg_probe or "<large_dwg_probe.json>"
     manifest = "<customer_evidence_manifest.json>"
+    p5_g7_require_arg = (
+        "--require-p5-g7-tile-eviction-proof "
+        if require_p5_g7_forced_tile_eviction
+        else ""
+    )
+    p5_g6_tile_cache_arg = (
+        f"--p5-g6-tile-cache-mb {_format_number_arg(p5_g6_tile_cache_mb)} "
+        if p5_g6_tile_cache_mb is not None
+        else ""
+    )
+    p5_g16_args = " ".join(
+        f'--p5-g16-benchmark-json "{path}"' for path in p5_g16_replay_jsons
+    )
+    if p5_g16_args:
+        p5_g16_args = p5_g16_args + " "
+    p5_g22_args = " ".join(
+        f'--p5-g22-gui-soak-json "{path}"' for path in p5_g22_gui_soak_jsons
+    )
+    if p5_g22_args:
+        p5_g22_args = p5_g22_args + " "
     # Plan §17 Phase B-5 (GPT Pro F3): the legacy 10000/2000 ms defaults
     # below trigger a deprecation warning on stderr. Once Phase B-2
     # (PyMuPDF DisplayList) + B-3 (DXF pre-filter) + B-4 (prefetch) have
@@ -567,6 +691,10 @@ def _recommended_commands(
         f"--review-ground-truth \"{truth}\" --ground-truth-status approved "
         f"--review-decision-truth \"{decision_truth}\" --dataset-strata \"{strata}\" "
         f"--large-dwg-probe \"{large_probe}\" "
+        f"{p5_g7_proof_args} "
+        f"{p5_g16_args}"
+        f"{p5_g22_args}"
+        f"{p5_g7_require_arg}{p5_g6_tile_cache_arg}"
         "--operator-reviewer-role structural_review_lead "
         f"--operator-notes-file \"{notes}\" --confirmed-export-artifact \"{confirmed}\" "
         f"--min-total-pairs {min_total_pairs} --max-total-pairs {max_total_pairs} "
@@ -579,6 +707,8 @@ def _recommended_commands(
         f"{result_args} --release-manifest \"{release_manifest}\" "
         f"--large-dwg-probe \"{large_probe}\" --require-large-dwg-probe "
         f"--customer-evidence-manifest \"{manifest}\" --evidence-level customer_grade "
+        f"{p5_g16_args}"
+        f"{p5_g22_args}"
         f"--min-total-pairs {min_total_pairs} --max-total-pairs {max_total_pairs} "
         "--max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 "
         "--max-cache-hit-zone-render-ms 2000 --out <mvp_exit_audit.json> "
@@ -608,6 +738,91 @@ def _tool_command(script_name: str) -> str:
     return f"python {folder}\\{script_name}"
 
 
+def _summarize_p5_g16_replay(path: Path) -> dict[str, Any]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return {
+            "path": str(path),
+            "readable": False,
+            "status": "failed",
+            "benchmark_id": "",
+            "profile": "",
+            "issues": ["p5_g16_real_corpus_replay JSON is missing or unreadable"],
+        }
+    issues: list[str] = []
+    if payload.get("benchmark_id") != "p5_g16_real_corpus_replay":
+        issues.append("benchmark_id must be p5_g16_real_corpus_replay")
+    if payload.get("profile") != "real_corpus_artifact_replay":
+        issues.append("profile must be real_corpus_artifact_replay")
+    if payload.get("status") != "passed":
+        issues.append(f"status={payload.get('status') or '<missing>'}")
+    return {
+        "path": str(path),
+        "readable": True,
+        "status": "passed" if not issues else "failed",
+        "benchmark_id": str(payload.get("benchmark_id") or ""),
+        "profile": str(payload.get("profile") or ""),
+        "customer_manifest": str(_nested(payload, "artifacts", "customer_evidence_manifest") or ""),
+        "validation_summary": str(_nested(payload, "artifacts", "validation_summary") or ""),
+        "issues": issues,
+    }
+
+
+def _summarize_p5_g22_gui_soak(path: Path) -> dict[str, Any]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return {
+            "path": str(path),
+            "readable": False,
+            "status": "failed",
+            "benchmark_id": "",
+            "profile": "",
+            "issues": ["p5_g22_actual_gui_soak JSON is missing or unreadable"],
+        }
+    issues: list[str] = []
+    if payload.get("benchmark_id") != "p5_g22_actual_gui_soak":
+        issues.append("benchmark_id must be p5_g22_actual_gui_soak")
+    if payload.get("profile") != "actual_gui_customer_corpus_soak":
+        issues.append("profile must be actual_gui_customer_corpus_soak")
+    if payload.get("status") != "passed":
+        issues.append(f"status={payload.get('status') or '<missing>'}")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    native_summary = (
+        summary.get("native_resource_summary")
+        if isinstance(summary.get("native_resource_summary"), dict)
+        else {}
+    )
+    worker_summary = (
+        summary.get("worker_tree_summary")
+        if isinstance(summary.get("worker_tree_summary"), dict)
+        else {}
+    )
+    if not native_summary:
+        issues.append("summary.native_resource_summary missing")
+    elif native_summary.get("measurement_available") is not True:
+        issues.append("summary.native_resource_summary.measurement_available must be true")
+    if not worker_summary:
+        issues.append("summary.worker_tree_summary missing")
+    elif worker_summary.get("cleanup_ok") is not True or _int(worker_summary.get("orphan_worker_count")) != 0:
+        issues.append("summary.worker_tree_summary cleanup/orphan check failed")
+    return {
+        "path": str(path),
+        "readable": True,
+        "status": "passed" if not issues else "failed",
+        "benchmark_id": str(payload.get("benchmark_id") or ""),
+        "profile": str(payload.get("profile") or ""),
+        "customer_manifest": str(_nested(payload, "args", "customer_evidence_manifest") or ""),
+        "validation_summary": str(_nested(payload, "args", "validation_summary") or ""),
+        "completed_visit_count": _int(summary.get("completed_visit_count")),
+        "blank_view_count": _int(summary.get("blank_view_count")),
+        "orphan_worker_count": _int(summary.get("orphan_worker_count")),
+        "native_resource_summary": native_summary,
+        "worker_tree_summary": worker_summary,
+        "shared_summaries_present": bool(native_summary and worker_summary),
+        "issues": issues,
+    }
+
+
 def _diagnostics(
     *,
     validations: Sequence[dict[str, Any]],
@@ -629,6 +844,12 @@ def _diagnostics(
     has_workbench_acceptance: bool,
     customer_manifest_summaries: Sequence[dict[str, Any]],
     large_dwg_probe_summary: dict[str, Any],
+    p5_g7_forced_tile_eviction_outputs: Sequence[dict[str, Any]],
+    p5_g7_forced_tile_eviction_passed_outputs: Sequence[dict[str, Any]],
+    require_p5_g7_forced_tile_eviction: bool,
+    p5_g6_tile_cache_mb: float | None,
+    p5_g16_replays: Sequence[dict[str, Any]],
+    p5_g22_gui_soaks: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
     completed = [item for item in validations if int(item["completed_pairs"]) > 0]
     missing_format_coverage: list[str] = []
@@ -714,6 +935,50 @@ def _diagnostics(
         "workbench_acceptance_summary_found": has_workbench_acceptance,
         "large_dwg_probe_passed": large_dwg_probe_summary["passed"],
         "large_dwg_probe_issues": list(large_dwg_probe_summary["issues"]),
+        "p5_g7_forced_tile_eviction_required": require_p5_g7_forced_tile_eviction,
+        "p5_g7_forced_tile_eviction_expected_tile_cache_mb": p5_g6_tile_cache_mb,
+        "p5_g7_forced_tile_eviction_candidates": [
+            item["p5_g7_forced_tile_eviction"]
+            for item in p5_g7_forced_tile_eviction_outputs
+        ],
+        "p5_g7_forced_tile_eviction_passed_outputs": [
+            item["path"] for item in p5_g7_forced_tile_eviction_passed_outputs
+        ],
+        "p5_g7_forced_tile_eviction_missing_outputs": (
+            []
+            if (not require_p5_g7_forced_tile_eviction or p5_g7_forced_tile_eviction_passed_outputs)
+            else ["p5_g7_forced_tile_eviction"]
+        ),
+        "p5_g7_forced_tile_eviction_issues": [
+            {
+                "path": item["path"],
+                "issues": item["p5_g7_forced_tile_eviction"].get("issues", []),
+            }
+            for item in p5_g7_forced_tile_eviction_outputs
+            if item["p5_g7_forced_tile_eviction"].get("status") != "passed"
+        ],
+        "p5_g16_real_corpus_replay_candidates": list(p5_g16_replays),
+        "p5_g16_real_corpus_replay_passed": [
+            item for item in p5_g16_replays if item.get("status") == "passed"
+        ],
+        "p5_g22_actual_gui_soak_candidates": list(p5_g22_gui_soaks),
+        "p5_g22_actual_gui_soak_passed": [
+            item for item in p5_g22_gui_soaks if item.get("status") == "passed"
+        ],
+        "p5_g22_native_resource_summary_passed": [
+            item
+            for item in p5_g22_gui_soaks
+            if (item.get("native_resource_summary") or {}).get("measurement_available") is True
+        ],
+        "p5_g22_worker_tree_summary_passed": [
+            item
+            for item in p5_g22_gui_soaks
+            if (item.get("worker_tree_summary") or {}).get("cleanup_ok") is True
+            and _int((item.get("worker_tree_summary") or {}).get("orphan_worker_count")) == 0
+        ],
+        "p5_g22_actual_gui_soak_missing_shared_summaries": [
+            item for item in p5_g22_gui_soaks if not item.get("shared_summaries_present")
+        ],
         "customer_evidence_manifest_count": len(customer_manifest_summaries),
         "customer_evidence_manifests_not_ready": [
             item for item in customer_manifest_summaries if not item["self_check_ready"]
@@ -1136,6 +1401,11 @@ def _float(value: Any) -> float:
         return float(value or 0.0)
     except Exception:
         return 0.0
+
+
+def _format_number_arg(value: float) -> str:
+    text = f"{float(value):.12g}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 if __name__ == "__main__":

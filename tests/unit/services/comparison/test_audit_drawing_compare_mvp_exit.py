@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import zipfile
 from pathlib import Path
 
 from scripts import audit_drawing_compare_mvp_exit as audit
+from src.services.comparison.visual_asset import build_visual_asset_cache_key
 
 
 def _write_result(
@@ -104,8 +106,95 @@ def _write_result(
         },
     }
     if completed_pairs > 0:
+        summary["runtime_budget"] = {
+            "schema_version": 4,
+            "peak_working_set_mb": 128.0,
+            "peak_rss_mb": 128.0,
+            "peak_disk_spool_mb": 0.1,
+            "first_review_ready_s": min(total_s, 5.0),
+            "total_s": total_s,
+            "sample_count": 1,
+            "sampler_active": True,
+            "notes": [],
+            "native_resource_platform": "windows",
+            "native_resource_available": True,
+            "native_resource_sample_count": 1,
+            "start_process_handle_count": 10,
+            "final_process_handle_count": 10,
+            "peak_process_handle_count": 10,
+            "process_handle_positive_delta": 0,
+            "start_gdi_handle_count": 5,
+            "final_gdi_handle_count": 5,
+            "peak_gdi_handle_count": 5,
+            "gdi_handle_positive_delta": 0,
+            "start_user_handle_count": 6,
+            "final_user_handle_count": 6,
+            "peak_user_handle_count": 6,
+            "user_handle_positive_delta": 0,
+            "start_worker_process_count": 0,
+            "final_worker_process_count": 0,
+            "peak_worker_process_count": 0,
+            "worker_process_positive_delta": 0,
+            "native_resource_notes": [],
+        }
+        summary["perf_events_summary"] = {
+            "schema_version": 1,
+            "status": "ready",
+            "event_count": 5,
+            "summary_input_bytes": 512,
+            "summary_elapsed_ms": 1.0,
+            "stage_counts": {"scan": 1, "match": 1, "compare": 1, "artifact": 1, "viewer": 1},
+            "event_counts": {"completed": 5},
+        }
         summary["selected_zone_evidence"] = {
             "renders": [{"bbox_status": "exact"} for _ in range(max(1, zone_crop_count))]
+        }
+        summary["p5_g3_realset_gate"] = {
+            "schema_version": 1,
+            "status": "passed",
+            "requested": True,
+            "failures": [],
+            "evidence": {
+                "comparison": {
+                    "status": "passed",
+                    "completed_pairs": completed_pairs,
+                    "minimum_completed_pairs": 1,
+                },
+                "runtime_budget": {
+                    "status": "passed",
+                    "sampler_active": True,
+                    "sample_count": 1,
+                },
+                "viewer_perf_summary": {
+                    "status": "passed",
+                    "event_count": 5,
+                    "minimum_event_count": 1,
+                },
+                "selected_zone_evidence": {
+                    "status": "passed",
+                    "render_count": max(1, zone_crop_count),
+                    "failure_count": 0,
+                    "minimum_render_count": 1,
+                },
+                "nonblank": {
+                    "status": "passed",
+                    "checked": 1,
+                    "nonblank_count": 1,
+                    "minimum_nonblank_images": 1,
+                },
+                "tile_manifest": {
+                    "status": "passed",
+                    "manifest_path": "viewer/tiles_manifest.json",
+                    "pair_count": 1,
+                    "require_eviction": False,
+                    "evicted_pair_count": 0,
+                    "evicted_estimated_bytes": 0,
+                    "stale_manifest_count": 0,
+                    "missing_pair_manifest_count": 0,
+                    "orphan_payload_bytes": 0,
+                    "max_orphan_payload_bytes": 0,
+                },
+            },
         }
         artifact_s = max(0.001, total_s - 3.0)
         summary["first_interactive_ready"] = {
@@ -158,6 +247,8 @@ def _write_result(
         )
     if completed_pairs > 0 and include_workbench_acceptance_summary:
         _write_workbench_acceptance_summary(path / "workbench_acceptance_summary.json", item8=True, item10=True)
+    if completed_pairs > 0:
+        _write_viewer_manifest_with_visual_asset(path)
 
 
 def _source_artifacts(
@@ -176,6 +267,87 @@ def _source_artifacts(
             "source_b": f"<redacted>/after.{after_ext}",
         }
     ]
+
+
+def _write_viewer_manifest_with_visual_asset(path: Path) -> None:
+    manifest_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/visual_asset_manifest.json")
+    manifest_ref = str(manifest_rel).replace("\\", "/")
+    source_hash = "test-source-hash"
+    source_signature = {"schema_version": 1, "source_hash": source_hash}
+    plot_profile_hash = "test-plot-profile"
+    cache_key_hash = build_visual_asset_cache_key(
+        source_hash=source_hash,
+        source_signature=source_signature,
+        backend_id="source_pdf",
+        backend_version="1",
+        license_id="customer_provided",
+        plot_profile_hash=plot_profile_hash,
+        page_index=0,
+        dpi=80,
+    )
+    manifest_path = path / manifest_rel
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "visual_asset_id": "S21-0001:after:source_pdf",
+                "source_path": "new.pdf",
+                "asset_path": "viewer/pages/S21-0001_after.pdf",
+                "asset_kind": "source_pdf",
+                "status": "ready",
+                "reason_code": "",
+                "source_hash": source_hash,
+                "source_signature": source_signature,
+                "cache_key_hash": cache_key_hash,
+                "plot_profile_hash": plot_profile_hash,
+                "page_index": 0,
+                "dpi": 80,
+                "page_size_pt": [612.0, 792.0],
+                "pixel_size": [680, 880],
+                "visual_backend_id": "source_pdf",
+                "visual_backend_version": "1",
+                "visual_backend_license_id": "customer_provided",
+                "visual_fidelity": "pdf_visual_background",
+                "render_lifecycle": "ready",
+                "transform_quality": "estimated",
+                "nonblank_probe_status": "passed",
+                "metadata": {
+                    "nonblank_probe": "viewer/visual_assets/S21-0001/after/source_pdf/nonblank_probe.json",
+                    "nonblank_probe_hash": "test-probe-hash",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    viewer_manifest = {
+        "schema_version": 2,
+        "visual_asset_manifest_count": 1,
+        "visual_asset_manifest_paths": [manifest_ref],
+        "pairs": [
+            {
+                "pair_id": "S21-0001",
+                "visual_asset_manifest_paths": [manifest_ref],
+                "visual_assets": {
+                    "after": {
+                        "source_pdf": {
+                            "manifest_path": manifest_ref,
+                            "asset_kind": "source_pdf",
+                            "status": "ready",
+                            "cache_key_hash": cache_key_hash,
+                            "nonblank_probe_status": "passed",
+                        }
+                    }
+                },
+            }
+        ],
+    }
+    viewer_root = path / "viewer"
+    viewer_root.mkdir(parents=True, exist_ok=True)
+    (viewer_root / "viewer_manifest.json").write_text(json.dumps(viewer_manifest), encoding="utf-8")
+    (viewer_root / "tiles_manifest.json").write_text(
+        json.dumps({"schema_version": 1, "pairs": {}, "pair_count": 0}),
+        encoding="utf-8",
+    )
 
 
 def _write_change_zones_csv(
@@ -206,6 +378,123 @@ def _preflight_checks() -> list[dict]:
         {"name": name, "status": "ok"}
         for name in sorted(audit.REQUIRED_PREFLIGHT_CHECKS)
     ]
+
+
+def test_selected_zone_perf_evidence_surfaces_fallback_reason_codes(tmp_path: Path) -> None:
+    summary = {
+        "comparison": {"completed_pairs": 1},
+        "viewer_perf_summary": {
+            "zone_crop_count": 2,
+            "zone_crop_cold_ms": {"p95": 500.0},
+            "zone_crop_cache_hit_ms": {"p95": 25.0},
+            "reason_code_counts": {"missing_page_bbox": 2},
+            "renderer_backend_counts": {"pdf-page-bbox-required": 2},
+        },
+    }
+
+    check = audit._check_selected_zone_perf(
+        [{"path": tmp_path, "summary": summary}],
+        [summary],
+        evidence_level="customer_grade",
+        max_cold_zone_render_ms=10_000.0,
+        max_cache_hit_zone_render_ms=2_000.0,
+    )
+
+    assert check.passed is True
+    evidence = "\n".join(check.evidence)
+    assert "missing_page_bbox" in evidence
+    assert "pdf-page-bbox-required" in evidence
+
+
+def test_parse_args_accepts_require_p5_g3_realset_gate(tmp_path: Path) -> None:
+    result_dir = tmp_path / "validation"
+    result_dir.mkdir()
+
+    args = audit.parse_args(
+        [
+            "--results-dir",
+            str(result_dir),
+            "--require-p5-g3-realset-gate",
+            "--require-p5-g3-tile-eviction",
+            "--p5-g3-min-tile-evicted-pairs",
+            "2",
+            "--p5-g3-min-tile-evicted-bytes",
+            "4096",
+            "--p5-g6-tile-cache-mb",
+            "0.25",
+        ]
+    )
+
+    assert args.require_p5_g3_realset_gate is True
+    assert args.require_p5_g3_tile_eviction is True
+    assert args.p5_g3_min_tile_evicted_pairs == 2
+    assert args.p5_g3_min_tile_evicted_bytes == 4096
+    assert args.p5_g6_tile_cache_mb == 0.25
+
+
+def test_parse_args_accepts_require_p5_g6_tile_eviction_aliases(tmp_path: Path) -> None:
+    result_dir = tmp_path / "validation"
+    result_dir.mkdir()
+
+    args = audit.parse_args(
+        [
+            "--results-dir",
+            str(result_dir),
+            "--require-p5-g6-tile-eviction",
+            "--p5-g6-min-tile-evicted-pairs",
+            "3",
+            "--p5-g6-min-tile-evicted-bytes",
+            "8192",
+        ]
+    )
+
+    assert args.require_p5_g3_tile_eviction is True
+    assert args.p5_g3_min_tile_evicted_pairs == 3
+    assert args.p5_g3_min_tile_evicted_bytes == 8192
+
+
+def test_parse_args_accepts_p5_g16_benchmark_json(tmp_path: Path) -> None:
+    result_dir = tmp_path / "validation"
+    result_dir.mkdir()
+    benchmark_a = tmp_path / "p5_g16_a.json"
+    benchmark_b = tmp_path / "p5_g16_b.json"
+
+    args = audit.parse_args(
+        [
+            "--results-dir",
+            str(result_dir),
+            "--p5-g16-benchmark-json",
+            str(benchmark_a),
+            "--p5-g16-real-corpus-replay",
+            str(benchmark_b),
+            "--require-p5-g16-real-corpus-replay",
+        ]
+    )
+
+    assert args.p5_g16_benchmark_json == [benchmark_a, benchmark_b]
+    assert args.require_p5_g16_real_corpus_replay is True
+
+
+def test_parse_args_accepts_p5_g22_gui_soak_json(tmp_path: Path) -> None:
+    result_dir = tmp_path / "validation"
+    result_dir.mkdir()
+    soak_a = tmp_path / "p5_g22_a.json"
+    soak_b = tmp_path / "p5_g22_b.json"
+
+    args = audit.parse_args(
+        [
+            "--results-dir",
+            str(result_dir),
+            "--p5-g22-gui-soak-json",
+            str(soak_a),
+            "--p5-g22-actual-gui-soak",
+            str(soak_b),
+            "--require-p5-g22-actual-gui-soak",
+        ]
+    )
+
+    assert args.p5_g22_gui_soak_json == [soak_a, soak_b]
+    assert args.require_p5_g22_actual_gui_soak is True
 
 
 def _ai_policy() -> dict:
@@ -456,6 +745,179 @@ def _write_large_dwg_probe(
     )
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_p5_g16_replay_json(
+    path: Path,
+    validation_summary: Path,
+    customer_manifest: Path,
+    *,
+    status: str = "passed",
+    failed_gate: str | None = None,
+    validation_sha: str | None = None,
+) -> None:
+    gate_names = sorted(audit.P5_G16_REQUIRED_GATES)
+    gates = [
+        {
+            "name": name,
+            "domain": "unit",
+            "passed": name != failed_gate,
+            "observed": 0,
+            "threshold": 0,
+            "actual": 0,
+            "target": 0,
+            "op": "==",
+            "required": True,
+            "detail": "",
+        }
+        for name in gate_names
+    ]
+    payload = {
+        "schema_version": 1,
+        "benchmark_id": "p5_g16_real_corpus_replay",
+        "profile": "real_corpus_artifact_replay",
+        "status": status,
+        "source": {
+            "validation_summary": {
+                "sha256": validation_sha if validation_sha is not None else _sha256(validation_summary),
+            },
+        },
+        "args": {
+            "require_customer_corpus": True,
+        },
+        "environment": {
+            "psutil_available": True,
+            "allow_missing_psutil": False,
+        },
+        "corpus": {
+            "evidence_level": "customer_grade",
+            "sheet_count": 20,
+            "has_dwg_dxf": True,
+            "has_pdf_pdf": True,
+            "manifest_sha256": _sha256(customer_manifest),
+        },
+        "summary": {
+            "visit_count": 100,
+            "completed_visit_count": 100,
+            "replay_completed": True,
+            "zone_render_artifact_count": 1,
+            "page_artifact_count": 1,
+            "blank_zone_output_count": 0,
+            "missing_zone_image_count": 0,
+            "stale_result_visible_count": 0,
+            "fallback_missing_reason_count": 0,
+            "timeout_count": 0,
+            "cancel_count": 0,
+            "rss_measurement_available": True,
+        },
+        "gates": gates,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _write_p5_g22_actual_gui_soak_json(
+        path.parent / "p5_g22_actual_gui_soak.json",
+        validation_summary,
+        customer_manifest,
+    )
+
+
+def _write_p5_g22_actual_gui_soak_json(
+    path: Path,
+    validation_summary: Path,
+    customer_manifest: Path,
+    *,
+    status: str = "passed",
+    failed_gate: str | None = None,
+    validation_sha: str | None = None,
+) -> None:
+    gate_names = sorted(audit.P5_G22_REQUIRED_GATES)
+    gates = [
+        {
+            "name": name,
+            "domain": "unit",
+            "passed": name != failed_gate,
+            "observed": 0,
+            "threshold": 0,
+            "actual": 0,
+            "target": 0,
+            "op": "==",
+            "required": True,
+            "detail": "",
+        }
+        for name in gate_names
+    ]
+    payload = {
+        "schema_version": 1,
+        "benchmark_id": "p5_g22_actual_gui_soak",
+        "profile": "actual_gui_customer_corpus_soak",
+        "status": status,
+        "source": {
+            "validation_summary": {
+                "sha256": validation_sha if validation_sha is not None else _sha256(validation_summary),
+            },
+        },
+        "args": {
+            "require_customer_corpus": True,
+            "skip_zone_render_workers": False,
+        },
+        "environment": {
+            "psutil_available": True,
+            "allow_missing_psutil": False,
+            "allow_missing_native_resources": False,
+        },
+        "corpus": {
+            "evidence_level": "customer_grade",
+            "sheet_count": 20,
+            "has_dwg_dxf": True,
+            "has_pdf_pdf": True,
+            "manifest_sha256": _sha256(customer_manifest),
+        },
+        "summary": {
+            "visit_count": 100,
+            "completed_visit_count": 100,
+            "gui_soak_completed": True,
+            "drawing_selection_ms": {"p95_ms": 100.0},
+            "page_navigation_count": 0,
+            "zone_selection_count": 1,
+            "zone_selection_ms": {"p95_ms": 100.0},
+            "event_loop_gap_ms": {"max_ms": 100.0, "over_500ms_count": 0},
+            "blank_view_count": 0,
+            "stale_active_pair_count": 0,
+            "stale_active_zone_count": 0,
+            "viewer_perf_stale_count": 0,
+            "rss_measurement_available": True,
+            "native_resource_measurement_available": True,
+            "native_resource_summary": {
+                "measurement_available": True,
+                "rss_slope": {"available": True, "positive_end_delta": 0.0},
+                "process_handle_slope": {"available": True, "positive_end_delta": 0.0},
+                "open_file_descriptor_slope": {"available": False, "positive_end_delta": None},
+                "gdi_handle_slope": {"available": True, "positive_end_delta": 0.0},
+                "user_handle_slope": {"available": True, "positive_end_delta": 0.0},
+                "positive_end_deltas": {
+                    "rss_mb": 0.0,
+                    "process_handle_count": 0.0,
+                    "open_file_descriptor_count": None,
+                    "gdi_handle_count": 0.0,
+                    "user_handle_count": 0.0,
+                },
+            },
+            "worker_cleanup_ok": True,
+            "worker_tree_summary": {
+                "snapshot_start": {"active_worker_count": 0},
+                "snapshot_after_cleanup": {"active_worker_count": 0},
+                "cleanup_ok": True,
+                "orphan_worker_count": 0,
+            },
+            "orphan_worker_count": 0,
+        },
+        "samples": [{} for _ in range(100)],
+        "gates": gates,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _write_customer_evidence_manifest(path: Path) -> None:
     truth_csv = path.parent / "review_ground_truth.csv"
     decision_csv = path.parent / "review_decision_truth.csv"
@@ -684,6 +1146,55 @@ def _write_customer_evidence_manifest(path: Path) -> None:
     )
 
 
+def _mutate_customer_manifest_with_provenance(path: Path, **updates: dict) -> None:
+    manifest_payload = json.loads(path.read_text(encoding="utf-8"))
+    manifest_payload.pop("provenance", None)
+    manifest_payload.update(updates)
+    from src.services.comparison.manifest_provenance import (
+        build_provenance,
+        compute_file_sha256,
+    )
+
+    confirmed_export = (
+        path.parent
+        / manifest_payload["operator_dry_run"]["artifacts"]["confirmed_export_artifact"]
+    )
+    input_file_hashes: dict[str, str] = {
+        "review_ground_truth_csv": compute_file_sha256(
+            path.parent / manifest_payload["ground_truth"]["review_ground_truth_csv"]
+        ),
+        "review_decision_truth_csv": compute_file_sha256(
+            path.parent / manifest_payload["review_decision_quality"]["review_decision_truth_csv"]
+        ),
+        "dataset_strata_csv": compute_file_sha256(
+            path.parent / manifest_payload["dataset_strata"]["dataset_strata_csv"]
+        ),
+        "large_dwg_probe_json": compute_file_sha256(
+            path.parent / manifest_payload["large_dwg_resource_probe"]["path"]
+        ),
+        "operator_notes_file": compute_file_sha256(
+            path.parent / manifest_payload["operator_dry_run"]["artifacts"]["notes_file"]
+        ),
+        "confirmed_export_artifact": compute_file_sha256(confirmed_export),
+    }
+    manifest_payload["provenance"] = build_provenance(
+        manifest_payload,
+        input_file_hashes=input_file_hashes,
+        tool_version="test-fixture",
+    )
+    path.write_text(json.dumps(manifest_payload, ensure_ascii=False), encoding="utf-8")
+    replay_path = path.parent / "pdf" / "p5_g16_real_corpus_replay.json"
+    if replay_path.exists():
+        replay_payload = json.loads(replay_path.read_text(encoding="utf-8"))
+        replay_payload.setdefault("corpus", {})["manifest_sha256"] = _sha256(path)
+        replay_path.write_text(json.dumps(replay_payload), encoding="utf-8")
+    gui_soak_path = path.parent / "pdf" / "p5_g22_actual_gui_soak.json"
+    if gui_soak_path.exists():
+        gui_soak_payload = json.loads(gui_soak_path.read_text(encoding="utf-8"))
+        gui_soak_payload.setdefault("corpus", {})["manifest_sha256"] = _sha256(path)
+        gui_soak_path.write_text(json.dumps(gui_soak_payload), encoding="utf-8")
+
+
 def _complete_customer_audit_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     cad_dir = tmp_path / "cad"
     pdf_dir = tmp_path / "pdf"
@@ -705,6 +1216,11 @@ def _complete_customer_audit_fixture(tmp_path: Path) -> tuple[Path, Path, Path, 
     (pdf_dir / "artifacts" / "review_report_test.pdf").write_bytes(b"%PDF")
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
     return cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest
 
 
@@ -729,6 +1245,11 @@ def test_mvp_exit_audit_passes_with_complete_evidence(tmp_path: Path) -> None:
     (pdf_dir / "artifacts" / "review_report_test.pdf").write_bytes(b"%PDF")
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
 
     report = audit.run_audit(
         result_dirs=[cad_dir, pdf_dir, blocked_dir],
@@ -740,6 +1261,546 @@ def test_mvp_exit_audit_passes_with_complete_evidence(tmp_path: Path) -> None:
 
     assert report["status"] == "passed"
     assert report["summary"]["failed"] == 0
+
+
+def test_customer_grade_audit_requires_p5_g22_actual_gui_soak_by_default(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    (pdf_dir / "p5_g22_actual_gui_soak.json").unlink()
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g22_actual_gui_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "artifact missing" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_failed_p5_g22_actual_gui_soak_gate(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g22_actual_gui_soak_json(
+        pdf_dir / "p5_g22_actual_gui_soak.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+        failed_gate="p5_g22_blank_view_count",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g22_actual_gui_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "required gates failed: p5_g22_blank_view_count" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_p5_g22_missing_shared_summaries(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    soak_path = pdf_dir / "p5_g22_actual_gui_soak.json"
+    payload = json.loads(soak_path.read_text(encoding="utf-8"))
+    payload["summary"].pop("native_resource_summary", None)
+    payload["summary"].pop("worker_tree_summary", None)
+    soak_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g22_actual_gui_soak")
+    assert check["passed"] is False
+    assert "summary.native_resource_summary missing" in check["detail"]
+    assert "summary.worker_tree_summary missing" in check["detail"]
+
+
+def test_customer_grade_audit_requires_p5_g24_visual_asset_manifests(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    viewer_manifest_path = pdf_dir / "viewer" / "viewer_manifest.json"
+    viewer_manifest = json.loads(viewer_manifest_path.read_text(encoding="utf-8"))
+    viewer_manifest["visual_asset_manifest_paths"] = []
+    viewer_manifest["pairs"][0]["visual_asset_manifest_paths"] = []
+    viewer_manifest["pairs"][0]["visual_assets"] = {}
+    viewer_manifest_path.write_text(json.dumps(viewer_manifest), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g24_visual_asset_policy")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "no visual asset manifest references" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_visual_asset_manifest_policy_violation(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    visual_manifest_path = (
+        pdf_dir
+        / "viewer"
+        / "visual_assets"
+        / "S21-0001"
+        / "after"
+        / "source_pdf"
+        / "visual_asset_manifest.json"
+    )
+    visual_manifest = json.loads(visual_manifest_path.read_text(encoding="utf-8"))
+    visual_manifest["nonblank_probe_status"] = "not_probed"
+    visual_manifest_path.write_text(json.dumps(visual_manifest), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g24_visual_asset_policy")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "nonblank_probe_status must be passed" in check["detail"]
+
+
+def test_customer_grade_audit_requires_runtime_budget_by_default(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    summary_path = pdf_dir / "validation_summary.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload.pop("runtime_budget", None)
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "runtime_budget_measurement")
+    assert check["passed"] is False
+    assert "runtime_budget block missing" in check["detail"]
+
+
+def test_customer_grade_audit_requires_perf_events_summary_by_default(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    summary_path = pdf_dir / "validation_summary.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload.pop("perf_events_summary", None)
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "perf_events_summary_measurement")
+    assert check["passed"] is False
+    assert "perf_events_summary block missing" in check["detail"]
+
+
+def test_customer_grade_audit_requires_p5_g16_benchmark_by_default(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    (pdf_dir / "p5_g16_real_corpus_replay.json").unlink()
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g16_real_corpus_replay")
+    assert check["passed"] is False
+    assert "artifact missing" in check["detail"]
+
+
+def test_customer_grade_audit_accepts_default_sibling_p5_g16_json(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g16_real_corpus_replay")
+    assert check["passed"] is True
+    assert report["status"] == "passed"
+
+
+def test_p5_g16_benchmark_rejects_failed_gate(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+        status="failed",
+        failed_gate="blank_zone_output_count",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g16_real_corpus_replay")
+    assert check["passed"] is False
+    assert "status=failed" in check["detail"]
+    assert "blank_zone_output_count" in check["detail"]
+
+
+def test_p5_g16_benchmark_rejects_stale_validation_summary_hash(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    summary_path = pdf_dir / "validation_summary.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload["comparison"]["completed_pairs"] = 21
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g16_real_corpus_replay")
+    assert check["passed"] is False
+    assert "validation_summary.sha256 does not match" in check["detail"]
+
+
+def test_customer_grade_audit_requires_p5_g3_realset_gate_by_default(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    summary_path = pdf_dir / "validation_summary.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload.pop("p5_g3_realset_gate", None)
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g3_realset_release_gate")
+    assert check["passed"] is False
+    assert "p5_g3_realset_gate block missing" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_not_requested_p5_g3_gate(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    summary_path = pdf_dir / "validation_summary.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload["p5_g3_realset_gate"] = {
+        "schema_version": 1,
+        "status": "not_requested",
+        "requested": False,
+        "failures": [],
+        "evidence": {},
+    }
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g3_realset_release_gate")
+    assert check["passed"] is False
+    assert "p5_g3_realset_gate.requested is not true" in check["detail"]
+
+
+def test_p5_g3_realset_gate_reports_tile_manifest_failures(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    summary_path = pdf_dir / "validation_summary.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    payload["p5_g3_realset_gate"]["status"] = "failed"
+    payload["p5_g3_realset_gate"]["failures"] = [
+        "tile_manifest: orphan_payload_bytes=4096 > 0"
+    ]
+    payload["p5_g3_realset_gate"]["evidence"]["tile_manifest"]["status"] = "failed"
+    payload["p5_g3_realset_gate"]["evidence"]["tile_manifest"]["orphan_payload_bytes"] = 4096
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g3_realset_release_gate")
+    assert check["passed"] is False
+    assert "p5_g3_realset_gate.tile_manifest.status=failed" in check["detail"]
+    assert "orphan_payload_bytes=4096" in check["detail"]
+    assert "viewer package manifest materialisation" in "\n".join(check["evidence"])
+
+
+def test_audit_can_require_p5_g3_tile_eviction_evidence(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="synthetic",
+        require_p5_g3_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=1,
+        p5_g3_min_tile_evicted_bytes=1,
+    )
+
+    check = _check_by_name(report, "p5_g3_realset_release_gate")
+    assert check["passed"] is False
+    assert "tile_manifest.require_eviction is not true" in check["detail"]
+    assert "tile_manifest.evicted_pair_count=0 < 1" in check["detail"]
+
+
+def test_audit_passes_required_p5_g3_tile_eviction_evidence(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    for result_dir in (cad_dir, pdf_dir):
+        summary_path = result_dir / "validation_summary.json"
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        tile = payload["p5_g3_realset_gate"]["evidence"]["tile_manifest"]
+        tile["require_eviction"] = True
+        tile["evicted_pair_count"] = 2
+        tile["evicted_estimated_bytes"] = 4096
+        tile["configured_tile_cache_mb"] = 0.25
+        tile["tile_cache_env_mb"] = "0.25"
+        tile["byte_limit"] = 262144
+        summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="synthetic",
+        require_p5_g3_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=2,
+        p5_g3_min_tile_evicted_bytes=4096,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    check = _check_by_name(report, "p5_g3_realset_release_gate")
+    assert check["passed"] is True
+    evidence = "\n".join(check["evidence"])
+    assert "configured_tile_cache_mb=0.25" in evidence
+    assert "tile_cache_env_mb=0.25" in evidence
+
+
+def test_audit_fails_p5_g6_tile_cache_cap_mismatch(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    for result_dir in (cad_dir, pdf_dir):
+        summary_path = result_dir / "validation_summary.json"
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        tile = payload["p5_g3_realset_gate"]["evidence"]["tile_manifest"]
+        tile["require_eviction"] = True
+        tile["evicted_pair_count"] = 2
+        tile["evicted_estimated_bytes"] = 4096
+        tile["configured_tile_cache_mb"] = 0.5
+        tile["tile_cache_env_mb"] = "0.5"
+        tile["byte_limit"] = 524288
+        summary_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="synthetic",
+        require_p5_g3_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=2,
+        p5_g3_min_tile_evicted_bytes=4096,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    check = _check_by_name(report, "p5_g3_realset_release_gate")
+    assert check["passed"] is False
+    assert "configured_tile_cache_mb=0.5 != 0.25" in check["detail"]
+    assert "tile_cache_env_mb=0.5 != 0.25" in check["detail"]
+    assert "byte_limit=524288 != 262144" in check["detail"]
+
+
+def test_customer_grade_audit_surfaces_passed_p5_g7_forced_tile_eviction_manifest(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _mutate_customer_manifest_with_provenance(
+        customer_manifest,
+        p5_g7_forced_tile_eviction={
+            "schema_version": 1,
+            "status": "passed",
+            "required": True,
+            "expected_tile_cache_mb": 0.25,
+            "proof_count": 1,
+            "passed_proof_count": 1,
+            "proofs": [{"status": "passed"}],
+            "release_manifests": [],
+            "issues": [],
+        },
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    assert report["status"] == "passed"
+    check = _check_by_name(report, "p5_g7_forced_tile_eviction_manifest")
+    assert check["passed"] is True
+    assert "expected_tile_cache_mb=0.25" in check["evidence"]
+
+
+def test_p5_g7_manifest_does_not_satisfy_required_p5_g3_tile_eviction(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _mutate_customer_manifest_with_provenance(
+        customer_manifest,
+        p5_g7_forced_tile_eviction={
+            "schema_version": 1,
+            "status": "passed",
+            "required": True,
+            "expected_tile_cache_mb": 0.25,
+            "proof_count": 1,
+            "passed_proof_count": 1,
+            "proofs": [{"status": "passed"}],
+            "release_manifests": [],
+            "issues": [],
+        },
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+        require_p5_g3_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=1,
+        p5_g3_min_tile_evicted_bytes=1,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    assert _check_by_name(report, "p5_g7_forced_tile_eviction_manifest")["passed"] is True
+    p5_g3_check = _check_by_name(report, "p5_g3_realset_release_gate")
+    assert p5_g3_check["passed"] is False
+    assert "tile_manifest.require_eviction is not true" in p5_g3_check["detail"]
+
+
+def test_customer_grade_audit_fails_inconsistent_p5_g7_forced_tile_eviction_manifest(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _mutate_customer_manifest_with_provenance(
+        customer_manifest,
+        p5_g7_forced_tile_eviction={
+            "schema_version": 1,
+            "status": "failed",
+            "required": True,
+            "expected_tile_cache_mb": 0.25,
+            "proof_count": 0,
+            "passed_proof_count": 0,
+            "proofs": [],
+            "release_manifests": [],
+            "issues": ["required P5-G7 forced tile-eviction proof is missing or failed"],
+        },
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g7_forced_tile_eviction_manifest")
+    assert check["passed"] is False
+    assert "required=true requires status=passed" in check["detail"]
+    assert report["status"] == "failed"
 
 
 def test_customer_grade_audit_fails_low_review_decision_precision(tmp_path: Path) -> None:
@@ -870,6 +1931,11 @@ def test_mvp_exit_audit_accepts_required_large_dwg_probe(tmp_path: Path) -> None
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
     _write_large_dwg_probe(large_dwg_probe)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
 
     report = audit.run_audit(
         result_dirs=[cad_dir, pdf_dir, blocked_dir],
@@ -951,6 +2017,11 @@ def test_mvp_exit_audit_cli_outputs_ascii_safe_json(tmp_path: Path, capsys) -> N
     (pdf_dir / "artifacts" / "review_report_test.pdf").write_bytes(b"%PDF")
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
 
     code = audit.main(
         [
@@ -1003,6 +2074,11 @@ def test_customer_grade_audit_accepts_korean_structural_reviewer_role(tmp_path: 
     (pdf_dir / "artifacts" / "review_report_test.pdf").write_bytes(b"%PDF")
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
     manifest = json.loads(customer_manifest.read_text(encoding="utf-8"))
     manifest["operator_dry_run"]["reviewer_role"] = "구조 검토 책임자"
     notes_path = customer_manifest.parent / manifest["operator_dry_run"]["artifacts"]["notes_file"]
@@ -1039,6 +2115,11 @@ def test_customer_grade_audit_accepts_korean_structural_reviewer_role(tmp_path: 
         tool_version="test-fixture",
     )
     customer_manifest.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
 
     report = audit.run_audit(
         result_dirs=[cad_dir, pdf_dir, blocked_dir],
@@ -1073,6 +2154,11 @@ def test_customer_grade_audit_accepts_utf16_operator_notes(tmp_path: Path) -> No
     (pdf_dir / "artifacts" / "review_report_test.pdf").write_bytes(b"%PDF")
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
     manifest = json.loads(customer_manifest.read_text(encoding="utf-8"))
     notes_path = customer_manifest.parent / manifest["operator_dry_run"]["artifacts"]["notes_file"]
     notes_path.write_text(
@@ -1470,6 +2556,11 @@ def test_customer_grade_manifest_must_match_audited_evidence(tmp_path: Path) -> 
     (pdf_dir / "artifacts" / "review_report_test.pdf").write_bytes(b"%PDF")
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
 
     report = audit.run_audit(
         result_dirs=[cad_dir, pdf_dir, blocked_dir],
@@ -1777,6 +2868,11 @@ def test_customer_grade_audit_accepts_cad_pdf_block_csv_evidence(tmp_path: Path)
     (pdf_dir / "artifacts" / "review_report_test.pdf").write_bytes(b"%PDF")
     _write_release_manifest(release_manifest)
     _write_customer_evidence_manifest(customer_manifest)
+    _write_p5_g16_replay_json(
+        pdf_dir / "p5_g16_real_corpus_replay.json",
+        pdf_dir / "validation_summary.json",
+        customer_manifest,
+    )
 
     report = audit.run_audit(
         result_dirs=[cad_dir, pdf_dir, blocked_dir],

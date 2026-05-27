@@ -139,6 +139,7 @@ def test_zone_request_ref_round_trip(tmp_path: Path) -> None:
         zone_id="Z-007",
         side="after",
         bbox_world=(10.0, 20.0, 30.0, 40.0),
+        bbox_coordinate_space="image_pixels",
         pad_world=2.5,
         target_px_w=1280,
         target_px_h=720,
@@ -154,6 +155,10 @@ def test_zone_request_ref_round_trip(tmp_path: Path) -> None:
     assert len(loaded.zone_requests) == 1
     assert loaded.zone_requests[0].zone_id == "Z-007"
     assert loaded.zone_requests[0].bbox_world == (10.0, 20.0, 30.0, 40.0)
+    assert loaded.zone_requests[0].coordinate_contract_version == "coordinate_contract.v1"
+    assert loaded.zone_requests[0].bbox_coordinate_space == "image_pixels_tl"
+    assert loaded.zone_requests[0].source_truth == "pdf_visual"
+    assert loaded.zone_requests[0].y_axis == "down"
     assert loaded.zone_requests[0].cache_key == "abcdef"
 
 
@@ -166,8 +171,14 @@ def test_evidence_ref_round_trip(tmp_path: Path) -> None:
         pixel_size=(800, 600),
         world_to_pixel=(40.0, 0.0, -400.0, 0.0, -30.0, 1200.0),
         pixel_to_world=(0.025, 0.0, 10.0, 0.0, -0.0333, 40.0),
+        transform_quality="estimated",
+        bbox_coordinate_space="pdf_page_points_bl",
         render_ms=850.0,
         cache_hit=True,
+        visual_fidelity="relative_overlay",
+        render_lifecycle="fallback_visible",
+        fallback_reason_code="source_render_failed",
+        warnings=["zone_render_fallback:source_render_failed:RuntimeError"],
     )
     m = ViewerManifestV3(
         pair_uuid="p", package_version="v3", source_kind="normalized_dxf",
@@ -179,12 +190,43 @@ def test_evidence_ref_round_trip(tmp_path: Path) -> None:
     assert len(loaded.evidence) == 1
     assert loaded.evidence[0].cache_hit is True
     assert loaded.evidence[0].pixel_size == (800, 600)
+    assert loaded.evidence[0].transform_quality == "estimated"
+    assert loaded.evidence[0].bbox_coordinate_space == "pdf_page_points_bl"
+    assert loaded.evidence[0].source_truth == "pdf_visual"
+    assert loaded.evidence[0].y_axis == "up"
+    assert loaded.evidence[0].visual_fidelity == "relative_overlay"
+    assert loaded.evidence[0].render_lifecycle == "fallback_visible"
+    assert loaded.evidence[0].fallback_reason_code == "source_render_failed"
+    assert loaded.evidence[0].warnings == ["zone_render_fallback:source_render_failed:RuntimeError"]
+
+
+def test_v3_old_zone_and_evidence_payloads_default_coordinate_contract() -> None:
+    req = ZoneRequestRef.from_dict({
+        "zone_id": "legacy-zone",
+        "bbox_world": [1, 2, 3, 4],
+    })
+    ev = EvidenceRef.from_dict({
+        "zone_id": "legacy-evidence",
+        "world_bbox": [1, 2, 3, 4],
+        "pixel_size": [10, 20],
+    })
+
+    assert req.bbox_coordinate_space == "cad_wcs_mm"
+    assert req.source_truth == "cad_entity"
+    assert req.y_axis == "up"
+    assert ev.bbox_coordinate_space == "cad_wcs_mm"
+    assert ev.source_truth == "cad_entity"
+    assert ev.y_axis == "up"
 
 
 def test_source_signature_round_trip() -> None:
     sig = SourceSignature(
         source_path="C:/x/y.dwg",
         file_hash="aabbcc",
+        source_hash="source-hash",
+        file_size=123,
+        mtime_ns=456,
+        signature_schema_version="1",
         dxf_version="AC1027",
         font_sig="ddee",
         backend_sig="ezdxf-1.4.3",

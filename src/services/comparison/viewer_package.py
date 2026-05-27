@@ -8,6 +8,7 @@ overlay JSON plus optional low-resolution PNG backgrounds and crop tiles.
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import json
 import logging
@@ -16,9 +17,28 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from .cad_visual_backend import (
+    CAD_VISUAL_BACKEND_DISABLED,
+    CAD_VISUAL_BACKEND_UNAVAILABLE,
+    CadVisualConversionRequest,
+    CadVisualConversionResult,
+)
+from .render_backend_registry import get_default_render_backend_registry
 from .review_project import _bbox_to_pixel_bbox, _ensure_preview_dxf, _render_dxf_to_png
+from .source_signature import build_source_signature
+from .transform import (
+    COORD_CAD_WCS_MM,
+    COORD_IMAGE_PIXELS_TL,
+    COORD_PDF_PAGE_POINTS_BL,
+    SOURCE_TRUTH_CAD_ENTITY,
+    SOURCE_TRUTH_PDF_VISUAL,
+    Y_AXIS_DOWN,
+    Y_AXIS_UP,
+    normalize_coordinate_space,
+)
 from .viewer_manifest_v2 import (
     IDENTITY_AFFINE as V2_IDENTITY_AFFINE,
     MANIFEST_FILENAME as V2_MANIFEST_FILENAME,
@@ -36,6 +56,11 @@ from .viewer_manifest_v3 import (
     ViewerManifestV3,
     write_manifest_v3,
 )
+from .viewer_overlay_pages import (
+    DEFAULT_OVERLAY_PAGE_SIZE,
+    OVERLAY_PAGES_DIRNAME,
+    write_overlay_page_store,
+)
 from .viewer_tile_cache import (
     ViewerTileCacheOptions,
     append_pair_to_tiles_manifest_jsonl,
@@ -45,6 +70,11 @@ from .viewer_tile_cache import (
     tiles_manifest_is_current,
     viewer_cache_key,
     write_pair_tile_cache,
+)
+from .visual_asset import (
+    VisualAssetManifest,
+    build_visual_asset_cache_key,
+    write_visual_asset_manifest,
 )
 from .workbench_subprocess import (
     VIEWER_RENDER_WORKER_MODULE,
@@ -56,6 +86,7 @@ logger = logging.getLogger(__name__)
 
 VIEWER_PACKAGE_SCHEMA_VERSION = 2
 OVERLAY_SCHEMA_VERSION = 2
+CAD_VISUAL_CONVERSION_DEFERRED = "cad_visual_conversion_deferred"
 
 # Phase F: name of the v2 manifest written *alongside* the v1 file. The v1
 # manifest stays untouched so existing GUI code keeps working — the v2 is read
@@ -98,6 +129,8 @@ class ViewerPackageOptions:
     viewer_perf_log: bool = False
     render_timeout_seconds: int = 0
     build_lod_tiles: bool = True
+    cad_visual_backend: str = ""
+    cad_visual_conversion_timeout_seconds: int = 180
 
 
 @dataclass
@@ -149,6 +182,7 @@ def export_viewer_package(
     max_zone_tiles: int = 300,
     export_marked_pdf: bool = False,
     marked_pdf_mode: str = "selected",
+    max_overlay_records_per_pair: Optional[int] = None,
     review_dashboard: Optional[Union[str, Path, Dict[str, Any]]] = None,
     preview_manifest: Optional[Union[str, Path, Dict[str, Any]]] = None,
     review_dashboard_path: Optional[Union[str, Path]] = None,
@@ -170,6 +204,8 @@ def export_viewer_package(
     viewer_perf_log: bool = False,
     render_timeout_seconds: int = 0,
     build_lod_tiles: bool = True,
+    cad_visual_backend: str = "",
+    cad_visual_conversion_timeout_seconds: int = 180,
     runtime_sampler: Optional[Any] = None,
     memory_cap_mb: Optional[float] = None,
 ) -> ViewerPackage:
@@ -185,6 +221,7 @@ def export_viewer_package(
     artifact_root = Path(artifact_dir)
     viewer_root = Path(viewer_dir) if viewer_dir else artifact_root / "viewer"
     overlay_dir = viewer_root / "overlays"
+    overlay_page_dir = viewer_root / OVERLAY_PAGES_DIRNAME
     page_dir = viewer_root / "pages"
     image_dir = viewer_root / "images"
     focus_tile_dir = viewer_root / "focus_tiles"
@@ -192,7 +229,17 @@ def export_viewer_package(
     viewer_cache_root = Path(viewer_cache_dir) if viewer_cache_dir else viewer_root
     tile_dir = viewer_cache_root / "tiles"
     overlay_tile_dir = viewer_cache_root / "overlay_tiles"
-    for directory in (viewer_root, overlay_dir, page_dir, image_dir, tile_dir, focus_tile_dir, overlay_tile_dir, marked_pdf_dir):
+    for directory in (
+        viewer_root,
+        overlay_dir,
+        overlay_page_dir,
+        page_dir,
+        image_dir,
+        tile_dir,
+        focus_tile_dir,
+        overlay_tile_dir,
+        marked_pdf_dir,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
 
     options = ViewerPackageOptions(
@@ -202,6 +249,11 @@ def export_viewer_package(
         max_zone_tiles=max(0, int(max_zone_tiles)),
         export_marked_pdf=bool(export_marked_pdf),
         marked_pdf_mode=marked_pdf_mode,
+        max_overlay_records_per_pair=(
+            max(1, int(max_overlay_records_per_pair))
+            if max_overlay_records_per_pair is not None
+            else None
+        ),
         preview_dpi=max(20, int(preview_dpi)),
         preview_max_edge_px=max(800, int(preview_max_edge_px)),
         tile_size=max(128, int(tile_size)),
@@ -214,6 +266,10 @@ def export_viewer_package(
         viewer_perf_log=bool(viewer_perf_log),
         render_timeout_seconds=max(0, int(render_timeout_seconds)),
         build_lod_tiles=bool(build_lod_tiles),
+        cad_visual_backend=str(cad_visual_backend or ""),
+        cad_visual_conversion_timeout_seconds=max(
+            1, int(cad_visual_conversion_timeout_seconds or 180)
+        ),
     )
     tile_options = ViewerTileCacheOptions(
         tile_size=options.tile_size,
@@ -252,6 +308,8 @@ def export_viewer_package(
     lazy_pairs = 0
     page_count = 0
     render_slots_used = 0
+    visual_asset_manifest_count = 0
+    visual_asset_manifest_paths: List[str] = []
 
     dxf_cache_root = Path(dxf_cache_dir) if dxf_cache_dir else artifact_root / "dxf_cache"
     dxf_cache_root.mkdir(parents=True, exist_ok=True)
@@ -274,6 +332,12 @@ def export_viewer_package(
     # Audit-gates §11.6 — track adaptive degradation warnings so each tier
     # transition is reported exactly once instead of once-per-pair.
     _degradation_warned = {"value": False}
+    cad_visual_registry = get_default_render_backend_registry()
+    cad_visual_capabilities = cad_visual_registry.resolve_cad_visual_backend(
+        options.cad_visual_backend,
+        allow_env=False,
+    ).capabilities
+    visual_asset_dir = viewer_root / "visual_assets"
 
     for pair_id in sorted(zones_by_pair):
         if runtime_sampler is not None:
@@ -337,6 +401,7 @@ def export_viewer_package(
             if background["after_image"] and background["after_transform"]:
                 render_status = "preview_reused"
             else:
+                render_started = perf_counter()
                 rendered = _render_pair_backgrounds_with_timeout(
                     pair_id=pair_id,
                     source_a=source_a,
@@ -349,9 +414,22 @@ def export_viewer_package(
                     page_a=primary_page_a,
                     page_b=primary_page_b,
                 )
+                render_elapsed_ms = round((perf_counter() - render_started) * 1000.0, 3)
                 background.update(rendered)
                 render_status = rendered["render_status"]
                 pair_warning.extend(rendered["warnings"])
+                if options.viewer_perf_log:
+                    append_viewer_perf_event(
+                        viewer_root,
+                        "package_background_render",
+                        pair_uuid=pair_id,
+                        render_ms=render_elapsed_ms,
+                        render_status=render_status,
+                        render_decision=render_decision,
+                        worker_spawned=bool(rendered.get("worker_spawned")),
+                        page_a=primary_page_a,
+                        page_b=primary_page_b,
+                    )
         elif render_decision == "skipped_by_page_cap":
             render_status = "skipped_by_page_cap"
         elif background["after_image"] and background["after_transform"]:
@@ -374,6 +452,14 @@ def export_viewer_package(
         coordinate_source = "image_pixels" if is_pdf_pair else "cad_world"
         visual_fidelity = "pdf_render" if is_pdf_pair else ("cad_render" if background_type == "png" else "relative_overlay")
         render_lifecycle = "ready" if background_type == "png" else ("idle" if is_pdf_pair else "queued")
+        cad_visual_conversion = _cad_visual_conversion_provenance_for_pair(
+            pair_id=pair_id,
+            source_a=source_a,
+            source_b=source_b,
+            visual_asset_dir=visual_asset_dir,
+            registry=cad_visual_registry,
+            options=options,
+        )
         if background_type == "png":
             rendered_pairs += 1
         else:
@@ -386,6 +472,25 @@ def export_viewer_package(
         # fields, ``convert_bbox_to_world_space`` skips the conversion and
         # the markers float at world coords ~6× outside the page bounds.
         pair_pdf_dpi = _pdf_dpi_from_zone_rows(rows) if is_pdf_pair else 0.0
+        rendered_background_signature = _rendered_background_signature(
+            source_a=source_a,
+            source_b=source_b,
+            before_image=before_image,
+            after_image=after_image,
+            before_transform=before_transform,
+            after_transform=after_transform,
+            page_a=primary_page_a,
+            page_b=primary_page_b,
+            dpi=options.preview_dpi,
+            render_status=render_status,
+        )
+        overlay_rows, overlay_total_count, overlay_deferred_count = _limit_overlay_rows(
+            rows,
+            pair_id=pair_id,
+            selected_keys=selected_keys,
+            priority_by_key=priority_by_key,
+            max_records=options.max_overlay_records_per_pair,
+        )
         overlays = [
             _overlay_from_zone_row(
                 row,
@@ -397,11 +502,23 @@ def export_viewer_package(
                 bbox_coordinate_space=(coordinate_source if is_pdf_pair else ""),
                 pdf_dpi=pair_pdf_dpi,
             )
-            for row in rows
+            for row in overlay_rows
         ]
         overlays = _sort_overlays(overlays)
-        if options.max_overlay_records_per_pair and options.max_overlay_records_per_pair > 0:
-            overlays = overlays[: options.max_overlay_records_per_pair]
+        overlay_page_summary = write_overlay_page_store(
+            pair_id=pair_id,
+            overlays=overlays,
+            output_root=overlay_page_dir,
+            page_size=DEFAULT_OVERLAY_PAGE_SIZE,
+        )
+        overlay_page_fields = overlay_page_summary.to_manifest_fields()
+        legacy_overlay_limit = max(1, int(options.max_visible_overlays or DEFAULT_OVERLAY_PAGE_SIZE))
+        legacy_overlays = (
+            overlays
+            if len(overlays) <= legacy_overlay_limit
+            else list(overlays[:legacy_overlay_limit])
+        )
+        legacy_overlay_truncated = len(legacy_overlays) < len(overlays)
 
         pair_tile_count = 0
         if options.render_policy in {"top-issues", "all"} and after_image and total_tile_count < options.max_zone_tiles:
@@ -425,6 +542,7 @@ def export_viewer_package(
             source_a=source_a,
             source_b=source_b,
             options=tile_options,
+            rendered_background_signature=rendered_background_signature,
         )
         if (
             options.build_lod_tiles
@@ -432,9 +550,20 @@ def export_viewer_package(
             and options.render_policy in {"top-issues", "all"}
         ):
             pair_tile_manifest = {}
-            if tiles_manifest_is_current(cache_tiles_manifest, pair_id, tile_cache_key):
+            cache_lookup_started = perf_counter()
+            tile_cache_hit = tiles_manifest_is_current(
+                cache_tiles_manifest,
+                pair_id,
+                tile_cache_key,
+                require_complete=True,
+            )
+            cache_lookup_ms = round((perf_counter() - cache_lookup_started) * 1000.0, 3)
+            tile_write_ms = 0.0
+            if tile_cache_hit:
                 pair_tile_manifest = ((_read_json(cache_tiles_manifest).get("pairs") or {}).get(pair_id) or {})
             if not isinstance(pair_tile_manifest, dict) or not pair_tile_manifest:
+                tile_cache_hit = False
+                tile_write_started = perf_counter()
                 pair_tile_manifest = write_pair_tile_cache(
                     pair_uuid=pair_id,
                     before_image=before_image,
@@ -445,6 +574,7 @@ def export_viewer_package(
                     options=tile_options,
                     cache_key=tile_cache_key,
                 )
+                tile_write_ms = round((perf_counter() - tile_write_started) * 1000.0, 3)
                 # Audit-gates §11.5 — streaming JSONL append instead of the
                 # legacy O(N²) read-mutate-rewrite. Both sinks (cache + viewer)
                 # accumulate per-pair records cheaply; a single materialise
@@ -461,6 +591,27 @@ def export_viewer_package(
                     pair_uuid=pair_id,
                     tile_count=pair_lod_tile_count,
                     overlay_tile_count=pair_overlay_tile_count,
+                    tile_cache_hit=tile_cache_hit,
+                    cache_lookup_ms=cache_lookup_ms,
+                    tile_write_ms=tile_write_ms,
+                    tile_pyramid_ms=float(pair_tile_manifest.get("tile_pyramid_ms") or 0.0),
+                    overlay_tile_ms=float(pair_tile_manifest.get("overlay_tile_ms") or 0.0),
+                    tile_cache_write_ms=float(pair_tile_manifest.get("tile_cache_write_ms") or 0.0),
+                    tile_payload_bytes=int(pair_tile_manifest.get("tile_payload_bytes") or 0),
+                    overlay_tile_payload_bytes=int(pair_tile_manifest.get("overlay_tile_payload_bytes") or 0),
+                    cache_total_estimated_bytes=int(pair_tile_manifest.get("cache_total_estimated_bytes") or 0),
+                    cache_byte_limit=int(pair_tile_manifest.get("cache_byte_limit") or 0),
+                    eviction_count=int(pair_tile_manifest.get("eviction_count") or 0),
+                    evicted_pair_count=int(pair_tile_manifest.get("evicted_pair_count") or 0),
+                    evicted_estimated_bytes=int(pair_tile_manifest.get("evicted_estimated_bytes") or 0),
+                    cache_retained_estimated_bytes=int(pair_tile_manifest.get("cache_retained_estimated_bytes") or 0),
+                    cache_estimated_bytes_before_eviction=int(
+                        pair_tile_manifest.get("cache_estimated_bytes_before_eviction") or 0
+                    ),
+                    eviction_reason=str(pair_tile_manifest.get("eviction_reason") or ""),
+                    overlay_count=int(pair_tile_manifest.get("overlay_count") or len(overlays)),
+                    materialized_overlay_count=int(pair_tile_manifest.get("materialized_overlay_count") or 0),
+                    overlay_omitted_count=int(pair_tile_manifest.get("overlay_omitted_count") or 0),
                     render_policy=options.render_policy,
                 )
 
@@ -481,9 +632,15 @@ def export_viewer_package(
             "before_image": before_image,
             "after_image": after_image,
             "overlay_count": len(overlays),
-            "zone_count": len(overlays),
-            "overlays": overlays,
+            "zone_count": overlay_total_count,
+            "overlay_total_count": overlay_total_count,
+            "overlay_deferred_count": overlay_deferred_count,
+            "overlay_deferred": overlay_deferred_count > 0,
+            "overlay_legacy_count": len(legacy_overlays),
+            "overlay_legacy_truncated": legacy_overlay_truncated,
+            "overlays": legacy_overlays,
         }
+        overlay_payload.update(overlay_page_fields)
         overlay_path = overlay_dir / f"{safe_pair}.json"
         _write_json(overlay_path, overlay_payload)
         total_overlay_count += len(overlays)
@@ -510,6 +667,24 @@ def export_viewer_package(
         page_path = after_page_path or before_page_path
         if before_page_path or after_page_path:
             page_count += 1
+        visual_assets, pair_visual_asset_paths = _write_pair_visual_asset_manifests(
+            pair_id=pair_id,
+            source_a=source_a,
+            source_b=source_b,
+            before_page_pdf=before_page_path,
+            after_page_pdf=after_page_path,
+            before_image=before_image,
+            after_image=after_image,
+            before_transform=before_transform,
+            after_transform=after_transform,
+            cad_visual_conversion=cad_visual_conversion,
+            visual_asset_dir=visual_asset_dir,
+            options=options,
+            page_a=primary_page_a,
+            page_b=primary_page_b,
+        )
+        visual_asset_manifest_count += len(pair_visual_asset_paths)
+        visual_asset_manifest_paths.extend(pair_visual_asset_paths)
 
         pair_entry = {
             "pair_id": pair_id,
@@ -545,14 +720,25 @@ def export_viewer_package(
             "render_status": render_status,
             "render_warning": "; ".join(pair_warning),
             "overlay_count": len(overlays),
+            "overlay_total_count": overlay_total_count,
+            "overlay_deferred_count": overlay_deferred_count,
+            "overlay_deferred": overlay_deferred_count > 0,
+            "overlay_legacy_count": len(legacy_overlays),
+            "overlay_legacy_truncated": legacy_overlay_truncated,
+            **overlay_page_fields,
             "tile_count": pair_tile_count,
             "lod_tile_count": pair_lod_tile_count,
             "overlay_tile_count": pair_overlay_tile_count,
             "tile_manifest": tile_manifest_path,
             "tile_cache_key": tile_cache_key,
+            "rendered_background_signature": rendered_background_signature,
+            "visual_assets": visual_assets,
+            "visual_asset_manifest_paths": pair_visual_asset_paths,
             "marked_pdf": marked_pdf_path,
             "marked_pdf_status": marked_pdf_status,
         }
+        if cad_visual_conversion:
+            pair_entry["cad_visual_conversion"] = cad_visual_conversion
         pair_entries.append(pair_entry)
         warnings.extend([f"{pair_id}: {warning}" for warning in pair_warning if warning])
 
@@ -562,15 +748,56 @@ def export_viewer_package(
     # so existing readers (tiles_manifest_is_current, viewer manifest export)
     # see the same dict shape they expect from the legacy merge code path.
     try:
-        materialise_tiles_manifest_from_jsonl(viewer_cache_root, keep_jsonl=False)
+        same_tiles_manifest_root = viewer_cache_root.resolve() == viewer_root.resolve()
+    except OSError:
+        same_tiles_manifest_root = viewer_cache_root == viewer_root
+    materialise_started = perf_counter()
+    try:
+        materialise_tiles_manifest_from_jsonl(
+            viewer_cache_root,
+            keep_jsonl=same_tiles_manifest_root,
+        )
+        if options.viewer_perf_log:
+            append_viewer_perf_event(
+                viewer_root,
+                "tiles_manifest_materialise",
+                target="cache",
+                materialise_ms=round((perf_counter() - materialise_started) * 1000.0, 3),
+                status="ready",
+            )
     except Exception:
+        if options.viewer_perf_log:
+            append_viewer_perf_event(
+                viewer_root,
+                "tiles_manifest_materialise",
+                target="cache",
+                materialise_ms=round((perf_counter() - materialise_started) * 1000.0, 3),
+                status="failed",
+            )
         # Best-effort: a missing JSONL on the cache side just means no pairs
         # produced tile records this run; downstream readers tolerate empty
         # manifests, so we do not fail the whole viewer build over this.
         pass
+    materialise_started = perf_counter()
     try:
         materialise_tiles_manifest_from_jsonl(viewer_root, keep_jsonl=False)
+        if options.viewer_perf_log:
+            append_viewer_perf_event(
+                viewer_root,
+                "tiles_manifest_materialise",
+                target="viewer",
+                materialise_ms=round((perf_counter() - materialise_started) * 1000.0, 3),
+                status="ready",
+            )
     except Exception:
+        if options.viewer_perf_log:
+            append_viewer_perf_event(
+                viewer_root,
+                "tiles_manifest_materialise",
+                target="viewer",
+                materialise_ms=round((perf_counter() - materialise_started) * 1000.0, 3),
+                status="failed",
+            )
         pass
 
     transform_complete = bool(pair_entries) and all(entry.get("after_transform") for entry in pair_entries)
@@ -590,12 +817,18 @@ def export_viewer_package(
         "focus_tile_max_edge": options.focus_tile_max_edge,
         "viewer_perf_log": bool(options.viewer_perf_log),
         "build_lod_tiles": bool(options.build_lod_tiles),
+        "cad_visual_backend": cad_visual_capabilities.to_dict(),
+        "cad_visual_conversion_timeout_seconds": options.cad_visual_conversion_timeout_seconds,
+        "visual_asset_manifest_count": visual_asset_manifest_count,
+        "visual_asset_manifest_paths": visual_asset_manifest_paths,
         "coordinate_source": "cad_world",
         "rendered_pair_count": rendered_pairs,
         "lazy_pair_count": lazy_pairs,
         "page_count": page_count,
         "tile_count": total_tile_count,
         "tiles_manifest": str(viewer_root / "tiles_manifest.json"),
+        "viewer_perf_json": str(viewer_root / "viewer_perf.json"),
+        "viewer_perf_jsonl": str(viewer_root / "viewer_perf.jsonl"),
         "marked_pdf_count": marked_pdf_count,
         "marked_pdf_skipped_count": marked_pdf_skipped_count,
         "transform_complete": transform_complete,
@@ -604,12 +837,14 @@ def export_viewer_package(
         "warnings": warnings,
         "directories": {
             "overlays": str(overlay_dir),
+            "overlay_pages": str(overlay_page_dir),
             "pages": str(page_dir),
             "images": str(image_dir),
             "tiles": str(tile_dir),
             "focus_tiles": str(focus_tile_dir),
             "overlay_tiles": str(overlay_tile_dir),
             "marked_pdf": str(marked_pdf_dir),
+            "visual_assets": str(visual_asset_dir),
         },
         "viewer_perf_json": str(viewer_root / "viewer_perf.json"),
         "pairs": pair_entries,
@@ -676,7 +911,9 @@ def export_viewer_package(
         "viewer_overlay_tiles_dir": str(overlay_tile_dir),
         "viewer_tiles_manifest_json": str(viewer_root / "tiles_manifest.json"),
         "viewer_perf_json": str(viewer_root / "viewer_perf.json"),
+        "viewer_perf_jsonl": str(viewer_root / "viewer_perf.jsonl"),
         "marked_pdf_dir": str(marked_pdf_dir),
+        "viewer_visual_assets_dir": str(visual_asset_dir),
     }
     return ViewerPackage(
         viewer_dir=viewer_root,
@@ -818,6 +1055,587 @@ def _source_path_for_pair(rows: Sequence[Dict[str, str]], artifact: Dict[str, An
             if value:
                 return Path(str(value))
     return None
+
+
+def _cad_visual_conversion_provenance_for_pair(
+    *,
+    pair_id: str,
+    source_a: Optional[Path],
+    source_b: Optional[Path],
+    visual_asset_dir: Path,
+    registry: Any,
+    options: ViewerPackageOptions,
+) -> Dict[str, Dict[str, Any]]:
+    """Record CAD visual conversion provenance without changing render output.
+
+    R5.5 intentionally keeps conversion disabled by default. The metadata here
+    makes the selected backend and disabled/skipped reason visible in the
+    viewer package without starting an external converter from this hot path.
+    """
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for side, source in (("before", source_a), ("after", source_b)):
+        if not _is_cad_source(source):
+            continue
+        result[side] = _cad_visual_conversion_provenance_for_source(
+            pair_id=pair_id,
+            source=source,
+            side=side,
+            visual_asset_dir=visual_asset_dir,
+            registry=registry,
+            options=options,
+        )
+    return result
+
+
+def _cad_visual_conversion_provenance_for_source(
+    *,
+    pair_id: str,
+    source: Optional[Path],
+    side: str,
+    visual_asset_dir: Path,
+    registry: Any,
+    options: ViewerPackageOptions,
+) -> Dict[str, Any]:
+    assert source is not None
+    safe_pair = _safe_name(pair_id)
+    output_dir = visual_asset_dir / safe_pair / side
+    request = CadVisualConversionRequest(
+        source_path=source,
+        output_dir=output_dir,
+        output_format="pdf",
+        backend_id=options.cad_visual_backend,
+        pair_id=pair_id,
+        side=side,
+        page_index=0,
+        dpi=options.preview_dpi,
+        timeout_s=float(options.cad_visual_conversion_timeout_seconds),
+        metadata={"stage": "viewer_package", "provenance_only": True},
+    )
+    try:
+        backend = registry.resolve_cad_visual_backend(
+            options.cad_visual_backend,
+            allow_env=False,
+        )
+        caps = backend.capabilities
+    except Exception as exc:  # pragma: no cover - defensive for future adapters
+        conversion = CadVisualConversionResult(
+            status="failed",
+            reason_code=CAD_VISUAL_BACKEND_UNAVAILABLE,
+            source_path=str(source),
+            output_format="pdf",
+            backend_id=str(options.cad_visual_backend or ""),
+            warnings=[f"CAD visual backend probe failed: {exc}"],
+        )
+        return conversion.to_dict()
+
+    if not caps.can_convert_to_pdf:
+        reason_code = (
+            CAD_VISUAL_BACKEND_DISABLED
+            if not caps.enabled_by_default
+            else CAD_VISUAL_BACKEND_UNAVAILABLE
+        )
+        warning = "CAD visual conversion backend is disabled by default."
+    else:
+        # R5.5 only surfaces provenance. Actual conversion must go through the
+        # killable CAD visual worker in a later integration step.
+        reason_code = CAD_VISUAL_CONVERSION_DEFERRED
+        warning = "CAD visual conversion is available but not enabled for viewer export."
+
+    conversion = CadVisualConversionResult(
+        status="skipped",
+        reason_code=reason_code,
+        source_path=str(request.source_path),
+        output_format="pdf",
+        backend_id=caps.backend_id,
+        backend_version=caps.backend_version,
+        license_id=caps.license_id,
+        warnings=list(caps.notes) or [warning],
+        metadata={
+            "pair_id": pair_id,
+            "side": side,
+            "requested_backend_id": options.cad_visual_backend,
+            "timeout_s": float(options.cad_visual_conversion_timeout_seconds),
+            "provenance_only": True,
+        },
+    )
+    return conversion.to_dict()
+
+
+def _write_pair_visual_asset_manifests(
+    *,
+    pair_id: str,
+    source_a: Optional[Path],
+    source_b: Optional[Path],
+    before_page_pdf: Optional[Path],
+    after_page_pdf: Optional[Path],
+    before_image: str,
+    after_image: str,
+    before_transform: Optional[Dict[str, Any]],
+    after_transform: Optional[Dict[str, Any]],
+    cad_visual_conversion: Dict[str, Dict[str, Any]],
+    visual_asset_dir: Path,
+    options: ViewerPackageOptions,
+    page_a: int,
+    page_b: int,
+) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    visual_assets: Dict[str, Dict[str, Any]] = {}
+    manifest_paths: List[str] = []
+    sides = (
+        ("before", source_a, before_page_pdf, before_image, before_transform, int(page_a)),
+        ("after", source_b, after_page_pdf, after_image, after_transform, int(page_b)),
+    )
+    for side, source, page_pdf, image, transform, page_index in sides:
+        side_assets: Dict[str, Any] = {}
+        if source and source.suffix.lower() in PDF_EXTENSIONS and page_pdf:
+            entry = _write_visual_asset_manifest_for_side(
+                pair_id=pair_id,
+                side=side,
+                role="source_pdf",
+                source=source,
+                asset_path=page_pdf,
+                asset_kind="source_pdf",
+                visual_asset_dir=visual_asset_dir,
+                options=options,
+                page_index=page_index,
+                transform=transform,
+                visual_backend_id="source_pdf",
+                visual_backend_version="1",
+                visual_backend_license_id="customer_provided",
+                visual_fidelity="pdf_visual_background",
+                render_lifecycle="ready" if image else "source_only",
+                transform_quality="estimated" if transform else "relative_only",
+                bbox_coordinate_space="image_pixels" if transform else "",
+                reason_code="",
+                status="ready",
+            )
+            side_assets["source_pdf"] = entry
+            manifest_paths.append(entry["manifest_path"])
+        if image:
+            entry = _write_visual_asset_manifest_for_side(
+                pair_id=pair_id,
+                side=side,
+                role="raster_fallback",
+                source=source,
+                asset_path=Path(image),
+                asset_kind="raster_fallback",
+                visual_asset_dir=visual_asset_dir,
+                options=options,
+                page_index=page_index,
+                transform=transform,
+                visual_backend_id="viewer_package_raster",
+                visual_backend_version=str(VIEWER_PACKAGE_SCHEMA_VERSION),
+                visual_backend_license_id="project_internal",
+                visual_fidelity="raster_background",
+                render_lifecycle="ready",
+                transform_quality="estimated" if transform else "relative_only",
+                bbox_coordinate_space="image_pixels" if transform else "",
+                reason_code="",
+                status="ready",
+            )
+            side_assets["raster_fallback"] = entry
+            manifest_paths.append(entry["manifest_path"])
+        cad_conversion = cad_visual_conversion.get(side)
+        if isinstance(cad_conversion, dict):
+            entry = _write_cad_visual_provenance_manifest(
+                pair_id=pair_id,
+                side=side,
+                source=source,
+                conversion=cad_conversion,
+                visual_asset_dir=visual_asset_dir,
+                options=options,
+            )
+            side_assets["cad_visual_provenance"] = entry
+            manifest_paths.append(entry["manifest_path"])
+        if side_assets:
+            visual_assets[side] = side_assets
+    return visual_assets, manifest_paths
+
+
+def _write_visual_asset_manifest_for_side(
+    *,
+    pair_id: str,
+    side: str,
+    role: str,
+    source: Optional[Path],
+    asset_path: Path,
+    asset_kind: str,
+    visual_asset_dir: Path,
+    options: ViewerPackageOptions,
+    page_index: int,
+    transform: Optional[Dict[str, Any]],
+    visual_backend_id: str,
+    visual_backend_version: str,
+    visual_backend_license_id: str,
+    visual_fidelity: str,
+    render_lifecycle: str,
+    transform_quality: str,
+    bbox_coordinate_space: str,
+    reason_code: str,
+    status: str,
+) -> Dict[str, Any]:
+    safe_pair = _safe_name(pair_id)
+    manifest_dir = visual_asset_dir / safe_pair / side / role
+    plot_profile_hash = _visual_plot_profile_hash(
+        asset_kind=asset_kind,
+        dpi=options.preview_dpi,
+        max_edge_px=options.preview_max_edge_px,
+        page_index=page_index,
+    )
+    source_signature = _visual_source_signature(
+        source,
+        backend_id=visual_backend_id,
+        plot_profile_hash=plot_profile_hash,
+    )
+    source_hash = str(source_signature.get("source_hash") or "")
+    dpi = _transform_dpi(transform, fallback=options.preview_dpi)
+    cache_key_hash = build_visual_asset_cache_key(
+        source_hash=source_hash,
+        source_signature=source_signature,
+        backend_id=visual_backend_id,
+        backend_version=visual_backend_version,
+        license_id=visual_backend_license_id,
+        plot_profile_hash=plot_profile_hash,
+        page_index=page_index,
+        dpi=dpi,
+    )
+    probe_path = manifest_dir / "nonblank_probe.json"
+    probe = _write_visual_asset_probe(
+        probe_path,
+        asset_path=asset_path,
+        source_hash=source_hash,
+        cache_key_hash=cache_key_hash,
+        page_index=page_index,
+        dpi=dpi,
+    )
+    manifest = VisualAssetManifest(
+        visual_asset_id=f"{pair_id}:{side}:{role}",
+        source_path=str(source or ""),
+        asset_path=str(asset_path),
+        asset_kind=asset_kind,  # type: ignore[arg-type]
+        status=status,
+        reason_code=reason_code,
+        source_hash=source_hash,
+        source_signature=source_signature,
+        cache_key_hash=cache_key_hash,
+        plot_profile_hash=plot_profile_hash,
+        page_index=page_index,
+        dpi=dpi,
+        page_size_pt=_page_size_pt_from_transform(transform),
+        pixel_size=_transform_pixel_size(transform),
+        visual_backend_id=visual_backend_id,
+        visual_backend_version=visual_backend_version,
+        visual_backend_license_id=visual_backend_license_id,
+        visual_fidelity=visual_fidelity,
+        render_lifecycle=render_lifecycle,
+        transform_quality=transform_quality,
+        bbox_coordinate_space=bbox_coordinate_space,
+        nonblank_probe_status=str(probe.get("status") or "not_probed"),
+        metadata={
+            "pair_id": pair_id,
+            "side": side,
+            "role": role,
+            "nonblank_probe": str(probe_path),
+            "nonblank_probe_hash": str(probe.get("probe_hash") or ""),
+            "asset_hash": str(probe.get("asset_hash") or ""),
+            "probe_method": str(probe.get("method") or ""),
+        },
+    )
+    manifest_path = write_visual_asset_manifest(manifest_dir / "visual_asset_manifest.json", manifest)
+    return {
+        "manifest_path": str(manifest_path),
+        "asset_kind": manifest.asset_kind,
+        "status": manifest.status,
+        "reason_code": manifest.reason_code,
+        "cache_key_hash": manifest.cache_key_hash,
+        "nonblank_probe_status": manifest.nonblank_probe_status,
+    }
+
+
+def _write_cad_visual_provenance_manifest(
+    *,
+    pair_id: str,
+    side: str,
+    source: Optional[Path],
+    conversion: Dict[str, Any],
+    visual_asset_dir: Path,
+    options: ViewerPackageOptions,
+) -> Dict[str, Any]:
+    safe_pair = _safe_name(pair_id)
+    manifest_dir = visual_asset_dir / safe_pair / side / "cad_visual_provenance"
+    status = str(conversion.get("status") or "skipped")
+    output_path = str(conversion.get("output_path") or "")
+    asset_kind = "cad_to_pdf" if status == "converted" and output_path else "relative_only"
+    backend_id = str(conversion.get("backend_id") or options.cad_visual_backend or "disabled")
+    backend_version = str(conversion.get("backend_version") or "")
+    license_id = str(conversion.get("license_id") or "none")
+    plot_profile_hash = _visual_plot_profile_hash(
+        asset_kind="cad_to_pdf",
+        dpi=options.preview_dpi,
+        max_edge_px=options.preview_max_edge_px,
+        page_index=0,
+    )
+    source_signature = _visual_source_signature(
+        source,
+        backend_id=backend_id,
+        plot_profile_hash=plot_profile_hash,
+    )
+    source_hash = str(source_signature.get("source_hash") or "")
+    cache_key_hash = build_visual_asset_cache_key(
+        source_hash=source_hash,
+        source_signature=source_signature,
+        backend_id=backend_id,
+        backend_version=backend_version,
+        license_id=license_id,
+        plot_profile_hash=plot_profile_hash,
+        page_index=0,
+        dpi=options.preview_dpi,
+    )
+    manifest = VisualAssetManifest(
+        visual_asset_id=f"{pair_id}:{side}:cad_visual_provenance",
+        source_path=str(source or conversion.get("source_path") or ""),
+        asset_path=output_path,
+        asset_kind=asset_kind,  # type: ignore[arg-type]
+        status="ready" if status == "converted" and output_path else "skipped",
+        reason_code=str(conversion.get("reason_code") or ""),
+        source_hash=source_hash,
+        source_signature=source_signature,
+        cache_key_hash=cache_key_hash,
+        plot_profile_hash=plot_profile_hash,
+        page_index=0,
+        dpi=options.preview_dpi,
+        visual_backend_id=backend_id,
+        visual_backend_version=backend_version,
+        visual_backend_license_id=license_id,
+        visual_fidelity="pdf_visual_background" if asset_kind == "cad_to_pdf" else "relative_only",
+        render_lifecycle="ready" if asset_kind == "cad_to_pdf" else "deferred",
+        transform_quality="estimated" if asset_kind == "cad_to_pdf" else "relative_only",
+        nonblank_probe_status="not_probed",
+        warnings=[str(item) for item in conversion.get("warnings", []) if str(item)],
+        metadata={
+            "pair_id": pair_id,
+            "side": side,
+            "cad_visual_conversion": conversion,
+            "provenance_only": True,
+            "conversion_invoked_from_hot_path": False,
+        },
+    )
+    manifest_path = write_visual_asset_manifest(manifest_dir / "visual_asset_manifest.json", manifest)
+    return {
+        "manifest_path": str(manifest_path),
+        "asset_kind": manifest.asset_kind,
+        "status": manifest.status,
+        "reason_code": manifest.reason_code,
+        "cache_key_hash": manifest.cache_key_hash,
+        "nonblank_probe_status": manifest.nonblank_probe_status,
+    }
+
+
+def _visual_source_signature(
+    source: Optional[Path],
+    *,
+    backend_id: str,
+    plot_profile_hash: str,
+) -> Dict[str, Any]:
+    return build_source_signature(
+        source,
+        render_backend_id=backend_id,
+        plot_profile_hash=plot_profile_hash,
+        include_sample_hash=True,
+    )
+
+
+def _visual_plot_profile_hash(
+    *,
+    asset_kind: str,
+    dpi: int,
+    max_edge_px: int,
+    page_index: int,
+) -> str:
+    payload = {
+        "schema": 1,
+        "asset_kind": str(asset_kind or ""),
+        "dpi": int(dpi or 0),
+        "max_edge_px": int(max_edge_px or 0),
+        "page_index": int(page_index or 0),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _rendered_background_signature(
+    *,
+    source_a: Optional[Path],
+    source_b: Optional[Path],
+    before_image: str,
+    after_image: str,
+    before_transform: Optional[Dict[str, Any]],
+    after_transform: Optional[Dict[str, Any]],
+    page_a: int,
+    page_b: int,
+    dpi: int,
+    render_status: str,
+) -> str:
+    payload = {
+        "schema": 1,
+        "source_a": build_source_signature(source_a),
+        "source_b": build_source_signature(source_b),
+        "before_image": _file_signature_for_path(Path(before_image)) if before_image else {},
+        "after_image": _file_signature_for_path(Path(after_image)) if after_image else {},
+        "before_transform": before_transform or {},
+        "after_transform": after_transform or {},
+        "page_a": int(page_a or 0),
+        "page_b": int(page_b or 0),
+        "dpi": int(dpi or 0),
+        "render_status": str(render_status or ""),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _write_visual_asset_probe(
+    path: Path,
+    *,
+    asset_path: Path,
+    source_hash: str,
+    cache_key_hash: str,
+    page_index: int,
+    dpi: int,
+) -> Dict[str, Any]:
+    asset_signature = _file_signature_for_path(asset_path)
+    payload = {
+        "schema_version": 1,
+        "status": "not_probed",
+        "method": "hash_link_only",
+        "asset_path": str(asset_path),
+        "asset_hash": str(asset_signature.get("sha256") or ""),
+        "asset_size": int(asset_signature.get("size") or 0),
+        "source_hash": source_hash,
+        "cache_key_hash": cache_key_hash,
+        "page_index": int(page_index or 0),
+        "dpi": int(dpi or 0),
+        "note": "P5-G24 foundation hash-link; pixel nonblank probe is required before customer_grade pass.",
+    }
+    payload["probe_hash"] = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    _write_json(path, payload)
+    return payload
+
+
+def _file_signature_for_path(path: Optional[Path]) -> Dict[str, Any]:
+    if not path:
+        return {"exists": False, "size": 0, "sha256": ""}
+    try:
+        target = Path(path)
+        stat = target.stat()
+    except OSError:
+        return {"exists": False, "size": 0, "sha256": ""}
+    digest = hashlib.sha256()
+    try:
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return {"exists": True, "size": int(stat.st_size), "sha256": ""}
+    return {"exists": True, "size": int(stat.st_size), "sha256": digest.hexdigest()}
+
+
+def _transform_dpi(transform: Optional[Dict[str, Any]], *, fallback: int) -> int:
+    if isinstance(transform, dict):
+        for key in ("effective_dpi", "pdf_dpi", "dpi"):
+            value = transform.get(key)
+            try:
+                parsed = int(round(float(value)))
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+    return int(fallback or 0)
+
+
+def _transform_pixel_size(transform: Optional[Dict[str, Any]]) -> List[int]:
+    if not isinstance(transform, dict):
+        return []
+    width = transform.get("img_width") or transform.get("max_x")
+    height = transform.get("img_height") or transform.get("max_y")
+    try:
+        width_i = int(round(float(width)))
+        height_i = int(round(float(height)))
+    except (TypeError, ValueError):
+        return []
+    return [width_i, height_i] if width_i > 0 and height_i > 0 else []
+
+
+def _page_size_pt_from_transform(transform: Optional[Dict[str, Any]]) -> List[float]:
+    pixels = _transform_pixel_size(transform)
+    if len(pixels) != 2:
+        return []
+    dpi = _transform_dpi(transform, fallback=0)
+    if dpi <= 0:
+        return []
+    return [
+        round(float(pixels[0]) * 72.0 / float(dpi), 3),
+        round(float(pixels[1]) * 72.0 / float(dpi), 3),
+    ]
+
+
+def _is_cad_source(source: Optional[Path]) -> bool:
+    return bool(source and source.suffix.lower() in CAD_EXTENSIONS)
+
+
+def _limit_overlay_rows(
+    rows: Sequence[Dict[str, str]],
+    *,
+    pair_id: str,
+    selected_keys: set[Tuple[str, str]],
+    priority_by_key: Dict[Tuple[str, str], Dict[str, Any]],
+    max_records: Optional[int],
+) -> Tuple[List[Dict[str, str]], int, int]:
+    total = len(rows)
+    if max_records is None or max_records <= 0 or total <= max_records:
+        return list(rows), total, 0
+
+    limit = max(1, int(max_records))
+    selected_rows: List[Dict[str, str]] = []
+    other_rows: List[Dict[str, str]] = []
+    for row in rows:
+        zone_id = str(row.get("zone_id", ""))
+        if (pair_id, zone_id) in selected_keys:
+            selected_rows.append(row)
+        else:
+            other_rows.append(row)
+
+    selected_rows = sorted(
+        selected_rows,
+        key=lambda row: _overlay_row_priority_key(row, pair_id, priority_by_key),
+    )
+    other_rows = sorted(
+        other_rows,
+        key=lambda row: _overlay_row_priority_key(row, pair_id, priority_by_key),
+    )
+    if len(selected_rows) >= limit:
+        limited = selected_rows
+    else:
+        limited = selected_rows + other_rows[: limit - len(selected_rows)]
+    return limited, total, max(0, total - len(limited))
+
+
+def _overlay_row_priority_key(
+    row: Dict[str, str],
+    pair_id: str,
+    priority_by_key: Dict[Tuple[str, str], Dict[str, Any]],
+) -> Tuple[int, int, str]:
+    zone_id = str(row.get("zone_id", ""))
+    priority = priority_by_key.get((pair_id, zone_id), {})
+    rank = priority.get("rank") if isinstance(priority, dict) else None
+    try:
+        rank_value = int(rank) if rank is not None and str(rank).strip() else 999999
+    except (TypeError, ValueError):
+        rank_value = 999999
+    return (rank_value, -_safe_int(row.get("raw_change_count")), zone_id)
 
 
 def _first_nonempty(rows: Sequence[Dict[str, str]], key: str, default: str = "") -> str:
@@ -1438,7 +2256,7 @@ def _render_pair_backgrounds_with_timeout(
     flags so the rendered PNGs reflect the correct pages.
     """
     if timeout_seconds <= 0 or not source_a or not source_b:
-        return _render_pair_backgrounds(
+        result = _render_pair_backgrounds(
             pair_id=pair_id,
             source_a=source_a,
             source_b=source_b,
@@ -1449,6 +2267,9 @@ def _render_pair_backgrounds_with_timeout(
             page_a=page_a,
             page_b=page_b,
         )
+        result["worker_spawned"] = False
+        result["render_worker_status"] = "inprocess"
+        return result
 
     image_dir.mkdir(parents=True, exist_ok=True)
     result_json = image_dir / f"{_safe_name(pair_id)}.render_result.json"
@@ -1496,6 +2317,8 @@ def _render_pair_backgrounds_with_timeout(
             "before_transform": None,
             "after_transform": None,
             "render_status": "render_timeout",
+            "worker_spawned": True,
+            "render_worker_status": "subprocess_timeout",
             "warnings": [f"viewer render timed out after {timeout_seconds}s; kept overlay-only lazy view"],
         }
     if completed.returncode != 0:
@@ -1507,6 +2330,8 @@ def _render_pair_backgrounds_with_timeout(
             "before_transform": None,
             "after_transform": None,
             "render_status": "render_failed",
+            "worker_spawned": True,
+            "render_worker_status": "subprocess_failed",
             "warnings": [f"viewer render subprocess failed: {detail[:500]}"],
         }
     payload = _read_json(result_json) if result_json.exists() else {}
@@ -1517,8 +2342,12 @@ def _render_pair_backgrounds_with_timeout(
             "before_transform": None,
             "after_transform": None,
             "render_status": "render_failed",
+            "worker_spawned": True,
+            "render_worker_status": "subprocess_empty_result",
             "warnings": ["viewer render subprocess did not write a result"],
         }
+    payload["worker_spawned"] = True
+    payload["render_worker_status"] = "subprocess"
     return payload
 
 
@@ -1810,6 +2639,7 @@ def _update_artifact_manifest(artifact_dir: Path, viewer_manifest_path: Path, in
             "viewer_index_html": str(index_html),
             "viewer_tiles_manifest_json": str(Path(viewer_manifest_path).parent / "tiles_manifest.json"),
             "viewer_perf_json": str(Path(viewer_manifest_path).parent / "viewer_perf.json"),
+            "viewer_perf_jsonl": str(Path(viewer_manifest_path).parent / "viewer_perf.jsonl"),
         }
     )
     data["output_paths"] = output_paths
@@ -1821,6 +2651,7 @@ def _update_artifact_manifest(artifact_dir: Path, viewer_manifest_path: Path, in
         "tile_count": manifest.get("tile_count", 0),
         "tiles_manifest": manifest.get("tiles_manifest", ""),
         "viewer_perf_json": manifest.get("viewer_perf_json", ""),
+        "viewer_perf_jsonl": manifest.get("viewer_perf_jsonl", ""),
         "viewer_engine": manifest.get("viewer_engine", "auto"),
         "max_visible_overlays": manifest.get("max_visible_overlays", 500),
         "marked_pdf_count": manifest.get("marked_pdf_count", 0),
@@ -1836,6 +2667,7 @@ def _update_artifact_manifest(artifact_dir: Path, viewer_manifest_path: Path, in
             "viewer_index_html": str(index_html),
             "viewer_tiles_manifest_json": str(Path(viewer_manifest_path).parent / "tiles_manifest.json"),
             "viewer_perf_json": str(Path(viewer_manifest_path).parent / "viewer_perf.json"),
+            "viewer_perf_jsonl": str(Path(viewer_manifest_path).parent / "viewer_perf.jsonl"),
             "viewer_overlay_count": manifest.get("overlay_count", 0),
             "viewer_pair_count": manifest.get("pair_count", 0),
             "viewer_page_count": manifest.get("page_count", 0),
@@ -1979,6 +2811,7 @@ def _v2_artifact_ref(
     *,
     fidelity: str,
     renderer_id: str,
+    coordinate_source: str = "cad_world",
 ) -> Optional[V2ArtifactRef]:
     """Build a v2 ArtifactRef from the v1 background image + transform.
 
@@ -1995,6 +2828,13 @@ def _v2_artifact_ref(
     quality = "exact" if fidelity in {"exact_world_render", "exact_world_tile_sparse"} else "relative_only"
     if bbox == (0.0, 0.0, 0.0, 0.0):
         quality = "relative_only"
+    bbox_space = _v2_bbox_coordinate_space(transform, coordinate_source)
+    source_truth = (
+        SOURCE_TRUTH_PDF_VISUAL
+        if bbox_space in {COORD_IMAGE_PIXELS_TL, COORD_PDF_PAGE_POINTS_BL}
+        else SOURCE_TRUTH_CAD_ENTITY
+    )
+    y_axis = Y_AXIS_DOWN if bbox_space == COORD_IMAGE_PIXELS_TL else Y_AXIS_UP
     return V2ArtifactRef(
         image_uri=image_path,
         world_bbox=bbox,
@@ -2002,10 +2842,30 @@ def _v2_artifact_ref(
         world_to_pixel=V2_IDENTITY_AFFINE,
         pixel_to_world=V2_IDENTITY_AFFINE,
         transform_quality=quality,
+        bbox_coordinate_space=bbox_space,
+        source_truth=source_truth,
+        y_axis=y_axis,
         renderer_id=renderer_id,
         renderer_version="",
         notes="auto-translated from viewer_manifest.v1",
     )
+
+
+def _v2_bbox_coordinate_space(
+    transform: Optional[Dict[str, Any]],
+    coordinate_source: str,
+) -> str:
+    """Infer the explicit v2 bbox coordinate space from old v1 metadata."""
+
+    if isinstance(transform, dict) and transform.get("coordinate_space"):
+        return normalize_coordinate_space(transform.get("coordinate_space"))
+    if isinstance(transform, dict) and (
+        transform.get("pdf_page_size") or transform.get("page_size")
+    ):
+        return COORD_PDF_PAGE_POINTS_BL
+    if str(coordinate_source or "") == "image_pixels":
+        return COORD_IMAGE_PIXELS_TL
+    return COORD_CAD_WCS_MM
 
 
 def _build_v2_manifest_from_v1(
@@ -2047,12 +2907,14 @@ def _build_v2_manifest_from_v1(
             transform=pair.get("before_transform"),
             fidelity=fidelity,
             renderer_id="viewer_package_v1",
+            coordinate_source=str(pair.get("coordinate_source") or "cad_world"),
         )
         after_ref = _v2_artifact_ref(
             image_path=str(pair.get("after_image") or ""),
             transform=pair.get("after_transform"),
             fidelity=fidelity,
             renderer_id="viewer_package_v1",
+            coordinate_source=str(pair.get("coordinate_source") or "cad_world"),
         )
         for ref in (before_ref, after_ref):
             if ref is None:
@@ -2091,6 +2953,7 @@ def _build_v2_manifest_from_v1(
         "viewer_memory_budget_mb": v1_manifest.get(
             "viewer_memory_budget_mb", options.viewer_memory_budget_mb
         ),
+        "cad_visual_backend": v1_manifest.get("cad_visual_backend") or {},
     }
 
     overlay_space = "world" if (
@@ -2136,6 +2999,24 @@ def _v3_initial_render_mode(pairs_v1: list) -> str:
     """
 
     return "relative_only"
+
+
+def _v3_source_signature(source_path: str, *, backend_sig: str) -> V3SourceSignature:
+    if not source_path:
+        return V3SourceSignature(backend_sig=backend_sig)
+    signature = build_source_signature(
+        source_path,
+        render_backend_id=backend_sig,
+        config_fingerprint="viewer_manifest_v3:v1",
+    )
+    return V3SourceSignature(
+        source_path=str(signature.get("source_path") or source_path),
+        source_hash=str(signature.get("source_hash") or ""),
+        file_size=int(signature.get("file_size") or 0),
+        mtime_ns=int(signature.get("mtime_ns") or 0),
+        signature_schema_version=str(signature.get("schema_version") or ""),
+        backend_sig=backend_sig,
+    )
 
 
 def _build_v3_manifest_from_v1(
@@ -2191,17 +3072,24 @@ def _build_v3_manifest_from_v1(
         if before_path and after_path:
             break
 
-    backend_sig = (
-        f"ezdxf|qt-pyside6|viewer_package_v{v1_manifest.get('schema_version', 'unknown')}"
+    cad_visual_backend = v1_manifest.get("cad_visual_backend") or {}
+    cad_visual_sig = ""
+    if isinstance(cad_visual_backend, dict):
+        cad_visual_sig = (
+            f"cad_visual:{cad_visual_backend.get('backend_id', '')}:"
+            f"{cad_visual_backend.get('backend_version', '')}:"
+            f"{cad_visual_backend.get('license_id', '')}"
+        )
+    backend_sig = "|".join(
+        item
+        for item in (
+            f"ezdxf|qt-pyside6|viewer_package_v{v1_manifest.get('schema_version', 'unknown')}",
+            cad_visual_sig,
+        )
+        if item
     )
-    before_sig = V3SourceSignature(
-        source_path=before_path,
-        backend_sig=backend_sig,
-    )
-    after_sig = V3SourceSignature(
-        source_path=after_path,
-        backend_sig=backend_sig,
-    )
+    before_sig = _v3_source_signature(before_path, backend_sig=backend_sig)
+    after_sig = _v3_source_signature(after_path, backend_sig=backend_sig)
 
     capabilities = {
         "viewer_engine": v1_manifest.get("viewer_engine", "auto"),
@@ -2209,6 +3097,7 @@ def _build_v3_manifest_from_v1(
         "tile_size": v1_manifest.get("tile_size", options.tile_size),
         "scene_pack_root": str(viewer_root / SCENE_PACKS_SUBDIR),
         "scene_pack_built": False,  # G1: lazy build by viewer_session
+        "cad_visual_backend": cad_visual_backend if isinstance(cad_visual_backend, dict) else {},
     }
 
     overlay_space = "world" if (

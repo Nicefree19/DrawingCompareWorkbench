@@ -140,6 +140,27 @@ class TestDwgDifferCleanup:
         assert first.exists()
         assert converter.convert.call_count == 1
 
+    def test_dxf_cache_can_reuse_same_stem_when_exact_key_changes(self, temp_dir):
+        cache_dir = temp_dir / "dxf_cache"
+        cache_dir.mkdir()
+        source_dir = temp_dir / "copied_source"
+        source_dir.mkdir()
+        source = source_dir / "large_detail.dwg"
+        source.write_bytes(b"dwg")
+        cached = cache_dir / "large_detail.previoushash.dxf"
+        cached.write_text("0\nEOF\n", encoding="utf-8")
+
+        differ = DwgDiffer(
+            config={"use_canonical_pipeline": False},
+            dxf_cache_dir=cache_dir,
+        )
+
+        resolved = differ._ensure_dxf(source)
+
+        assert resolved == cached
+        assert differ._dxf_cache_resolution_notes
+        assert "using compatible same-stem cache" in differ._dxf_cache_resolution_notes[0]
+
     def test_legacy_dwg_fallback_error_uses_opt_in_wording(self, mock_dwg_file, temp_dir):
         for differ in (
             DwgDiffer(config={"use_canonical_pipeline": False}),

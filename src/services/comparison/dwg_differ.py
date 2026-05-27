@@ -10,7 +10,6 @@ DWG/DXF 파일을 비교하고 변경 사항을 감지합니다.
     - ComparisonResult 통합
 """
 
-import hashlib
 import logging
 import os
 import shutil
@@ -24,6 +23,7 @@ from .comparison_config import ComparisonConfig, get_default_config
 from .drawing_compare_engine import CompareTolerance, DrawingCompareOptions
 from .dxf_comparator import DxfChangeType, DxfComparator, DxfComparisonResult
 from .dxf_entity_extractor import DxfEntityExtractor
+from .dxf_read import read_dxf_document
 from .dwg_converter import DwgConverter, ODAConverterNotFoundError
 from .import_pipeline import (
     ComparePipeline,
@@ -31,6 +31,7 @@ from .import_pipeline import (
     ImportPipelineOptions,
 )
 from .progress_tracker import create_tracker
+from .source_signature import source_cache_filename, source_cache_stem
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class DwgDiffer:
             Path(change_zone_stream_path).resolve() if change_zone_stream_path else None
         )
         self._change_zone_stream_pair_id = change_zone_stream_pair_id
+        self._dxf_cache_resolution_notes: List[str] = []
 
         # Phase 3 P3-3: ComparisonConfig 통합
         self._comparison_config = comparison_config or get_default_config()
@@ -258,11 +260,11 @@ class DwgDiffer:
             if not tracker.report_simple(10, "Old 파일 로드 중..."):
                 return result
             t0 = time.perf_counter()
-            doc_a = ezdxf.readfile(str(dxf_a))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
 
             if not tracker.report_simple(15, "New 파일 로드 중..."):
                 return result
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
             timing["load"] = time.perf_counter() - t0
 
             # Phase 3 P3-3: expand_blocks 설정 적용
@@ -419,6 +421,7 @@ class DwgDiffer:
                 "time_to_first_stream_record_ms": comparison.stats.get(
                     "time_to_first_stream_record_ms"
                 ),
+                "dxf_cache_resolution_notes": list(self._dxf_cache_resolution_notes),
             }
             self._copy_change_zone_stream_metadata(comparison, result)
             if result.metadata.get("truncated_changes"):
@@ -619,8 +622,8 @@ class DwgDiffer:
             if not tracker.report_simple(10, "파일 로드 중..."):
                 return (None, empty_result)
 
-            doc_a = ezdxf.readfile(str(dxf_a))
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
 
             if tracker.is_cancelled():
                 return (None, empty_result)
@@ -718,8 +721,8 @@ class DwgDiffer:
             dxf_a = self._ensure_dxf(source_a)
             dxf_b = self._ensure_dxf(source_b)
 
-            doc_a = ezdxf.readfile(str(dxf_a))
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
 
             # 레이아웃 목록 (합집합)
             layouts_a = set(self.extractor.get_layouts(doc_a))
@@ -802,8 +805,8 @@ class DwgDiffer:
             dxf_a = self._ensure_dxf(source_a)
             dxf_b = self._ensure_dxf(source_b)
 
-            doc_a = ezdxf.readfile(str(dxf_a))
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
 
             # Phase 3 P3-3: expand_blocks 설정 적용
             expand_blocks = self._comparison_config.expand_blocks
@@ -855,6 +858,18 @@ class DwgDiffer:
         if cache_path.exists() and cache_path.stat().st_size > 0:
             logger.info("DWG DXF cache hit: %s -> %s", path.name, cache_path)
             return cache_path
+        compatible_cache_path = self._compatible_dxf_cache_path(
+            path,
+            exact_path=cache_path,
+        )
+        if compatible_cache_path is not None:
+            note = (
+                "DWG DXF cache exact key missed; using compatible same-stem cache "
+                f"for {path.name}: {compatible_cache_path.name}"
+            )
+            logger.warning(note)
+            self._dxf_cache_resolution_notes.append(note)
+            return compatible_cache_path
 
         if self.converter is None:
             raise ODAConverterNotFoundError(
@@ -879,19 +894,67 @@ class DwgDiffer:
                 shutil.rmtree(converted_path.parent, ignore_errors=True)
 
     def _dxf_cache_path(self, path: Path) -> Path:
-        path = Path(path).resolve()
-        stat = path.stat()
-        digest = hashlib.sha1()
-        for value in (
-            str(path).lower(),
-            str(stat.st_size),
-            str(stat.st_mtime_ns),
-            "ACAD2018",
+        filename = source_cache_filename(
+            path,
+            namespace="compare_dxf",
+            extension=".dxf",
+            importer_version="ACAD2018",
+            config_fingerprint="dwg_differ:v1",
+            digest_length=16,
+        )
+        return self._dxf_cache_dir / filename
+
+    def _compatible_dxf_cache_path(
+        self,
+        path: Path,
+        *,
+        exact_path: Optional[Path] = None,
+    ) -> Optional[Path]:
+        """Find a same-stem cached DXF when the strict path/mtime key changed.
+
+        The strict cache key includes absolute path, size, and mtime to avoid
+        stale reuse. In the Workbench, however, users often reopen the same DWG
+        from a copied folder while the already-generated DXF cache remains the
+        only practical fallback for large ACAD files that exceed the canonical
+        token budget. This fallback is intentionally limited to the sanitized
+        exact filename stem and non-empty ``*.dxf`` files in the configured cache
+        directory.
+        """
+
+        if self._dxf_cache_dir is None:
+            return None
+        cache_dir = self._dxf_cache_dir
+        if not cache_dir.exists():
+            return None
+        if (
+            exact_path is not None
+            and exact_path.exists()
+            and exact_path.stat().st_size > 0
         ):
-            digest.update(value.encode("utf-8", errors="ignore"))
-            digest.update(b"\0")
-        safe_stem = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in path.stem)
-        return self._dxf_cache_dir / f"{safe_stem}.{digest.hexdigest()[:16]}.dxf"
+            return exact_path
+        safe_stem = "".join(
+            ch if ch.isalnum() or ch in "._-" else "_" for ch in Path(path).stem
+        )
+        stems = [safe_stem, source_cache_stem(path)]
+        candidates = []
+        for stem in dict.fromkeys(stem for stem in stems if stem):
+            candidates.extend(
+                candidate
+                for candidate in cache_dir.glob(f"{stem}.*.dxf")
+                if candidate.is_file() and candidate.stat().st_size > 0
+            )
+        if exact_path is not None:
+            candidates = [candidate for candidate in candidates if candidate != exact_path]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.stat().st_mtime_ns,
+                candidate.stat().st_size,
+            ),
+            reverse=True,
+        )
+        return candidates[0]
 
     def _map_change_type(self, dxf_change: DxfChangeType) -> ChangeType:
         """DxfChangeType → ChangeType 변환"""
@@ -1025,6 +1088,7 @@ class DwgDiffer:
             "time_to_first_stream_record_ms": comparison.stats.get(
                 "time_to_first_stream_record_ms"
             ),
+            "dxf_cache_resolution_notes": list(self._dxf_cache_resolution_notes),
         }
         self._copy_change_zone_stream_metadata(comparison, result)
         if result.metadata.get("truncated_changes"):
@@ -1118,5 +1182,5 @@ class DwgDiffer:
         """
         source = Path(source)
         dxf_path = self._ensure_dxf(source)
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = read_dxf_document(dxf_path, ezdxf_module=ezdxf)
         return self.extractor.get_entity_layers(doc)

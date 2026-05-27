@@ -47,9 +47,22 @@ PRODUCT_SCAN_ROOTS = ("src",)
 POLICY_WORDING_SCAN_FILES = (
     "src/services/comparison/dwg_differ.py",
     "src/services/comparison/dxf_renderer.py",
+    "src/services/comparison/render_backend_registry.py",
+    "src/services/comparison/cad_visual_conversion_worker.py",
     "scripts/release_environment_check.py",
     "scripts/release_drawing_compare_workbench.py",
     ".github/workflows/cad-format-regression.yml",
+)
+CAD_VISUAL_BACKEND_POLICY_FILES = (
+    "src/services/comparison/render_backend_registry.py",
+    "src/services/comparison/cad_visual_conversion_worker.py",
+)
+CAD_VISUAL_HOT_PATH_SCAN_FILES = (
+    "src/gui/drawing_compare_workbench.py",
+    "src/gui/lightweight_viewport.py",
+    "src/services/comparison/viewer_package.py",
+    "src/services/comparison/viewer_session.py",
+    "src/services/comparison/zone_render_service.py",
 )
 SUPPORT_CLAIM_SCAN_FILES = (
     "README.md",
@@ -97,6 +110,41 @@ FORBIDDEN_WORDING_PATTERNS = (
         "CAD_POLICY_DEFAULT_PYMUPDF_AUTO",
         re.compile(r"fallback_chain\s*=\s*\[[^\]]*['\"]pymupdf['\"]", re.IGNORECASE),
         "Default DXF auto rendering must not include PyMuPDF/MuPDF.",
+    ),
+)
+NON_APPROVED_VISUAL_BACKEND_TOKENS = (
+    "oda_drawings_sdk",
+    "qcad_pro",
+    "qcad_professional_cli",
+    "aspose_cad",
+    "ghostscript",
+    "libredwg",
+    "pymupdf",
+)
+FORBIDDEN_VISUAL_BACKEND_PATTERNS = (
+    (
+        "CAD_POLICY_NON_APPROVED_VISUAL_BACKEND_DEFAULT_ENABLED",
+        re.compile(
+            r"(?:['\"]?enabled_by_default['\"]?\s*[:=]\s*True|DEFAULT_CAD_VISUAL_BACKENDS\s*=\s*\[[^\]]+)",
+            re.IGNORECASE,
+        ),
+        "Non-approved CAD visual backends must not be enabled by default.",
+    ),
+    (
+        "CAD_POLICY_NON_APPROVED_VISUAL_BACKEND_AUTO_CHAIN",
+        re.compile(r"fallback_chain\s*=\s*\[[^\]]+", re.IGNORECASE),
+        "Non-approved CAD visual backends must not be in an automatic fallback chain.",
+    ),
+)
+FORBIDDEN_HOT_PATH_CONVERSION_PATTERNS = (
+    (
+        "CAD_POLICY_CAD_VISUAL_HOT_PATH_CONVERSION",
+        re.compile(
+            r"\b(?:convert_cad_visual_in_subprocess|run_conversion_request)\s*\("
+            r"|\.convert_cad_visual\s*\(",
+            re.IGNORECASE,
+        ),
+        "CAD visual conversion must not run from GUI/viewer hot paths.",
     ),
 )
 FORBIDDEN_SUPPORT_CLAIM_PATTERNS = (
@@ -151,6 +199,8 @@ def scan_repo(root: Path = ROOT) -> list[PolicyViolation]:
     violations.extend(check_runtime_requirements(root))
     violations.extend(check_product_code(root))
     violations.extend(check_policy_wording(root))
+    violations.extend(check_cad_visual_backend_policy(root))
+    violations.extend(check_cad_visual_hot_path_conversion(root))
     violations.extend(check_support_claim_wording(root))
     violations.extend(check_dwg_cleanroom_contract(root))
     violations.extend(check_ci_gate(root))
@@ -226,6 +276,41 @@ def check_policy_wording(root: Path) -> list[PolicyViolation]:
                         "PyMuPDF/fitz must be reported as optional/licensed, not required runtime.",
                     )
                 )
+    return violations
+
+
+def check_cad_visual_backend_policy(root: Path) -> list[PolicyViolation]:
+    violations: list[PolicyViolation] = []
+    token_pattern = re.compile(
+        "|".join(re.escape(token) for token in NON_APPROVED_VISUAL_BACKEND_TOKENS),
+        re.IGNORECASE,
+    )
+    for rel in CAD_VISUAL_BACKEND_POLICY_FILES:
+        path = root / rel
+        if not path.exists():
+            continue
+        for line_number, line in enumerate(_read_lines(path), start=1):
+            if not token_pattern.search(line):
+                continue
+            for code, pattern, message in FORBIDDEN_VISUAL_BACKEND_PATTERNS:
+                if pattern.search(line):
+                    violations.append(PolicyViolation(rel, line_number, code, message, line.strip()))
+    return violations
+
+
+def check_cad_visual_hot_path_conversion(root: Path) -> list[PolicyViolation]:
+    violations: list[PolicyViolation] = []
+    for rel in CAD_VISUAL_HOT_PATH_SCAN_FILES:
+        path = root / rel
+        if not path.exists():
+            continue
+        for line_number, line in enumerate(_read_lines(path), start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            for code, pattern, message in FORBIDDEN_HOT_PATH_CONVERSION_PATTERNS:
+                if pattern.search(line):
+                    violations.append(PolicyViolation(rel, line_number, code, message, stripped))
     return violations
 
 

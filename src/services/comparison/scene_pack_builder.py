@@ -389,6 +389,7 @@ def build_scene_pack(
     from ezdxf.addons.drawing import Frontend, RenderContext
     from ezdxf.addons.drawing.json import CustomJSONBackend
 
+    from src.services.comparison.dxf_read import read_dxf_document_result
     from src.services.comparison.zone_vector_renderer import resolve_dxf_path
 
     output_dir = Path(output_dir)
@@ -428,7 +429,11 @@ def build_scene_pack(
     # 2. Open + flatten via CustomJSONBackend.
     _emit(progress, "reading_dxf", 0.20, "DXF 읽는 중")
     try:
-        doc = ezdxf.readfile(str(dxf_path))
+        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        doc = read_result.doc
+        read_warning = read_result.diagnostics.warning()
+        if read_warning:
+            warnings.append(read_warning)
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         _emit(progress, "failed", None, f"DXF 읽기 실패: {exc}")

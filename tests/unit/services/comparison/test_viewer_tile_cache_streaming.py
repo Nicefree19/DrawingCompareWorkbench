@@ -28,6 +28,11 @@ def _pair_record(uuid: str, *, tile_count: int = 5, overlay_tile_count: int = 2)
         "tile_size": 512,
         "tile_count": tile_count,
         "overlay_tile_count": overlay_tile_count,
+        "tile_payload_bytes": tile_count * 100,
+        "overlay_tile_payload_bytes": overlay_tile_count * 25,
+        "cache_total_estimated_bytes": tile_count * 100 + overlay_tile_count * 25,
+        "cache_byte_limit": 512 * 1024 * 1024,
+        "eviction_count": 0,
         "cache_key": f"key_{uuid}",
     }
 
@@ -109,14 +114,64 @@ class TestMaterialise:
         assert set(payload["pairs"].keys()) == {"p1", "p2"}
         assert payload["pairs"]["p1"]["tile_count"] == 10
         assert payload["pairs"]["p2"]["tile_count"] == 20
+        assert payload["pairs"]["p1"]["cache_total_estimated_bytes"] == 10 * 100 + 2 * 25
+        assert payload["pairs"]["p2"]["cache_byte_limit"] == 512 * 1024 * 1024
 
     def test_dedup_keeps_latest_for_same_pair(self, tmp_path: Path):
         viewer_root = tmp_path / "viewer"
         append_pair_to_tiles_manifest_jsonl(viewer_root, _pair_record("p1", tile_count=5))
         append_pair_to_tiles_manifest_jsonl(viewer_root, _pair_record("p1", tile_count=15))
+        (viewer_root / "tiles" / "p1").mkdir(parents=True)
+        (viewer_root / "tiles" / "p1" / "tile_manifest.json").write_text("{}", encoding="utf-8")
+        (viewer_root / "tiles" / "p2").mkdir(parents=True)
+        (viewer_root / "tiles" / "p2" / "tile_manifest.json").write_text("{}", encoding="utf-8")
+
         payload = json.loads(materialise_tiles_manifest_from_jsonl(viewer_root).read_text(encoding="utf-8"))
         assert payload["pair_count"] == 1
         assert payload["pairs"]["p1"]["tile_count"] == 15  # last write wins
+
+    def test_visible_first_latest_record_keeps_complete_accumulated_manifest(self, tmp_path: Path):
+        viewer_root = tmp_path / "viewer"
+        first = _pair_record("p-visible", tile_count=2, overlay_tile_count=1)
+        first.update(
+            {
+                "generation_mode": "visible_first",
+                "pyramid_complete": False,
+                "planned_tile_count": 128,
+                "materialized_tile_count": 2,
+                "visible_tile_windows": [
+                    {"side": "before", "level": 0, "tile_window": [0, 0, 0, 0]},
+                    {"side": "after", "level": 0, "tile_window": [0, 0, 0, 0]},
+                ],
+            }
+        )
+        second = dict(first)
+        second.update(
+            {
+                "tile_count": 4,
+                "materialized_tile_count": 4,
+                "visible_tile_windows": first["visible_tile_windows"]
+                + [
+                    {"side": "before", "level": 0, "tile_window": [3, 3, 3, 3]},
+                    {"side": "after", "level": 0, "tile_window": [3, 3, 3, 3]},
+                ],
+            }
+        )
+
+        append_pair_to_tiles_manifest_jsonl(viewer_root, first)
+        append_pair_to_tiles_manifest_jsonl(viewer_root, second)
+        (viewer_root / "tiles" / "p1").mkdir(parents=True)
+        (viewer_root / "tiles" / "p1" / "tile_manifest.json").write_text("{}", encoding="utf-8")
+
+        payload = json.loads(materialise_tiles_manifest_from_jsonl(viewer_root).read_text(encoding="utf-8"))
+
+        pair = payload["pairs"]["p-visible"]
+        assert payload["pair_count"] == 1
+        assert pair["generation_mode"] == "visible_first"
+        assert pair["pyramid_complete"] is False
+        assert pair["tile_count"] == 4
+        assert pair["planned_tile_count"] == 128
+        assert len(pair["visible_tile_windows"]) == 4
 
     def test_keep_jsonl_default_true(self, tmp_path: Path):
         viewer_root = tmp_path / "viewer"
@@ -145,6 +200,9 @@ class TestMaterialise:
         record = _pair_record("p1")
         record["tile_size"] = "garbage"
         append_pair_to_tiles_manifest_jsonl(viewer_root, record)
+        (viewer_root / "tiles" / "p-visible").mkdir(parents=True)
+        (viewer_root / "tiles" / "p-visible" / "tile_manifest.json").write_text("{}", encoding="utf-8")
+
         payload = json.loads(materialise_tiles_manifest_from_jsonl(viewer_root).read_text(encoding="utf-8"))
         assert payload["tile_size"] == 512  # default
 
@@ -174,10 +232,30 @@ class TestMemoryFootprint:
         viewer_root = tmp_path / "viewer"
         for i in range(200):
             append_pair_to_tiles_manifest_jsonl(viewer_root, _pair_record(f"p{i}", tile_count=i))
+            pair_dir = viewer_root / "tiles" / f"p{i}"
+            pair_dir.mkdir(parents=True)
+            (pair_dir / "tile_manifest.json").write_text("{}", encoding="utf-8")
         payload = json.loads(materialise_tiles_manifest_from_jsonl(viewer_root).read_text(encoding="utf-8"))
         assert payload["pair_count"] == 200
         # Sum 0..199 = 19900
         assert payload["tile_count"] == sum(range(200))
+
+    def test_materialise_filters_evicted_pair_records(self, tmp_path: Path):
+        viewer_root = tmp_path / "viewer"
+        retained = _pair_record("retained")
+        retained["tile_root"] = str(viewer_root / "tiles")
+        evicted = _pair_record("evicted")
+        evicted["tile_root"] = str(viewer_root / "tiles")
+        append_pair_to_tiles_manifest_jsonl(viewer_root, retained)
+        append_pair_to_tiles_manifest_jsonl(viewer_root, evicted)
+        pair_dir = viewer_root / "tiles" / "retained"
+        pair_dir.mkdir(parents=True)
+        (pair_dir / "tile_manifest.json").write_text("{}", encoding="utf-8")
+
+        payload = json.loads(materialise_tiles_manifest_from_jsonl(viewer_root).read_text(encoding="utf-8"))
+
+        assert set(payload["pairs"]) == {"retained"}
+        assert payload["pair_count"] == 1
 
     def test_concurrent_appends_do_not_interleave(self, tmp_path: Path):
         """Plan §19 A-2 (Agent A finding A1) — concurrent appends to

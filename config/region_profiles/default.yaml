@@ -1,0 +1,50 @@
+name: default
+frame_layer_patterns:
+  - "*FRAME*"
+  - "*BORDER*"
+  - "*SHEET*"
+title_layer_patterns:
+  - "*TITLE*"
+  - "*TITLEBLOCK*"
+table_layer_patterns:
+  - "*TABLE*"
+  - "*SCHEDULE*"
+  - "*BOM*"
+  - "*BLOCK INFO*"
+  - "*BLOCKINFO*"
+table_reject_keywords:
+  - "BLOCK INFO"
+  - "BLOCKINFO"
+  - "TITLE"
+  - "TITLEBLOCK"
+  - "REV"
+  - "REVISION"
+  - "TABLE"
+  - "SCHEDULE"
+  - "BOM"
+  - "MATERIAL"
+  - "DWG"
+  - "SHEET"
+  - "SCALE"
+  - "DATE"
+  - "DRAWN"
+  - "CHECK"
+  - "APPROVED"
+structural_layer_tokens:
+  - "BEAM"
+  - "COL"
+  - "SLAB"
+  - "WALL"
+  - "GRID"
+  - "REBAR"
+nonstructural_layer_tokens:
+  - "TITLE"
+  - "TABLE"
+  - "REV"
+  - "BOM"
+  - "BLOCK INFO"
+drawing_number_patterns:
+  - "(?<![A-Z0-9])([A-Z]{1,4}[0-9]{2})[-_. ]+([0-9]{3,5}[A-Z]?)(?![A-Z0-9])"
+  - "\\b[A-Z]{1,4}[-_]?\\d{1,4}(?:[-_][A-Z0-9]{1,6})?\\b"
+  - "\\b\\d{1,4}[-_][A-Z]{1,4}[-_]?\\d{1,4}\\b"
+title_area_policy: bottom_or_right_title_band

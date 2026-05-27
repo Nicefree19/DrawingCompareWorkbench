@@ -39,6 +39,7 @@ def test_release_realset_command_uses_customer_mvp_validation_profile(tmp_path: 
     assert command[command.index("--export-profile") + 1] == "sharable"
     for flag in (
         "--quality-gate",
+        "--p5-g3-realset-gate",
         "--change-zone-report",
         "--executive-review",
         "--review-dashboard",
@@ -111,6 +112,143 @@ def test_release_realset_command_passes_review_ground_truth(tmp_path: Path) -> N
 
     assert "--review-ground-truth" in command
     assert command[command.index("--review-ground-truth") + 1] == str(review_truth.resolve())
+
+
+def test_release_realset_command_can_require_p5_g3_tile_eviction(tmp_path: Path) -> None:
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    out_dir = tmp_path / "release"
+    old_dir.mkdir()
+    new_dir.mkdir()
+
+    args = release.parse_args(
+        [
+            "--a",
+            str(old_dir),
+            "--b",
+            str(new_dir),
+            "--out",
+            str(out_dir),
+            "--require-p5-g3-tile-eviction",
+            "--p5-g3-min-tile-evicted-pairs",
+            "2",
+            "--p5-g3-min-tile-evicted-bytes",
+            "4096",
+            "--p5-g6-tile-cache-mb",
+            "0.25",
+        ]
+    )
+
+    command = release._realset_command(args, out_dir / "realset_validation")
+
+    assert "--p5-g3-realset-gate" in command
+    assert "--p5-g3-require-tile-eviction" in command
+    assert command[command.index("--p5-g3-min-tile-evicted-pairs") + 1] == "2"
+    assert command[command.index("--p5-g3-min-tile-evicted-bytes") + 1] == "4096"
+    assert command[command.index("--p5-g6-tile-cache-mb") + 1] == "0.25"
+    assert release._tile_cache_env_overrides(args) == {
+        release.TILE_CACHE_MB_ENV_VAR: "0.25"
+    }
+
+
+def test_release_realset_command_accepts_p5_g6_tile_eviction_aliases(tmp_path: Path) -> None:
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    out_dir = tmp_path / "release"
+    old_dir.mkdir()
+    new_dir.mkdir()
+
+    args = release.parse_args(
+        [
+            "--a",
+            str(old_dir),
+            "--b",
+            str(new_dir),
+            "--out",
+            str(out_dir),
+            "--require-p5-g6-tile-eviction",
+            "--p5-g6-min-tile-evicted-pairs",
+            "3",
+            "--p5-g6-min-tile-evicted-bytes",
+            "8192",
+            "--p5-g6-tile-cache-mb",
+            "0.5",
+        ]
+    )
+
+    command = release._realset_command(args, out_dir / "realset_validation")
+
+    assert "--p5-g3-realset-gate" in command
+    assert "--p5-g3-require-tile-eviction" in command
+    assert command[command.index("--p5-g3-min-tile-evicted-pairs") + 1] == "3"
+    assert command[command.index("--p5-g3-min-tile-evicted-bytes") + 1] == "8192"
+    assert command[command.index("--p5-g6-tile-cache-mb") + 1] == "0.5"
+
+
+def test_run_step_records_p5_g6_tile_cache_env_override(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, cwd, env, timeout):
+        captured["env"] = env
+        return subprocess.CompletedProcess(list(command), 0)
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+    manifest = {"steps": []}
+
+    result = release._run_step(
+        manifest,
+        "probe",
+        ["python", "-V"],
+        env_overrides={release.TILE_CACHE_MB_ENV_VAR: "0.25"},
+    )
+
+    assert result == 0
+    assert captured["env"][release.TILE_CACHE_MB_ENV_VAR] == "0.25"
+    assert manifest["steps"][0]["env_overrides"] == {
+        release.TILE_CACHE_MB_ENV_VAR: "0.25"
+    }
+
+
+def test_release_main_passes_p5_g6_tile_cache_env_to_validation_and_smoke(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    out_dir = tmp_path / "release"
+    old_dir.mkdir()
+    new_dir.mkdir()
+    calls: list[tuple[str, dict[str, str] | None, list[str]]] = []
+
+    def fake_run_step(manifest, name, command, **kwargs):
+        calls.append((name, kwargs.get("env_overrides"), list(command)))
+        return 0
+
+    monkeypatch.setattr(release, "_oda_preflight", lambda python: {"status": "skipped"})
+    monkeypatch.setattr(release, "_run_step", fake_run_step)
+
+    code = release.main(
+        [
+            "--a",
+            str(old_dir),
+            "--b",
+            str(new_dir),
+            "--out",
+            str(out_dir),
+            "--skip-tests",
+            "--skip-build",
+            "--skip-packaged-launch-smoke",
+            "--p5-g6-tile-cache-mb",
+            "0.25",
+        ]
+    )
+
+    assert code == 0
+    by_name = {name: (env, command) for name, env, command in calls}
+    expected_env = {release.TILE_CACHE_MB_ENV_VAR: "0.25"}
+    assert by_name["realset_validation"][0] == expected_env
+    assert by_name["workbench_acceptance_smoke"][0] == expected_env
+    assert "--p5-g6-tile-cache-mb" in by_name["realset_validation"][1]
 
 
 def test_release_acceptance_command_points_at_realset_outputs(tmp_path: Path) -> None:
@@ -211,6 +349,58 @@ def test_release_mvp_exit_audit_requires_validation_result_source(tmp_path: Path
     assert exc_info.value.code == 2
 
 
+def test_release_mvp_exit_audit_rejects_skip_selected_zone_when_generating_realset(tmp_path: Path) -> None:
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    out_dir = tmp_path / "release"
+    customer_manifest = tmp_path / "customer_evidence_manifest.json"
+    old_dir.mkdir()
+    new_dir.mkdir()
+    customer_manifest.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        release.parse_args(
+            [
+                "--a",
+                str(old_dir),
+                "--b",
+                str(new_dir),
+                "--out",
+                str(out_dir),
+                "--run-mvp-exit-audit",
+                "--customer-evidence-manifest",
+                str(customer_manifest),
+                "--skip-selected-zone-evidence",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+
+
+def test_release_rejects_p5_g3_tile_eviction_without_selected_zone_evidence(tmp_path: Path) -> None:
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    out_dir = tmp_path / "release"
+    old_dir.mkdir()
+    new_dir.mkdir()
+
+    with pytest.raises(SystemExit) as exc_info:
+        release.parse_args(
+            [
+                "--a",
+                str(old_dir),
+                "--b",
+                str(new_dir),
+                "--out",
+                str(out_dir),
+                "--require-p5-g3-tile-eviction",
+                "--skip-selected-zone-evidence",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+
+
 def test_release_mvp_exit_audit_requires_existing_extra_result_dir(tmp_path: Path) -> None:
     out_dir = tmp_path / "release"
     customer_manifest = tmp_path / "customer_evidence_manifest.json"
@@ -284,6 +474,8 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     extra_dir = tmp_path / "cad_pdf_block"
     customer_manifest = tmp_path / "customer_evidence_manifest.json"
     large_dwg_probe = tmp_path / "large_dwg_probe.json"
+    p5_g16 = tmp_path / "p5_g16_real_corpus_replay.json"
+    p5_g22 = tmp_path / "p5_g22_actual_gui_soak.json"
     release_manifest = out_dir / "release_manifest.json"
     audit_json = out_dir / "mvp_exit_audit.json"
     old_dir.mkdir()
@@ -293,6 +485,8 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     (out_dir / "realset_validation").mkdir(parents=True)
     customer_manifest.write_text("{}", encoding="utf-8")
     large_dwg_probe.write_text("{}", encoding="utf-8")
+    p5_g16.write_text("{}", encoding="utf-8")
+    p5_g22.write_text("{}", encoding="utf-8")
 
     args = release.parse_args(
         [
@@ -307,7 +501,18 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
             str(customer_manifest),
             "--large-dwg-probe",
             str(large_dwg_probe),
+            "--p5-g16-benchmark-json",
+            str(p5_g16),
+            "--p5-g22-gui-soak-json",
+            str(p5_g22),
             "--require-large-dwg-probe",
+            "--require-p5-g3-tile-eviction",
+            "--p5-g3-min-tile-evicted-pairs",
+            "2",
+            "--p5-g3-min-tile-evicted-bytes",
+            "4096",
+            "--p5-g6-tile-cache-mb",
+            "0.25",
             "--exit-audit-results-dir",
             str(extra_dir),
         ]
@@ -334,6 +539,13 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     assert command[command.index("--evidence-level") + 1] == "customer_grade"
     assert command[command.index("--large-dwg-probe") + 1] == str(large_dwg_probe.resolve())
     assert "--require-large-dwg-probe" in command
+    assert "--require-p5-g3-realset-gate" in command
+    assert command[command.index("--p5-g16-benchmark-json") + 1] == str(p5_g16.resolve())
+    assert command[command.index("--p5-g22-gui-soak-json") + 1] == str(p5_g22.resolve())
+    assert "--require-p5-g3-tile-eviction" in command
+    assert command[command.index("--p5-g3-min-tile-evicted-pairs") + 1] == "2"
+    assert command[command.index("--p5-g3-min-tile-evicted-bytes") + 1] == "4096"
+    assert command[command.index("--p5-g6-tile-cache-mb") + 1] == "0.25"
 
 
 def test_release_mvp_exit_audit_sees_customer_package_audit_artifact(tmp_path: Path, monkeypatch) -> None:
@@ -396,6 +608,10 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert (out_dir / "cli" / "audit_drawing_compare_mvp_exit.py").exists()
     assert (out_dir / "cli" / "prepare_drawing_compare_customer_evidence.py").exists()
     assert (out_dir / "cli" / "inventory_drawing_compare_customer_evidence.py").exists()
+    assert (out_dir / "cli" / "closeout_drawing_compare_customer_evidence.py").exists()
+    assert (out_dir / "cli" / "audit_closeout_readiness.py").exists()
+    assert (out_dir / "cli" / "benchmark_real_corpus_replay.py").exists()
+    assert (out_dir / "cli" / "benchmark_actual_gui_soak.py").exists()
     readme = (out_dir / "README_INTERNAL_PILOT.md").read_text(encoding="utf-8")
     assert "## Validation (source checkout)" in readme
     assert "## Resume (source checkout)" in readme
@@ -418,6 +634,44 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "audit_drawing_compare_mvp_exit.py" in readme
     assert "prepare_drawing_compare_customer_evidence.py" in readme
     assert "inventory_drawing_compare_customer_evidence.py" in readme
+    assert "closeout_drawing_compare_customer_evidence.py" in readme
+    assert "audit_closeout_readiness.py" in readme
+    assert "benchmark_real_corpus_replay.py" in readme
+    assert "benchmark_actual_gui_soak.py" in readme
+    assert "--p5-g16-benchmark-json <p5_g16_real_corpus_replay.json>" in readme
+    assert "--p5-g22-gui-soak-json" in readme
+    assert "p5_g16_real_corpus_replay.json" in readme
+    assert "p5_g22_actual_gui_soak.json" in readme
+    assert "routing_expectations.p5_g16_real_corpus_replay_generation_enabled" in readme
+    assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in readme
+    assert "plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan=true" in readme
+    assert "plan.invariants.final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in readme
+    assert "--dry-run --plan-json <closeout_plan.json> --readiness-json <closeout_readiness.json>" in readme
+    assert "--require-ready --out <closeout_readiness_audit.json>" in readme
+    assert "closeout_readiness_audit.json" in readme
+    assert "readiness audit has `status=passed`" in readme
+    assert "status=ready_for_closeout" in readme
+    assert "status=preflight_failed" in readme
+    assert "preflight.issue_count" in readme
+    assert "preflight.issues" in readme
+    assert "outputs.plan_json" in readme
+    assert "outputs.readiness_json" in readme
+    assert "outputs.failure_json" in readme
+    assert "outputs.inventory_json" in readme
+    assert "outputs.customer_evidence_manifest" in readme
+    assert "outputs.audit_json" in readme
+    assert "routing_expectations.require_p5_g7_tile_eviction_proof" in readme
+    assert "plan.available=true" in readme
+    assert "plan.step_count" in readme
+    assert "plan.invariants.proof_dirs_excluded_from_final_audit_results_dir=true" in readme
+    assert "Retain `closeout_readiness.json` with `closeout_plan.json`" in readme
+    assert "preflight.status=passed" in readme
+    assert "preflight.issue_count=0" in readme
+    assert "src/services/comparison/manifest_provenance.py" in readme
+    assert "--p5-g7-tile-eviction-proof-dir" in readme
+    assert "--p5-g7-proof-validation-manifest" in readme
+    assert "--require-p5-g7-tile-eviction-proof" in readme
+    assert "excludes it from the final audit corpus `--results-dir` list" in readme
     assert "--large-dwg-probe <large_dwg_probe.json>" in readme
     assert "diagnostics.large_dwg_probe_passed" in readme
     assert "diagnostics.large_dwg_probe_issues" in readme
@@ -448,6 +702,18 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "--max-first-review-ready-s 1800" in readme
     assert "--max-cold-zone-render-ms 10000" in readme
     assert "--max-cache-hit-zone-render-ms 2000" in readme
+    assert "--p5-g3-realset-gate" in readme
+    assert "--require-p5-g3-realset-gate" in readme
+    assert "--require-p5-g3-tile-eviction" in readme
+    assert "--require-p5-g6-tile-eviction" in readme
+    assert "--p5-g6-tile-cache-mb 0.25" in readme
+    assert "DRAWING_COMPARE_TILE_CACHE_MB" in readme
+    assert "p5_g3_realset_release_gate" in (
+        out_dir / "mvp_exit_prompt_to_artifact_checklist.md"
+    ).read_text(encoding="utf-8")
+    assert "P5-G7 forced tile-eviction proof is preserved when claimed" in (
+        out_dir / "mvp_exit_prompt_to_artifact_checklist.md"
+    ).read_text(encoding="utf-8")
     assert "20-50 completed sheets/pairs" in readme
     assert "timings.total_s <= 1800" in readme
     assert "selected-zone render telemetry for every completed output" in readme
@@ -460,6 +726,17 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "mvp_exit_prompt_to_artifact_checklist.md" in readme
     assert "customer_evidence_closeout_packet.md" in readme
     assert "customer_evidence_request_ko.md" in readme
+    assert "closeout_failure.json" in readme
+    assert "--failure-json <closeout_failure.json>" in readme
+    assert "failure_kind=subprocess_nonzero_exit" in readme
+    assert "failed_step.name" in readme
+    assert "failed_step.returncode" in readme
+    assert "failed_step.command_context" in readme
+    assert "completed_steps" in readme
+    assert "remaining_steps" in readme
+    assert "plan_invariants" in readme
+    assert "triage_hints" in readme
+    assert "parent console log" in readme
     assert "review_ground_truth_template.csv" in readme
     assert "--run-mvp-exit-audit" in readme
     assert "--run-mvp-exit-audit` requires a customer evidence manifest" in readme
@@ -481,6 +758,18 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "input_selection" in prompt_checklist
     assert "automatic_compare_completed" in prompt_checklist
     assert "Pre-final inventory has no stale customer manifest warnings" in prompt_checklist
+    assert "Closeout pre-execution readiness is captured" in prompt_checklist
+    assert "Closeout pre-execution readiness is captured and independently audited" in prompt_checklist
+    assert "P5-G16 real-corpus replay passes" in prompt_checklist
+    assert "p5_g16_real_corpus_replay.json" in prompt_checklist
+    assert "final_audit_p5_g16_benchmark_jsons_equal_plan=true" in prompt_checklist
+    assert "P5-G22 actual GUI soak passes" in prompt_checklist
+    assert "p5_g22_actual_gui_soak.json" in prompt_checklist
+    assert "final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in prompt_checklist
+    assert "closeout_readiness.json" in prompt_checklist
+    assert "closeout_readiness_audit.json" in prompt_checklist
+    assert "preflight.issue_count=0" in prompt_checklist
+    assert "final_audit_results_dirs_equal_standard_result_dirs=true" in prompt_checklist
     assert "diagnostics.large_dwg_probe_passed=true" in prompt_checklist
     assert "diagnostics.customer_evidence_manifests_not_ready" in prompt_checklist
     assert "diagnostics.customer_evidence_manifests_missing_approved_ground_truth" in prompt_checklist
@@ -498,6 +787,38 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "omit it for local-only inventory" in closeout_packet
     assert "diagnostics.customer_evidence_manifests_not_ready" in closeout_packet
     assert "--evidence-level customer_grade" in closeout_packet
+    assert "One-Command Closeout Runner" in closeout_packet
+    assert "--dry-run --plan-json <closeout_plan.json> --readiness-json <closeout_readiness.json>" in closeout_packet
+    assert "audit_closeout_readiness.py" in closeout_packet
+    assert "p5_g16_real_corpus_replay.json" in closeout_packet
+    assert "P5-G16 replay JSON" in closeout_packet
+    assert "routing_expectations.p5_g16_real_corpus_replay_generation_enabled" in closeout_packet
+    assert "final_audit_p5_g16_benchmark_jsons_equal_plan=true" in closeout_packet
+    assert "p5_g22_actual_gui_soak.json" in closeout_packet
+    assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in closeout_packet
+    assert "final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in closeout_packet
+    assert "closeout_readiness_audit.json" in closeout_packet
+    assert "closeout_readiness.json" in closeout_packet
+    assert "status=preflight_failed" in closeout_packet
+    assert "outputs.plan_json" in closeout_packet
+    assert "outputs.readiness_json" in closeout_packet
+    assert "outputs.failure_json" in closeout_packet
+    assert "outputs.inventory_json" in closeout_packet
+    assert "outputs.customer_evidence_manifest" in closeout_packet
+    assert "outputs.audit_json" in closeout_packet
+    assert "routing_expectations.require_p5_g7_tile_eviction_proof" in closeout_packet
+    assert "plan.available=true" in closeout_packet
+    assert "plan.step_count" in closeout_packet
+    assert "plan.invariants.proof_dirs_excluded_from_final_audit_results_dir=true" in closeout_packet
+    assert "Retain `closeout_readiness.json` with `closeout_plan.json`" in closeout_packet
+    assert "preflight.status=passed" in closeout_packet
+    assert "preflight.issue_count=0" in closeout_packet
+    assert "`validation_summary.json` and `_SUCCESS`" in closeout_packet
+    assert "--p5-g7-tile-eviction-proof-dir <proof_validation>" in closeout_packet
+    assert "keeps it out of the final audit `--results-dir` corpus" in closeout_packet
+    assert "closeout_failure.json" in closeout_packet
+    assert "--failure-json <closeout_failure.json>" in closeout_packet
+    assert "stdout_stderr.capture_mode=inherited_console" in closeout_packet
     evidence_request_path = out_dir / "customer_evidence_request_ko.md"
     assert evidence_request_path.read_bytes() == release.CUSTOMER_EVIDENCE_REQUEST_KO_SOURCE.read_bytes()
     evidence_request_ko = evidence_request_path.read_text(encoding="utf-8")
@@ -544,6 +865,17 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert evidence_template["selected_zone_performance"]["status"] == ""
     assert evidence_template["selected_zone_performance"]["max_cold_zone_render_ms"] == 10000.0
     assert evidence_template["selected_zone_performance"]["max_cache_hit_zone_render_ms"] == 2000.0
+    assert evidence_template["p5_g7_forced_tile_eviction"] == {
+        "schema_version": 1,
+        "status": "not_provided",
+        "required": False,
+        "expected_tile_cache_mb": None,
+        "proof_count": 0,
+        "passed_proof_count": 0,
+        "proofs": [],
+        "release_manifests": [],
+        "issues": [],
+    }
     assert evidence_template["workbench_acceptance"]["required_items"] == ["5.", "8.", "8b.", "9b.", "9c.", "10."]
     assert evidence_template["readiness"]["status"] == ""
     assert "Do not use this template as final MVP completion evidence" in evidence_template["readiness"]["warning"]
@@ -618,6 +950,18 @@ def test_release_manifest_lists_operator_checklist_template(tmp_path: Path, monk
     inventory_tool = Path(manifest["artifacts"]["customer_evidence_inventory_tool"])
     assert inventory_tool.name == "inventory_drawing_compare_customer_evidence.py"
     assert inventory_tool.exists()
+    closeout_tool = Path(manifest["artifacts"]["customer_evidence_closeout_tool"])
+    assert closeout_tool.name == "closeout_drawing_compare_customer_evidence.py"
+    assert closeout_tool.exists()
+    readiness_audit_tool = Path(manifest["artifacts"]["closeout_readiness_audit_tool"])
+    assert readiness_audit_tool.name == "audit_closeout_readiness.py"
+    assert readiness_audit_tool.exists()
+    replay_tool = Path(manifest["artifacts"]["p5_g16_real_corpus_replay_tool"])
+    assert replay_tool.name == "benchmark_real_corpus_replay.py"
+    assert replay_tool.exists()
+    gui_soak_tool = Path(manifest["artifacts"]["p5_g22_actual_gui_soak_tool"])
+    assert gui_soak_tool.name == "benchmark_actual_gui_soak.py"
+    assert gui_soak_tool.exists()
 
 
 def test_release_cli_evidence_tools_start_without_source_tree_imports(tmp_path: Path) -> None:
@@ -633,6 +977,10 @@ def test_release_cli_evidence_tools_start_without_source_tree_imports(tmp_path: 
         out_dir / "cli" / "audit_drawing_compare_mvp_exit.py",
         out_dir / "cli" / "prepare_drawing_compare_customer_evidence.py",
         out_dir / "cli" / "inventory_drawing_compare_customer_evidence.py",
+        out_dir / "cli" / "closeout_drawing_compare_customer_evidence.py",
+        out_dir / "cli" / "audit_closeout_readiness.py",
+        out_dir / "cli" / "benchmark_real_corpus_replay.py",
+        out_dir / "cli" / "benchmark_actual_gui_soak.py",
     ):
         result = subprocess.run(
             [sys.executable, str(script.relative_to(out_dir)), "--help"],
@@ -690,6 +1038,10 @@ def test_release_customer_shareable_package_excludes_internal_paths(tmp_path: Pa
     assert "customer_package_path_audit.json" in package_manifest["contents"]
     assert "customer_evidence_closeout_packet.md" in package_manifest["contents"]
     assert "customer_evidence_request_ko.md" in package_manifest["contents"]
+    assert "cli/closeout_drawing_compare_customer_evidence.py" in package_manifest["contents"]
+    assert "cli/audit_closeout_readiness.py" in package_manifest["contents"]
+    assert "cli/benchmark_real_corpus_replay.py" in package_manifest["contents"]
+    assert "cli/benchmark_actual_gui_soak.py" in package_manifest["contents"]
     assert "release_manifest.json" not in package_manifest["contents"]
     assert package_audit["status"] == "passed"
     assert package_audit["leak_count"] == 0
@@ -711,6 +1063,10 @@ def test_release_customer_shareable_package_excludes_internal_paths(tmp_path: Pa
     assert "customer_package_path_audit.json" in names
     assert "customer_evidence_closeout_packet.md" in names
     assert "customer_evidence_request_ko.md" in names
+    assert "cli/closeout_drawing_compare_customer_evidence.py" in names
+    assert "cli/audit_closeout_readiness.py" in names
+    assert "cli/benchmark_real_corpus_replay.py" in names
+    assert "cli/benchmark_actual_gui_soak.py" in names
     assert request_bytes == release.CUSTOMER_EVIDENCE_REQUEST_KO_SOURCE.read_bytes()
 
 

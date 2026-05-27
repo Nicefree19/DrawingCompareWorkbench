@@ -67,6 +67,7 @@ class RunManifestWriter:
         counts: Optional[dict[str, Any]] = None,
         outputs: Optional[dict[str, Any]] = None,
         warnings: Optional[list[str]] = None,
+        failures: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         self._finalize_running_stages()
         self.payload["status"] = "completed"
@@ -77,6 +78,10 @@ class RunManifestWriter:
             self.payload["outputs"] = _json_safe(outputs)
         if warnings:
             self.payload["warnings"] = list(self.payload.get("warnings", [])) + list(warnings)
+        if failures:
+            self.payload["failures"] = list(self.payload.get("failures", [])) + _json_safe(
+                failures
+            )
         self.write()
         self.failed_path.unlink(missing_ok=True)
         self.success_path.write_text(

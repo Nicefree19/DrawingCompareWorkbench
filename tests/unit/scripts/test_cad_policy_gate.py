@@ -109,3 +109,53 @@ def test_policy_gate_accepts_customer_safe_wording_and_ci(tmp_path: Path) -> Non
     )
 
     assert scan_repo(tmp_path) == []
+
+
+def test_policy_gate_rejects_default_enabled_nonapproved_cad_visual_backend(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "src/services/comparison/render_backend_registry.py",
+        'CAD_VISUAL_BACKENDS = {"qcad_professional_cli": {"enabled_by_default": True}}\n',
+    )
+
+    codes = {violation.code for violation in scan_repo(tmp_path)}
+
+    assert "CAD_POLICY_NON_APPROVED_VISUAL_BACKEND_DEFAULT_ENABLED" in codes
+
+
+def test_policy_gate_rejects_nonapproved_cad_visual_auto_fallback_chain(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "src/services/comparison/cad_visual_conversion_worker.py",
+        'fallback_chain = ["qcad_pro", "aspose_cad", "ghostscript"]\n',
+    )
+
+    codes = {violation.code for violation in scan_repo(tmp_path)}
+
+    assert "CAD_POLICY_NON_APPROVED_VISUAL_BACKEND_AUTO_CHAIN" in codes
+
+
+def test_policy_gate_rejects_cad_visual_conversion_in_viewer_hot_path(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "src/services/comparison/viewer_package.py",
+        "result = registry.convert_cad_visual(request)\n",
+    )
+    _write(
+        tmp_path / "src/gui/drawing_compare_workbench.py",
+        "result = convert_cad_visual_in_subprocess(request)\n",
+    )
+
+    codes = {violation.code for violation in scan_repo(tmp_path)}
+
+    assert "CAD_POLICY_CAD_VISUAL_HOT_PATH_CONVERSION" in codes
+
+
+def test_policy_gate_accepts_disabled_cad_visual_backend_descriptors(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "src/services/comparison/render_backend_registry.py",
+        'CAD_VISUAL_BACKENDS = {"qcad_professional_cli": {"enabled_by_default": False}}\n'
+        'DEFAULT_CAD_VISUAL_BACKENDS = []\n',
+    )
+
+    codes = {violation.code for violation in scan_repo(tmp_path)}
+
+    assert "CAD_POLICY_NON_APPROVED_VISUAL_BACKEND_DEFAULT_ENABLED" not in codes
+    assert "CAD_POLICY_NON_APPROVED_VISUAL_BACKEND_AUTO_CHAIN" not in codes

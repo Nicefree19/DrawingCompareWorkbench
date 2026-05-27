@@ -42,6 +42,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
+from .dxf_read import read_dxf_document_result
+from .source_signature import source_cache_filename
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +72,20 @@ except ImportError as exc:  # pragma: no cover - optional dependency guard
 # needs more, we surface the truncation in the result dict so the GUI can
 # warn the reviewer rather than silently lose detail.
 _MAX_ACCEPTED_ENTITIES = 1500
+
+# ezdxf's SVG frontend can crash while expanding malformed MULTILEADER
+# entities from customer DWGs converted through third-party tools. These
+# annotations are common in construction drawings, so the zone viewer renders
+# a simplified line/text fallback instead of letting one bad entity blank the
+# whole selected-zone view.
+_FRAGILE_VECTOR_ENTITY_TYPES = {"MULTILEADER", "MLEADER"}
+
+
+def _is_fragile_vector_entity(entity) -> bool:
+    try:
+        return str(entity.dxftype()).upper() in _FRAGILE_VECTOR_ENTITY_TYPES
+    except Exception:
+        return False
 
 
 def resolve_dxf_path(
@@ -117,11 +134,19 @@ def resolve_dxf_path(
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        stat = src.stat()
-        cache_key = f"{src.stem}__{int(stat.st_mtime_ns)}__{stat.st_size}.dxf"
-    except OSError:
-        cache_key = f"{src.stem}__nostat.dxf"
+    shared_cached = _exact_dwg_differ_cache(src, cache_dir)
+    if shared_cached is not None:
+        logger.info("Reusing shared DWG DXF cache for %s -> %s", src.name, shared_cached)
+        return shared_cached
+
+    cache_key = source_cache_filename(
+        src,
+        namespace="preview_dxf",
+        extension=".dxf",
+        importer_version="canonical_debug_dxf:AC1015",
+        config_fingerprint="zone_vector_renderer:v1",
+        digest_length=16,
+    )
     cached = cache_dir / cache_key
     if cached.exists() and cached.stat().st_size > 0:
         logger.info("Reusing cached DXF for %s -> %s", src.name, cached)
@@ -148,9 +173,205 @@ def resolve_dxf_path(
         logger.info("Cached canonical DWG debug DXF: %s -> %s", src.name, cached)
         return cached
     except Exception as exc:
+        fallback = _cached_dxf_fallback(src, cache_dir)
+        if fallback is None:
+            try:
+                from .cache_paths import workbench_data_root
+
+                legacy_cache_dir = workbench_data_root() / "dxf_cache"
+                if legacy_cache_dir != cache_dir:
+                    fallback = _cached_dxf_fallback(src, legacy_cache_dir)
+            except Exception:
+                logger.debug(
+                    "Could not inspect legacy DXF cache for %s",
+                    src,
+                    exc_info=True,
+                )
+        if fallback is not None:
+            logger.warning(
+                "DWG vector normalisation failed for %s; using cached DXF %s: %s",
+                src.name,
+                fallback.name,
+                exc,
+            )
+            return fallback
         raise OSError(
             f"DWG canonical import/export failed for {src.name}: {exc}"
         ) from exc
+
+
+def _cached_dxf_fallback(source_path: Path, cache_dir: Path) -> Optional[Path]:
+    """Return a non-empty compatible DXF cache for DWG vector rendering."""
+
+    try:
+        from .dwg_differ import DwgDiffer
+
+        differ = DwgDiffer(
+            config={
+                "use_canonical_pipeline": False,
+                "use_legacy_ezdxf_pipeline": True,
+            },
+            dxf_cache_dir=cache_dir,
+        )
+        exact = differ._dxf_cache_path(source_path)
+        return differ._compatible_dxf_cache_path(source_path, exact_path=exact)
+    except Exception:
+        logger.debug("Could not resolve cached DXF fallback for %s", source_path, exc_info=True)
+        return None
+
+
+def _exact_dwg_differ_cache(source_path: Path, cache_dir: Path) -> Optional[Path]:
+    """Return the strict shared DWG differ cache entry, never same-stem fallback."""
+
+    try:
+        from .dwg_differ import DwgDiffer
+
+        differ = DwgDiffer(
+            config={
+                "use_canonical_pipeline": False,
+                "use_legacy_ezdxf_pipeline": True,
+            },
+            dxf_cache_dir=cache_dir,
+        )
+        exact = differ._dxf_cache_path(source_path)
+        if exact.exists() and exact.stat().st_size > 0:
+            return exact
+    except Exception:
+        logger.debug("Could not resolve exact shared DXF cache for %s", source_path, exc_info=True)
+    return None
+
+
+def _fragile_skip_reason(skipped_count: int) -> str:
+    if skipped_count <= 0:
+        return ""
+    return (
+        f"Rendered {skipped_count} fragile MULTILEADER/MLEADER entities as "
+        "simplified safe primitives because the ezdxf SVG renderer cannot "
+        "safely expand their native representation."
+    )
+
+
+def _empty_zone_reason(skipped_fragile_count: int) -> str:
+    reason = "No renderable DXF entities overlap the requested zone bbox."
+    fragile_reason = _fragile_skip_reason(skipped_fragile_count)
+    if fragile_reason:
+        return f"{reason} {fragile_reason}"
+    return reason
+
+
+def _vec2_tuple(value) -> Optional[tuple[float, float]]:
+    try:
+        return (float(value.x), float(value.y))
+    except Exception:
+        pass
+    try:
+        return (float(value[0]), float(value[1]))
+    except Exception:
+        return None
+
+
+def _distance2(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+
+def _mleader_plain_text(entity) -> str:
+    try:
+        text = str(entity.context.mtext.default_content or "").strip()
+    except Exception:
+        return ""
+    # MText stores paragraph/control escapes. Keep this intentionally simple:
+    # the fallback exists to preserve visual context, not to typeset MText.
+    return (
+        text.replace("\\P", " ")
+        .replace("{", "")
+        .replace("}", "")
+        .strip()
+    )
+
+
+def _append_safe_mleader_primitives(entity, scratch_msp) -> int:
+    """Append a simplified MULTILEADER representation to ``scratch_msp``.
+
+    The native ezdxf MULTILEADER renderer can fail on missing style records in
+    converted customer DXFs. A few line segments plus optional plain text is
+    enough to keep the selected-zone viewer from going blank while avoiding
+    the fragile native expansion path entirely.
+    """
+
+    try:
+        context = entity.context
+    except Exception:
+        return 0
+
+    added = 0
+    attribs = {"color": 7}
+    try:
+        layer = str(entity.dxf.layer or "")
+        if layer:
+            attribs["layer"] = layer
+    except Exception:
+        pass
+
+    for leader in getattr(context, "leaders", []) or []:
+        last = _vec2_tuple(getattr(leader, "last_leader_point", None))
+        for leader_line in getattr(leader, "lines", []) or []:
+            points = [
+                point
+                for point in (
+                    _vec2_tuple(vertex)
+                    for vertex in (getattr(leader_line, "vertices", []) or [])
+                )
+                if point is not None
+            ]
+            if len(points) >= 2:
+                for start, end in zip(points, points[1:]):
+                    scratch_msp.add_line(start, end, dxfattribs=attribs)
+                    added += 1
+            elif len(points) == 1 and last is not None and _distance2(points[0], last) > 1e-9:
+                scratch_msp.add_line(points[0], last, dxfattribs=attribs)
+                added += 1
+        dogleg_vector = _vec2_tuple(getattr(leader, "dogleg_vector", None))
+        try:
+            dogleg_length = float(getattr(leader, "dogleg_length", 0.0) or 0.0)
+        except Exception:
+            dogleg_length = 0.0
+        if last is not None and dogleg_vector is not None and abs(dogleg_length) > 1e-9:
+            end = (
+                last[0] + dogleg_vector[0] * dogleg_length,
+                last[1] + dogleg_vector[1] * dogleg_length,
+            )
+            if _distance2(last, end) > 1e-9:
+                scratch_msp.add_line(last, end, dxfattribs=attribs)
+                added += 1
+
+    insert = None
+    try:
+        insert = _vec2_tuple(context.mtext.insert)
+    except Exception:
+        insert = _vec2_tuple(getattr(context, "base_point", None))
+    try:
+        char_height = max(float(getattr(context, "char_height", 0.0) or 0.0), 1.0)
+    except Exception:
+        char_height = 1.0
+    text = _mleader_plain_text(entity)
+    if insert is not None and text:
+        scratch_msp.add_text(
+            text,
+            dxfattribs={
+                **attribs,
+                "height": char_height,
+                "insert": insert,
+            },
+        )
+        added += 1
+    elif insert is not None and added == 0:
+        # Empty-content leaders still need a visible anchor so annotation-only
+        # zones do not render as an empty SVG.
+        radius = max(char_height * 0.25, 1.0)
+        scratch_msp.add_circle(insert, radius=radius, dxfattribs=attribs)
+        added += 1
+
+    return added
 
 
 @dataclass(frozen=True)
@@ -264,15 +485,27 @@ def render_zone_svg(
     padded = _pad_bbox(zone_world_bbox, padding_ratio)
     zone_bbox = BoundingBox2d([(padded[0], padded[1]), (padded[2], padded[3])])
 
-    doc = ezdxf.readfile(str(dxf_path))
+    try:
+        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        doc = read_result.doc
+    except Exception as exc:
+        return ZoneVectorRenderResult(
+            svg_path="",
+            entity_count=0,
+            elapsed_ms=(time.perf_counter() - start) * 1000.0,
+            world_bbox=zone_world_bbox,
+            skipped_reason=f"ezdxf.readfile failed: {exc}",
+        )
     msp = doc.modelspace()
+    scratch_doc = ezdxf.new("R2010")
+    scratch_msp = scratch_doc.modelspace()
 
-    # Stateful entity counter so the filter_func can enforce the cap and
-    # ALSO propagate a truncated flag back without raising. Frontends
-    # that respect filter_func will skip the rest of the iteration once
-    # we start returning False.
+    # Stateful counters so recursive INSERT expansion can enforce the cap and
+    # propagate a truncated flag back without raising.
     accepted_count = [0]
     truncated = [False]
+    skipped_fragile_count = [0]
+    render_entities = []
 
     # Per-entity bbox is computed via ezdxf.bbox.extents([entity]) — entity
     # objects don't expose .bbox() directly. We share a Cache across calls so
@@ -309,6 +542,9 @@ def render_zone_svg(
             return None
 
     def _zone_filter(entity) -> bool:
+        if _is_fragile_vector_entity(entity):
+            skipped_fragile_count[0] += 1
+            return False
         if accepted_count[0] >= max_entities:
             truncated[0] = True
             return False
@@ -324,6 +560,57 @@ def render_zone_svg(
             return True
         return False
 
+    def _is_insert(entity) -> bool:
+        try:
+            return str(entity.dxftype()).upper() == "INSERT"
+        except Exception:
+            return False
+
+    def _collect_zone_entity(entity, depth: int = 0) -> None:
+        if accepted_count[0] >= max_entities:
+            truncated[0] = True
+            return
+        if _is_fragile_vector_entity(entity):
+            added = _append_safe_mleader_primitives(entity, scratch_msp)
+            if added:
+                render_entities.extend(list(scratch_msp)[-added:])
+                accepted_count[0] += added
+                skipped_fragile_count[0] += 1
+                if accepted_count[0] >= max_entities:
+                    truncated[0] = True
+            else:
+                skipped_fragile_count[0] += 1
+            return
+        ent_bbox_2d = _entity_bbox_2d(entity)
+        if ent_bbox_2d is not None and not zone_bbox.has_overlap(ent_bbox_2d):
+            return
+        if _is_insert(entity) and depth < 8:
+            try:
+                for child in entity.virtual_entities():
+                    _collect_zone_entity(child, depth + 1)
+                    if accepted_count[0] >= max_entities:
+                        break
+            except Exception as exc:
+                skipped_fragile_count[0] += 1
+                logger.debug(
+                    "Skipping fragile INSERT during zone SVG render: %s",
+                    exc,
+                    exc_info=True,
+                )
+            return
+        # Some entities (proxy graphics, malformed text, etc.) refuse bbox
+        # computation. Be inclusive: better to render an extra entity than
+        # silently lose change geometry.
+        render_entities.append(entity)
+        accepted_count[0] += 1
+        if accepted_count[0] >= max_entities:
+            truncated[0] = True
+
+    for entity in msp:
+        _collect_zone_entity(entity)
+        if accepted_count[0] >= max_entities:
+            break
+
     cfg = _ezdxf_config.Configuration(
         background_policy=_ezdxf_config.BackgroundPolicy.WHITE,
     )
@@ -335,9 +622,34 @@ def render_zone_svg(
         # policy will do the right thing anyway.
         pass
 
-    Frontend(ctx=RenderContext(doc), out=backend, config=cfg).draw_layout(
-        msp, finalize=True, filter_func=_zone_filter
-    )
+    try:
+        frontend = Frontend(ctx=RenderContext(doc), out=backend, config=cfg)
+        try:
+            frontend.set_background(background_color)
+        except Exception:
+            pass
+        frontend.draw_entities(render_entities)
+        frontend.pipeline.finalize()
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        logger.warning(
+            "Zone SVG draw failed after %d accepted entities for %s: %s",
+            accepted_count[0],
+            dxf_path.name,
+            exc,
+            exc_info=True,
+        )
+        return ZoneVectorRenderResult(
+            svg_path="",
+            entity_count=accepted_count[0],
+            elapsed_ms=elapsed_ms,
+            world_bbox=padded,
+            truncated=truncated[0],
+            skipped_reason=(
+                f"SVG draw failed: {type(exc).__name__}: {exc}. "
+                "The raster/background viewer should remain available."
+            ),
+        )
 
     if accepted_count[0] == 0:
         # filter_func rejected every entity → SVGBackend.get_string would
@@ -351,7 +663,7 @@ def render_zone_svg(
             entity_count=0,
             elapsed_ms=elapsed_ms,
             world_bbox=padded,
-            skipped_reason="No DXF entities overlap the requested zone bbox.",
+            skipped_reason=_empty_zone_reason(skipped_fragile_count[0]),
         )
 
     # Page sizing. We size the Page to match the zone bbox aspect so
@@ -407,6 +719,7 @@ def render_zone_svg(
         elapsed_ms=elapsed_ms,
         world_bbox=padded,
         truncated=truncated[0],
+        skipped_reason=_fragile_skip_reason(skipped_fragile_count[0]),
     )
 
 

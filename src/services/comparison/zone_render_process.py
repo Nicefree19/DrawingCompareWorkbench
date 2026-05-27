@@ -76,6 +76,7 @@ def main() -> int:
                 }
             )
         except Exception as exc:
+            error_type = type(exc).__name__
             _write_response(
                 {
                     "ok": False,
@@ -83,7 +84,11 @@ def main() -> int:
                     "pair_uuid": str(locals().get("request", {}).get("pair_uuid", "")),
                     "zone_id": str(locals().get("request", {}).get("zone_id", "")),
                     "error": str(exc),
-                    "error_type": type(exc).__name__,
+                    "error_type": error_type,
+                    "visual_fidelity": "relative_overlay",
+                    "render_lifecycle": "failed",
+                    "reason_code": error_type,
+                    "fallback_reason_code": error_type,
                 }
             )
     return 0

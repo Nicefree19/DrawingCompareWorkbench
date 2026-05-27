@@ -28,6 +28,7 @@ except ImportError:
     logger.warning("ezdxf가 설치되지 않았습니다")
 
 from .dxf_comparator import DxfChange, DxfChangeType
+from .dxf_read import read_dxf_document
 
 
 class DxfCloudMarker:
@@ -121,7 +122,7 @@ class DxfCloudMarker:
         logger.info(f"구름마크 DXF 생성 시작: {len(changes)}개 변경점")
 
         # DXF 파일 열기
-        doc = ezdxf.readfile(str(base_dxf_path))
+        doc = read_dxf_document(base_dxf_path, ezdxf_module=ezdxf)
         msp = doc.modelspace()
 
         # 레이어 생성
@@ -161,7 +162,7 @@ class DxfCloudMarker:
         if not base_dxf_path.exists():
             raise FileNotFoundError(f"Base DXF file not found: {base_dxf_path}")
 
-        doc = ezdxf.readfile(str(base_dxf_path))
+        doc = read_dxf_document(base_dxf_path, ezdxf_module=ezdxf)
         msp = doc.modelspace()
         self._create_layers(doc)
 

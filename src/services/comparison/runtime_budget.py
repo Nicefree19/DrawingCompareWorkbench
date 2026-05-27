@@ -34,18 +34,37 @@ Author: TEKLA_MCP Team
 from __future__ import annotations
 
 import logging
+import math
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from .native_resource_sampler import (
+    NATIVE_RESOURCE_SCHEMA_VERSION,
+    native_resource_snapshot,
+)
+
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2  # Plan §16 Phase C-2.1: +peak_comparator_changes, +time_to_first_stream_record_ms
+SCHEMA_VERSION = 4  # P5-G23: +native resource / worker plateau metrics
 SAMPLE_INTERVAL_S = 0.1
+SPOOL_SCAN_INTERVAL_S = 1.0
 DEFAULT_DISK_SPOOL_MB_CAP = 1024.0
 DEFAULT_VIEWER_MEMORY_BUDGET_MB = 4096.0
+
+_NATIVE_RESOURCE_COUNT_KEYS = (
+    "process_handle_count",
+    "open_file_descriptor_count",
+    "gdi_handle_count",
+    "user_handle_count",
+)
+_NATIVE_COUNT_KEYS = (
+    *_NATIVE_RESOURCE_COUNT_KEYS,
+    "worker_process_count",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +122,52 @@ class RuntimeBudget:
     # operators can detect a stalled comparator (Phase C-3.1).
     peak_comparator_changes: Optional[int] = None
     time_to_first_stream_record_ms: Optional[float] = None
+    # P5-G14 — instrumentation must prove its own overhead is bounded.
+    sampler_tick_ms: Optional[dict[str, float]] = None
+    spool_scan_ms: Optional[dict[str, float]] = None
+    sampler_overhead_ms: Optional[float] = None
+    telemetry_overhead_ratio: Optional[float] = None
+    spool_scan_count: int = 0
+    spool_scan_file_count: int = 0
+    spool_scan_bytes: int = 0
+    # P5-G23 — native resource / worker-tree plateau evidence.
+    native_resource_schema_version: int = NATIVE_RESOURCE_SCHEMA_VERSION
+    native_resource_platform: str = ""
+    native_resource_available: bool = False
+    native_resource_sample_count: int = 0
+    start_process_handle_count: Optional[int] = None
+    final_process_handle_count: Optional[int] = None
+    peak_process_handle_count: Optional[int] = None
+    process_handle_positive_delta: Optional[int] = None
+    start_open_file_descriptor_count: Optional[int] = None
+    final_open_file_descriptor_count: Optional[int] = None
+    peak_open_file_descriptor_count: Optional[int] = None
+    open_file_descriptor_positive_delta: Optional[int] = None
+    start_gdi_handle_count: Optional[int] = None
+    final_gdi_handle_count: Optional[int] = None
+    peak_gdi_handle_count: Optional[int] = None
+    gdi_handle_positive_delta: Optional[int] = None
+    start_user_handle_count: Optional[int] = None
+    final_user_handle_count: Optional[int] = None
+    peak_user_handle_count: Optional[int] = None
+    user_handle_positive_delta: Optional[int] = None
+    start_worker_process_count: Optional[int] = None
+    final_worker_process_count: Optional[int] = None
+    peak_worker_process_count: Optional[int] = None
+    worker_process_positive_delta: Optional[int] = None
+    native_resource_notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         # Round numeric fields for stable JSON diffs.
-        for key in ("peak_working_set_mb", "peak_rss_mb", "peak_disk_spool_mb", "total_s"):
+        for key in (
+            "peak_working_set_mb",
+            "peak_rss_mb",
+            "peak_disk_spool_mb",
+            "total_s",
+            "sampler_overhead_ms",
+            "telemetry_overhead_ratio",
+        ):
             value = payload.get(key)
             if isinstance(value, (int, float)):
                 payload[key] = round(float(value), 3)
@@ -121,6 +181,9 @@ class RuntimeBudget:
             payload["time_to_first_stream_record_ms"] = round(
                 float(payload["time_to_first_stream_record_ms"]), 3
             )
+        for key in ("sampler_tick_ms", "spool_scan_ms"):
+            if isinstance(payload.get(key), dict):
+                payload[key] = _round_percentile_payload(payload[key])
         return payload
 
 
@@ -150,9 +213,15 @@ class RuntimeBudgetSampler:
         *,
         spool_dirs: Optional[list[Path]] = None,
         sample_interval_s: float = SAMPLE_INTERVAL_S,
+        spool_scan_interval_s: float = SPOOL_SCAN_INTERVAL_S,
     ) -> None:
         self._spool_dirs = [Path(p) for p in (spool_dirs or [])]
         self._sample_interval_s = max(0.01, float(sample_interval_s))
+        self._spool_scan_interval_s = max(
+            self._sample_interval_s,
+            float(spool_scan_interval_s),
+        )
+        self._last_spool_scan_perf: Optional[float] = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -170,6 +239,20 @@ class RuntimeBudgetSampler:
         self._sample_count: int = 0
         self._notes: list[str] = []
         self._psutil_proc: Any = None
+        self._sampler_tick_ms_values: list[float] = []
+        self._spool_scan_ms_values: list[float] = []
+        self._spool_scan_count: int = 0
+        self._spool_scan_file_count: int = 0
+        self._spool_scan_bytes: int = 0
+        self._native_start_counts: dict[str, int] = {}
+        self._native_final_counts: dict[str, int] = {}
+        self._native_peak_counts: dict[str, int] = {}
+        self._native_resource_sample_count: int = 0
+        self._native_resource_available: bool = False
+        self._native_resource_platform: str = ""
+        self._native_resource_notes: list[str] = []
+        self._last_native_resource_sample_perf: Optional[float] = None
+        self._last_worker_sample_perf: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -215,6 +298,65 @@ class RuntimeBudgetSampler:
             return None
         effective = wset if wset > 0 else rss
         return effective / (1024 * 1024)
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a non-stopping point-in-time snapshot for stage telemetry."""
+
+        with self._lock:
+            working_set = self._peak_working_set_bytes
+            rss = self._peak_rss_bytes
+            spool = self._peak_spool_bytes
+            sample_count = self._sample_count
+            sampler_tick_ms = _percentile_summary(self._sampler_tick_ms_values)
+            spool_scan_ms = _percentile_summary(self._spool_scan_ms_values)
+            sampler_overhead_ms = sum(self._sampler_tick_ms_values)
+            spool_scan_count = self._spool_scan_count
+            spool_scan_file_count = self._spool_scan_file_count
+            spool_scan_bytes = self._spool_scan_bytes
+            start_perf = self._start_perf
+            native_current = dict(self._native_final_counts)
+            native_peak = dict(self._native_peak_counts)
+            native_resource_available = self._native_resource_available
+            native_resource_sample_count = self._native_resource_sample_count
+            native_resource_platform = self._native_resource_platform
+        if working_set == 0 and rss > 0:
+            working_set = rss
+        elapsed_ms = (
+            max(0.0, (time.perf_counter() - start_perf) * 1000.0)
+            if start_perf is not None
+            else 0.0
+        )
+        return {
+            "working_set_mb": (
+                working_set / (1024 * 1024) if working_set else None
+            ),
+            "rss_mb": rss / (1024 * 1024) if rss else None,
+            "spool_mb": spool / (1024 * 1024) if spool else None,
+            "sample_count": sample_count,
+            "sampler_tick_ms": sampler_tick_ms,
+            "spool_scan_ms": spool_scan_ms,
+            "sampler_overhead_ms": sampler_overhead_ms,
+            "telemetry_overhead_ratio": (
+                sampler_overhead_ms / elapsed_ms if elapsed_ms > 0 else None
+            ),
+            "spool_scan_count": spool_scan_count,
+            "spool_scan_file_count": spool_scan_file_count,
+            "spool_scan_bytes": spool_scan_bytes,
+            "native_resource_schema_version": NATIVE_RESOURCE_SCHEMA_VERSION,
+            "native_resource_platform": native_resource_platform,
+            "native_resource_available": native_resource_available,
+            "native_resource_sample_count": native_resource_sample_count,
+            "process_handle_count": native_current.get("process_handle_count"),
+            "open_file_descriptor_count": native_current.get("open_file_descriptor_count"),
+            "gdi_handle_count": native_current.get("gdi_handle_count"),
+            "user_handle_count": native_current.get("user_handle_count"),
+            "worker_process_count": native_current.get("worker_process_count"),
+            "peak_process_handle_count": native_peak.get("process_handle_count"),
+            "peak_open_file_descriptor_count": native_peak.get("open_file_descriptor_count"),
+            "peak_gdi_handle_count": native_peak.get("gdi_handle_count"),
+            "peak_user_handle_count": native_peak.get("user_handle_count"),
+            "peak_worker_process_count": native_peak.get("worker_process_count"),
+        }
 
     def assert_within_memory_budget(
         self, max_mb: Optional[float], *, stage: str = "viewer_package"
@@ -317,7 +459,8 @@ class RuntimeBudgetSampler:
             self._thread.join(timeout=2.0)
         # One final synchronous measurement so very short runs still produce
         # a non-zero working set value.
-        self._sample_once()
+        if self._start_perf is not None or self._sample_count > 0:
+            self._sample_once(force_spool_scan=True)
 
         with self._lock:
             total_s: Optional[float] = None
@@ -328,6 +471,21 @@ class RuntimeBudgetSampler:
                     first_review_ready_s = max(
                         0.0, self._first_review_ready_perf - self._start_perf
                     )
+            sampler_tick_ms = _percentile_summary(self._sampler_tick_ms_values)
+            spool_scan_ms = _percentile_summary(self._spool_scan_ms_values)
+            sampler_overhead_ms = sum(self._sampler_tick_ms_values)
+            telemetry_overhead_ratio = (
+                sampler_overhead_ms / (total_s * 1000.0)
+                if total_s and total_s > 0
+                else None
+            )
+            native_start = dict(self._native_start_counts)
+            native_final = dict(self._native_final_counts)
+            native_peak = dict(self._native_peak_counts)
+            native_resource_available = self._native_resource_available
+            native_resource_sample_count = self._native_resource_sample_count
+            native_resource_platform = self._native_resource_platform
+            native_resource_notes = list(self._native_resource_notes)
             return RuntimeBudget(
                 peak_working_set_mb=(
                     self._peak_working_set_bytes / (1024 * 1024)
@@ -359,6 +517,52 @@ class RuntimeBudgetSampler:
                     self._peak_comparator_changes or None
                 ),
                 time_to_first_stream_record_ms=self._time_to_first_stream_record_ms,
+                sampler_tick_ms=sampler_tick_ms,
+                spool_scan_ms=spool_scan_ms,
+                sampler_overhead_ms=sampler_overhead_ms,
+                telemetry_overhead_ratio=telemetry_overhead_ratio,
+                spool_scan_count=self._spool_scan_count,
+                spool_scan_file_count=self._spool_scan_file_count,
+                spool_scan_bytes=self._spool_scan_bytes,
+                native_resource_platform=native_resource_platform,
+                native_resource_available=native_resource_available,
+                native_resource_sample_count=native_resource_sample_count,
+                start_process_handle_count=native_start.get("process_handle_count"),
+                final_process_handle_count=native_final.get("process_handle_count"),
+                peak_process_handle_count=native_peak.get("process_handle_count"),
+                process_handle_positive_delta=_positive_delta(
+                    native_start.get("process_handle_count"),
+                    native_final.get("process_handle_count"),
+                ),
+                start_open_file_descriptor_count=native_start.get("open_file_descriptor_count"),
+                final_open_file_descriptor_count=native_final.get("open_file_descriptor_count"),
+                peak_open_file_descriptor_count=native_peak.get("open_file_descriptor_count"),
+                open_file_descriptor_positive_delta=_positive_delta(
+                    native_start.get("open_file_descriptor_count"),
+                    native_final.get("open_file_descriptor_count"),
+                ),
+                start_gdi_handle_count=native_start.get("gdi_handle_count"),
+                final_gdi_handle_count=native_final.get("gdi_handle_count"),
+                peak_gdi_handle_count=native_peak.get("gdi_handle_count"),
+                gdi_handle_positive_delta=_positive_delta(
+                    native_start.get("gdi_handle_count"),
+                    native_final.get("gdi_handle_count"),
+                ),
+                start_user_handle_count=native_start.get("user_handle_count"),
+                final_user_handle_count=native_final.get("user_handle_count"),
+                peak_user_handle_count=native_peak.get("user_handle_count"),
+                user_handle_positive_delta=_positive_delta(
+                    native_start.get("user_handle_count"),
+                    native_final.get("user_handle_count"),
+                ),
+                start_worker_process_count=native_start.get("worker_process_count"),
+                final_worker_process_count=native_final.get("worker_process_count"),
+                peak_worker_process_count=native_peak.get("worker_process_count"),
+                worker_process_positive_delta=_positive_delta(
+                    native_start.get("worker_process_count"),
+                    native_final.get("worker_process_count"),
+                ),
+                native_resource_notes=native_resource_notes,
             )
 
     # ------------------------------------------------------------------
@@ -370,60 +574,164 @@ class RuntimeBudgetSampler:
             self._sample_once()
             self._stop_event.wait(self._sample_interval_s)
 
-    def _sample_once(self) -> None:
-        proc = self._psutil_proc
-        if proc is None and not self._spool_dirs:
-            return
-        with self._lock:
-            self._sample_count += 1
-
-        if proc is not None:
-            try:
-                info = proc.memory_info()
-            except Exception as exc:  # process gone, permission denied, etc.
-                self._notes.append(f"memory_info_failed:{exc!r}")
-                self._psutil_proc = None
+    def _sample_once(self, *, force_spool_scan: bool = False) -> None:
+        tick_started = time.perf_counter()
+        try:
+            proc = self._psutil_proc
+            if proc is None and not self._spool_dirs and self._start_perf is None:
                 return
-            rss = int(getattr(info, "rss", 0) or 0)
-            wset = int(getattr(info, "peak_wset", 0) or 0)
             with self._lock:
-                if rss > self._peak_rss_bytes:
-                    self._peak_rss_bytes = rss
-                if wset > self._peak_working_set_bytes:
-                    self._peak_working_set_bytes = wset
-                # Fallback: when peak_wset is unavailable (non-Windows),
-                # mirror the rss high-water mark so the budget still reports
-                # a non-None working-set value rather than masking the metric.
-                if (
-                    wset == 0
-                    and rss > self._peak_working_set_bytes
-                ):
-                    self._peak_working_set_bytes = rss
+                self._sample_count += 1
 
-        if self._spool_dirs:
-            spool_bytes = 0
-            for spool_dir in self._spool_dirs:
-                spool_bytes += _directory_size(spool_dir)
+            if proc is not None:
+                try:
+                    info = proc.memory_info()
+                except Exception as exc:  # process gone, permission denied, etc.
+                    self._notes.append(f"memory_info_failed:{exc!r}")
+                    self._psutil_proc = None
+                    return
+                rss = int(getattr(info, "rss", 0) or 0)
+                wset = int(getattr(info, "peak_wset", 0) or 0)
+                with self._lock:
+                    if rss > self._peak_rss_bytes:
+                        self._peak_rss_bytes = rss
+                    if wset > self._peak_working_set_bytes:
+                        self._peak_working_set_bytes = wset
+                    # Fallback: when peak_wset is unavailable (non-Windows),
+                    # mirror the rss high-water mark so the budget still reports
+                    # a non-None working-set value rather than masking the metric.
+                    if (
+                        wset == 0
+                        and rss > self._peak_working_set_bytes
+                    ):
+                        self._peak_working_set_bytes = rss
+
+            sample_native_resource = self._should_sample_native_resource(
+                force=force_spool_scan
+            )
+            sample_worker = self._should_sample_worker(force=force_spool_scan)
+            if sample_native_resource or sample_worker:
+                resource = native_resource_snapshot(
+                    proc=proc,
+                    include_process_memory=False,
+                    include_process_resources=sample_native_resource,
+                    include_worker_processes=sample_worker,
+                )
+                with self._lock:
+                    self._record_native_resource_snapshot_locked(resource)
+
+            if self._spool_dirs and self._should_scan_spool(force=force_spool_scan):
+                scan_started = time.perf_counter()
+                spool_bytes = 0
+                spool_file_count = 0
+                for spool_dir in self._spool_dirs:
+                    scanned_bytes, scanned_files = _directory_scan(spool_dir)
+                    spool_bytes += scanned_bytes
+                    spool_file_count += scanned_files
+                scan_elapsed_ms = (time.perf_counter() - scan_started) * 1000.0
+                with self._lock:
+                    self._spool_scan_ms_values.append(scan_elapsed_ms)
+                    self._spool_scan_count += 1
+                    self._spool_scan_file_count += spool_file_count
+                    self._spool_scan_bytes += spool_bytes
+                    if spool_bytes > self._peak_spool_bytes:
+                        self._peak_spool_bytes = spool_bytes
+        finally:
+            tick_elapsed_ms = (time.perf_counter() - tick_started) * 1000.0
             with self._lock:
-                if spool_bytes > self._peak_spool_bytes:
-                    self._peak_spool_bytes = spool_bytes
+                self._sampler_tick_ms_values.append(tick_elapsed_ms)
+
+    def _should_scan_spool(self, *, force: bool = False) -> bool:
+        if force:
+            self._last_spool_scan_perf = time.perf_counter()
+            return True
+        now = time.perf_counter()
+        last = self._last_spool_scan_perf
+        if last is not None and (now - last) < self._spool_scan_interval_s:
+            return False
+        self._last_spool_scan_perf = now
+        return True
+
+    def _should_sample_worker(self, *, force: bool = False) -> bool:
+        if force:
+            self._last_worker_sample_perf = time.perf_counter()
+            return True
+        now = time.perf_counter()
+        last = self._last_worker_sample_perf
+        if last is not None and (now - last) < self._spool_scan_interval_s:
+            return False
+        self._last_worker_sample_perf = now
+        return True
+
+    def _should_sample_native_resource(self, *, force: bool = False) -> bool:
+        if force:
+            self._last_native_resource_sample_perf = time.perf_counter()
+            return True
+        now = time.perf_counter()
+        last = self._last_native_resource_sample_perf
+        if last is not None and (now - last) < self._spool_scan_interval_s:
+            return False
+        self._last_native_resource_sample_perf = now
+        return True
+
+    def _record_native_resource_snapshot_locked(self, resource: dict[str, Any]) -> None:
+        if not isinstance(resource, dict):
+            return
+        platform_value = str(resource.get("native_resource_platform") or "")
+        if platform_value:
+            self._native_resource_platform = platform_value
+        notes = resource.get("native_resource_notes")
+        if isinstance(notes, list):
+            for note in notes:
+                _append_unique(self._native_resource_notes, str(note))
+
+        has_native_count = any(
+            resource.get(key) is not None for key in _NATIVE_RESOURCE_COUNT_KEYS
+        )
+        if resource.get("native_resource_available") is True or has_native_count:
+            self._native_resource_available = True
+            self._native_resource_sample_count += 1
+
+        for key in _NATIVE_COUNT_KEYS:
+            value = _optional_int(resource.get(key))
+            if value is None:
+                continue
+            if key not in self._native_start_counts:
+                self._native_start_counts[key] = value
+            self._native_final_counts[key] = value
+            previous_peak = self._native_peak_counts.get(key)
+            if previous_peak is None or value > previous_peak:
+                self._native_peak_counts[key] = value
 
 
 def _directory_size(path: Path) -> int:
     """Recursively sum file sizes under ``path``. Failures yield 0."""
+    return _directory_scan(path)[0]
+
+
+def _directory_scan(path: Path) -> tuple[int, int]:
+    """Recursively sum file sizes and file count under ``path``."""
     if not path.exists():
-        return 0
+        return 0, 0
     total = 0
-    try:
-        for child in path.rglob("*"):
-            try:
-                if child.is_file():
-                    total += child.stat().st_size
-            except OSError:
-                continue
-    except OSError:
-        return total
-    return total
+    file_count = 0
+    stack = [Path(path)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                            file_count += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total, file_count
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +764,43 @@ def runtime_budget_from_dict(payload: Optional[dict[str, Any]]) -> RuntimeBudget
         time_to_first_stream_record_ms=_optional_float(
             payload.get("time_to_first_stream_record_ms")
         ),
+        sampler_tick_ms=_optional_percentile_payload(payload.get("sampler_tick_ms")),
+        spool_scan_ms=_optional_percentile_payload(payload.get("spool_scan_ms")),
+        sampler_overhead_ms=_optional_float(payload.get("sampler_overhead_ms")),
+        telemetry_overhead_ratio=_optional_float(payload.get("telemetry_overhead_ratio")),
+        spool_scan_count=_optional_int(payload.get("spool_scan_count")) or 0,
+        spool_scan_file_count=_optional_int(payload.get("spool_scan_file_count")) or 0,
+        spool_scan_bytes=_optional_int(payload.get("spool_scan_bytes")) or 0,
+        native_resource_schema_version=(
+            _optional_int(payload.get("native_resource_schema_version"))
+            or NATIVE_RESOURCE_SCHEMA_VERSION
+        ),
+        native_resource_platform=str(payload.get("native_resource_platform") or ""),
+        native_resource_available=bool(payload.get("native_resource_available") or False),
+        native_resource_sample_count=_optional_int(payload.get("native_resource_sample_count")) or 0,
+        start_process_handle_count=_optional_int(payload.get("start_process_handle_count")),
+        final_process_handle_count=_optional_int(payload.get("final_process_handle_count")),
+        peak_process_handle_count=_optional_int(payload.get("peak_process_handle_count")),
+        process_handle_positive_delta=_optional_int(payload.get("process_handle_positive_delta")),
+        start_open_file_descriptor_count=_optional_int(payload.get("start_open_file_descriptor_count")),
+        final_open_file_descriptor_count=_optional_int(payload.get("final_open_file_descriptor_count")),
+        peak_open_file_descriptor_count=_optional_int(payload.get("peak_open_file_descriptor_count")),
+        open_file_descriptor_positive_delta=_optional_int(payload.get("open_file_descriptor_positive_delta")),
+        start_gdi_handle_count=_optional_int(payload.get("start_gdi_handle_count")),
+        final_gdi_handle_count=_optional_int(payload.get("final_gdi_handle_count")),
+        peak_gdi_handle_count=_optional_int(payload.get("peak_gdi_handle_count")),
+        gdi_handle_positive_delta=_optional_int(payload.get("gdi_handle_positive_delta")),
+        start_user_handle_count=_optional_int(payload.get("start_user_handle_count")),
+        final_user_handle_count=_optional_int(payload.get("final_user_handle_count")),
+        peak_user_handle_count=_optional_int(payload.get("peak_user_handle_count")),
+        user_handle_positive_delta=_optional_int(payload.get("user_handle_positive_delta")),
+        start_worker_process_count=_optional_int(payload.get("start_worker_process_count")),
+        final_worker_process_count=_optional_int(payload.get("final_worker_process_count")),
+        peak_worker_process_count=_optional_int(payload.get("peak_worker_process_count")),
+        worker_process_positive_delta=_optional_int(payload.get("worker_process_positive_delta")),
+        native_resource_notes=[
+            str(note) for note in (payload.get("native_resource_notes") or [])
+        ],
     )
 
 
@@ -477,13 +822,69 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
 
 
+def _positive_delta(start: Optional[int], final: Optional[int]) -> Optional[int]:
+    if start is None or final is None:
+        return None
+    return max(0, int(final) - int(start))
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+def _optional_percentile_payload(value: Any) -> Optional[dict[str, float]]:
+    if not isinstance(value, dict):
+        return None
+    payload = _round_percentile_payload(value)
+    return payload if payload else None
+
+
+def _round_percentile_payload(value: dict[str, Any]) -> dict[str, float]:
+    payload: dict[str, float] = {}
+    for key in ("p50", "p95", "p99", "max", "mean"):
+        number = _optional_float(value.get(key))
+        if number is not None:
+            payload[key] = round(number, 3)
+    return payload
+
+
+def _percentile_summary(values: list[float]) -> Optional[dict[str, float]]:
+    samples = sorted(float(value) for value in values if float(value) >= 0.0)
+    if not samples:
+        return None
+    return {
+        "p50": round(_percentile(samples, 0.50), 3),
+        "p95": round(_percentile(samples, 0.95), 3),
+        "p99": round(_percentile(samples, 0.99), 3),
+        "max": round(samples[-1], 3),
+        "mean": round(sum(samples) / len(samples), 3),
+    }
+
+
+def _percentile(samples: list[float], q: float) -> float:
+    if not samples:
+        return 0.0
+    if len(samples) == 1:
+        return samples[0]
+    rank = q * (len(samples) - 1)
+    lower = int(math.floor(rank))
+    upper = int(math.ceil(rank))
+    if lower == upper:
+        return samples[lower]
+    fraction = rank - lower
+    return samples[lower] + (samples[upper] - samples[lower]) * fraction
+
+
 __all__ = [
     "DEFAULT_DISK_SPOOL_MB_CAP",
     "DEFAULT_VIEWER_MEMORY_BUDGET_MB",
     "MemoryBudgetExceeded",
+    "NATIVE_RESOURCE_SCHEMA_VERSION",
     "RuntimeBudget",
     "RuntimeBudgetSampler",
     "SAMPLE_INTERVAL_S",
     "SCHEMA_VERSION",
+    "SPOOL_SCAN_INTERVAL_S",
     "runtime_budget_from_dict",
 ]

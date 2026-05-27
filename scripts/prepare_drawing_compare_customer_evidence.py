@@ -141,6 +141,7 @@ DISALLOWED_EVIDENCE_PATH_MARKERS = (
     "customer_evidence_request",
 )
 CAD_STRUCTURAL_TEXT_ENTITY_TYPES = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "INSERT"}
+TILE_CACHE_MB_ENV_VAR = "DRAWING_COMPARE_TILE_CACHE_MB"
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -226,6 +227,60 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--p5-g7-tile-eviction-proof-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Validation output folder from a forced tile-cache eviction proof run. "
+            "Repeat as needed. These runs are preserved as supporting evidence and "
+            "are not counted as customer corpus sheets."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g7-tile-eviction-release-manifest",
+        type=Path,
+        action="append",
+        default=[],
+        help="Release manifest from the forced tile-eviction proof run.",
+    )
+    parser.add_argument(
+        "--require-p5-g7-tile-eviction-proof",
+        action="store_true",
+        help="Require a passing P5-G7 forced tile-eviction proof before manifest readiness can pass.",
+    )
+    parser.add_argument(
+        "--p5-g6-tile-cache-mb",
+        type=float,
+        help="Expected DRAWING_COMPARE_TILE_CACHE_MB cap used by the P5-G7 forced tile-eviction proof.",
+    )
+    parser.add_argument(
+        "--p5-g16-benchmark-json",
+        "--p5-g16-real-corpus-replay",
+        dest="p5_g16_benchmark_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G16 real-corpus replay JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover replay evidence without a separate manual path handoff."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g22-gui-soak-json",
+        "--p5-g22-actual-gui-soak",
+        dest="p5_g22_gui_soak_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G22 actual GUI soak JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover live Qt/QML navigation evidence without a manual handoff."
+        ),
+    )
+    parser.add_argument(
         "--required-structural-coverage",
         action="append",
         choices=tuple(STRUCTURAL_COVERAGE_TERMS),
@@ -297,6 +352,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_cold_zone_render_ms=resolved_max_cold_zone_render_ms,
         max_cache_hit_zone_render_ms=resolved_max_cache_hit_zone_render_ms,
         required_structural_coverage=args.required_structural_coverage,
+        p5_g7_tile_eviction_proof_dirs=[
+            path.resolve() for path in args.p5_g7_tile_eviction_proof_dir
+        ],
+        p5_g7_tile_eviction_release_manifests=[
+            path.resolve() for path in args.p5_g7_tile_eviction_release_manifest
+        ],
+        require_p5_g7_tile_eviction_proof=args.require_p5_g7_tile_eviction_proof,
+        p5_g6_tile_cache_mb=args.p5_g6_tile_cache_mb,
+        p5_g16_benchmark_json=[path.resolve() for path in args.p5_g16_benchmark_json],
+        p5_g22_gui_soak_json=[path.resolve() for path in args.p5_g22_gui_soak_json],
     )
     print(json.dumps(result, ensure_ascii=True, indent=2))
     return 0 if result["status"] == "ready" else 1
@@ -330,6 +395,12 @@ def prepare_manifest(
     max_cold_zone_render_ms: float = 10_000.0,
     max_cache_hit_zone_render_ms: float = 2_000.0,
     required_structural_coverage: Sequence[str] | None = None,
+    p5_g7_tile_eviction_proof_dirs: Sequence[Path] | None = None,
+    p5_g7_tile_eviction_release_manifests: Sequence[Path] | None = None,
+    require_p5_g7_tile_eviction_proof: bool = False,
+    p5_g6_tile_cache_mb: float | None = None,
+    p5_g16_benchmark_json: Sequence[Path] | None = None,
+    p5_g22_gui_soak_json: Sequence[Path] | None = None,
 ) -> dict[str, Any]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     audit_json = audit_json or out_path.with_name("sharable_path_audit_summary.json")
@@ -338,6 +409,15 @@ def prepare_manifest(
     large_dwg_probe = large_dwg_probe or review_ground_truth.with_name("large_dwg_probe.json")
     required = list(required_structural_coverage or STRUCTURAL_COVERAGE_TERMS.keys())
     loaded = [_load_result_dir(path) for path in result_dirs]
+    result_dir_forced_tile_eviction_proofs = [
+        summarize_p5_g7_forced_tile_eviction_proof(
+            item["summary"] if isinstance(item.get("summary"), dict) else {},
+            result_dir=item["path"],
+            summary_path=Path(item["path"]) / "validation_summary.json",
+            expected_tile_cache_mb=p5_g6_tile_cache_mb,
+        )
+        for item in loaded
+    ]
     summaries = [item["summary"] for item in loaded if isinstance(item.get("summary"), dict)]
     queue_items = [item for summary in summaries for item in _queue_items(summary)]
 
@@ -368,6 +448,31 @@ def prepare_manifest(
     first_interactive_readiness = summarize_first_interactive_readiness(summaries)
     bbox_quality = summarize_bbox_quality(summaries)
     large_dwg_resource_probe = summarize_large_dwg_resource_probe(_load_json(large_dwg_probe))
+    p5_g7_forced_tile_eviction = summarize_p5_g7_forced_tile_eviction(
+        p5_g7_tile_eviction_proof_dirs or [],
+        expected_tile_cache_mb=p5_g6_tile_cache_mb,
+        release_manifests=p5_g7_tile_eviction_release_manifests or [],
+        reference_base=out_path.parent,
+        required=require_p5_g7_tile_eviction_proof,
+    )
+    p5_g16_real_corpus_replay = summarize_p5_g16_real_corpus_replay(
+        p5_g16_benchmark_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g16_refs = [
+        item["benchmark_json"]
+        for item in p5_g16_real_corpus_replay["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    p5_g22_actual_gui_soak = summarize_p5_g22_actual_gui_soak(
+        p5_g22_gui_soak_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g22_refs = [
+        item["benchmark_json"]
+        for item in p5_g22_actual_gui_soak["artifacts"]
+        if item.get("benchmark_json")
+    ]
 
     path_audit = {
         "schema_version": 1,
@@ -449,8 +554,19 @@ def prepare_manifest(
             "leak_count": leak_count,
             "audit_json": _manifest_ref(out_path.parent, audit_json),
         },
+        "artifacts": {
+            "p5_g16_real_corpus_replay_json": p5_g16_refs[0] if p5_g16_refs else "",
+            "p5_g16_real_corpus_replay_jsons": p5_g16_refs,
+            "p5_g22_actual_gui_soak_json": p5_g22_refs[0] if p5_g22_refs else "",
+            "p5_g22_actual_gui_soak_jsons": p5_g22_refs,
+        },
+        "performance_benchmarks": {
+            "p5_g16_real_corpus_replay": p5_g16_real_corpus_replay,
+            "p5_g22_actual_gui_soak": p5_g22_actual_gui_soak,
+        },
         "cad_policy_evidence": cad_policy_evidence,
         "selected_zone_performance": selected_zone_performance,
+        "p5_g7_forced_tile_eviction": p5_g7_forced_tile_eviction,
         "workbench_acceptance": workbench_acceptance,
         "ai_policy": ai_policy,
     }
@@ -478,6 +594,15 @@ def prepare_manifest(
         max_cold_zone_render_ms=max_cold_zone_render_ms,
         max_cache_hit_zone_render_ms=max_cache_hit_zone_render_ms,
     )
+    forbidden_result_dir_proofs = [
+        proof for proof in result_dir_forced_tile_eviction_proofs if proof.get("candidate") is True
+    ]
+    for proof in forbidden_result_dir_proofs:
+        label = proof.get("result_dir") or proof.get("validation_summary") or "<results-dir>"
+        issues.append(
+            f"{label}: P5-G7 forced tile-eviction proof must be passed via "
+            "--p5-g7-tile-eviction-proof-dir, not --results-dir"
+        )
     status = "ready" if not issues else "incomplete"
     manifest["readiness"] = {
         "status": status,
@@ -537,6 +662,42 @@ def prepare_manifest(
                 )
         except Exception:
             pass
+        for index, proof_dir in enumerate(p5_g7_tile_eviction_proof_dirs or [], start=1):
+            try:
+                proof_summary = Path(proof_dir) / "validation_summary.json"
+                if proof_summary.exists():
+                    input_file_hashes[f"p5_g7_tile_eviction_proof_{index}"] = compute_file_sha256(
+                        proof_summary
+                    )
+            except Exception:
+                pass
+        for index, release_manifest in enumerate(
+            p5_g7_tile_eviction_release_manifests or [],
+            start=1,
+        ):
+            try:
+                if release_manifest.exists():
+                    input_file_hashes[f"p5_g7_tile_eviction_release_manifest_{index}"] = compute_file_sha256(
+                        Path(release_manifest)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g16_benchmark_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g16_real_corpus_replay_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g22_gui_soak_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g22_actual_gui_soak_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
         manifest["provenance"] = build_provenance(
             manifest,
             input_file_hashes=input_file_hashes,
@@ -565,6 +726,10 @@ def prepare_manifest(
                 max_first_review_ready_s=max_first_review_ready_s,
             ),
             "selected_zone_performance": selected_zone_performance,
+            "p5_g16_real_corpus_replay": p5_g16_real_corpus_replay,
+            "p5_g22_actual_gui_soak": p5_g22_actual_gui_soak,
+            "p5_g7_forced_tile_eviction": p5_g7_forced_tile_eviction,
+            "p5_g7_forced_tile_eviction_results_dir_rejections": forbidden_result_dir_proofs,
             "workbench_acceptance": workbench_acceptance,
             "review_decision_quality": review_decision_quality,
             "dataset_strata": dataset_strata_summary,
@@ -577,6 +742,410 @@ def prepare_manifest(
                 "max": max_total_pairs,
             },
         },
+    }
+
+
+def summarize_p5_g7_forced_tile_eviction(
+    proof_dirs: Sequence[Path],
+    *,
+    expected_tile_cache_mb: float | None = None,
+    release_manifests: Sequence[Path] | None = None,
+    reference_base: Path | None = None,
+    required: bool = False,
+) -> dict[str, Any]:
+    """Summarize P5-G7 forced tile-cache eviction proof runs without corpus mixing."""
+    proofs: list[dict[str, Any]] = []
+    for proof_dir in proof_dirs:
+        summary_path = proof_dir / "validation_summary.json"
+        summary = _load_json(summary_path)
+        proof = summarize_p5_g7_forced_tile_eviction_proof(
+            summary if isinstance(summary, dict) else {},
+            result_dir=proof_dir,
+            summary_path=summary_path,
+            expected_tile_cache_mb=expected_tile_cache_mb,
+            reference_base=reference_base,
+        )
+        if proof["status"] == "not_provided":
+            proof["status"] = "failed"
+            proof["issues"] = [
+                "validation_summary.json does not contain forced tile-eviction proof evidence"
+            ]
+        if not summary_path.exists():
+            proof["issues"].append("validation_summary.json does not exist")
+            proof["status"] = "failed"
+        proofs.append(proof)
+
+    release_summaries = [
+        _summarize_p5_g7_release_manifest(
+            path,
+            expected_tile_cache_mb=expected_tile_cache_mb,
+            reference_base=reference_base,
+        )
+        for path in release_manifests or []
+    ]
+    issues: list[str] = []
+    for proof in proofs:
+        if proof["status"] != "passed":
+            label = proof.get("result_dir") or proof.get("validation_summary") or "<p5_g7_proof>"
+            issues.append(f"{label}: " + "; ".join(proof.get("issues") or ["proof failed"]))
+    for release in release_summaries:
+        if release["status"] != "passed":
+            label = release.get("path") or "<release_manifest>"
+            issues.append(f"{label}: " + "; ".join(release.get("issues") or ["release manifest failed"]))
+    passed = [proof for proof in proofs if proof["status"] == "passed"]
+    if required and not passed:
+        issues.append("required P5-G7 forced tile-eviction proof is missing or failed")
+    if proofs:
+        status = "passed" if passed and not issues else "failed"
+    else:
+        status = "failed" if required else "not_provided"
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required": required,
+        "expected_tile_cache_mb": expected_tile_cache_mb,
+        "proof_count": len(proofs),
+        "passed_proof_count": len(passed),
+        "proofs": proofs,
+        "release_manifests": release_summaries,
+        "issues": issues,
+    }
+
+
+def summarize_p5_g16_real_corpus_replay(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        summary = payload_dict.get("summary") if isinstance(payload_dict.get("summary"), dict) else {}
+        native_summary = (
+            summary.get("native_resource_summary")
+            if isinstance(summary.get("native_resource_summary"), dict)
+            else {}
+        )
+        worker_summary = (
+            summary.get("worker_tree_summary")
+            if isinstance(summary.get("worker_tree_summary"), dict)
+            else {}
+        )
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "native_resource_summary": native_summary,
+                "worker_tree_summary": worker_summary,
+                "shared_summaries_present": bool(native_summary and worker_summary),
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == "p5_g16_real_corpus_replay"
+        and item["profile"] == "real_corpus_artifact_replay"
+    ]
+    status = "passed" if passed else ("planned" if artifacts else "missing")
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "native_resource_summary": (
+            artifacts[0]["native_resource_summary"] if artifacts else {}
+        ),
+        "worker_tree_summary": (
+            artifacts[0]["worker_tree_summary"] if artifacts else {}
+        ),
+        "shared_summary_count": len(
+            [item for item in artifacts if item.get("shared_summaries_present")]
+        ),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g22_actual_gui_soak(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        summary = payload_dict.get("summary") if isinstance(payload_dict.get("summary"), dict) else {}
+        native_summary = (
+            summary.get("native_resource_summary")
+            if isinstance(summary.get("native_resource_summary"), dict)
+            else {}
+        )
+        worker_summary = (
+            summary.get("worker_tree_summary")
+            if isinstance(summary.get("worker_tree_summary"), dict)
+            else {}
+        )
+        issues: list[str] = []
+        if path.exists() and payload_dict.get("status") == "passed":
+            if not native_summary:
+                issues.append("summary.native_resource_summary missing")
+            elif native_summary.get("measurement_available") is not True:
+                issues.append("summary.native_resource_summary.measurement_available must be true")
+            if not worker_summary:
+                issues.append("summary.worker_tree_summary missing")
+            elif worker_summary.get("cleanup_ok") is not True or _int(worker_summary.get("orphan_worker_count")) != 0:
+                issues.append("summary.worker_tree_summary cleanup/orphan check failed")
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "native_resource_summary": native_summary,
+                "worker_tree_summary": worker_summary,
+                "shared_summaries_present": bool(native_summary and worker_summary),
+                "issues": issues,
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == "p5_g22_actual_gui_soak"
+        and item["profile"] == "actual_gui_customer_corpus_soak"
+        and item["shared_summaries_present"]
+        and not item["issues"]
+    ]
+    status = "passed" if passed else ("failed" if any(item["exists"] for item in artifacts) else ("planned" if artifacts else "missing"))
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "native_resource_summary": (
+            artifacts[0]["native_resource_summary"] if artifacts else {}
+        ),
+        "worker_tree_summary": (
+            artifacts[0]["worker_tree_summary"] if artifacts else {}
+        ),
+        "shared_summary_count": len(
+            [item for item in artifacts if item.get("shared_summaries_present")]
+        ),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g7_forced_tile_eviction_proof(
+    summary: dict[str, Any],
+    *,
+    result_dir: Path | None = None,
+    summary_path: Path | None = None,
+    expected_tile_cache_mb: float | None = None,
+    reference_base: Path | None = None,
+    strict_candidate: bool = True,
+) -> dict[str, Any]:
+    gate = summary.get("p5_g3_realset_gate") if isinstance(summary, dict) else None
+    gate = gate if isinstance(gate, dict) else {}
+    gate_evidence = gate.get("evidence") if isinstance(gate.get("evidence"), dict) else {}
+    tile = gate_evidence.get("tile_manifest") if isinstance(gate_evidence, dict) else None
+    tile = tile if isinstance(tile, dict) else {}
+
+    configured_mb = _optional_float(tile.get("configured_tile_cache_mb"))
+    env_mb = _optional_float(tile.get("tile_cache_env_mb"))
+    byte_limit = _int(tile.get("byte_limit"))
+    evicted_pair_count = _int(tile.get("evicted_pair_count"))
+    evicted_estimated_bytes = _int(tile.get("evicted_estimated_bytes"))
+    min_evicted_pairs = max(1, _int(tile.get("min_evicted_pair_count")) or 1)
+    min_evicted_bytes = max(1, _int(tile.get("min_evicted_estimated_bytes")) or 1)
+    require_eviction = tile.get("require_eviction") is True
+    requested = gate.get("requested") is True
+    forced_markers = requested and (
+        require_eviction
+        if strict_candidate
+        else (
+            require_eviction
+            or configured_mb is not None
+            or env_mb is not None
+            or evicted_pair_count > 0
+            or evicted_estimated_bytes > 0
+        )
+    )
+    if not forced_markers:
+        return {
+            "status": "not_provided",
+            "candidate": False,
+            "result_dir": _manifest_ref(reference_base, result_dir) if reference_base else str(result_dir or ""),
+            "validation_summary": (
+                _manifest_ref(reference_base, summary_path)
+                if reference_base
+                else str(summary_path or "")
+            ),
+            "issues": [],
+        }
+
+    issues: list[str] = []
+    gate_status = str(gate.get("status") or "")
+    tile_status = str(tile.get("status") or "")
+    if not requested:
+        issues.append("p5_g3_realset_gate.requested is not true")
+    if gate_status != "passed":
+        issues.append(f"p5_g3_realset_gate.status={gate_status or '<missing>'}")
+    if tile_status and tile_status != "passed":
+        issues.append(f"p5_g3_realset_gate.tile_manifest.status={tile_status}")
+    if not require_eviction:
+        issues.append("p5_g3_realset_gate.tile_manifest.require_eviction is not true")
+    if evicted_pair_count < min_evicted_pairs:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.evicted_pair_count="
+            f"{evicted_pair_count} < {min_evicted_pairs}"
+        )
+    if evicted_estimated_bytes < min_evicted_bytes:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.evicted_estimated_bytes="
+            f"{evicted_estimated_bytes} < {min_evicted_bytes}"
+        )
+    if configured_mb is None or configured_mb <= 0:
+        issues.append("p5_g3_realset_gate.tile_manifest.configured_tile_cache_mb missing")
+    if env_mb is None or env_mb <= 0:
+        issues.append("p5_g3_realset_gate.tile_manifest.tile_cache_env_mb missing")
+    if configured_mb is not None and env_mb is not None and not _float_close(env_mb, configured_mb):
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.tile_cache_env_mb="
+            f"{env_mb} != configured_tile_cache_mb={configured_mb}"
+        )
+    if byte_limit <= 0:
+        issues.append("p5_g3_realset_gate.tile_manifest.byte_limit missing")
+    elif configured_mb is not None:
+        configured_bytes = int(configured_mb * 1024 * 1024)
+        if abs(byte_limit - configured_bytes) > 1:
+            issues.append(
+                f"p5_g3_realset_gate.tile_manifest.byte_limit={byte_limit} != {configured_bytes}"
+            )
+    if expected_tile_cache_mb is not None:
+        expected_bytes = int(float(expected_tile_cache_mb) * 1024 * 1024)
+        if not _float_close(configured_mb, expected_tile_cache_mb):
+            issues.append(
+                "p5_g3_realset_gate.tile_manifest.configured_tile_cache_mb="
+                f"{configured_mb} != {expected_tile_cache_mb}"
+            )
+        if not _float_close(env_mb, expected_tile_cache_mb):
+            issues.append(
+                "p5_g3_realset_gate.tile_manifest.tile_cache_env_mb="
+                f"{env_mb} != {expected_tile_cache_mb}"
+            )
+        if byte_limit <= 0:
+            issues.append(
+                "p5_g3_realset_gate.tile_manifest.byte_limit missing for "
+                f"expected tile cache cap {expected_tile_cache_mb} MB"
+            )
+        elif abs(byte_limit - expected_bytes) > 1:
+            issues.append(
+                f"p5_g3_realset_gate.tile_manifest.byte_limit={byte_limit} != {expected_bytes}"
+            )
+
+    stale_manifest_count = _int(tile.get("stale_manifest_count"))
+    missing_pair_payload_count = _int(tile.get("missing_pair_payload_count"))
+    retained_estimated_bytes = _int(tile.get("retained_estimated_bytes"))
+    orphan_payload_bytes = _int(tile.get("orphan_payload_bytes"))
+    max_orphan_payload_bytes = _int(tile.get("max_orphan_payload_bytes"))
+    if stale_manifest_count:
+        issues.append(f"p5_g3_realset_gate.tile_manifest.stale_manifest_count={stale_manifest_count}")
+    if missing_pair_payload_count:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.missing_pair_payload_count="
+            f"{missing_pair_payload_count}"
+        )
+    if byte_limit > 0 and retained_estimated_bytes > byte_limit:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.retained_estimated_bytes="
+            f"{retained_estimated_bytes} > byte_limit={byte_limit}"
+        )
+    if orphan_payload_bytes > max_orphan_payload_bytes:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.orphan_payload_bytes="
+            f"{orphan_payload_bytes} > {max_orphan_payload_bytes}"
+        )
+
+    return {
+        "status": "passed" if not issues else "failed",
+        "candidate": True,
+        "result_dir": _manifest_ref(reference_base, result_dir) if reference_base else str(result_dir or ""),
+        "validation_summary": (
+            _manifest_ref(reference_base, summary_path)
+            if reference_base
+            else str(summary_path or "")
+        ),
+        "p5_g3_realset_gate_status": gate_status,
+        "requested": requested,
+        "tile_manifest_status": tile_status,
+        "require_eviction": require_eviction,
+        "configured_tile_cache_mb": configured_mb,
+        "tile_cache_env_mb": env_mb,
+        "byte_limit": byte_limit,
+        "evicted_pair_count": evicted_pair_count,
+        "min_evicted_pair_count": min_evicted_pairs,
+        "evicted_estimated_bytes": evicted_estimated_bytes,
+        "min_evicted_estimated_bytes": min_evicted_bytes,
+        "retained_estimated_bytes": retained_estimated_bytes,
+        "stale_manifest_count": stale_manifest_count,
+        "missing_pair_payload_count": missing_pair_payload_count,
+        "orphan_payload_bytes": orphan_payload_bytes,
+        "max_orphan_payload_bytes": max_orphan_payload_bytes,
+        "issues": issues,
+    }
+
+
+def _summarize_p5_g7_release_manifest(
+    path: Path,
+    *,
+    expected_tile_cache_mb: float | None,
+    reference_base: Path | None,
+) -> dict[str, Any]:
+    payload = _load_json(path)
+    issues: list[str] = []
+    env_values: list[float] = []
+    if not path.exists():
+        issues.append("release_manifest.json does not exist")
+    if not isinstance(payload, dict):
+        issues.append("release_manifest.json is missing or unreadable")
+        payload = {}
+    for step in payload.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        env_overrides = step.get("env_overrides")
+        if not isinstance(env_overrides, dict):
+            continue
+        value = _optional_float(env_overrides.get(TILE_CACHE_MB_ENV_VAR))
+        if value is not None:
+            env_values.append(value)
+    if expected_tile_cache_mb is not None:
+        if not env_values:
+            issues.append(f"release manifest missing {TILE_CACHE_MB_ENV_VAR} env override")
+        for value in env_values:
+            if not _float_close(value, expected_tile_cache_mb):
+                issues.append(
+                    f"release manifest {TILE_CACHE_MB_ENV_VAR}={value} != {expected_tile_cache_mb}"
+                )
+    return {
+        "status": "passed" if not issues else "failed",
+        "path": _manifest_ref(reference_base, path) if reference_base else str(path),
+        "tile_cache_env_var": TILE_CACHE_MB_ENV_VAR,
+        "tile_cache_env_mb_values": env_values,
+        "issues": issues,
     }
 
 
@@ -691,6 +1260,27 @@ def _readiness_issues(
         issues.append("large_dwg_probe JSON must exist")
     if _nested(manifest, "large_dwg_resource_probe", "status") != "passed":
         issues.append("large_dwg_resource_probe.status must be passed")
+    p5_g7_tile_eviction = manifest.get("p5_g7_forced_tile_eviction")
+    if (
+        isinstance(p5_g7_tile_eviction, dict)
+        and p5_g7_tile_eviction.get("required") is True
+        and p5_g7_tile_eviction.get("status") != "passed"
+    ):
+        issues.append("p5_g7_forced_tile_eviction.status must be passed when required")
+    p5_g22 = _nested(manifest, "performance_benchmarks", "p5_g22_actual_gui_soak")
+    if isinstance(p5_g22, dict) and _int(p5_g22.get("artifact_count")) > 0:
+        if p5_g22.get("status") != "passed":
+            issues.append("p5_g22_actual_gui_soak.status must be passed when provided")
+        if _int(p5_g22.get("shared_summary_count")) < _int(p5_g22.get("artifact_count")):
+            issues.append(
+                "p5_g22_actual_gui_soak shared native/worker summaries are required for all provided artifacts"
+            )
+        native_summary = p5_g22.get("native_resource_summary") if isinstance(p5_g22.get("native_resource_summary"), dict) else {}
+        worker_summary = p5_g22.get("worker_tree_summary") if isinstance(p5_g22.get("worker_tree_summary"), dict) else {}
+        if native_summary.get("measurement_available") is not True:
+            issues.append("p5_g22_actual_gui_soak.native_resource_summary.measurement_available must be true")
+        if worker_summary.get("cleanup_ok") is not True or _int(worker_summary.get("orphan_worker_count")) != 0:
+            issues.append("p5_g22_actual_gui_soak.worker_tree_summary cleanup/orphan check must pass")
     if not operator_notes_file:
         issues.append("operator notes_file with workflow checklist is required")
     if not operator_notes_file and not operator_screenshots_dir:
@@ -1354,6 +1944,23 @@ def _float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_close(actual: float | None, expected: float | None) -> bool:
+    if actual is None or expected is None:
+        return False
+    return abs(float(actual) - float(expected)) <= 1e-6
 
 
 def _string_list(value: Any) -> list[str]:

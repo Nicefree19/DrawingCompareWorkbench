@@ -9,7 +9,8 @@ import os
 import gc
 import shutil
 import inspect
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence, Union
@@ -49,6 +50,11 @@ from .export_profiles import (
     normalize_export_profile,
 )
 from .preflight import PreflightResult, run_preflight
+from .perf_events import (
+    PERF_EVENTS_SUMMARY_FILENAME,
+    PerfEventWriter,
+    remove_raw_perf_events,
+)
 from .review_project import (
     PreviewPackage,
     export_preview_artifacts,
@@ -69,10 +75,21 @@ ProgressCallback = Callable[[str, float, str], None]
 # MemoryBudgetExceeded auto-retry path so listeners that record raw values
 # can distinguish the retry tick from the regular post-process emit.
 CancelCallback = Callable[[], bool]
+FirstReviewReadyCallback = Callable[["FolderCompareRunResult"], None]
 AUTO_STRUCTURAL_CLOUD_CATEGORIES = {"member", "dimension", "rebar", "grid", "mixed"}
 MULTI_FRAME_MODE_ENV = "DRAWING_COMPARE_MULTI_FRAME"
 MULTI_FRAME_MODES = {"off", "sidecar_only", "review_gate", "auto"}
 AUTO_REGION_COMPARE_ENV = "DRAWING_COMPARE_AUTO_REGION_COMPARE"
+REGION_LOCAL_DEFAULT_ENV = "DRAWING_COMPARE_REGION_LOCAL_DEFAULT"
+REGION_PILOT_SUMMARY_ENV = "DRAWING_COMPARE_REGION_PILOT_SUMMARY"
+REGION_LOCAL_DEFAULT_MODES = {"off", "pilot_passed"}
+REQUIRED_REGION_PILOT_ACCEPTANCE_KEYS = {
+    "detected_region_rate",
+    "whole_modelspace_fallback_rate",
+    "user_approved_match_accuracy",
+    "false_positive_reduction",
+    "viewer_screenshot_count",
+}
 
 
 @dataclass
@@ -145,6 +162,8 @@ class FolderCompareRunRequest:
     viewer_perf_log: bool = False
     max_viewer_pages: int = 30
     max_zone_tiles: int = 300
+    cad_visual_backend: str = ""
+    cad_visual_conversion_timeout_seconds: int = 180
     export_marked_pdf: bool = False
     marked_pdf_mode: str = "off"
     export_profile: str = "sharable"
@@ -153,6 +172,12 @@ class FolderCompareRunRequest:
     # artifacts: top-issue backgrounds are still rendered, but zone tiles,
     # marked PDFs, and full cloud-mark DXFs are deferred.
     fast_first_review: bool = False
+    auto_fast_first_review: bool = True
+    fast_first_review_pair_threshold: int = 20
+    fast_first_review_zone_threshold: int = 1000
+    fast_first_review_max_viewer_pages: int = 1
+    fast_first_review_render_timeout_seconds: int = 30
+    fast_first_review_max_overlay_records_per_pair: int = 500
     auto_export_structural_clouds: bool = False
     allow_long_path_warning: bool = False
     # Phase O — optional override for noise filter settings. When None,
@@ -197,6 +222,11 @@ class FolderCompareRunResult:
     preflight_result: PreflightResult
     started_at: str
     finished_at: str
+    result_state: str = "package_complete"
+    package_complete: bool = True
+    first_review_ready_at: str = ""
+    package_completed_at: str = ""
+    first_review_metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def confirmed_pairs(self) -> int:
@@ -228,6 +258,7 @@ class FolderComparePipeline:
         is_cancelled: Optional[CancelCallback] = None,
         runtime_sampler: Optional[Any] = None,
         viewer_memory_cap_mb: Optional[float] = None,
+        first_review_ready_callback: Optional[FirstReviewReadyCallback] = None,
     ) -> FolderCompareRunResult:
         started_at = datetime.now().isoformat()
         output_dir = Path(self.request.output_dir).resolve()
@@ -249,7 +280,15 @@ class FolderComparePipeline:
         export_profile = normalize_export_profile(self.request.export_profile)
         fast_first_review = bool(self.request.fast_first_review)
         run_manifest = RunManifestWriter(output_dir)
+        perf_writer = PerfEventWriter(
+            output_dir,
+            run_id=str(run_manifest.payload.get("run_id") or ""),
+            runtime_sampler=runtime_sampler,
+        )
+        perf_summary_path = output_dir / PERF_EVENTS_SUMMARY_FILENAME
         active_stage = "prepare"
+        auto_fast_first_review_triggered = False
+        auto_fast_first_review_reason = ""
 
         # Phase O — resolve noise filter settings (request override → disk
         # file → safe defaults). All three branches return a populated
@@ -274,8 +313,13 @@ class FolderComparePipeline:
 
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                perf_writer.path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Could not reset perf_events log", exc_info=True)
             dxf_cache_dir.mkdir(parents=True, exist_ok=True)
             compare_state_dir.mkdir(parents=True, exist_ok=True)
+            preflight_started = time.perf_counter()
             preflight = run_preflight(
                 source_a=self.request.source_a,
                 source_b=self.request.source_b,
@@ -292,6 +336,9 @@ class FolderComparePipeline:
                     "source_b": self.request.source_b,
                     "recursive": self.request.recursive,
                     "fast_first_review": fast_first_review,
+                    "auto_fast_first_review": self.request.auto_fast_first_review,
+                    "fast_first_review_pair_threshold": self.request.fast_first_review_pair_threshold,
+                    "fast_first_review_zone_threshold": self.request.fast_first_review_zone_threshold,
                 },
                 paths={
                     "output_dir": output_dir,
@@ -305,6 +352,13 @@ class FolderComparePipeline:
                 preflight=preflight.to_dict(),
             )
             run_manifest.stage("preflight", "completed", preflight_status=preflight.status)
+            perf_writer.stage_event(
+                "preflight",
+                "completed",
+                preflight_started,
+                warning_count=len(preflight.warnings),
+                error_code="preflight_errors" if preflight.errors else "",
+            )
             if preflight.errors:
                 raise RuntimeError(
                     "Preflight failed: "
@@ -314,6 +368,7 @@ class FolderComparePipeline:
 
             active_stage = "scan"
             run_manifest.stage(active_stage, "running")
+            stage_started = time.perf_counter()
             self._emit(progress_callback, "scan", 5, "도면 찾는 중")
             self._check_cancelled(is_cancelled)
             scan_options = DescriptorBuildOptions(
@@ -327,9 +382,21 @@ class FolderComparePipeline:
             self._check_cancelled(is_cancelled)
             descriptors_b = scan_drawing_inputs(self.request.source_b, options=scan_options)
             run_manifest.stage(active_stage, "completed", a_count=len(descriptors_a), b_count=len(descriptors_b))
+            perf_writer.stage_event(
+                active_stage,
+                "completed",
+                stage_started,
+                input_bytes=_descriptor_total_bytes(descriptors_a)
+                + _descriptor_total_bytes(descriptors_b),
+                entity_count=_descriptor_entity_count(descriptors_a)
+                + _descriptor_entity_count(descriptors_b),
+                a_count=len(descriptors_a),
+                b_count=len(descriptors_b),
+            )
 
             active_stage = "match"
             run_manifest.stage(active_stage, "running")
+            stage_started = time.perf_counter()
             self._emit(progress_callback, "match", 28, "도면 번호로 자동 매칭 중")
             self._check_cancelled(is_cancelled)
             candidates = _explicit_file_pair_candidates(
@@ -346,9 +413,53 @@ class FolderComparePipeline:
                 confirmed=sum(1 for candidate in candidates if candidate.is_confirmed),
                 review_required=sum(1 for candidate in candidates if candidate.status == MatchStatus.REVIEW_REQUIRED),
             )
+            perf_writer.stage_event(
+                active_stage,
+                "completed",
+                stage_started,
+                pair_count=len(candidates),
+                confirmed=sum(1 for candidate in candidates if candidate.is_confirmed),
+                review_required=sum(
+                    1
+                    for candidate in candidates
+                    if candidate.status == MatchStatus.REVIEW_REQUIRED
+                ),
+            )
+            if (
+                not fast_first_review
+                and self.request.auto_fast_first_review
+                and _should_auto_fast_first_review(
+                    pair_count=len(candidates),
+                    source_a_count=len(descriptors_a),
+                    source_b_count=len(descriptors_b),
+                    threshold=self.request.fast_first_review_pair_threshold,
+                )
+            ):
+                fast_first_review = True
+                auto_fast_first_review_triggered = True
+                auto_fast_first_review_reason = "large_run_pair_or_input_count"
+                run_manifest.stage(
+                    "fast_first_review_auto",
+                    "completed",
+                    reason=auto_fast_first_review_reason,
+                    pair_count=len(candidates),
+                    source_a_count=len(descriptors_a),
+                    source_b_count=len(descriptors_b),
+                    threshold=max(1, int(self.request.fast_first_review_pair_threshold or 1)),
+                )
+                perf_writer.append(
+                    stage="fast_first_review_auto",
+                    event="completed",
+                    pair_count=len(candidates),
+                    source_a_count=len(descriptors_a),
+                    source_b_count=len(descriptors_b),
+                    threshold=max(1, int(self.request.fast_first_review_pair_threshold or 1)),
+                    reason=auto_fast_first_review_reason,
+                )
 
             active_stage = "compare"
             run_manifest.stage(active_stage, "running")
+            stage_started = time.perf_counter()
             self._emit(progress_callback, "compare", 35, "도면 비교 중")
 
             # Phase H4 — load any pre-existing manual page overrides
@@ -439,6 +550,11 @@ class FolderComparePipeline:
                 is_cancelled=is_cancelled,
             )
             self._check_cancelled(is_cancelled)
+            compare_failures = _compare_failure_records(compare_summary)
+            compare_failure_path = _write_compare_failures(
+                compare_failures,
+                artifact_dir / "compare_failures.json",
+            )
             run_manifest.stage(
                 active_stage,
                 "completed",
@@ -446,18 +562,31 @@ class FolderComparePipeline:
                 completed_pairs=compare_summary.completed_pairs,
                 failed_pairs=compare_summary.failed_pairs,
                 cancelled_pairs=compare_summary.cancelled_pairs,
+                failures=compare_failures,
+            )
+            perf_writer.stage_event(
+                active_stage,
+                "completed",
+                stage_started,
+                pair_count=compare_summary.requested_pairs,
+                completed_pairs=compare_summary.completed_pairs,
+                failed_pairs=compare_summary.failed_pairs,
+                warning_count=len(compare_failures),
+                error_code="compare_failed" if compare_failures else "",
             )
 
             active_stage = "artifact"
             run_manifest.stage(active_stage, "running")
+            stage_started = time.perf_counter()
             self._emit(progress_callback, "artifact", 78, "결과 만드는 중")
+            effective_export_cloud_marks = not fast_first_review
             artifact_package = export_change_artifacts(
                 compare_summary,
                 artifact_dir,
                 dxf_cache_dir=dxf_cache_dir,
                 compare_state_dir=compare_state_dir,
                 cloud_options=CloudMarkOptions(export_mode="selected"),
-                export_cloud_marks=not fast_first_review,
+                export_cloud_marks=effective_export_cloud_marks,
                 # Phase O — Codex review RV-20260507-003 fix:
                 # without this, change_zones.csv / artifact_manifest.json /
                 # cloud_marked DXFs / dashboard JSON are still built with
@@ -466,6 +595,10 @@ class FolderComparePipeline:
                 # surface even after the dialog "saves" min_changes_per_zone>=2.
                 zone_options=zone_options,
             )
+            if compare_failure_path is not None:
+                artifact_package.output_paths["compare_failures_json"] = str(
+                    compare_failure_path
+                )
             region_paths = _export_region_aware_artifacts(
                 compare_summary=compare_summary,
                 artifact_package=artifact_package,
@@ -482,9 +615,45 @@ class FolderComparePipeline:
                 cloud_omitted_zone_count=artifact_package.cloud_omitted_zone_count,
                 region_aware_output_count=len(region_paths),
             )
+            perf_writer.stage_event(
+                active_stage,
+                "completed",
+                stage_started,
+                entity_count=artifact_package.raw_change_count,
+                zone_count=artifact_package.zone_count,
+                cloud_region_count=artifact_package.cloud_region_count,
+            )
+            if (
+                not fast_first_review
+                and self.request.auto_fast_first_review
+                and _should_auto_fast_first_review_for_zone_count(
+                    zone_count=getattr(artifact_package, "zone_count", 0),
+                    threshold=self.request.fast_first_review_zone_threshold,
+                )
+            ):
+                fast_first_review = True
+                auto_fast_first_review_triggered = True
+                auto_fast_first_review_reason = "large_run_zone_count"
+                run_manifest.stage(
+                    "fast_first_review_auto",
+                    "completed",
+                    reason=auto_fast_first_review_reason,
+                    zone_count=int(getattr(artifact_package, "zone_count", 0) or 0),
+                    threshold=max(1, int(self.request.fast_first_review_zone_threshold or 1)),
+                    scope="viewer_only",
+                )
+                perf_writer.append(
+                    stage="fast_first_review_auto",
+                    event="completed",
+                    zone_count=int(getattr(artifact_package, "zone_count", 0) or 0),
+                    threshold=max(1, int(self.request.fast_first_review_zone_threshold or 1)),
+                    reason=auto_fast_first_review_reason,
+                    scope="viewer_only",
+                )
 
             active_stage = "preview"
             run_manifest.stage(active_stage, "running")
+            stage_started = time.perf_counter()
             # Granular emits 88→98 break the previously-silent block where
             # an unbounded background render at the viewer-package step would
             # leave the GUI stuck on "88%" indefinitely (see RV-20260502-001).
@@ -537,6 +706,19 @@ class FolderComparePipeline:
                 fold_repetitive_layers=self.request.fold_repetitive_layers,
             )
             artifact_package.output_paths.update(executive_package.output_paths)
+            perf_writer.stage_event(
+                active_stage,
+                "completed",
+                stage_started,
+                zone_count=artifact_package.zone_count,
+                preview_count=preview_package.preview_count,
+            )
+            run_manifest.stage(
+                active_stage,
+                "completed",
+                preview_count=preview_package.preview_count,
+                review_dashboard_json=executive_package.output_paths.get("review_dashboard_json"),
+            )
             # Heuristic ETA hint — large drawings (>1000 zones) may need
             # 5-15 minutes for tile cache + overlay rendering. Surfacing the
             # zone count here turns the silent 96% wait into a "I know what's
@@ -550,6 +732,8 @@ class FolderComparePipeline:
                     zone_hint = f" ({_zone_count}개 변경구역)"
             except Exception:
                 pass
+            active_stage = "viewer"
+            run_manifest.stage(active_stage, "running")
             self._emit(progress_callback, "viewer", 96, f"뷰어 패키지 만드는 중{zone_hint}")
             # Audit-gates §11.4 — viewer_package now runs in an isolated
             # subprocess so a memory blow-up on a single S20-class drawing
@@ -580,6 +764,32 @@ class FolderComparePipeline:
                 "off" if fast_first_review else self.request.marked_pdf_mode
             )
             effective_build_lod_tiles = not fast_first_review
+            effective_max_viewer_pages = self.request.max_viewer_pages
+            effective_render_timeout_seconds = self.request.render_timeout_seconds
+            effective_max_overlay_records_per_pair: Optional[int] = None
+            if fast_first_review:
+                fast_page_cap = max(
+                    0,
+                    int(self.request.fast_first_review_max_viewer_pages or 0),
+                )
+                effective_max_viewer_pages = min(
+                    max(0, int(self.request.max_viewer_pages or 0)),
+                    fast_page_cap,
+                )
+                fast_timeout_cap = max(
+                    1,
+                    int(self.request.fast_first_review_render_timeout_seconds or 30),
+                )
+                requested_timeout = int(self.request.render_timeout_seconds or 0)
+                effective_render_timeout_seconds = (
+                    min(requested_timeout, fast_timeout_cap)
+                    if requested_timeout > 0
+                    else fast_timeout_cap
+                )
+                effective_max_overlay_records_per_pair = max(
+                    1,
+                    int(self.request.fast_first_review_max_overlay_records_per_pair or 500),
+                )
 
             viewer_options: dict[str, Any] = {
                 "viewer_dir": viewer_dir,
@@ -587,7 +797,7 @@ class FolderComparePipeline:
                 "preview_manifest": preview_package.manifest_path,
                 "viewer_mode": self.request.viewer_mode,
                 "render_policy": effective_viewer_render_policy,
-                "render_timeout_seconds": self.request.render_timeout_seconds,
+                "render_timeout_seconds": effective_render_timeout_seconds,
                 "viewer_engine": self.request.viewer_engine,
                 "viewer_cache_dir": self.request.viewer_cache_dir,
                 "tile_size": self.request.tile_size,
@@ -599,8 +809,11 @@ class FolderComparePipeline:
                 "overview_max_edge": self.request.overview_max_edge,
                 "focus_tile_max_edge": self.request.focus_tile_max_edge,
                 "viewer_perf_log": self.request.viewer_perf_log,
-                "max_viewer_pages": self.request.max_viewer_pages,
+                "max_viewer_pages": effective_max_viewer_pages,
                 "max_zone_tiles": effective_max_zone_tiles,
+                "max_overlay_records_per_pair": effective_max_overlay_records_per_pair,
+                "cad_visual_backend": self.request.cad_visual_backend,
+                "cad_visual_conversion_timeout_seconds": self.request.cad_visual_conversion_timeout_seconds,
                 "dxf_cache_dir": dxf_cache_dir,
                 "preview_dpi": self.request.preview_dpi,
                 "preview_max_edge_px": self.request.preview_max_edge_px,
@@ -639,6 +852,7 @@ class FolderComparePipeline:
             except Exception:
                 subprocess_fault_dir = None
 
+            viewer_stage_started = time.perf_counter()
             viewer_package_dict, viewer_report = _export_viewer_package_isolated_compat(
                 artifact_dir,
                 options=viewer_options,
@@ -815,18 +1029,84 @@ class FolderComparePipeline:
                 output_paths={k: str(v) for k, v in viewer_output_paths.items()},
             )
             artifact_package.output_paths.update(viewer_output_paths)
-            run_manifest.stage(
-                "first_review_ready",
+            perf_writer.stage_event(
+                "viewer",
                 "completed",
-                fast_first_review=fast_first_review,
-                review_dashboard_json=executive_package.output_paths.get("review_dashboard_json"),
-                viewer_manifest_json=viewer_manifest_path_value,
-                viewer_render_policy=effective_viewer_render_policy,
-                max_zone_tiles=effective_max_zone_tiles,
-                build_lod_tiles=effective_build_lod_tiles,
-                cloud_marks_deferred=fast_first_review,
-                marked_pdf_deferred=fast_first_review,
+                viewer_stage_started,
+                pair_count=viewer_package.pair_count,
+                entity_count=viewer_overlay_count,
+                cache_namespace="viewer_package",
+                cache_hit=None,
+                warning_count=len(viewer_package.warnings),
+                render_mode=effective_viewer_render_policy,
+                fidelity="pdf_first" if viewer_package.page_count else "cad_or_lazy",
+                tile_count=viewer_package.tile_count,
+                rendered_pair_count=viewer_package.rendered_pair_count,
+                lazy_pair_count=viewer_package.lazy_pair_count,
             )
+            first_review_ready_at = datetime.now().isoformat()
+            ready_artifacts = {
+                key: value
+                for key, value in {
+                    "review_dashboard_json": executive_package.output_paths.get("review_dashboard_json"),
+                    "viewer_manifest_json": viewer_manifest_path_value,
+                    "viewer_index_html": viewer_package.output_paths.get("viewer_index_html"),
+                    "preview_manifest_json": preview_package.manifest_path,
+                    "review_project_json": str(review_project_path),
+                }.items()
+                if value
+            }
+            marked_pdf_requested = bool(self.request.export_marked_pdf)
+            lod_tiles_requested = (
+                bool(self.request.max_zone_tiles)
+                or self.request.viewer_render_policy == "all"
+                or bool(self.request.prefetch_neighbor_tiles)
+            )
+            deferred_outputs = {
+                "cloud_marks": "completed" if effective_export_cloud_marks else "deferred",
+                "marked_pdf": (
+                    "not_requested"
+                    if not marked_pdf_requested
+                    else "completed"
+                    if effective_export_marked_pdf
+                    else "deferred"
+                ),
+                "lod_tiles": (
+                    "not_requested"
+                    if not lod_tiles_requested
+                    else "completed"
+                    if effective_build_lod_tiles
+                    else "deferred"
+                ),
+                "compare_state_json": "deferred" if fast_first_review else "ready",
+                "export_profile": "pending",
+                "package_success_sentinel": "pending",
+            }
+            if self.request.auto_export_structural_clouds:
+                deferred_outputs["auto_structural_clouds"] = (
+                    "pending" if not fast_first_review else "deferred"
+                )
+            first_review_metadata = {
+                "fast_first_review": fast_first_review,
+                "fast_first_review_auto": auto_fast_first_review_triggered,
+                "fast_first_review_auto_reason": auto_fast_first_review_reason,
+                "review_dashboard_json": executive_package.output_paths.get("review_dashboard_json"),
+                "viewer_manifest_json": viewer_manifest_path_value,
+                "viewer_render_policy": effective_viewer_render_policy,
+                "max_zone_tiles": effective_max_zone_tiles,
+                "max_viewer_pages": effective_max_viewer_pages,
+                "render_timeout_seconds": effective_render_timeout_seconds,
+                "max_overlay_records_per_pair": effective_max_overlay_records_per_pair,
+                "build_lod_tiles": effective_build_lod_tiles,
+                "cloud_marks_deferred": not effective_export_cloud_marks,
+                "marked_pdf_deferred": fast_first_review,
+                "review_ready": True,
+                "package_complete": False,
+                "ready_at": first_review_ready_at,
+                "ready_artifacts": ready_artifacts,
+                "deferred_outputs": deferred_outputs,
+            }
+            run_manifest.stage("first_review_ready", "completed", **first_review_metadata)
             if runtime_sampler is not None and hasattr(
                 runtime_sampler, "mark_first_review_ready"
             ):
@@ -837,6 +1117,47 @@ class FolderComparePipeline:
                         "Runtime sampler first-review marker failed",
                         exc_info=True,
                     )
+            review_ready_result = FolderCompareRunResult(
+                request=self.request,
+                output_dir=str(output_dir),
+                artifact_dir=str(artifact_dir),
+                preview_dir=str(preview_dir),
+                review_project_path=str(review_project_path),
+                review_state_path=str(review_state_path),
+                dxf_cache_dir=str(dxf_cache_dir),
+                compare_state_dir=str(compare_state_dir),
+                descriptors_a=descriptors_a,
+                descriptors_b=descriptors_b,
+                candidates=candidates,
+                compare_summary=compare_summary,
+                artifact_package=artifact_package,
+                preview_package=preview_package,
+                executive_package=executive_package,
+                viewer_package=viewer_package,
+                run_manifest_path=str(run_manifest.path),
+                success_sentinel_path=str(run_manifest.success_path),
+                failed_sentinel_path=str(run_manifest.failed_path),
+                preflight_report_path=str(preflight_path),
+                preflight_result=preflight,
+                started_at=started_at,
+                finished_at=first_review_ready_at,
+                result_state="review_ready",
+                package_complete=False,
+                first_review_ready_at=first_review_ready_at,
+                package_completed_at="",
+                first_review_metadata=dict(first_review_metadata),
+            )
+            self._emit(
+                progress_callback,
+                "first_review_ready",
+                97,
+                "검토 가능 - 최종 패키지 정리 중",
+            )
+            if first_review_ready_callback is not None:
+                try:
+                    first_review_ready_callback(review_ready_result)
+                except Exception:
+                    logger.debug("first_review_ready callback failed", exc_info=True)
             # Audit-gates §10 follow-up — emit sub-progress between 96% and
             # 100% so the GUI progress bar does not appear frozen for 1-12
             # minutes during S20-class viewer build + post-processing. The
@@ -878,6 +1199,9 @@ class FolderComparePipeline:
                     **fast_state_cleanup,
                 )
 
+            active_stage = "export_profile"
+            run_manifest.stage(active_stage, "running")
+            export_profile_started = time.perf_counter()
             _apply_export_profile_outputs(
                 export_profile,
                 output_dir,
@@ -894,6 +1218,29 @@ class FolderComparePipeline:
                 },
                 review_project_path,
             )
+            perf_writer.stage_event(
+                "export_profile",
+                "completed",
+                export_profile_started,
+                export_profile=export_profile,
+                raw_perf_will_be_removed=export_profile == "sharable",
+            )
+            perf_summary = perf_writer.summarize(write=True)
+            raw_perf_removed = False
+            if export_profile == "sharable":
+                raw_perf_removed = remove_raw_perf_events(output_dir)
+            perf_writer_path_for_outputs = (
+                {}
+                if raw_perf_removed or export_profile == "sharable"
+                else {"perf_events_jsonl": str(perf_writer.path)}
+            )
+            run_manifest.stage(
+                active_stage,
+                "completed",
+                export_profile=export_profile,
+                raw_perf_removed=raw_perf_removed,
+                output_path_count=len(artifact_package.output_paths),
+            )
             released_change_records = 0
             if fast_first_review:
                 released_change_records = _release_compare_memory(compare_summary)
@@ -905,6 +1252,7 @@ class FolderComparePipeline:
                     released_change_records=released_change_records,
                 )
             finished_at = datetime.now().isoformat()
+            package_completed_at = finished_at
             run_manifest.complete(
                 counts={
                     "descriptors_a": len(descriptors_a),
@@ -922,8 +1270,11 @@ class FolderComparePipeline:
                     "review_project_json": review_project_path,
                     "preview_manifest_json": preview_package.manifest_path,
                     "preflight_report_json": preflight_path,
+                    "perf_events_summary_json": perf_summary_path,
+                    **perf_writer_path_for_outputs,
                 },
                 warnings=[check.message for check in preflight.warnings],
+                failures=compare_failures,
             )
             _apply_export_profile_outputs(
                 export_profile,
@@ -962,8 +1313,22 @@ class FolderComparePipeline:
                 preflight_result=preflight,
                 started_at=started_at,
                 finished_at=finished_at,
+                result_state="package_complete",
+                package_complete=True,
+                first_review_ready_at=first_review_ready_at,
+                package_completed_at=package_completed_at,
+                first_review_metadata=dict(first_review_metadata),
             )
         except Exception as exc:
+            try:
+                perf_writer.append(
+                    stage=active_stage,
+                    event="failed",
+                    error_code=type(exc).__name__,
+                )
+                perf_writer.summarize(write=True)
+            except Exception:
+                logger.debug("Failed to record perf failure event", exc_info=True)
             run_manifest.fail(active_stage, exc)
             raise
 
@@ -981,6 +1346,129 @@ class FolderComparePipeline:
     def _check_cancelled(is_cancelled: Optional[CancelCallback]) -> None:
         if is_cancelled and is_cancelled():
             raise RuntimeError("사용자가 도면 비교 작업을 취소했습니다.")
+
+def _compare_failure_records(compare_summary: BatchCompareSummary) -> list[dict[str, Any]]:
+    """Return compact per-pair failure diagnostics for run artifacts."""
+
+    records: list[dict[str, Any]] = []
+    for item in getattr(compare_summary, "items", []) or []:
+        if getattr(item, "status", "") != "failed":
+            continue
+        candidate_payload = (
+            item.candidate.to_dict()
+            if getattr(item, "candidate", None) is not None
+            else {}
+        )
+        result = getattr(item, "result", None)
+        metadata = getattr(result, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        warnings = getattr(result, "warnings", None)
+        records.append(
+            {
+                "pair_id": candidate_payload.get("pair_id")
+                or candidate_payload.get("pair_uuid"),
+                "display_label": candidate_payload.get("display_label"),
+                "status": getattr(item, "status", ""),
+                "error": getattr(item, "error", "") or "",
+                "source_a": (candidate_payload.get("source_a") or {}).get("path", ""),
+                "source_b": (candidate_payload.get("source_b") or {}).get("path", ""),
+                "error_code": metadata.get("error_code"),
+                "pipeline_status": metadata.get("pipeline_status"),
+                "message": metadata.get("message"),
+                "canonical_fallback_used": metadata.get("canonical_fallback_used"),
+                "canonical_fallback_reason": metadata.get("canonical_fallback_reason"),
+                "canonical_error_code": metadata.get("canonical_error_code"),
+                "dxf_cache_resolution_notes": metadata.get(
+                    "dxf_cache_resolution_notes",
+                    [],
+                ),
+                "warnings": list(warnings or [])[:20],
+            }
+        )
+    return records
+
+
+def _descriptor_total_bytes(descriptors: Sequence[DrawingFileDescriptor]) -> int:
+    total = 0
+    for descriptor in descriptors:
+        try:
+            total += Path(descriptor.path).stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _should_auto_fast_first_review(
+    *,
+    pair_count: int,
+    source_a_count: int,
+    source_b_count: int,
+    threshold: int,
+) -> bool:
+    """Return True when a run is large enough to prioritize first review."""
+
+    try:
+        safe_threshold = max(1, int(threshold or 1))
+    except (TypeError, ValueError):
+        safe_threshold = 20
+    try:
+        largest_count = max(int(pair_count or 0), int(source_a_count or 0), int(source_b_count or 0))
+    except (TypeError, ValueError):
+        largest_count = 0
+    return largest_count >= safe_threshold
+
+
+def _should_auto_fast_first_review_for_zone_count(
+    *,
+    zone_count: Any,
+    threshold: int,
+) -> bool:
+    try:
+        safe_threshold = max(1, int(threshold or 1))
+        safe_zone_count = int(zone_count or 0)
+    except (TypeError, ValueError):
+        return False
+    return safe_zone_count >= safe_threshold
+
+
+def _descriptor_entity_count(descriptors: Sequence[DrawingFileDescriptor]) -> int:
+    total = 0
+    for descriptor in descriptors:
+        counts = getattr(descriptor, "entity_counts", {}) or {}
+        if not isinstance(counts, Mapping):
+            continue
+        for value in counts.values():
+            try:
+                total += int(value)
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def _write_compare_failures(
+    records: Sequence[Mapping[str, Any]],
+    output_path: Path,
+) -> Optional[Path]:
+    if not records:
+        return None
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generated_at": datetime.now().isoformat(),
+                "failed_pair_count": len(records),
+                "failures": list(records),
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    return output_path
+
 
 def _release_compare_memory(compare_summary: BatchCompareSummary) -> int:
     """Drop retained raw change objects after artifacts have been written."""
@@ -1110,6 +1598,145 @@ def _auto_region_compare_requested() -> bool:
     }
 
 
+def _resolve_region_local_default_enablement(
+    detection_results: Sequence[Any],
+    match_summaries: Sequence[Any],
+) -> dict[str, Any]:
+    """Return the guarded R10 default-enable decision.
+
+    R10 must not silently turn region-local primary compare on until a real
+    pilot summary has passed. Operators can roll back by setting
+    ``DRAWING_COMPARE_REGION_LOCAL_DEFAULT=off``; explicit opt-in via
+    ``DRAWING_COMPARE_AUTO_REGION_COMPARE=1`` remains unchanged.
+    """
+
+    raw_mode = os.getenv(REGION_LOCAL_DEFAULT_ENV, "pilot_passed").strip().lower()
+    if raw_mode in {"0", "false", "no"}:
+        raw_mode = "off"
+    if raw_mode not in REGION_LOCAL_DEFAULT_MODES:
+        return {
+            "mode": raw_mode,
+            "status": "disabled",
+            "automatic_localized_compare_requested": False,
+            "gate_reasons": [
+                f"invalid {REGION_LOCAL_DEFAULT_ENV} value; use off or pilot_passed"
+            ],
+        }
+    if raw_mode == "off":
+        return {
+            "mode": raw_mode,
+            "status": "disabled",
+            "automatic_localized_compare_requested": False,
+            "gate_reasons": ["region-local default enablement disabled by feature flag"],
+        }
+
+    pilot_path_raw = os.getenv(REGION_PILOT_SUMMARY_ENV, "").strip()
+    if not pilot_path_raw:
+        return {
+            "mode": raw_mode,
+            "status": "waiting_for_pilot_summary",
+            "automatic_localized_compare_requested": False,
+            "gate_reasons": [f"{REGION_PILOT_SUMMARY_ENV} is not configured"],
+        }
+    pilot_path = Path(pilot_path_raw)
+    pilot_status, pilot_reasons = _pilot_summary_acceptance_status(pilot_path)
+    if pilot_status != "passed":
+        return {
+            "mode": raw_mode,
+            "status": "pilot_not_passed",
+            "pilot_summary_json": str(pilot_path),
+            "automatic_localized_compare_requested": False,
+            "gate_reasons": pilot_reasons,
+        }
+
+    high_confidence, gate_reasons = _high_confidence_region_local_default_gate(
+        detection_results,
+        match_summaries,
+    )
+    return {
+        "mode": raw_mode,
+        "status": "enabled" if high_confidence else "review_required",
+        "pilot_summary_json": str(pilot_path),
+        "automatic_localized_compare_requested": high_confidence,
+        "gate_reasons": gate_reasons,
+    }
+
+
+def _pilot_summary_acceptance_status(path: Path) -> tuple[str, list[str]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "missing", [f"pilot summary not found: {path}"]
+    except Exception as exc:  # noqa: BLE001
+        return "invalid", [f"pilot summary cannot be read: {exc}"]
+    if not isinstance(payload, Mapping):
+        return "invalid", ["pilot summary must be a JSON object"]
+    if str(payload.get("mode") or "") != "multi_detail_region_compare_pilot":
+        return "invalid", ["pilot summary mode is not multi_detail_region_compare_pilot"]
+    try:
+        case_count = int(payload.get("case_count") or 0)
+    except (TypeError, ValueError):
+        case_count = 0
+    if case_count <= 0:
+        return "invalid", ["pilot summary has no pilot cases"]
+    if str(payload.get("overall_status") or "") != "passed":
+        return "failed", ["pilot summary overall_status is not passed"]
+    acceptance = payload.get("acceptance")
+    if not isinstance(acceptance, Mapping):
+        return "invalid", ["pilot summary acceptance block is missing"]
+    missing = sorted(REQUIRED_REGION_PILOT_ACCEPTANCE_KEYS - set(acceptance.keys()))
+    if missing:
+        return "failed", [f"pilot acceptance missing: {', '.join(missing)}"]
+    failed = [
+        str(name)
+        for name, item in acceptance.items()
+        if not isinstance(item, Mapping) or str(item.get("status") or "") != "passed"
+    ]
+    if failed:
+        return "failed", [f"pilot acceptance not passed: {', '.join(failed)}"]
+    return "passed", []
+
+
+def _high_confidence_region_local_default_gate(
+    detection_results: Sequence[Any],
+    match_summaries: Sequence[Any],
+) -> tuple[bool, list[str]]:
+    gate_reasons: list[str] = []
+    if not detection_results or not match_summaries:
+        return False, ["region artifacts are missing"]
+
+    region_counts: list[int] = []
+    whole_modelspace_count = 0
+    for result in detection_results:
+        regions = list(getattr(result, "regions", []) or [])
+        non_whole = [
+            region
+            for region in regions
+            if str(getattr(region, "detection_method", "")) != "whole_modelspace"
+        ]
+        region_counts.append(len(non_whole))
+        whole_modelspace_count += len(regions) - len(non_whole)
+    if not region_counts or any(count < 2 for count in region_counts):
+        gate_reasons.append("single-detail or incomplete multi-detail detection; kept global compare")
+    if whole_modelspace_count:
+        gate_reasons.append("whole-modelspace fallback requires manual review")
+
+    approved_count = 0
+    review_required_count = 0
+    unmatched_count = 0
+    for summary in match_summaries:
+        approved_count += int(getattr(summary, "auto_matched_count", 0) or 0)
+        approved_count += int(getattr(summary, "manual_matched_count", 0) or 0)
+        review_required_count += int(getattr(summary, "review_required_count", 0) or 0)
+        unmatched_count += int(getattr(summary, "unmatched_before_count", 0) or 0)
+        unmatched_count += int(getattr(summary, "unmatched_after_count", 0) or 0)
+    if not approved_count:
+        gate_reasons.append("no approved region matches")
+    if review_required_count or unmatched_count:
+        gate_reasons.append("ambiguous or unmatched regions require manual review")
+    return not gate_reasons, gate_reasons
+
+
 def _explicit_file_pair_candidates(
     source_a: Union[str, Path],
     source_b: Union[str, Path],
@@ -1182,6 +1809,7 @@ def _export_region_aware_artifacts(
             match_sheet_regions,
             write_region_match_summary,
         )
+        from .region_match_overrides import load_region_match_overrides
         from .localized_compare import (
             LocalizedCompareSummary,
             localize_change_zones,
@@ -1191,6 +1819,11 @@ def _export_region_aware_artifacts(
             write_localized_compare_summary,
             compare_localized_region_entities,
         )
+        from .region_compare_pipeline import (
+            build_region_local_primary_change_zones,
+            write_region_local_primary_change_zones,
+        )
+        from .region_viewer_package import export_region_viewer_package
         from .dxf_entity_extractor import DxfEntityExtractor
         from .pair_identity import candidate_pair_uuid
         from .sheet_region_detector import (
@@ -1229,10 +1862,25 @@ def _export_region_aware_artifacts(
                 dxf_cache_dir=dxf_cache_dir,
             )
             detection_results.extend([before_result, after_result])
+            region_overrides_path = artifact_dir.parent / "manual_region_matches.json"
+            region_overrides = tuple()
+            if region_overrides_path.exists():
+                try:
+                    region_overrides = load_region_match_overrides(
+                        region_overrides_path,
+                        pair_id=pair_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to load manual region overrides from %s: %s",
+                        region_overrides_path,
+                        exc,
+                    )
             match_summary = match_sheet_regions(
                 before_result.regions,
                 after_result.regions,
                 pair_id=pair_id,
+                overrides=region_overrides,
             )
             match_summaries.append(match_summary)
             localized_summary = localize_change_zones(
@@ -1274,25 +1922,65 @@ def _export_region_aware_artifacts(
             if any(summary.gate_status != "passed" for summary in localized_summaries)
             else "passed"
         )
-        auto_region_requested = _auto_region_compare_requested()
+        explicit_auto_region_requested = _auto_region_compare_requested()
+        default_enablement = _resolve_region_local_default_enablement(
+            detection_results,
+            match_summaries,
+        )
+        auto_region_requested = explicit_auto_region_requested or bool(
+            default_enablement.get("automatic_localized_compare_requested")
+        )
+        auto_region_request_source = (
+            "explicit_feature_flag"
+            if explicit_auto_region_requested
+            else "default_pilot_passed"
+            if auto_region_requested
+            else "not_requested"
+        )
         auto_region_payload: dict[str, Any] = {
             "automatic_localized_compare_requested": auto_region_requested,
             "automatic_localized_compare_enabled": False,
+            "automatic_localized_compare_request_source": auto_region_request_source,
+            "default_enablement": default_enablement,
             "status": "not_requested",
             "gate_reasons": [],
         }
+        primary_region_payload: dict[str, Any] = {
+            "primary_enabled": False,
+            "status": "not_requested",
+            "zone_count": 0,
+            "gate_reasons": [],
+        }
         if auto_region_requested:
-            auto_region_payload = _build_auto_region_compare_payload(
+            region_compare_contexts = _attach_region_compare_sources(
                 pair_contexts,
-                extractor=DxfEntityExtractor(),
+                dxf_cache_dir,
+            )
+            dxf_extractor = DxfEntityExtractor()
+            auto_region_payload = _build_auto_region_compare_payload(
+                region_compare_contexts,
+                extractor=dxf_extractor,
                 compare_localized_region_entities=compare_localized_region_entities,
                 serialize_localized_region_result=serialize_localized_region_result,
             )
+            auto_region_payload["automatic_localized_compare_request_source"] = (
+                auto_region_request_source
+            )
+            auto_region_payload["default_enablement"] = default_enablement
             auto_region_path = write_localized_region_compare_results(
                 auto_region_payload,
                 artifact_dir / "localized_region_compare_results.json",
             )
             paths["localized_region_compare_results_json"] = str(auto_region_path)
+            primary_region_payload = build_region_local_primary_change_zones(
+                region_compare_contexts,
+                extractor=dxf_extractor,
+            )
+            primary_region_path = write_region_local_primary_change_zones(
+                primary_region_payload,
+                artifact_dir / "localized_change_zones_v2.json",
+            )
+            paths["localized_change_zones_v2_json"] = str(primary_region_path)
         _write_json_atomic(
             status_path,
             {
@@ -1303,8 +1991,30 @@ def _export_region_aware_artifacts(
                 "automatic_localized_compare_enabled": bool(
                     auto_region_payload.get("automatic_localized_compare_enabled")
                 ),
+                "automatic_localized_compare_request_source": str(
+                    auto_region_payload.get("automatic_localized_compare_request_source")
+                    or "not_requested"
+                ),
                 "automatic_localized_compare_status": str(
                     auto_region_payload.get("status") or "not_requested"
+                ),
+                "region_default_enablement_status": str(
+                    default_enablement.get("status") or "unknown"
+                ),
+                "region_default_enablement_gate_reasons": list(
+                    default_enablement.get("gate_reasons") or []
+                ),
+                "region_default_enablement_pilot_summary_json": str(
+                    default_enablement.get("pilot_summary_json") or ""
+                ),
+                "region_local_primary_enabled": bool(
+                    primary_region_payload.get("primary_enabled")
+                ),
+                "region_local_primary_status": str(
+                    primary_region_payload.get("status") or "not_requested"
+                ),
+                "region_local_primary_zone_count": int(
+                    primary_region_payload.get("zone_count") or 0
                 ),
                 "pair_count": len(match_summaries),
                 "region_detection_source_count": len(detection_results),
@@ -1366,6 +2076,9 @@ def _export_region_aware_artifacts(
                 "multi_frame_validation_json": str(validation_path),
             }
         )
+        if auto_region_requested and (artifact_dir / "localized_change_zones_v2.json").exists():
+            region_viewer_path = export_region_viewer_package(artifact_dir)
+            paths["region_viewer_manifest_json"] = str(region_viewer_path)
         _merge_artifact_manifest_paths(
             artifact_package.output_paths.get("artifact_manifest_json"),
             paths,
@@ -1407,8 +2120,10 @@ def _build_auto_region_compare_payload(
 
     for context in pair_contexts:
         pair_id = str(context.get("pair_id") or "")
-        source_a = Path(context.get("source_a") or "")
-        source_b = Path(context.get("source_b") or "")
+        original_source_a = Path(context.get("source_a") or "")
+        original_source_b = Path(context.get("source_b") or "")
+        source_a = Path(context.get("region_compare_source_a") or original_source_a)
+        source_b = Path(context.get("region_compare_source_b") or original_source_b)
         match_summary = context.get("match_summary")
         localized_summary = context.get("localized_summary")
         before_result = context.get("before_result")
@@ -1418,7 +2133,13 @@ def _build_auto_region_compare_payload(
 
         if source_a.suffix.lower() != ".dxf" or source_b.suffix.lower() != ".dxf":
             unsupported_pair_count += 1
-            pair_reasons.append("automatic region-local compare currently supports direct DXF pairs only")
+            pair_reasons.append(
+                "automatic region-local compare requires resolved DXF sources "
+                f"(before={original_source_a.suffix.lower() or '<none>'}:"
+                f"{context.get('region_compare_source_a_reason') or 'unresolved'}, "
+                f"after={original_source_b.suffix.lower() or '<none>'}:"
+                f"{context.get('region_compare_source_b_reason') or 'unresolved'})"
+            )
         if getattr(match_summary, "review_required_count", 0):
             pair_reasons.append("one or more region matches require manual review")
         if getattr(match_summary, "unmatched_before_count", 0) or getattr(match_summary, "unmatched_after_count", 0):
@@ -1432,7 +2153,13 @@ def _build_auto_region_compare_payload(
                 {
                     "pair_id": pair_id,
                     "status": "skipped",
+                    "source_a": str(original_source_a),
+                    "source_b": str(original_source_b),
+                    "region_compare_source_a": str(source_a),
+                    "region_compare_source_b": str(source_b),
                     "gate_reasons": pair_reasons,
+                    "region_result_count": 0,
+                    "total_changes": 0,
                     "region_results": [],
                 }
             )
@@ -1457,14 +2184,20 @@ def _build_auto_region_compare_payload(
                 {
                     "pair_id": pair_id,
                     "status": "skipped",
+                    "source_a": str(original_source_a),
+                    "source_b": str(original_source_b),
+                    "region_compare_source_a": str(source_a),
+                    "region_compare_source_b": str(source_b),
                     "gate_reasons": [reason],
+                    "region_result_count": 0,
+                    "total_changes": 0,
                     "region_results": [],
                 }
             )
             continue
 
         for match in getattr(match_summary, "matches", ()) or ():
-            if getattr(match, "status", "") != "auto_matched":
+            if getattr(match, "status", "") not in {"auto_matched", "manual_matched"}:
                 continue
             before_region = before_regions.get(getattr(match, "before_region_id", ""))
             after_region = after_regions.get(getattr(match, "after_region_id", ""))
@@ -1490,13 +2223,17 @@ def _build_auto_region_compare_payload(
         pair_status = "passed" if pair_results else "skipped"
         if not pair_results:
             skipped_pair_count += 1
-            reason = "no auto-matched regions were eligible for localized compare"
+            reason = "no approved region matches were eligible for localized compare"
             gate_reasons.append(f"{pair_id}: {reason}")
             pair_reasons.append(reason)
         pairs.append(
             {
                 "pair_id": pair_id,
                 "status": pair_status,
+                "source_a": str(original_source_a),
+                "source_b": str(original_source_b),
+                "region_compare_source_a": str(source_a),
+                "region_compare_source_b": str(source_b),
                 "gate_reasons": pair_reasons,
                 "region_result_count": len(pair_results),
                 "total_changes": sum(int(item.get("total_changes") or 0) for item in pair_results),
@@ -1518,6 +2255,56 @@ def _build_auto_region_compare_payload(
         "total_changes": total_changes,
         "pairs": pairs,
     }
+
+
+def _attach_region_compare_sources(
+    pair_contexts: Sequence[Mapping[str, Any]],
+    dxf_cache_dir: Path,
+) -> list[dict[str, Any]]:
+    """Resolve DWG inputs to cached DXFs only after region-local compare is gated on."""
+
+    resolved_contexts: list[dict[str, Any]] = []
+    for context in pair_contexts:
+        source_a = Path(context.get("source_a") or "")
+        source_b = Path(context.get("source_b") or "")
+        region_compare_source_a, region_compare_source_a_reason = _resolve_region_compare_source(
+            source_a,
+            dxf_cache_dir,
+        )
+        region_compare_source_b, region_compare_source_b_reason = _resolve_region_compare_source(
+            source_b,
+            dxf_cache_dir,
+        )
+        enriched = dict(context)
+        enriched.update(
+            {
+                "region_compare_source_a": region_compare_source_a,
+                "region_compare_source_b": region_compare_source_b,
+                "region_compare_source_a_reason": region_compare_source_a_reason,
+                "region_compare_source_b_reason": region_compare_source_b_reason,
+            }
+        )
+        resolved_contexts.append(enriched)
+    return resolved_contexts
+
+
+def _resolve_region_compare_source(source: Path, dxf_cache_dir: Path) -> tuple[Path, str]:
+    """Return a DXF source path suitable for region-local entity extraction."""
+
+    source = Path(source)
+    suffix = source.suffix.lower()
+    if suffix == ".dxf":
+        return source, "direct_dxf"
+    if suffix != ".dwg":
+        return source, "unsupported_source_format"
+    try:
+        from .dwg_differ import DwgDiffer
+
+        resolved = DwgDiffer(dxf_cache_dir=dxf_cache_dir)._ensure_dxf(source)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to resolve DWG cached DXF for region compare %s: %s", source, exc)
+        return source, f"dwg_to_dxf_failed:{exc.__class__.__name__}"
+    return Path(resolved), "cached_dxf"
 
 
 def _build_multi_frame_validation_payload(

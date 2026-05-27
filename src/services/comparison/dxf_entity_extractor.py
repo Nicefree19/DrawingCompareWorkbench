@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .dxf_read import read_dxf_document
 from .entity_normalizers import NormalizerFactory
 
 logger = logging.getLogger(__name__)
@@ -859,7 +860,7 @@ class DxfEntityExtractor:
         Returns:
             엔티티 타입별 정규화된 엔티티 목록
         """
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = read_dxf_document(dxf_path, ezdxf_module=ezdxf)
         return self.extract(doc)
 
     def get_layers(self, doc: "Drawing") -> List[str]:

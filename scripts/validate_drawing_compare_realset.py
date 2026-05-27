@@ -60,6 +60,10 @@ from src.services.comparison.export_profiles import (
     redact_payload_paths,
 )
 from src.services.comparison.preflight import run_preflight
+from src.services.comparison.perf_events import (
+    PERF_EVENTS_SUMMARY_FILENAME,
+    summarize_perf_events,
+)
 from src.services.comparison.review_project import (
     export_preview_artifacts,
     save_review_state,
@@ -127,9 +131,36 @@ COMPARE_CSV_COLUMNS = [
 ]
 
 QUALITY_SCHEMA_VERSION = 1
+P5_G3_REALSET_GATE_SCHEMA_VERSION = 1
+TILE_CACHE_MB_ENV_VAR = "DRAWING_COMPARE_TILE_CACHE_MB"
 DEFAULT_MIN_AUTO_PRECISION = 0.99
 DEFAULT_MIN_RECALL = 0.95
 DEFAULT_MAX_MATCH_TIME_REGRESSION = 0.30
+
+
+def _p5_g6_tile_cache_mb_value(args: argparse.Namespace) -> float | None:
+    raw = getattr(args, "p5_g6_tile_cache_mb", None)
+    if raw is None or raw == "":
+        return None
+    return float(raw)
+
+
+def _format_float_arg(value: float | int) -> str:
+    number = float(value)
+    return str(int(number)) if number.is_integer() else str(number)
+
+
+def _apply_p5_g6_tile_cache_env(args: argparse.Namespace) -> None:
+    value = _p5_g6_tile_cache_mb_value(args)
+    if value is not None:
+        os.environ[TILE_CACHE_MB_ENV_VAR] = _format_float_arg(value)
+
+
+def _p5_g3_realset_gate_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "p5_g3_realset_gate", False)
+        or getattr(args, "p5_g3_require_tile_eviction", False)
+    )
 
 REVIEW_QUEUE_CSV_COLUMNS = [
     "status",
@@ -169,11 +200,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--measure-runtime-budget",
         action="store_true",
+        default=True,
         help=(
             "Activate RuntimeBudgetSampler to record peak working-set memory, "
             "first-review-ready timing, and tempdir spool size. Required when "
-            "the audit script is run with --require-runtime-budget."
+            "the audit script is run with --require-runtime-budget. Enabled by default."
         ),
+    )
+    parser.add_argument(
+        "--no-runtime-budget",
+        action="store_false",
+        dest="measure_runtime_budget",
+        help="Disable RuntimeBudgetSampler for local experiments only.",
     )
     parser.add_argument("--ground-truth", type=Path, help="CSV: a_path,b_path,expected_status")
     parser.add_argument(
@@ -337,6 +375,54 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Maximum selected/top zones to render per pair when --render-selected-zone-evidence is enabled",
     )
     parser.add_argument(
+        "--p5-g3-realset-gate",
+        action="store_true",
+        help=(
+            "Require production realset performance evidence: runtime budget, "
+            "viewer perf, selected-zone, nonblank image, and tile-manifest payload checks"
+        ),
+    )
+    parser.add_argument("--p5-g3-min-completed-pairs", type=int, default=1)
+    parser.add_argument("--p5-g3-min-selected-zone-renders", type=int, default=1)
+    parser.add_argument("--p5-g3-min-viewer-perf-events", type=int, default=1)
+    parser.add_argument("--p5-g3-min-nonblank-images", type=int, default=1)
+    parser.add_argument("--p5-g3-max-tile-orphan-bytes", type=int, default=0)
+    parser.add_argument(
+        "--p5-g3-require-tile-eviction",
+        "--p5-g6-require-tile-eviction",
+        dest="p5_g3_require_tile_eviction",
+        action="store_true",
+        help=(
+            "Require observed tile-cache eviction evidence inside the P5-G3 "
+            "realset gate. Use only for controlled low-byte-cap production "
+            "or release-candidate probes."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g3-min-tile-evicted-pairs",
+        "--p5-g6-min-tile-evicted-pairs",
+        dest="p5_g3_min_tile_evicted_pairs",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--p5-g3-min-tile-evicted-bytes",
+        "--p5-g6-min-tile-evicted-bytes",
+        dest="p5_g3_min_tile_evicted_bytes",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--p5-g6-tile-cache-mb",
+        type=float,
+        default=None,
+        help=(
+            "Set DRAWING_COMPARE_TILE_CACHE_MB for this validation run so a "
+            "controlled P5-G6 tile-eviction probe is command-reproducible."
+        ),
+    )
+    parser.add_argument("--p5-g3-min-realset-datasets", type=int, default=1)
+    parser.add_argument(
         "--viewer-render-timeout-seconds",
         type=int,
         default=0,
@@ -387,11 +473,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=DEFAULT_MAX_MATCH_TIME_REGRESSION,
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.p5_g6_tile_cache_mb is not None and args.p5_g6_tile_cache_mb <= 0:
+        parser.error("--p5-g6-tile-cache-mb must be greater than 0")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    _apply_p5_g6_tile_cache_env(args)
     try:
         if getattr(args, "preflight_only", False):
             payload = run_preflight_only(args)
@@ -563,6 +653,7 @@ def run_simple_folder_compare(args: argparse.Namespace) -> dict[str, Any]:
             "layer_pattern_summary_csv": result.executive_package.output_paths.get("layer_pattern_summary_csv"),
             "viewer_manifest_json": result.viewer_package.output_paths.get("viewer_manifest_json"),
             "viewer_index_html": result.viewer_package.output_paths.get("viewer_index_html"),
+            "perf_events_summary_json": str(Path(result.output_dir) / PERF_EVENTS_SUMMARY_FILENAME),
         },
         "matching": {
             "confirmed_pairs": result.confirmed_pairs,
@@ -575,6 +666,7 @@ def run_simple_folder_compare(args: argparse.Namespace) -> dict[str, Any]:
         "preview_artifacts": result.preview_package.to_dict(),
         "executive_review": result.executive_package.to_dict(),
         "viewer_package": result.viewer_package.to_dict(),
+        "perf_events_summary": summarize_perf_events(Path(result.output_dir)),
         "preflight_result": result.preflight_result.to_dict(),
         "ai_policy": ai_policy,
         "run_manifest": result.run_manifest_path,
@@ -592,13 +684,14 @@ def run_simple_folder_compare(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_validation(args: argparse.Namespace) -> dict[str, Any]:
+    _apply_p5_g6_tile_cache_env(args)
     out_dir = args.out.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tracemalloc.start()
     total_started = time.perf_counter()
     runtime_sampler: RuntimeBudgetSampler | None = None
-    if bool(getattr(args, "measure_runtime_budget", False)):
+    if bool(getattr(args, "measure_runtime_budget", True)):
         spool_dirs: list[Path] = []
         for candidate in (out_dir, getattr(args, "dxf_cache_dir", None)):
             if candidate is None:
@@ -924,6 +1017,7 @@ def run_validation(args: argparse.Namespace) -> dict[str, Any]:
         "manual_matches_template_csv": out_dir / "manual_matches_template.csv",
         "ground_truth_template_csv": out_dir / "ground_truth_template.csv",
         "preflight_report_json": preflight_path,
+        "perf_events_summary_json": out_dir / PERF_EVENTS_SUMMARY_FILENAME,
         "run_manifest_json": run_manifest.path,
         "success_sentinel_json": run_manifest.success_path,
         "failed_sentinel_json": run_manifest.failed_path,
@@ -1374,6 +1468,67 @@ def _manifest_child_args(
                 getattr(parent, "selected_zone_evidence_per_pair", 1),
             )
         ),
+        p5_g3_realset_gate=bool(
+            dataset.get("p5_g3_realset_gate", getattr(parent, "p5_g3_realset_gate", False))
+        ),
+        p5_g3_min_completed_pairs=int(
+            dataset.get(
+                "p5_g3_min_completed_pairs",
+                getattr(parent, "p5_g3_min_completed_pairs", 1),
+            )
+        ),
+        p5_g3_min_selected_zone_renders=int(
+            dataset.get(
+                "p5_g3_min_selected_zone_renders",
+                getattr(parent, "p5_g3_min_selected_zone_renders", 1),
+            )
+        ),
+        p5_g3_min_viewer_perf_events=int(
+            dataset.get(
+                "p5_g3_min_viewer_perf_events",
+                getattr(parent, "p5_g3_min_viewer_perf_events", 1),
+            )
+        ),
+        p5_g3_min_nonblank_images=int(
+            dataset.get(
+                "p5_g3_min_nonblank_images",
+                getattr(parent, "p5_g3_min_nonblank_images", 1),
+            )
+        ),
+        p5_g3_max_tile_orphan_bytes=int(
+            dataset.get(
+                "p5_g3_max_tile_orphan_bytes",
+                getattr(parent, "p5_g3_max_tile_orphan_bytes", 0),
+            )
+        ),
+        p5_g3_require_tile_eviction=bool(
+            dataset.get(
+                "p5_g3_require_tile_eviction",
+                getattr(parent, "p5_g3_require_tile_eviction", False),
+            )
+        ),
+        p5_g3_min_tile_evicted_pairs=int(
+            dataset.get(
+                "p5_g3_min_tile_evicted_pairs",
+                getattr(parent, "p5_g3_min_tile_evicted_pairs", 1),
+            )
+        ),
+        p5_g3_min_tile_evicted_bytes=int(
+            dataset.get(
+                "p5_g3_min_tile_evicted_bytes",
+                getattr(parent, "p5_g3_min_tile_evicted_bytes", 1),
+            )
+        ),
+        p5_g6_tile_cache_mb=dataset.get(
+            "p5_g6_tile_cache_mb",
+            getattr(parent, "p5_g6_tile_cache_mb", None),
+        ),
+        p5_g3_min_realset_datasets=int(
+            dataset.get(
+                "p5_g3_min_realset_datasets",
+                getattr(parent, "p5_g3_min_realset_datasets", 1),
+            )
+        ),
         max_viewer_pages=int(dataset.get("max_viewer_pages", getattr(parent, "max_viewer_pages", 30))),
         max_zone_tiles=int(dataset.get("max_zone_tiles", getattr(parent, "max_zone_tiles", 300))),
         export_marked_pdf=bool(
@@ -1443,7 +1598,18 @@ def _aggregate_quality_gate(
             issue = dict(issue)
             issue["dataset_id"] = payload["baseline_record"]["dataset_id"]
             issues.append(issue)
-    requested = bool(getattr(args, "quality_gate", False))
+    if _p5_g3_realset_gate_requested(args):
+        min_datasets = max(1, _p5_g3_int(getattr(args, "p5_g3_min_realset_datasets", 1)))
+        if len(dataset_payloads) < min_datasets:
+            issues.append(
+                _gate_issue(
+                    "p5_g3_realset_dataset_count",
+                    len(dataset_payloads),
+                    min_datasets,
+                    "P5-G3 realset gate requires more validation datasets",
+                )
+            )
+    requested = bool(getattr(args, "quality_gate", False) or _p5_g3_realset_gate_requested(args))
     status = "not_requested"
     if requested:
         status = "failed" if issues else "passed"
@@ -1973,6 +2139,9 @@ def _render_selected_zone_evidence(
                         cache_hit=bool(result.cache_hit),
                         render_lifecycle=result.render_lifecycle,
                         visual_fidelity=result.visual_fidelity,
+                        renderer_backend=result.renderer_backend,
+                        reason_code=result.reason_code,
+                        source_format=_source_format_for_render(job.source_before, job.source_after),
                         evidence_source="validation_runner",
                         probe_phase=phase,
                     )
@@ -1986,6 +2155,9 @@ def _render_selected_zone_evidence(
                             "cache_hit": bool(result.cache_hit),
                             "render_lifecycle": result.render_lifecycle,
                             "visual_fidelity": result.visual_fidelity,
+                            "renderer_backend": result.renderer_backend,
+                            "reason_code": result.reason_code,
+                            "source_format": _source_format_for_render(job.source_before, job.source_after),
                         }
                     )
                 evidence["render_count"] += 1
@@ -2023,6 +2195,21 @@ def _render_selected_zone_evidence(
 
     _write_json(output_path, evidence)
     return evidence
+
+
+def _source_format_for_render(before: Path, after: Path) -> str:
+    suffixes = {
+        str(path.suffix or "").lower().lstrip(".")
+        for path in (Path(before), Path(after))
+        if str(path)
+    }
+    if not suffixes:
+        return "unknown"
+    if suffixes == {"pdf"}:
+        return "pdf"
+    if suffixes.issubset({"dwg", "dxf"}):
+        return "cad"
+    return "+".join(sorted(suffixes))
 
 
 def _selected_overlays_for_evidence(overlays: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2089,6 +2276,411 @@ def _viewer_perf_summary_for_summary(
         candidate = output_dir / "viewer"
         viewer_root = candidate if candidate.exists() else None
     return summarize_viewer_perf(viewer_root)
+
+
+def _p5_g3_realset_gate_payload(
+    payload: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    requested = _p5_g3_realset_gate_requested(args)
+    if not requested:
+        return {
+            "schema_version": P5_G3_REALSET_GATE_SCHEMA_VERSION,
+            "requested": False,
+            "status": "not_requested",
+            "passed": False,
+            "failures": [],
+            "evidence": {},
+        }
+    evidence = {
+        "comparison": _p5_g3_comparison_evidence(payload, args),
+        "runtime_budget": _p5_g3_runtime_budget_evidence(payload),
+        "viewer_perf_summary": _p5_g3_viewer_perf_evidence(payload, args),
+        "selected_zone_evidence": _p5_g3_selected_zone_evidence(payload, args),
+        "nonblank": _p5_g3_nonblank_evidence(Path(str(payload.get("output_dir") or ".")), args),
+        "tile_manifest": _p5_g3_tile_manifest_evidence(payload, args),
+    }
+    failures: list[str] = []
+    for domain, item in evidence.items():
+        if not isinstance(item, dict):
+            failures.append(f"{domain}: evidence missing")
+            continue
+        failures.extend(f"{domain}: {failure}" for failure in item.get("failures", []))
+    status = "not_requested"
+    if requested:
+        status = "failed" if failures else "passed"
+    return {
+        "schema_version": P5_G3_REALSET_GATE_SCHEMA_VERSION,
+        "requested": requested,
+        "status": status,
+        "passed": requested and not failures,
+        "failures": failures,
+        "evidence": evidence,
+    }
+
+
+def _p5_g3_comparison_evidence(payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    completed = _p5_g3_int((payload.get("comparison") or {}).get("completed_pairs"))
+    minimum = max(1, _p5_g3_int(getattr(args, "p5_g3_min_completed_pairs", 1)))
+    failures = [] if completed >= minimum else [f"completed_pairs={completed} < {minimum}"]
+    return {
+        "completed_pairs": completed,
+        "min_completed_pairs": minimum,
+        "failures": failures,
+    }
+
+
+def _p5_g3_runtime_budget_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    budget = payload.get("runtime_budget")
+    failures: list[str] = []
+    if not isinstance(budget, dict):
+        return {"present": False, "failures": ["runtime_budget block missing"]}
+    sampler_active = bool(budget.get("sampler_active"))
+    sample_count = _p5_g3_int(budget.get("sample_count"))
+    if not sampler_active:
+        failures.append("sampler_active=false")
+    if sample_count <= 0:
+        failures.append(f"sample_count={sample_count} <= 0")
+    return {
+        "present": True,
+        "sampler_active": sampler_active,
+        "sample_count": sample_count,
+        "peak_rss_mb": _p5_g3_float(budget.get("peak_rss_mb")),
+        "peak_working_set_mb": _p5_g3_float(budget.get("peak_working_set_mb")),
+        "peak_disk_spool_mb": _p5_g3_float(budget.get("peak_disk_spool_mb")),
+        "first_review_ready_s": _p5_g3_float(budget.get("first_review_ready_s")),
+        "failures": failures,
+    }
+
+
+def _p5_g3_viewer_perf_evidence(payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    perf = payload.get("viewer_perf_summary")
+    failures: list[str] = []
+    if not isinstance(perf, dict):
+        return {"present": False, "failures": ["viewer_perf_summary missing"]}
+    event_count = _p5_g3_int(perf.get("event_count"))
+    minimum = max(0, _p5_g3_int(getattr(args, "p5_g3_min_viewer_perf_events", 1)))
+    if event_count < minimum:
+        failures.append(f"event_count={event_count} < {minimum}")
+    return {
+        "present": True,
+        "status": str(perf.get("status") or ""),
+        "event_count": event_count,
+        "min_event_count": minimum,
+        "zone_crop_count": _p5_g3_int(perf.get("zone_crop_count")),
+        "tile_cache_event_count": _p5_g3_int(perf.get("tile_cache_event_count")),
+        "tile_cache_retained_estimated_bytes": _p5_g3_int(
+            perf.get("tile_cache_retained_estimated_bytes")
+        ),
+        "tile_cache_byte_limit": _p5_g3_int(perf.get("tile_cache_byte_limit")),
+        "tile_cache_evicted_pair_count": _p5_g3_int(perf.get("tile_cache_evicted_pair_count")),
+        "tile_cache_evicted_estimated_bytes": _p5_g3_int(
+            perf.get("tile_cache_evicted_estimated_bytes")
+        ),
+        "tile_cache_eviction_reason_counts": perf.get("tile_cache_eviction_reason_counts") or {},
+        "failures": failures,
+    }
+
+
+def _p5_g3_selected_zone_evidence(payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    selected = payload.get("selected_zone_evidence")
+    failures: list[str] = []
+    if not isinstance(selected, dict):
+        return {"present": False, "failures": ["selected_zone_evidence missing"]}
+    status = str(selected.get("status") or "")
+    render_count = _p5_g3_int(selected.get("render_count"))
+    if render_count <= 0:
+        render_count = len(selected.get("renders") or []) if isinstance(selected.get("renders"), list) else 0
+    minimum = max(1, _p5_g3_int(getattr(args, "p5_g3_min_selected_zone_renders", 1)))
+    failure_count = _p5_g3_int(selected.get("failure_count"))
+    if status != "passed":
+        failures.append(f"status={status or 'missing'}")
+    if render_count < minimum:
+        failures.append(f"render_count={render_count} < {minimum}")
+    if failure_count > 0:
+        failures.append(f"failure_count={failure_count} > 0")
+    return {
+        "present": True,
+        "status": status,
+        "render_count": render_count,
+        "min_render_count": minimum,
+        "event_count": _p5_g3_int(selected.get("event_count")),
+        "failure_count": failure_count,
+        "actual_crop_stats": selected.get("actual_crop_stats") or {},
+        "failures": failures,
+    }
+
+
+def _p5_g3_nonblank_evidence(output_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    minimum = max(1, _p5_g3_int(getattr(args, "p5_g3_min_nonblank_images", 1)))
+    existing = _load_json_dict(output_dir / "nonblank_pixel_probe.json")
+    if existing:
+        passed = existing.get("passed") is True or str(existing.get("status") or "").lower() == "passed"
+        checked = _p5_g3_int(existing.get("checked"))
+        failures = [] if passed and checked >= minimum else [f"nonblank_pixel_probe status={existing.get('status')} checked={checked}"]
+        return {
+            "source": "nonblank_pixel_probe.json",
+            "status": str(existing.get("status") or ""),
+            "passed": passed,
+            "checked": checked,
+            "min_nonblank_images": minimum,
+            "failures": failures,
+        }
+    image_paths = _p5_g3_candidate_visual_images(output_dir, limit=max(30, minimum))
+    if not image_paths:
+        return {
+            "source": "viewer_images",
+            "status": "missing",
+            "passed": False,
+            "checked": 0,
+            "nonblank_count": 0,
+            "min_nonblank_images": minimum,
+            "images": [],
+            "failures": ["no candidate screenshot/viewer images found"],
+        }
+    try:
+        from PIL import Image, ImageStat  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - optional local dependency
+        return {
+            "source": "viewer_images",
+            "status": "unavailable",
+            "passed": False,
+            "checked": 0,
+            "nonblank_count": 0,
+            "min_nonblank_images": minimum,
+            "reason": f"pillow_unavailable:{exc.__class__.__name__}",
+            "images": [],
+            "failures": ["Pillow unavailable for nonblank probe"],
+        }
+    checked: list[dict[str, Any]] = []
+    nonblank_count = 0
+    for path in image_paths[:30]:
+        entry = {
+            "path": _p5_g3_relative_path(path, output_dir),
+            "status": "failed",
+            "nonblank": False,
+        }
+        try:
+            with Image.open(path) as image:
+                converted = image.convert("RGB")
+                stat = ImageStat.Stat(converted)
+                extrema = converted.getextrema()
+        except Exception as exc:
+            entry["reason"] = exc.__class__.__name__
+            checked.append(entry)
+            continue
+        channel_ranges = [int(high) - int(low) for low, high in extrema]
+        mean = sum(float(value) for value in stat.mean) / max(1, len(stat.mean))
+        nonblank = any(value > 3 for value in channel_ranges) or mean < 250.0
+        entry.update({"status": "passed", "nonblank": nonblank, "mean": round(mean, 3)})
+        checked.append(entry)
+        if nonblank:
+            nonblank_count += 1
+    failures = [] if nonblank_count >= minimum else [f"nonblank_count={nonblank_count} < {minimum}"]
+    return {
+        "source": "viewer_images",
+        "status": "passed" if not failures else "failed",
+        "passed": not failures,
+        "checked": len(checked),
+        "nonblank_count": nonblank_count,
+        "min_nonblank_images": minimum,
+        "images": checked,
+        "failures": failures,
+    }
+
+
+def _p5_g3_tile_manifest_evidence(payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    viewer_package = payload.get("viewer_package")
+    if not isinstance(viewer_package, dict):
+        return {"present": False, "failures": ["viewer_package missing"]}
+    output_dir = Path(str(payload.get("output_dir") or "."))
+    output_paths = viewer_package.get("output_paths") if isinstance(viewer_package.get("output_paths"), dict) else {}
+    viewer_dir = _p5_g3_resolve_path(
+        output_paths.get("viewer_dir") or viewer_package.get("viewer_dir"),
+        output_dir,
+    )
+    if viewer_dir is None:
+        viewer_dir = output_dir / "viewer"
+    manifest_path = _p5_g3_resolve_path(
+        output_paths.get("viewer_tiles_manifest_json"),
+        output_dir,
+    )
+    if manifest_path is None:
+        manifest_path = viewer_dir / "tiles_manifest.json"
+    failures: list[str] = []
+    manifest = _load_json_dict(manifest_path)
+    if not manifest:
+        return {
+            "present": False,
+            "path": str(manifest_path),
+            "failures": ["tiles_manifest.json missing or unreadable"],
+        }
+    pairs = manifest.get("pairs") if isinstance(manifest.get("pairs"), dict) else {}
+    pair_count = _p5_g3_int(manifest.get("pair_count")) or len(pairs)
+    if pair_count <= 0:
+        failures.append("pair_count=0")
+    missing_pair_payload_count = 0
+    stale_manifest_count = 0
+    retained_estimated_bytes = 0
+    byte_limit = 0
+    known_pairs: set[str] = set()
+    for pair_id, pair_manifest in pairs.items():
+        if not isinstance(pair_manifest, dict):
+            stale_manifest_count += 1
+            continue
+        pair_name = _p5_g3_safe_name(pair_manifest.get("pair_uuid") or pair_id)
+        known_pairs.add(pair_name)
+        retained_estimated_bytes += _p5_g3_int(
+            pair_manifest.get("cache_total_estimated_bytes")
+            or (
+                _p5_g3_int(pair_manifest.get("tile_payload_bytes"))
+                + _p5_g3_int(pair_manifest.get("overlay_tile_payload_bytes"))
+            )
+        )
+        byte_limit = max(byte_limit, _p5_g3_int(pair_manifest.get("cache_byte_limit")))
+        tile_root = _p5_g3_resolve_path(pair_manifest.get("tile_root"), output_dir) or (viewer_dir / "tiles")
+        pair_manifest_path = tile_root / pair_name / "tile_manifest.json"
+        if not pair_manifest_path.exists():
+            missing_pair_payload_count += 1
+    if stale_manifest_count:
+        failures.append(f"stale_manifest_count={stale_manifest_count}")
+    if missing_pair_payload_count:
+        failures.append(f"missing_pair_payload_count={missing_pair_payload_count}")
+    if byte_limit > 0 and retained_estimated_bytes > byte_limit:
+        failures.append(f"retained_estimated_bytes={retained_estimated_bytes} > byte_limit={byte_limit}")
+    perf_summary = payload.get("viewer_perf_summary") if isinstance(payload.get("viewer_perf_summary"), dict) else {}
+    evicted_pair_count = _p5_g3_int(perf_summary.get("tile_cache_evicted_pair_count"))
+    evicted_estimated_bytes = _p5_g3_int(perf_summary.get("tile_cache_evicted_estimated_bytes"))
+    require_eviction = bool(getattr(args, "p5_g3_require_tile_eviction", False))
+    min_evicted_pairs = max(1, _p5_g3_int(getattr(args, "p5_g3_min_tile_evicted_pairs", 1)))
+    min_evicted_bytes = max(1, _p5_g3_int(getattr(args, "p5_g3_min_tile_evicted_bytes", 1)))
+    configured_tile_cache_mb = _p5_g6_tile_cache_mb_value(args)
+    tile_cache_env_mb = os.environ.get(TILE_CACHE_MB_ENV_VAR)
+    if require_eviction and evicted_pair_count < min_evicted_pairs:
+        failures.append(
+            f"evicted_pair_count={evicted_pair_count} < {min_evicted_pairs}"
+        )
+    if require_eviction and evicted_estimated_bytes < min_evicted_bytes:
+        failures.append(
+            f"evicted_estimated_bytes={evicted_estimated_bytes} < {min_evicted_bytes}"
+        )
+    tile_root = _p5_g3_resolve_path(output_paths.get("viewer_tiles_dir"), output_dir) or (viewer_dir / "tiles")
+    overlay_root = _p5_g3_resolve_path(output_paths.get("viewer_overlay_tiles_dir"), output_dir) or (
+        viewer_dir / "overlay_tiles"
+    )
+    orphan_pairs = (_p5_g3_child_dir_names(tile_root) | _p5_g3_child_dir_names(overlay_root)) - known_pairs
+    orphan_payload_bytes = sum(
+        _p5_g3_payload_bytes(tile_root / pair, {".png"})
+        + _p5_g3_payload_bytes(overlay_root / pair, {".json"})
+        for pair in orphan_pairs
+    )
+    max_orphan_bytes = max(0, _p5_g3_int(getattr(args, "p5_g3_max_tile_orphan_bytes", 0)))
+    if orphan_payload_bytes > max_orphan_bytes:
+        failures.append(f"orphan_payload_bytes={orphan_payload_bytes} > {max_orphan_bytes}")
+    return {
+        "present": True,
+        "path": str(manifest_path),
+        "pair_count": pair_count,
+        "stale_manifest_count": stale_manifest_count,
+        "missing_pair_payload_count": missing_pair_payload_count,
+        "retained_estimated_bytes": retained_estimated_bytes,
+        "byte_limit": byte_limit,
+        "retained_within_limit": byte_limit <= 0 or retained_estimated_bytes <= byte_limit,
+        "tile_cache_env_var": TILE_CACHE_MB_ENV_VAR,
+        "tile_cache_env_mb": tile_cache_env_mb,
+        "configured_tile_cache_mb": configured_tile_cache_mb,
+        "require_eviction": require_eviction,
+        "evicted_pair_count": evicted_pair_count,
+        "min_evicted_pair_count": min_evicted_pairs if require_eviction else 0,
+        "evicted_estimated_bytes": evicted_estimated_bytes,
+        "min_evicted_estimated_bytes": min_evicted_bytes if require_eviction else 0,
+        "orphan_pair_count": len(orphan_pairs),
+        "orphan_payload_bytes": orphan_payload_bytes,
+        "max_orphan_payload_bytes": max_orphan_bytes,
+        "failures": failures,
+    }
+
+
+def _p5_g3_candidate_visual_images(output_dir: Path, *, limit: int) -> list[Path]:
+    candidates: list[Path] = []
+    for relative in ("screenshots", "viewer/images", "viewer/zone_crops", "viewer/focus_tiles", "viewer/tiles"):
+        root = output_dir / relative
+        if not root.exists():
+            continue
+        for current, dirs, files in os.walk(root):
+            dirs.sort()
+            for name in sorted(files):
+                path = Path(current) / name
+                if path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                    candidates.append(path)
+                    if len(candidates) >= limit:
+                        return candidates
+    return candidates
+
+
+def _p5_g3_resolve_path(value: Any, output_dir: Path) -> Path | None:
+    text = str(value or "")
+    if not text or text.startswith("<redacted>"):
+        return None
+    path = Path(text)
+    if path.is_absolute():
+        return path
+    candidate = output_dir / path
+    return candidate if candidate.exists() else path
+
+
+def _p5_g3_child_dir_names(root: Path) -> set[str]:
+    if not root.exists():
+        return set()
+    try:
+        return {path.name for path in root.iterdir() if path.is_dir()}
+    except OSError:
+        return set()
+
+
+def _p5_g3_payload_bytes(root: Path, suffixes: set[str]) -> int:
+    if not root.exists():
+        return 0
+    total = 0
+    try:
+        for current, _, files in os.walk(root):
+            for name in files:
+                path = Path(current) / name
+                if suffixes and path.suffix.lower() not in suffixes:
+                    continue
+                try:
+                    total += path.stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total
+
+
+def _p5_g3_relative_path(path: Path, root: Path) -> str:
+    try:
+        return str(Path(path).relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return str(path)
+
+
+def _p5_g3_safe_name(value: Any) -> str:
+    text = str(value or "pair").strip() or "pair"
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+
+
+def _p5_g3_int(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _p5_g3_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _build_ai_policy_evidence(output_dir: Path | None = None) -> dict[str, Any]:
@@ -2328,6 +2920,8 @@ def _build_summary_payload(
             "overview_max_edge": int(getattr(args, "overview_max_edge", 2200)),
             "focus_tile_max_edge": int(getattr(args, "focus_tile_max_edge", 1600)),
             "viewer_perf_log": bool(getattr(args, "viewer_perf_log", False)),
+            "p5_g6_tile_cache_mb": _p5_g6_tile_cache_mb_value(args),
+            "tile_cache_env_var": TILE_CACHE_MB_ENV_VAR,
             "render_selected_zone_evidence": bool(
                 getattr(args, "render_selected_zone_evidence", False)
             ),
@@ -2400,6 +2994,7 @@ def _build_summary_payload(
         ),
         "viewer_package": viewer_package.to_dict() if viewer_package else None,
         "viewer_perf_summary": _viewer_perf_summary_for_summary(viewer_package, output_dir),
+        "perf_events_summary": summarize_perf_events(output_dir),
         "selected_zone_evidence": selected_zone_evidence,
         "ai_policy": ai_policy,
         "ground_truth": ground_truth,
@@ -2417,6 +3012,7 @@ def _build_summary_payload(
         timings=timings,
         payload=payload,
     )
+    payload["p5_g3_realset_gate"] = _p5_g3_realset_gate_payload(payload, args)
     return payload
 
 
@@ -2662,6 +3258,23 @@ def _evaluate_quality_gate(
                 )
             )
 
+    p5_g3_gate = payload.get("p5_g3_realset_gate")
+    if _p5_g3_realset_gate_requested(args):
+        if not isinstance(p5_g3_gate, dict) or p5_g3_gate.get("status") == "not_requested":
+            p5_g3_gate = _p5_g3_realset_gate_payload(payload, args)
+            payload["p5_g3_realset_gate"] = p5_g3_gate
+        if p5_g3_gate.get("status") != "passed":
+            issues.append(
+                _gate_issue(
+                    "p5_g3_realset_gate",
+                    p5_g3_gate.get("status") or "missing",
+                    "passed",
+                    "P5-G3 realset performance evidence gate failed",
+                    failures=list(p5_g3_gate.get("failures") or []),
+                    evidence=p5_g3_gate.get("evidence") or {},
+                )
+            )
+
     baseline_match_s = _baseline_match_time(previous_baseline)
     current_match_s = float(payload.get("timings", {}).get("match_s", 0.0) or 0.0)
     if baseline_match_s and current_match_s > baseline_match_s * (1.0 + thresholds["max_match_time_regression"]):
@@ -2675,7 +3288,7 @@ def _evaluate_quality_gate(
             )
         )
 
-    requested = bool(getattr(args, "quality_gate", False))
+    requested = bool(getattr(args, "quality_gate", False) or _p5_g3_realset_gate_requested(args))
     status = "not_requested"
     if requested:
         status = "failed" if issues else "passed"

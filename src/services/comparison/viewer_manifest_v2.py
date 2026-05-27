@@ -54,7 +54,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, Literal, Optional
 
-from src.services.comparison.transform import Affine6, AffineParams, Bbox
+from src.services.comparison.transform import (
+    Affine6,
+    AffineParams,
+    Bbox,
+    COORDINATE_CONTRACT_VERSION,
+    COORD_CAD_WCS_MM,
+    SOURCE_TRUTH_CAD_ENTITY,
+    Y_AXIS_UP,
+    coordinate_space_y_axis,
+    normalize_coordinate_space,
+    source_truth_for_coordinate_space,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +147,10 @@ class ArtifactRef:
     world_to_pixel: Affine6 = IDENTITY_AFFINE
     pixel_to_world: Affine6 = IDENTITY_AFFINE
     transform_quality: TransformQuality = "exact"
+    coordinate_contract_version: str = COORDINATE_CONTRACT_VERSION
+    bbox_coordinate_space: str = COORD_CAD_WCS_MM
+    source_truth: str = SOURCE_TRUTH_CAD_ENTITY
+    y_axis: str = Y_AXIS_UP
     layer_visibility_sig: str = ""
     render_profile_sig: str = ""
     renderer_id: str = ""
@@ -151,6 +166,10 @@ class ArtifactRef:
         d["pixel_size"] = list(self.pixel_size)
         d["world_to_pixel"] = list(self.world_to_pixel)
         d["pixel_to_world"] = list(self.pixel_to_world)
+        bbox_space = normalize_coordinate_space(self.bbox_coordinate_space)
+        d["bbox_coordinate_space"] = bbox_space
+        d["source_truth"] = _effective_source_truth(self.source_truth, bbox_space)
+        d["y_axis"] = _effective_y_axis(self.y_axis, bbox_space)
         return d
 
     @classmethod
@@ -176,6 +195,10 @@ class ArtifactRef:
             world_to_pixel=params.world_to_pixel,
             pixel_to_world=params.pixel_to_world,
             transform_quality=params.quality,
+            coordinate_contract_version=COORDINATE_CONTRACT_VERSION,
+            bbox_coordinate_space=params.coordinate_space,
+            source_truth=params.source_truth,
+            y_axis=params.y_axis,
             layer_visibility_sig=layer_visibility_sig,
             render_profile_sig=render_profile_sig,
             renderer_id=renderer_id,
@@ -196,6 +219,9 @@ class ArtifactRef:
             raise ManifestValidationError(
                 f"Unknown transform_quality: {tq!r}"
             )
+        bbox_space = normalize_coordinate_space(
+            data.get("bbox_coordinate_space", data.get("coordinate_space", COORD_CAD_WCS_MM))
+        )
         try:
             return cls(
                 image_uri=str(data.get("image_uri", "")),
@@ -204,6 +230,12 @@ class ArtifactRef:
                 world_to_pixel=tuple(data.get("world_to_pixel", IDENTITY_AFFINE)),  # type: ignore[arg-type]
                 pixel_to_world=tuple(data.get("pixel_to_world", IDENTITY_AFFINE)),  # type: ignore[arg-type]
                 transform_quality=tq,
+                coordinate_contract_version=str(
+                    data.get("coordinate_contract_version", COORDINATE_CONTRACT_VERSION)
+                ),
+                bbox_coordinate_space=bbox_space,
+                source_truth=_effective_source_truth(data.get("source_truth"), bbox_space),
+                y_axis=_effective_y_axis(data.get("y_axis"), bbox_space),
                 layer_visibility_sig=str(data.get("layer_visibility_sig", "")),
                 render_profile_sig=str(data.get("render_profile_sig", "")),
                 renderer_id=str(data.get("renderer_id", "")),
@@ -443,6 +475,22 @@ def _opt_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _effective_source_truth(value: Any, bbox_space: str) -> str:
+    inferred = source_truth_for_coordinate_space(bbox_space)
+    raw = str(value or "").strip()
+    if raw and not (raw == SOURCE_TRUTH_CAD_ENTITY and inferred != SOURCE_TRUTH_CAD_ENTITY):
+        return raw
+    return inferred
+
+
+def _effective_y_axis(value: Any, bbox_space: str) -> str:
+    inferred = coordinate_space_y_axis(bbox_space)
+    raw = str(value or "").strip()
+    if raw and not (raw == Y_AXIS_UP and inferred != Y_AXIS_UP):
+        return raw
+    return inferred
 
 
 __all__ = [

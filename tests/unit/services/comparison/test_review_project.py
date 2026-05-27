@@ -144,6 +144,58 @@ def test_preview_uses_stream_records_when_memory_details_are_truncated(tmp_path:
     assert Path(package.manifest_path).exists()
 
 
+def test_preview_reuses_prebuilt_change_zones_without_reclustering(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")
+    result.add_change(_line_change("line_1", 1000.0))
+    result.metadata["change_zones"] = [
+        {
+            "zone_id": "C-001",
+            "pair_id": "placeholder",
+            "bbox": [1000.0, 0.0, 1010.0, 10.0],
+            "old_bbox": None,
+            "centroid": [1005.0, 5.0],
+            "raw_change_count": 1,
+            "added_count": 1,
+            "deleted_count": 0,
+            "modified_count": 0,
+            "layers": ["BEAM"],
+            "entity_types": ["LINE"],
+            "representative_change_keys": ["line_1"],
+            "status": "needs_review",
+            "reasons": ["prebuilt"],
+            "metadata": {"source": "artifact"},
+        }
+    ]
+
+    def fail_build(*_args, **_kwargs):
+        raise AssertionError("preview should reuse prebuilt zones")
+
+    def fake_render(_dxf_path, output_path, *, dpi, max_edge_px):
+        output_path.write_bytes(b"fake png")
+        return {
+            "min_x": 0,
+            "min_y": 0,
+            "img_width": 2000,
+            "img_height": 1000,
+            "scale_x": 1,
+            "scale_y": 1,
+        }
+
+    monkeypatch.setattr("src.services.comparison.review_project.build_change_zones", fail_build)
+    monkeypatch.setattr(
+        "src.services.comparison.review_project._render_dxf_to_png",
+        fake_render,
+    )
+
+    package = export_preview_artifacts(_summary(tmp_path, result), tmp_path / "preview")
+
+    assert package.zone_overlay_count == 1
+    assert package.artifacts[0].zone_overlays[0].zone_id == "C-001"
+
+
 def test_preview_limit_can_skip_png_render_but_keep_zone_metadata(tmp_path: Path, monkeypatch) -> None:
     changes = [_line_change(f"line_{index}", index * 1000.0) for index in range(5)]
     result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")

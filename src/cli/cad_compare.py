@@ -122,6 +122,38 @@ def _run_file_compare(args: argparse.Namespace) -> int:
         include_layers=args.include_layer,
         exclude_layers=args.exclude_layer,
     )
+    canonical_status = _comparison_status(result.metadata)
+    if canonical_status == "failed":
+        canonical_error_code = result.metadata.get("error_code")
+        canonical_message = result.metadata.get("message") or "CAD comparison failed"
+        try:
+            fallback_result = DwgDiffer(
+                config={
+                    "use_canonical_pipeline": False,
+                    "use_legacy_ezdxf_pipeline": True,
+                    "allow_oda_fallback": False,
+                }
+            ).compare(
+                args.source_a,
+                args.source_b,
+                include_layers=args.include_layer,
+                exclude_layers=args.exclude_layer,
+            )
+        except Exception:
+            fallback_result = None
+        if fallback_result is not None and _comparison_status(fallback_result.metadata) != "failed":
+            fallback_result.metadata.update(
+                {
+                    "canonical_fallback_used": True,
+                    "canonical_fallback_reason": f"{canonical_error_code}: {canonical_message}",
+                    "canonical_error_code": canonical_error_code,
+                    "canonical_pipeline_status": result.metadata.get("pipeline_status"),
+                }
+            )
+            fallback_result.warnings.append(
+                f"Canonical CAD compare failed; used ezdxf fallback: {canonical_error_code}: {canonical_message}"
+            )
+            result = fallback_result
     payload = {
         "mode": "file",
         "status": _comparison_status(result.metadata),

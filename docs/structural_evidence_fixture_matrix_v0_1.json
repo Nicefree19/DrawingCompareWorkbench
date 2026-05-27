@@ -1,0 +1,229 @@
+{
+  "schema_version": "structural-evidence-fixture-matrix/v0.1",
+  "source_policy": "Repository fixtures and transient generated fixtures only. Do not copy customer or project drawings into this matrix.",
+  "quality_contract": {
+    "packet_schema_version": "structural-drawing-evidence/v0.1",
+    "max_evidence": 30,
+    "raw_payload_included": false,
+    "llm_used": false,
+    "judgment_level": "issue_suggestion_only",
+    "human_review_required": true
+  },
+  "cases": [
+    {
+      "case_id": "single_text_reference",
+      "mode": "analyze",
+      "input": {
+        "kind": "repo_file",
+        "path": "tests/data/comparison/cad_samples/dxf/text_centered.dxf"
+      },
+      "question": "Check GRID-A1 structural references",
+      "max_evidence": 5,
+      "expected": {
+        "exit_code": 0,
+        "status": "ok",
+        "source_health": "parsed",
+        "min_evidence": 1,
+        "max_evidence": 5,
+        "issue_kinds": ["reference_review"],
+        "evidence_source_kinds": ["drawing_anchor"],
+        "anchor_text_contains": ["GRID-A1"],
+        "artifact_keys": ["compact", "full_evidence", "canonical_summary", "diagnostics", "manifest"],
+        "max_compact_json_bytes": 50000
+      },
+      "known_limitations": [
+        "Synthetic fixture validates anchor retrieval, not structural correctness."
+      ]
+    },
+    {
+      "case_id": "large_generated_grid",
+      "mode": "analyze",
+      "input": {
+        "kind": "generated_large_dxf",
+        "file_name": "large_grid.dxf",
+        "grid_count": 80
+      },
+      "question": "Review grid and member tags for structural anchors",
+      "max_evidence": 30,
+      "expected": {
+        "exit_code": 0,
+        "status": "ok",
+        "source_health": "parsed",
+        "min_evidence": 20,
+        "max_evidence": 30,
+        "issue_kinds": ["evidence_review"],
+        "evidence_source_kinds": ["drawing_anchor"],
+        "artifact_keys": ["compact", "full_evidence", "canonical_summary", "diagnostics", "manifest"],
+        "max_compact_json_bytes": 220000
+      },
+      "known_limitations": [
+        "Generated large fixture exercises evidence caps and compact output size, not CAD rendering quality."
+      ]
+    },
+    {
+      "case_id": "unsupported_objects_partial",
+      "mode": "analyze",
+      "input": {
+        "kind": "repo_file",
+        "path": "tests/data/comparison/cad_samples/dxf/unsupported_objects.dxf"
+      },
+      "question": "Review unsupported content before relying on drawing evidence",
+      "max_evidence": 10,
+      "expected": {
+        "exit_code": 0,
+        "status": "partial",
+        "source_health": "partial",
+        "min_evidence": 0,
+        "max_evidence": 10,
+        "issue_kinds": ["unsupported_content_review", "source_health_review"],
+        "unsupported_counts_present": true,
+        "artifact_keys": ["compact", "full_evidence", "canonical_summary", "diagnostics", "manifest"],
+        "max_compact_json_bytes": 70000
+      },
+      "known_limitations": [
+        "Partial import must stay visible; it must not be summarized as all clear."
+      ]
+    },
+    {
+      "case_id": "missing_path_fail_closed",
+      "mode": "analyze",
+      "input": {
+        "kind": "transient_missing",
+        "file_name": "missing_input.dxf"
+      },
+      "question": "Review missing source behavior",
+      "max_evidence": 5,
+      "expected": {
+        "exit_code": 2,
+        "status": "failed",
+        "source_health": "missing",
+        "min_evidence": 0,
+        "max_evidence": 0,
+        "issue_kinds": ["source_health_review"],
+        "diagnostics_error_code": "CAD_PATH_INVALID",
+        "max_compact_json_bytes": 25000
+      },
+      "known_limitations": [
+        "No artifacts are expected because no source was loaded."
+      ]
+    },
+    {
+      "case_id": "unsupported_dwg_fail_closed",
+      "mode": "analyze",
+      "input": {
+        "kind": "transient_dwg_header",
+        "file_name": "blocked_ac1032.dwg",
+        "version": "AC1032"
+      },
+      "question": "Review unsupported DWG behavior",
+      "max_evidence": 5,
+      "expected": {
+        "exit_code": 2,
+        "status": "failed",
+        "source_health": "unsupported",
+        "min_evidence": 0,
+        "max_evidence": 0,
+        "issue_kinds": ["source_health_review"],
+        "diagnostics_error_code": "DWG_UNSUPPORTED_VERSION",
+        "diagnostics_paths": [
+          {
+            "path": ["diagnostics", "dwg_native", "blocking_stage"],
+            "equals": "section_map_decoder"
+          }
+        ],
+        "artifact_keys": ["compact", "full_evidence", "canonical_summary", "diagnostics", "manifest"],
+        "max_compact_json_bytes": 60000
+      },
+      "known_limitations": [
+        "Unsupported modern DWG versions remain intentionally blocked until a clean-room reader contract is approved."
+      ]
+    },
+    {
+      "case_id": "comparison_changed_pair",
+      "mode": "compare",
+      "before": {
+        "kind": "repo_file",
+        "path": "tests/data/comparison/cad_samples/dxf/simple_base.dxf"
+      },
+      "after": {
+        "kind": "repo_file",
+        "path": "tests/data/comparison/cad_samples/dxf/simple_modified.dxf"
+      },
+      "question": "Review drawing changes",
+      "max_evidence": 10,
+      "expected": {
+        "exit_code": 0,
+        "status": "ok",
+        "source_health": "parsed",
+        "min_evidence": 1,
+        "max_evidence": 10,
+        "issue_kinds": ["comparison_diff_review"],
+        "evidence_source_kinds": ["comparison_diff"],
+        "artifact_keys": ["compact", "full_evidence", "comparison_diff", "diagnostics", "manifest"],
+        "max_compact_json_bytes": 65000
+      },
+      "known_limitations": [
+        "Comparison differences remain review evidence, not issue conclusions."
+      ]
+    },
+    {
+      "case_id": "comparison_identical_pair",
+      "mode": "compare",
+      "before": {
+        "kind": "repo_file",
+        "path": "tests/data/comparison/golden/dxf/01_identical/before.dxf"
+      },
+      "after": {
+        "kind": "repo_file",
+        "path": "tests/data/comparison/golden/dxf/01_identical/after.dxf"
+      },
+      "question": "Review drawing changes",
+      "max_evidence": 10,
+      "expected": {
+        "exit_code": 0,
+        "status": "ok",
+        "source_health": "parsed",
+        "min_evidence": 0,
+        "max_evidence": 0,
+        "issue_kinds": [],
+        "artifact_keys": ["compact", "full_evidence", "comparison_diff", "diagnostics", "manifest"],
+        "max_compact_json_bytes": 25000
+      },
+      "known_limitations": [
+        "No comparison evidence does not mean the drawing is approved."
+      ]
+    }
+  ],
+  "false_positive_backlog": [
+    {
+      "id": "fp-watch-comparison-identical-wording",
+      "case_id": "comparison_identical_pair",
+      "risk": "A no-change comparison could be misread as final approval if wording drifts.",
+      "current_guard": "Summary wording avoids approval/release language and safety scan blocks positive action phrases.",
+      "next_improvement": "Add domain reviewer examples for no-change comparison wording."
+    },
+    {
+      "id": "fp-watch-generated-large-nearby-context",
+      "case_id": "large_generated_grid",
+      "risk": "Nearby context in dense drawings may include unrelated adjacent tags.",
+      "current_guard": "Nearby entities are capped at 8 and returned as context only.",
+      "next_improvement": "Add sheet region or viewport-aware proximity filtering."
+    }
+  ],
+  "false_negative_backlog": [
+    {
+      "id": "fn-watch-unsupported-geometry",
+      "case_id": "unsupported_objects_partial",
+      "risk": "Unsupported entity geometry can hide real structural anchors.",
+      "current_guard": "Partial source health and unsupported content review suggestion are emitted.",
+      "next_improvement": "Expand importer coverage only with bounded diagnostics and no raw payload exposure."
+    },
+    {
+      "id": "fn-watch-modern-dwg",
+      "case_id": "unsupported_dwg_fail_closed",
+      "risk": "Modern DWG sources currently cannot provide drawing anchors.",
+      "current_guard": "Unsupported source health and clean-room blocking stage are explicit.",
+      "next_improvement": "Implement approved clean-room section-map reader before enabling evidence extraction."
+    }
+  ]
+}

@@ -63,6 +63,10 @@ Item {
     // image lines up with the same affine the overlay layers use.
     property string backgroundImageSource: ""
     property var backgroundImageWorldBbox: []  // [xmin, ymin, xmax, ymax]
+    property string backgroundImageStatusName: pdfBackground.status === Image.Ready ? "ready"
+        : pdfBackground.status === Image.Loading ? "loading"
+        : pdfBackground.status === Image.Error ? "error"
+        : "null"
 
     // ---- ZOOM / PAN STATE (world coords) -------------------------------
     // World-space camera centre + units-per-pixel. This is the canonical
@@ -106,6 +110,7 @@ Item {
             && root.backgroundImageWorldBbox && root.backgroundImageWorldBbox.length === 4
         source: root.backgroundImageSource
         cache: true
+        asynchronous: true
         // Re-rasterize on demand at high zoom — Qt picks a sourceSize
         // ≥ on-screen size to avoid blur. Cap to keep memory bounded.
         sourceSize.width: Math.min(8192, Math.max(width * 2, 1024))

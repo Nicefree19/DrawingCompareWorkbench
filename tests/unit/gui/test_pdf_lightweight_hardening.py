@@ -28,6 +28,18 @@ import pytest
 from src.services.comparison.safe_unicode import safe_unicode
 
 
+def test_lightweight_pdf_background_image_loads_asynchronously() -> None:
+    qml_source = Path(
+        "src/gui/assets/drawing_compare/LightweightDrawingViewport.qml"
+    ).read_text(encoding="utf-8")
+    image_start = qml_source.index("Image {\n        id: pdfBackground")
+    image_end = qml_source.index("    // ---- VECTOR LAYER", image_start)
+    image_body = qml_source[image_start:image_end]
+
+    assert "property string backgroundImageStatusName" in qml_source
+    assert "asynchronous: true" in image_body
+
+
 class TestReadablePdfNotice:
     """PDF fallback notices must stay readable even when old literals are mojibake."""
 
@@ -252,6 +264,172 @@ class TestA4PdfPathRaceGuard:
 
         assert fake_renderer.render_page.call_count == 1
         assert viewport._pdf_render_state["cache_hit"] is True
+
+    def test_load_pdf_page_caps_large_initial_render_dpi(self, tmp_path):
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        source_pdf = tmp_path / "large.pdf"
+        source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._world_bbox = None
+        viewport._side = "before"
+        viewport._pdf_render_state = None
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+
+        fake_image = MagicMock()
+        fake_image.isNull.return_value = False
+        fake_image.width.return_value = 1754
+        fake_image.height.return_value = 2483
+
+        def save_png(path, _fmt):
+            Path(path).write_bytes(b"png")
+            return True
+
+        fake_image.save.side_effect = save_png
+
+        fake_renderer = MagicMock()
+        fake_renderer.is_loaded = True
+        fake_renderer.page_count.return_value = 1
+        fake_renderer.page_size_points.return_value = (1684.0, 2384.0)
+        fake_renderer.render_page.return_value = fake_image
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            result = LightweightDrawingViewport.load_pdf_page(
+                viewport,
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                max_render_pixels=8_000_000,
+                cache_dir=tmp_path / "cache",
+            )
+
+        assert result is True
+        fake_renderer.render_page.assert_called_once_with(0, target_dpi=100.0)
+        assert viewport._pdf_render_state["requested_dpi"] == 150.0
+        assert viewport._pdf_render_state["effective_dpi"] == 100.0
+        assert viewport._pdf_render_state["dpi_capped"] is True
+        assert list((tmp_path / "cache").glob("qtpdf_*_dpi100.png"))
+
+    def test_prewarm_metadata_fast_path_skips_qtpdf_document_load(self, tmp_path):
+        from src.gui.lightweight_viewport import (
+            LightweightDrawingViewport,
+            prewarm_pdf_page_cache,
+        )
+
+        source_pdf = tmp_path / "large.pdf"
+        source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+        cache_dir = tmp_path / "cache"
+
+        fake_image = MagicMock()
+        fake_image.isNull.return_value = False
+        fake_image.width.return_value = 1754
+        fake_image.height.return_value = 2483
+
+        def save_png(path, _fmt):
+            Path(path).write_bytes(b"png")
+            return True
+
+        fake_image.save.side_effect = save_png
+
+        fake_renderer = MagicMock()
+        fake_renderer.is_loaded = True
+        fake_renderer.page_count.return_value = 1
+        fake_renderer.page_size_points.return_value = (1684.0, 2384.0)
+        fake_renderer.render_page.return_value = fake_image
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            prewarm = prewarm_pdf_page_cache(
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                max_render_pixels=8_000_000,
+                cache_dir=cache_dir,
+            )
+
+        assert prewarm["ok"] is True
+        assert prewarm["cache_hit"] is False
+        assert prewarm["effective_dpi"] == 100.0
+        assert list(cache_dir.glob("qtpdf_*_dpi100.png"))
+        assert list(cache_dir.glob("qtpdf_*_meta.json"))
+        assert not list(cache_dir.glob("*.tmp"))
+
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._world_bbox = None
+        viewport._side = "before"
+        viewport._pdf_render_state = None
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer") as renderer_cls,
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            result = LightweightDrawingViewport.load_pdf_page(
+                viewport,
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                max_render_pixels=8_000_000,
+                cache_dir=cache_dir,
+            )
+
+        assert result is True
+        renderer_cls.assert_not_called()
+        assert viewport._pdf_render_state["cache_hit"] is True
+        assert viewport._pdf_render_state["metadata_hit"] is True
+        assert viewport._pdf_render_state["effective_dpi"] == 100.0
+
+    def test_prewarm_pdf_page_cache_does_not_touch_viewport_state(self, tmp_path):
+        from src.gui.lightweight_viewport import prewarm_pdf_page_cache
+
+        source_pdf = tmp_path / "source.pdf"
+        source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+        fake_image = MagicMock()
+        fake_image.isNull.return_value = False
+        fake_image.width.return_value = 300
+        fake_image.height.return_value = 400
+
+        def save_png(path, _fmt):
+            Path(path).write_bytes(b"png")
+            return True
+
+        fake_image.save.side_effect = save_png
+        fake_renderer = MagicMock()
+        fake_renderer.is_loaded = True
+        fake_renderer.page_count.return_value = 1
+        fake_renderer.page_size_points.return_value = (144.0, 192.0)
+        fake_renderer.render_page.return_value = fake_image
+
+        viewport = MagicMock()
+        viewport._pdf_render_state = {"pdf_path": "visible.pdf"}
+        viewport._quick = MagicMock()
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            result = prewarm_pdf_page_cache(
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                cache_dir=tmp_path / "cache",
+            )
+
+        assert result["ok"] is True
+        assert viewport._pdf_render_state == {"pdf_path": "visible.pdf"}
+        viewport._quick.rootObject.assert_not_called()
 
     def test_load_scene_pack_none_clears_stale_pdf_background(self):
         from src.gui.lightweight_viewport import LightweightDrawingViewport

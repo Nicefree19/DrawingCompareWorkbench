@@ -7,6 +7,8 @@ import types
 from pathlib import Path
 
 from src.services.comparison.workbench_subprocess import (
+    CAD_VISUAL_CONVERSION_WORKER_FLAG,
+    CAD_VISUAL_CONVERSION_WORKER_MODULE,
     VIEWER_PACKAGE_WORKER_FLAG,
     VIEWER_PACKAGE_WORKER_MODULE,
     VIEWER_RENDER_WORKER_FLAG,
@@ -56,6 +58,11 @@ def test_worker_command_uses_internal_flags_in_frozen_build() -> None:
         executable=executable,
         frozen=True,
     ) == (executable, [VIEWER_PACKAGE_WORKER_FLAG])
+    assert worker_command_for_module(
+        CAD_VISUAL_CONVERSION_WORKER_MODULE,
+        executable=executable,
+        frozen=True,
+    ) == (executable, [CAD_VISUAL_CONVERSION_WORKER_FLAG])
 
 
 def test_unknown_worker_module_still_uses_python_module_mode() -> None:
@@ -119,3 +126,20 @@ def test_dispatch_packaged_worker_routes_viewer_package_worker(monkeypatch) -> N
     )
 
     assert status == 11
+
+
+def test_dispatch_packaged_worker_routes_cad_visual_conversion_worker(monkeypatch) -> None:
+    module_name = CAD_VISUAL_CONVERSION_WORKER_MODULE
+    fake_module = types.ModuleType(module_name)
+
+    def fake_main():
+        return 13
+
+    fake_module.main = fake_main
+    monkeypatch.setitem(sys.modules, module_name, fake_module)
+
+    status = dispatch_packaged_worker(
+        ["DrawingCompareWorkbench.exe", WORKBENCH_WORKER_FLAGS[module_name]]
+    )
+
+    assert status == 13

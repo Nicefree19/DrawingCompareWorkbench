@@ -221,6 +221,27 @@ from .viewer_package import (
     ViewerPackageOptions,
     export_viewer_package,
 )
+from .cad_visual_backend import (
+    CadVisualBackend,
+    CadVisualBackendCapabilities,
+    CadVisualConversionRequest,
+    CadVisualConversionResult,
+    DisabledCadVisualBackend,
+)
+from .render_backend_registry import (
+    RenderBackendRegistry,
+    get_default_render_backend_registry,
+)
+from .cad_visual_conversion_worker import (
+    convert_cad_visual_in_subprocess,
+    run_conversion_request,
+)
+from .visual_asset import (
+    VisualAssetManifest,
+    VisualAssetManifestValidationError,
+    read_visual_asset_manifest,
+    write_visual_asset_manifest,
+)
 from .folder_compare_pipeline import (
     FolderComparePipeline,
     FolderCompareRunRequest,
@@ -404,6 +425,19 @@ __all__ = [
     "ViewerPackage",
     "ViewerPackageOptions",
     "export_viewer_package",
+    "CadVisualBackend",
+    "CadVisualBackendCapabilities",
+    "CadVisualConversionRequest",
+    "CadVisualConversionResult",
+    "DisabledCadVisualBackend",
+    "RenderBackendRegistry",
+    "get_default_render_backend_registry",
+    "convert_cad_visual_in_subprocess",
+    "run_conversion_request",
+    "VisualAssetManifest",
+    "VisualAssetManifestValidationError",
+    "read_visual_asset_manifest",
+    "write_visual_asset_manifest",
     "FolderComparePipeline",
     "FolderCompareRunRequest",
     "FolderCompareRunResult",
