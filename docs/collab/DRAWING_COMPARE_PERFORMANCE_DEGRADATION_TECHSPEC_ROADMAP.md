@@ -4240,3 +4240,559 @@ Next slice:
    real viewer packages and measures crop-first ordering directly.
 3. Add future standalone P5-G28/P5-G29 gates before expanding the P5-G30 child
    gate list.
+
+## 35. 2026-05-28 P5-G27 Bridge-Bearing Closeout Auto-Generation
+
+This slice resolves the closeout orchestration gap left by Sections 33 and 34.
+P5-G27 no longer has to remain a manually supplied closeout artifact when the
+closeout runner is already generating P5-G16 replay evidence.
+
+Implemented behavior:
+
+- `closeout_drawing_compare_customer_evidence.py` now plans generated
+  `p5_g27_selected_zone_crop_soak.json` artifacts for standard validation
+  result dirs when P5-G16 replay JSONs are planned or supplied;
+- the generated P5-G27 command runs
+  `benchmark_workbench_gui_hotpath.py --include-p5-g27-selected-zone-crop-first`
+  with `--p5-g27-real-renderer-bridge-json <p5_g16_real_corpus_replay.json>` and
+  `--p5-g27-require-real-renderer-bridge`;
+- the closeout order is now inventory, `prepare_customer_evidence_manifest_seed`,
+  generated P5-G16/P5-G27/P5-G22 evidence, final
+  `prepare_customer_evidence_manifest`, and final customer-grade audit, so
+  generated benchmarks receive the customer manifest they require while final
+  prepare no longer sees planned-but-missing P5-G27 artifacts;
+- generated P5-G27 JSONs are routed into both prepare and final audit through
+  `--p5-g27-selected-zone-crop-json`;
+- `audit_closeout_readiness.py` now validates P5-G27 generation outputs,
+  bridge arguments, P5-G16 bridge membership, prepare/final-audit routing, and
+  final audit inclusion of the P5-G27 evidence flag.
+
+Validation evidence:
+
+- `python -m py_compile scripts\closeout_drawing_compare_customer_evidence.py
+  scripts\audit_closeout_readiness.py
+  tests\unit\scripts\test_closeout_drawing_compare_customer_evidence.py
+  tests\unit\scripts\test_audit_closeout_readiness.py`;
+- focused closeout/readiness regressions passed with `20 passed`;
+- self-review found and fixed the manifest-order cycle by adding the seed
+  prepare step before generated P5-G16/P5-G22 benchmark commands.
+
+Self-review findings:
+
+- The closeout runner now chooses automatic generation by default, while
+  preserving `--skip-p5-g27-selected-zone-crop-first` for operators who supply
+  valid external P5-G27 evidence explicitly.
+- The P5-G27 generation step is deliberately placed after P5-G16 and before the
+  final prepare. The seed prepare exists only to create customer corpus metadata
+  for generated benchmarks and intentionally omits generated P5-G16/P5-G22/P5-G27
+  artifact flags.
+- This still uses the existing P5-G16 bridge rather than opening production
+  viewer packages directly. If live renderer failures continue, the next P5-G27
+  enhancement should measure crop-first ordering against real viewer packages.
+
+Next slice:
+
+1. Add standalone P5-G28 cache-plateau/lifecycle gates before adding it to
+   P5-G30.
+2. Add standalone P5-G29 telemetry-cost gates before adding it to P5-G30.
+3. If renderer failures remain in live runs, add the production viewer-package
+   P5-G27 mode described above.
+
+## 36. 2026-05-28 P5-G28 Cache Plateau Contract Seed
+
+This slice starts P5-G28 as an independent benchmark contract without yet wiring
+it into closeout/final-audit/P5-G30. The first step is deliberately tile-cache
+focused so the cache lifecycle gate can stabilize before broadening to
+DisplayList, DXF index, visual asset, overlay, and spool namespaces.
+
+Implemented behavior:
+
+- `benchmark_workbench_gui_hotpath.py` now exposes
+  `--include-p5-g28-cache-plateau`;
+- the flag reuses the existing tile retention lifecycle probe and emits
+  `benchmark_id=p5_g28_cache_plateau_soak`,
+  `profile=tile_cache_plateau_lifecycle_seed`, `p5_g28_evidence`,
+  `p5_g28_contract`, and `p5_g28_required_gate_names`;
+- the P5-G28 contract gates retained bytes under byte cap, real eviction,
+  orphan payload bytes, stale manifest records, hot-pair retention, evicted-pair
+  cache miss, `single_entry_over_cap_count`, prune p95, event-loop p95, and
+  event-loop gaps over 500 ms;
+- the underlying tile retention probe now records `eviction_reason_counts`,
+  `byte_limit_eviction_count`, and `single_entry_over_cap_count` so the gate can
+  distinguish healthy eviction from a single entry that exceeds the configured
+  cap by itself.
+
+Validation evidence:
+
+- `python -m py_compile scripts\benchmark_workbench_gui_hotpath.py
+  tests\unit\scripts\test_benchmark_workbench_gui_hotpath.py`;
+- `tests/unit/scripts/test_benchmark_workbench_gui_hotpath.py` passed with
+  `34 passed`;
+- a small CLI smoke run wrote `tmp\p5_g28_cache_plateau_smoke.json` with
+  `status=passed`, `benchmark_id=p5_g28_cache_plateau_soak`,
+  all P5-G28 required gates passing, retained bytes below byte cap, real
+  byte-limit eviction, and `single_entry_over_cap_count=0`.
+
+Self-review findings:
+
+- This is a contract seed, not the complete P5-G28 roadmap scope. It proves tile
+  cache lifecycle plateau and cleanup, but it does not yet cover DisplayList,
+  DXF index, overlay cache, visual asset manifests, or spool namespace retained
+  bytes.
+- The P5-G28 payload is intentionally not routed into customer closeout or
+  P5-G30 yet. That should wait until standalone final-audit validation exists.
+
+Next slice:
+
+1. Add P5-G28 final-audit validation for the new cache plateau JSON.
+2. Extend P5-G28 evidence beyond tile cache to DisplayList/DXF cache retained
+   bytes and eviction counters.
+3. Route P5-G28 through prepare/inventory/closeout only after the standalone
+   audit gate can reject incomplete or synthetic-only payloads.
+
+## 37. 2026-05-28 P5-G28 Standalone Final-Audit Validation
+
+This slice turns the P5-G28 cache plateau seed into an independently auditable
+artifact without yet promoting it into closeout generation or the P5-G30
+composite release gate.
+
+Implemented behavior:
+
+- `audit_drawing_compare_mvp_exit.py` now accepts repeatable
+  `--p5-g28-cache-plateau-json` / `--p5-g28-cache-plateau-soak` inputs and
+  `--require-p5-g28-cache-plateau-soak`;
+- the audit discovers `p5_g28_cache_plateau_soak.json` from explicit paths,
+  release/customer manifest references, validation-summary benchmark/output
+  fields, and result-dir siblings;
+- `p5_g28_cache_plateau_soak` validates schema/profile/status,
+  `p5_g28_contract`, declared `p5_g28_required_gate_names`, and every required
+  gate result;
+- the benchmark contract now includes and gates
+  `p5_g28_tile_cache_eviction_reason_present`, requiring at least one
+  `byte_limit` eviction reason instead of accepting eviction counts/bytes alone.
+
+Validation evidence:
+
+- focused P5-G28 benchmark and MVP exit audit regressions passed with
+  `161 passed`;
+- the focused tests cover required/missing P5-G28 evidence, result-dir sibling
+  discovery, missing byte-limit eviction reason rejection, and `main()` output
+  metadata for `benchmark_id`, `profile`, `p5_g28_evidence`,
+  `p5_g28_contract`, and `p5_g28_required_gate_names`.
+
+Self-review findings:
+
+- A read-only multi-agent review found that eviction reason counts were emitted
+  only as evidence and not as a required gate. The slice fixed that by adding a
+  dedicated `byte_limit` reason gate to the benchmark and audit.
+- P5-G28 remains a tile-cache lifecycle seed. It still does not prove
+  DisplayList, DXF index, visual asset, overlay cache, spool namespace, or
+  repeated plateau-slope behavior.
+- The gate is intentionally standalone. Customer-grade audits do not require
+  P5-G28 by default until prepare/inventory/closeout routing and P5-G30 policy
+  are designed.
+
+Next slice:
+
+1. Add P5-G28 prepare/inventory summarization so customer manifests can carry
+   cache plateau refs and issues.
+2. Route explicit P5-G28 JSON through release/closeout/readiness plans without
+   auto-generation first.
+3. Extend P5-G28 beyond tile retention into DisplayList/DXF/visual/spool cache
+   plateau evidence before deciding whether to add it to P5-G30.
+
+## 38. 2026-05-28 P5-G28 Prepare/Inventory Evidence Routing
+
+This slice routes standalone P5-G28 cache plateau artifacts through the customer
+evidence preparation and inventory tools without changing the default P5-G30
+policy. P5-G28 remains advisory by default, but every supplied or discovered
+artifact must pass the strict standalone contract when it is provided or
+required.
+
+Implemented behavior:
+
+- `prepare_drawing_compare_customer_evidence.py` accepts repeatable
+  `--p5-g28-cache-plateau-json` / `--p5-g28-cache-plateau-soak` inputs;
+- prepared manifests now record `artifacts.p5_g28_cache_plateau_json`,
+  `artifacts.p5_g28_cache_plateau_jsons`, and
+  `performance_benchmarks.p5_g28_cache_plateau` so the final audit can discover
+  cache plateau evidence from the manifest;
+- prepare provenance hashes include each supplied P5-G28 JSON under
+  `p5_g28_cache_plateau_<n>`;
+- the prepare summary validates schema/profile/status, `p5_g28_contract`,
+  declared `p5_g28_required_gate_names`, all required gates, byte-limit eviction
+  reasons, retained-byte cap, eviction bytes/counts, orphan/stale payload counts,
+  prune p95, event-loop p95, and over-500 ms event-loop gaps;
+- P5-G28 remains `required_for_customer_grade=false`; missing P5-G28 evidence
+  does not make a customer-grade manifest incomplete, but supplied failing
+  evidence does;
+- `inventory_drawing_compare_customer_evidence.py` discovers
+  `p5_g28_cache_plateau_soak.json`, summarizes pass/fail diagnostics, reports
+  candidate/pass/fail counts, and adds `--p5-g28-cache-plateau-json` to
+  recommended prepare/final-audit commands only when an artifact is found;
+- inventory does not add `--require-p5-g28-cache-plateau-soak` to default
+  recommendations, preserving the standalone/advisory policy until closeout
+  routing or P5-G30 policy explicitly changes.
+
+Validation evidence:
+
+- `python -m py_compile` passed for prepare/inventory scripts and their focused
+  unit tests;
+- focused prepare P5-G28 regressions pass, including missing eviction reason and
+  mixed pass/fail artifact rejection;
+- focused inventory regressions pass, including no-artifact defaults, discovered
+  optional flags, and failed-artifact diagnostics;
+- a constant sync smoke check confirms prepare, inventory, final audit, and the
+  benchmark all expose the same then-current P5-G28 required gate names including
+  `p5_g28_tile_cache_eviction_reason_present`;
+- a read-only worker implemented inventory routing and another review pass was
+  requested for the combined prepare/inventory policy surface.
+
+Self-review findings:
+
+- P5-G28 still covers only the tile-cache lifecycle seed. It does not yet prove
+  DisplayList, DXF index, visual asset, overlay cache, spool namespace, or
+  repeated plateau-slope behavior.
+- The routing intentionally avoids changing `customer_grade` auto-requirement
+  and avoids adding P5-G28 to `P5_G30_REQUIRED_CHECKS`.
+- Prepare was tightened so multiple supplied P5-G28 artifacts require every
+  supplied artifact to pass; one passing artifact no longer masks a failing one.
+
+Next slice:
+
+1. Route explicit P5-G28 JSON through release/closeout/readiness plans without
+   automatic generation.
+2. Add closeout/readiness invariants so a planned P5-G28 artifact is required
+   only inside that plan, not globally for customer-grade audits.
+3. Broaden P5-G28 retained-byte and eviction evidence beyond the tile cache to
+   DisplayList, DXF index, visual assets, overlays, and spool namespaces before
+   considering P5-G30 promotion.
+
+## 39. 2026-05-28 P5-G28 Closeout/Readiness/Release Routing
+
+This slice finishes explicit P5-G28 cache-plateau routing through the closeout
+planner and release guidance without promoting P5-G28 into default
+customer-grade or P5-G30 policy. P5-G28 remains advisory unless an operator
+supplies an existing `p5_g28_cache_plateau_soak.json`.
+
+Later update: Section 43 extends this explicit-only routing into closeout-owned
+P5-G28 generation from repeated validation summaries or dedicated lifecycle
+validation manifests while keeping P5-G28 advisory.
+
+Implemented behavior:
+
+- `closeout_drawing_compare_customer_evidence.py` accepts repeatable
+  `--p5-g28-cache-plateau-json` / `--p5-g28-cache-plateau-soak` inputs;
+- closeout plans record `p5_g28_cache_plateau_jsons` and forward planned JSONs
+  to the final manifest preparation step and the final customer-grade audit;
+- the seed manifest step intentionally receives no P5-G28 inputs, preserving
+  the seed-before-generated-benchmark ordering used by P5-G16/P5-G22/P5-G27;
+- the final audit command adds `--require-p5-g28-cache-plateau-soak` only when
+  the plan explicitly contains P5-G28 cache-plateau JSONs;
+- closeout readiness reports expose
+  `routing_expectations.p5_g28_cache_plateau_explicit_json_count` and
+  `routing_expectations.p5_g28_cache_plateau_planned_json_count`;
+- `audit_closeout_readiness.py` validates that final prepare and final audit
+  P5-G28 JSON arguments exactly match `plan.p5_g28_cache_plateau_jsons`;
+- readiness invariants now include
+  `final_audit_p5_g28_cache_plateau_jsons_equal_plan=true` and
+  `final_audit_p5_g28_cache_plateau_require_matches_plan=true`;
+- release packaging accepts the same explicit P5-G28 JSON flags, records the
+  artifact refs in `release_manifest.json`, and forwards the JSON to the MVP
+  exit audit without adding a global require flag;
+- release README, prompt-to-artifact checklist, and closeout packet guidance
+  now describe P5-G28 as optional explicit evidence and state that it is not a
+  default customer-grade/P5-G30 blocker.
+
+Validation evidence:
+
+- `python -m py_compile` passed for the affected closeout, readiness, release,
+  prepare, inventory, final-audit scripts and their focused tests;
+- focused closeout/readiness/release regressions passed: `55 passed`;
+- full P5-G28 affected propagation regressions passed: `272 passed`;
+- `git diff --check` passed;
+- `python scripts\cad_policy_gate.py` passed.
+
+Multi-agent/self-review findings:
+
+- A read-only multi-agent review found that readiness audit initially rejected
+  missing `--require-p5-g28-cache-plateau-soak` for unplanned P5-G28 but did not
+  reject stray unplanned `--p5-g28-cache-plateau-json` values. The slice fixed
+  this by making prepare/final-audit P5-G28 JSON values always equal the plan,
+  including the empty-plan case.
+- Focused negative coverage now mutates a dry-run plan with unplanned P5-G28
+  JSONs in final prepare/final audit and verifies readiness audit failure.
+- P5-G28 remains outside `P5_G30_REQUIRED_CHECKS`. Explicit release CLI
+  forwarding is validation-only; closeout is the only path that adds the
+  require flag, and only inside a plan with explicit P5-G28 JSONs.
+
+Next slice:
+
+1. Broaden P5-G28 evidence beyond the current tile-cache lifecycle seed to
+   DisplayList cache, DXF index cache, visual asset cache, overlay payloads, and
+   spool namespaces.
+2. Add repeated-run plateau slope metrics and retained-byte category breakdowns
+   before considering any P5-G30 promotion.
+3. Keep P5-G28 advisory until the broader cache plateau contract can prove
+   bounded memory/resource behavior across drawing open/close and selected-zone
+   render lifecycles.
+
+## 40. 2026-05-28 P5-G28 Category-Level Cache Plateau Contract
+
+This slice broadens P5-G28 beyond the initial tile-cache lifecycle seed. It
+still remains standalone/advisory, but the P5-G28 artifact now has to prove
+bounded cache behavior across the cache namespaces most likely to cause repeated
+open/close and selected-zone render slowdowns.
+
+Implemented behavior:
+
+- `benchmark_workbench_gui_hotpath.py --include-p5-g28-cache-plateau` now emits
+  `p5_tile_retention_probe.cache_category_breakdown` for five cache namespaces:
+  `display_list`, `dxf_index`, `visual_asset`, `overlay`, and `spool`;
+- each category records retained bytes, byte limit, retained entry count,
+  evicted entry count, evicted estimated bytes, orphan bytes/count, stale entry
+  count, and tail retained-byte slope;
+- the P5-G28 contract now includes category totals and booleans for
+  `cache_category_breakdown_present`, per-category plateau results,
+  `cache_category_orphans_zero`, `cache_category_stale_entries_zero`, and
+  `cache_plateau_tail_slope_ok`;
+- P5-G28 required gates now include category-level gates:
+  `p5_g28_cache_category_breakdown_present`,
+  `p5_g28_display_list_cache_plateau`,
+  `p5_g28_dxf_index_cache_plateau`,
+  `p5_g28_visual_asset_cache_plateau`,
+  `p5_g28_overlay_cache_plateau`,
+  `p5_g28_spool_namespace_plateau`,
+  `p5_g28_cache_category_orphans_zero`,
+  `p5_g28_cache_category_stale_entries_zero`, and
+  `p5_g28_cache_plateau_tail_slope`;
+- final MVP audit, prepare, and inventory strict validators now reject supplied
+  P5-G28 artifacts when category breakdowns are missing, over budget, unevicted,
+  orphaned, stale, or still growing in the tail sample;
+- prepare/inventory summaries expose category totals so advisory P5-G28 evidence
+  is inspectable without making it a customer-grade or P5-G30 blocker.
+
+Validation evidence:
+
+- `python -m py_compile` passed for the affected benchmark, audit, prepare,
+  inventory scripts and tests;
+- focused category-breakdown negative tests passed for final audit, prepare, and
+  inventory;
+- P5-G28 benchmark/audit/prepare/inventory focused suites passed with
+  `250 passed`;
+- a CLI smoke run wrote `tmp\p5_g28_category_smoke.json` with `status=passed`,
+  21 required P5-G28 gates, category breakdown present, 20 category evictions,
+  zero tail retained-byte slope, and no failed gates.
+
+Self-review findings:
+
+- The category probe is still a bounded synthetic namespace probe. It proves the
+  P5-G28 contract can carry and reject category-level retained-byte evidence,
+  but it does not yet sample live DisplayList/PyMuPDF object memory, actual DXF
+  index heap usage, or real GUI overlay model retention.
+- P5-G28 remains intentionally outside default customer-grade/P5-G30 policy.
+  Promotion should wait until the category probe is backed by real workbench
+  runtime sampling, not just deterministic file-backed namespaces.
+
+Next slice:
+
+1. Tie the P5-G28 category breakdown to live runtime counters where available:
+   DisplayList cache object counts, DXF index cache entries, visual asset cache
+   keys, overlay model payload counts, and spool directory bytes.
+2. Add repeated open/run/close soak evidence so plateau slope is measured across
+   lifecycle repetitions, not only within one synthetic namespace write loop.
+3. Re-run closeout/readiness/release propagation after the real-counter slice to
+   decide whether P5-G28 can remain advisory or should become a later composite
+   blocker.
+
+## 41. 2026-05-28 P5-G28 Live Validation Counter Bridge
+
+This slice starts replacing purely synthetic P5-G28 category evidence with
+runtime evidence already emitted by validation and viewer telemetry. P5-G28 is
+still advisory unless explicitly supplied, but supplied live-counter evidence is
+now strict: invalid retained-byte counters make the P5-G28 artifact fail.
+
+Implemented behavior:
+
+- `benchmark_workbench_gui_hotpath.py --include-p5-g28-cache-plateau` accepts
+  repeatable `--p5-g28-validation-summary` inputs;
+- the P5-G28 contract now includes `live_cache_counters` when validation
+  summaries are supplied;
+- live counter mapping currently normalizes:
+  `pdf_display_list_cache_max_total_bytes` /
+  `pdf_display_list_cache_total_estimated_bytes`,
+  `dxf_index_cache_max_total_bytes` /
+  `dxf_index_cache_total_estimated_bytes`,
+  `overlay_cache_max_total_bytes`, and
+  `runtime_budget.peak_disk_spool_mb`;
+- the reader accepts UTF-8 with BOM so Windows-generated JSON summaries remain
+  usable in the evidence path;
+- optional gates `p5_g28_live_cache_counters_present` and
+  `p5_g28_live_cache_counters_within_limits` are emitted only when live
+  summaries are supplied, leaving the 21 required P5-G28 gates unchanged;
+- final audit, prepare, and inventory reject supplied P5-G28 JSON when
+  `live_cache_counters` reports unreadable summaries, zero recognized counters,
+  negative counters, or retained bytes above a declared byte limit.
+
+Validation evidence:
+
+- focused live-counter regression tests passed for benchmark, final audit,
+  prepare, and inventory;
+- affected P5-G28/closeout/release propagation suite passed with `314 passed`;
+- CLI smoke with `--p5-g28-validation-summary` produced
+  `tmp\p5_g28_live_counter_smoke.json` with `status=passed`, four observed live
+  categories, live counters within limits, and no failed gates;
+- `python -m py_compile` passed for the affected scripts and tests.
+
+Self-review findings:
+
+- This bridge consumes existing validation/viewer summary counters. It still
+  does not sample PyMuPDF native DisplayList allocations directly and does not
+  yet model visual asset cache memory because visual assets are manifest-backed
+  rather than a single runtime cache object.
+- P5-G28 should stay advisory until repeated open/run/close evidence proves the
+  same counters plateau across lifecycle repetitions, not only within one
+  benchmark artifact.
+
+Next slice:
+
+1. Add an actual repeated open/run/close soak wrapper that feeds multiple
+   validation summaries into the live-counter bridge and records tail slope.
+2. Add stronger visual-asset retention evidence by measuring manifest-backed
+   visual asset bytes and stale identity keys.
+3. Promote only the optional live-counter gates after production-corpus evidence
+   shows stable retained bytes across repeated Workbench sessions.
+
+## 42. 2026-05-28 P5-G28 Repeated Live Counter Tail Slope
+
+This slice makes the P5-G28 live-counter bridge useful for repeated lifecycle
+evidence instead of only one validation summary. The benchmark can now compare
+the last two supplied validation summaries and reject retained live cache bytes
+that continue growing after the tail sample.
+
+Implemented behavior:
+
+- `--p5-g28-validation-summary` remains repeatable and each recognized live
+  cache category now records per-source samples;
+- `--p5-g28-live-counter-min-sources` enforces the minimum number of readable
+  validation summaries needed for repeated evidence;
+- `--p5-g28-live-counter-tail-slope-target-bytes` defines the allowed retained
+  byte growth between the last two readable samples, defaulting to zero;
+- the P5-G28 contract emits `tail_slope_ok`,
+  `tail_slope_max_bytes_per_run`, `tail_slope_target_bytes_per_run`, and
+  `tail_slope_invalid_category_count` for live counters;
+- optional gate `p5_g28_live_cache_counters_tail_slope` is emitted only when
+  live summaries are supplied, so the required P5-G28 gate set stays at 21;
+- final audit, prepare, and inventory now reject supplied P5-G28 artifacts when
+  live-counter source counts are below the declared minimum or repeated samples
+  show growing retained bytes.
+
+Validation evidence:
+
+- `python -m py_compile` passed for the affected benchmark, audit, prepare,
+  inventory scripts and tests;
+- focused tail-slope/min-source tests passed with `7 passed`;
+- CLI smoke wrote `tmp\p5_g28_live_counter_tail_smoke.json` with
+  `status=passed`, two readable live sources, four observed live categories,
+  tail slope max `0`, and no failed gates;
+- affected benchmark/audit/prepare/inventory/closeout/release suite passed with
+  `317 passed`;
+- `git diff --check` and `python scripts\cad_policy_gate.py` passed;
+- P5-G28 required gate count remains synchronized at 21 across benchmark,
+  audit, prepare, and inventory, and the live tail-slope gate remains optional.
+
+Self-review findings:
+
+- This step verifies repeated summaries supplied to the benchmark; it does not
+  yet launch and close the Workbench by itself to produce those summaries.
+- Visual asset retention is still only partially represented because current
+  live validation summaries do not expose a single visual-asset runtime cache
+  counter.
+- The source-count gate prevents one-summary evidence from masquerading as a
+  repeated plateau proof, but production promotion still needs a real lifecycle
+  wrapper over customer-size documents.
+
+Next slice:
+
+1. Add the actual open/run/close wrapper that generates multiple validation
+   summaries and feeds them into this tail-slope contract automatically.
+2. Add manifest-backed visual asset retained-byte and stale-key measurements to
+   close the remaining category gap.
+3. Re-run closeout/readiness/release propagation after the wrapper exists, then
+   decide whether P5-G28 stays advisory or becomes part of a later composite
+   customer performance gate.
+
+## 43. 2026-05-28 P5-G28 Closeout Lifecycle Wrapper
+
+This slice connects the repeated P5-G28 live-counter tail-slope contract to the
+customer closeout runner. It is a closeout lifecycle wrapper over validation
+runs, not yet an interactive Workbench open/close automation.
+
+Implemented behavior:
+
+- `closeout_drawing_compare_customer_evidence.py` can generate
+  `p5_g28_cache_plateau_soak.json` when there are at least
+  `--p5-g28-live-counter-min-sources` validation summaries;
+- if `--p5-g28-cache-plateau-validation-manifest <manifest>` is supplied, the
+  closeout runner repeats that manifest `--p5-g28-cache-plateau-runs` times and
+  feeds only those lifecycle summaries to the P5-G28 benchmark;
+- generated lifecycle output directories use
+  `p5_g28_cache_plateau_lifecycle_<manifest>_<run>` names and are deliberately
+  excluded from final audit `--results-dir` so the customer corpus remains the
+  approved standard result set;
+- the generated P5-G28 benchmark command passes
+  `--include-p5-g28-cache-plateau`, all selected `--p5-g28-validation-summary`
+  paths, `--p5-g28-live-counter-min-sources`, and
+  `--p5-g28-live-counter-tail-slope-target-bytes`;
+- final manifest preparation and final audit receive the same planned/generated
+  P5-G28 JSON list, and the final audit requires P5-G28 only when the plan
+  actually carries P5-G28 evidence;
+- `audit_closeout_readiness.py` now validates generated P5-G28 benchmark
+  commands, lifecycle validation outputs, summary lists, min-source/tail-slope
+  arguments, and lifecycle-dir exclusion from final audit results.
+
+Validation evidence:
+
+- focused closeout/readiness lifecycle regressions passed for generated P5-G28
+  from standard summaries, dedicated lifecycle validation manifests, lifecycle
+  dir exclusion, generated-route inclusion, lifecycle summary derivation,
+  summary mismatch rejection, min-source mismatch rejection, min-source count
+  rejection, tail-slope mismatch rejection, and P5-G28-only plan ordering;
+- `python -m py_compile` passed for the affected closeout/readiness scripts and
+  their focused tests during implementation and final verification;
+- affected benchmark/audit/prepare/inventory/closeout/release regressions passed
+  with `329 passed`;
+- a CLI dry-run/readiness smoke passed with a P5-G28 lifecycle manifest, two
+  lifecycle validation runs, generated `p5_g28_cache_plateau_soak.json`, and
+  final audit `--results-dir` limited to the standard corpus;
+- `git diff --check` and `python scripts\cad_policy_gate.py` passed;
+- release README, prompt-to-artifact checklist, and closeout packet guidance now
+  describe supplied and generated P5-G28 evidence, lifecycle manifest/runs,
+  min-source and tail-slope flags, and support-artifact retention.
+
+Self-review findings:
+
+- This completes the closeout orchestration wrapper needed by the previous
+  tail-slope contract, but it still uses validator runs as the lifecycle source.
+  It does not yet launch the interactive GUI, open documents, close the viewer,
+  and resample retained native resources inside one Workbench process.
+- A CLI smoke and multi-agent review exposed that the readiness audit initially
+  treated P5-G28-only generation as seed-manifest-dependent and did not prove
+  generated JSON inclusion, lifecycle summary derivation, or min-source counts.
+  Those gaps are now locked with negative tests.
+- Visual asset retained-byte evidence remains weaker than DisplayList/DXF/tile
+  evidence because visual assets are still measured through manifest-backed
+  outputs instead of a dedicated live runtime cache counter.
+- P5-G28 remains advisory/non-P5-G30. The readiness audit can prove routing
+  correctness, but production promotion still needs customer-size lifecycle
+  evidence with stable retained bytes and no stale visual asset identity keys.
+
+Next slice:
+
+1. Add manifest-backed visual asset retained-byte and stale-key measurements so
+   P5-G28 covers generated PDF/viewer asset growth with the same rigor as tile
+   and DisplayList evidence.
+2. Add or script an interactive Workbench open/close lifecycle probe once the
+   validation-wrapper evidence is stable enough to compare against.
+3. Re-run the full affected closeout/release/readiness suite and static gates
+   before considering P5-G28 promotion beyond advisory evidence.

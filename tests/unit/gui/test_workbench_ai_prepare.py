@@ -20,6 +20,7 @@ and a getattr-guarded windowTitle() / hasattr() check.
 
 from __future__ import annotations
 
+import importlib
 import sys
 import threading
 import time
@@ -41,16 +42,25 @@ for _name in (
     "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQml",
 ):
     if _name not in sys.modules:
-        sys.modules[_name] = MagicMock()
-        _mocked_modules.append(_name)
+        try:
+            importlib.import_module(_name)
+        except ImportError:
+            sys.modules[_name] = MagicMock()
+            _mocked_modules.append(_name)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _restore_pyside6_after_module():
     """Pop the MagicMock entries this file installed."""
     yield
-    for name in _mocked_modules:
-        sys.modules.pop(name, None)
+    if _mocked_modules:
+        for name in (
+            "src.gui.drawing_compare_workbench",
+            "src.gui.lightweight_viewport",
+        ):
+            sys.modules.pop(name, None)
+        for name in _mocked_modules:
+            sys.modules.pop(name, None)
 
 
 # ---------------------------------------------------------------------------
@@ -176,15 +186,14 @@ def test_kickoff_sets_status_text_and_starts_thread(tmp_path,
 
     # Stub QTimer.singleShot so the poll doesn't actually fire
     captured_calls = []
-    qt_core_mock = sys.modules["PySide6.QtCore"]
-    qt_core_mock.QTimer = MagicMock()
-    qt_core_mock.QTimer.singleShot = lambda ms, fn: captured_calls.append(
+    qtimer_mock = MagicMock()
+    qtimer_mock.singleShot = lambda ms, fn: captured_calls.append(
         (ms, fn)
     )
 
     # Patch QTimer reference in the workbench module (it imports at top)
     import src.gui.drawing_compare_workbench as wb
-    monkeypatch.setattr(wb, "QTimer", qt_core_mock.QTimer)
+    monkeypatch.setattr(wb, "QTimer", qtimer_mock)
 
     method = _bind_workbench_method("_kickoff_ai_prepare_v2", stub)
     method()
@@ -212,10 +221,9 @@ def test_kickoff_skips_when_use_embedding_false(monkeypatch) -> None:
 
     stub = _toy_workbench_stub()
     stub._load_ai_config_v2 = disabled_cfg.__get__(stub)
-    qt_core_mock = sys.modules["PySide6.QtCore"]
-    qt_core_mock.QTimer = MagicMock()
+    qtimer_mock = MagicMock()
     import src.gui.drawing_compare_workbench as wb
-    monkeypatch.setattr(wb, "QTimer", qt_core_mock.QTimer)
+    monkeypatch.setattr(wb, "QTimer", qtimer_mock)
 
     method = _bind_workbench_method("_kickoff_ai_prepare_v2", stub)
     method()
@@ -248,10 +256,9 @@ def test_kickoff_no_op_when_dispatcher_already_ready(tmp_path,
 
     stub = _toy_workbench_stub()
     stub._load_ai_config_v2 = cfg.__get__(stub)
-    qt_core_mock = sys.modules["PySide6.QtCore"]
-    qt_core_mock.QTimer = MagicMock()
+    qtimer_mock = MagicMock()
     import src.gui.drawing_compare_workbench as wb
-    monkeypatch.setattr(wb, "QTimer", qt_core_mock.QTimer)
+    monkeypatch.setattr(wb, "QTimer", qtimer_mock)
 
     method = _bind_workbench_method("_kickoff_ai_prepare_v2", stub)
     method()
@@ -368,10 +375,9 @@ def test_kickoff_swallows_setText_runtime_error(monkeypatch, tmp_path) -> None:
 
     stub = _toy_workbench_stub(status_label_alive=False)  # setText raises
     stub._load_ai_config_v2 = cfg.__get__(stub)
-    qt_core_mock = sys.modules["PySide6.QtCore"]
-    qt_core_mock.QTimer = MagicMock()
+    qtimer_mock = MagicMock()
     import src.gui.drawing_compare_workbench as wb
-    monkeypatch.setattr(wb, "QTimer", qt_core_mock.QTimer)
+    monkeypatch.setattr(wb, "QTimer", qtimer_mock)
 
     method = _bind_workbench_method("_kickoff_ai_prepare_v2", stub)
     method()  # no crash

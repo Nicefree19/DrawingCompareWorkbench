@@ -107,6 +107,38 @@ P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES = (
     "p5_g27_real_renderer_bridge_zone_images_present",
     "p5_g27_real_renderer_bridge_fallback_reasons",
 )
+P5_G28_BENCHMARK_ID = "p5_g28_cache_plateau_soak"
+P5_G28_PROFILE = "tile_cache_plateau_lifecycle_seed"
+P5_G28_CACHE_CATEGORY_NAMES = (
+    "display_list",
+    "dxf_index",
+    "visual_asset",
+    "overlay",
+    "spool",
+)
+P5_G28_REQUIRED_GATE_NAMES = (
+    "p5_g28_tile_retention_completed",
+    "p5_g28_tile_cache_byte_plateau",
+    "p5_g28_tile_cache_eviction_observed",
+    "p5_g28_tile_cache_eviction_reason_present",
+    "p5_g28_tile_cache_orphan_payloads_zero",
+    "p5_g28_tile_cache_stale_manifest_zero",
+    "p5_g28_hot_pair_retained",
+    "p5_g28_evicted_pair_cache_miss",
+    "p5_g28_single_entry_over_cap_count",
+    "p5_g28_prune_p95_ms",
+    "p5_g28_event_loop_gap_p95_ms",
+    "p5_g28_event_loop_over_500ms_count",
+    "p5_g28_cache_category_breakdown_present",
+    "p5_g28_display_list_cache_plateau",
+    "p5_g28_dxf_index_cache_plateau",
+    "p5_g28_visual_asset_cache_plateau",
+    "p5_g28_overlay_cache_plateau",
+    "p5_g28_spool_namespace_plateau",
+    "p5_g28_cache_category_orphans_zero",
+    "p5_g28_cache_category_stale_entries_zero",
+    "p5_g28_cache_plateau_tail_slope",
+)
 
 
 @dataclass
@@ -796,6 +828,793 @@ def _p5_g27_real_renderer_bridge_gates(bridge: dict[str, Any]) -> list[GateResul
             "The bridged real renderer replay must not contain fallback events without reason codes.",
         ),
     ]
+
+
+def _read_json_dict(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _p5_g28_counter_paths(args: argparse.Namespace) -> list[Path]:
+    paths = getattr(args, "p5_g28_validation_summary", None) or []
+    return [Path(path) for path in paths]
+
+
+def _p5_g28_counter_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for candidate in (
+        payload,
+        payload.get("summary"),
+        _nested_dict(payload, "summary", "viewer_perf_summary"),
+        payload.get("viewer_perf_summary"),
+    ):
+        if isinstance(candidate, dict) and candidate not in blocks:
+            blocks.append(candidate)
+    return blocks
+
+
+def _p5_g28_counter_observation(
+    block: dict[str, Any],
+    *,
+    retained_keys: Sequence[str],
+    limit_keys: Sequence[str],
+    eviction_keys: Sequence[str] = (),
+    evicted_byte_keys: Sequence[str] = (),
+) -> dict[str, Any]:
+    keys = tuple(retained_keys) + tuple(limit_keys) + tuple(eviction_keys) + tuple(evicted_byte_keys)
+    observed = any(key in block for key in keys)
+    return {
+        "observed": bool(observed),
+        "retained_bytes": max(
+            (_as_int(block.get(key)) for key in retained_keys if key in block),
+            default=0,
+        ),
+        "byte_limit": max(
+            (_as_int(block.get(key)) for key in limit_keys if key in block),
+            default=0,
+        ),
+        "eviction_count": max(
+            (_as_int(block.get(key)) for key in eviction_keys if key in block),
+            default=0,
+        ),
+        "evicted_estimated_bytes": max(
+            (_as_int(block.get(key)) for key in evicted_byte_keys if key in block),
+            default=0,
+        ),
+    }
+
+
+def _empty_p5_g28_live_categories() -> dict[str, dict[str, Any]]:
+    return {
+        category: {
+            "observed": False,
+            "source_count": 0,
+            "sample_count": 0,
+            "samples": [],
+            "retained_bytes": 0,
+            "byte_limit": 0,
+            "eviction_count": 0,
+            "evicted_estimated_bytes": 0,
+            "tail_slope_bytes_per_run": 0,
+            "tail_slope_target_bytes_per_run": 0,
+            "tail_slope_ok": True,
+            "within_limit": True,
+            "has_negative_counter": False,
+        }
+        for category in P5_G28_CACHE_CATEGORY_NAMES
+    }
+
+
+def _merge_p5_g28_live_category(target: dict[str, Any], observation: dict[str, Any]) -> None:
+    retained = _as_int(observation.get("retained_bytes"))
+    limit = _as_int(observation.get("byte_limit"))
+    eviction_count = _as_int(observation.get("eviction_count"))
+    evicted_bytes = _as_int(observation.get("evicted_estimated_bytes"))
+    if retained < 0 or limit < 0 or eviction_count < 0 or evicted_bytes < 0:
+        target["has_negative_counter"] = True
+    if observation.get("within_limit") is False:
+        target["within_limit"] = False
+    first_observation = target.get("observed") is not True
+    target["observed"] = True
+    if first_observation:
+        target["retained_bytes"] = retained
+        target["byte_limit"] = limit
+        target["eviction_count"] = eviction_count
+        target["evicted_estimated_bytes"] = evicted_bytes
+    else:
+        target["retained_bytes"] = max(_as_int(target.get("retained_bytes")), retained)
+        target["byte_limit"] = max(_as_int(target.get("byte_limit")), limit)
+        target["eviction_count"] = max(
+            _as_int(target.get("eviction_count")),
+            _as_int(observation.get("eviction_count")),
+        )
+        target["evicted_estimated_bytes"] = max(
+            _as_int(target.get("evicted_estimated_bytes")),
+            _as_int(observation.get("evicted_estimated_bytes")),
+        )
+    if limit > 0 and retained > limit:
+        target["within_limit"] = False
+
+
+def _p5_g28_live_source_categories(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    categories = _empty_p5_g28_live_categories()
+    for block in _p5_g28_counter_blocks(payload):
+        observations = {
+            "display_list": _p5_g28_counter_observation(
+                block,
+                retained_keys=(
+                    "pdf_display_list_cache_max_total_bytes",
+                    "pdf_display_list_cache_total_estimated_bytes",
+                ),
+                limit_keys=("pdf_display_list_cache_byte_limit",),
+                eviction_keys=("pdf_display_list_cache_eviction_count",),
+                evicted_byte_keys=("pdf_display_list_cache_evicted_estimated_bytes",),
+            ),
+            "dxf_index": _p5_g28_counter_observation(
+                block,
+                retained_keys=(
+                    "dxf_index_cache_max_total_bytes",
+                    "dxf_index_cache_total_estimated_bytes",
+                ),
+                limit_keys=("dxf_index_cache_byte_limit",),
+                eviction_keys=("dxf_index_cache_eviction_count",),
+                evicted_byte_keys=("dxf_index_cache_evicted_estimated_bytes",),
+            ),
+            "overlay": _p5_g28_counter_observation(
+                block,
+                retained_keys=(
+                    "overlay_cache_max_total_bytes",
+                    "overlay_cache_total_estimated_bytes",
+                ),
+                limit_keys=("overlay_cache_byte_limit",),
+                eviction_keys=("overlay_cache_eviction_count",),
+            ),
+        }
+        for category, observation in observations.items():
+            if observation["observed"]:
+                _merge_p5_g28_live_category(categories[category], observation)
+
+    runtime_budget = payload.get("runtime_budget")
+    if not isinstance(runtime_budget, dict):
+        runtime_budget = _nested_dict(payload, "summary", "runtime_budget")
+    if isinstance(runtime_budget, dict) and "peak_disk_spool_mb" in runtime_budget:
+        retained_bytes = int(_as_float(runtime_budget.get("peak_disk_spool_mb")) * 1024 * 1024)
+        limit_mb = max(
+            (
+                _as_float(runtime_budget.get(key))
+                for key in (
+                    "max_peak_disk_spool_mb",
+                    "disk_spool_limit_mb",
+                    "peak_disk_spool_limit_mb",
+                )
+                if key in runtime_budget
+            ),
+            default=0.0,
+        )
+        _merge_p5_g28_live_category(
+            categories["spool"],
+            {
+                "observed": True,
+                "retained_bytes": retained_bytes,
+                "byte_limit": int(limit_mb * 1024 * 1024) if limit_mb > 0 else 0,
+                "eviction_count": 0,
+                "evicted_estimated_bytes": 0,
+            },
+        )
+
+    viewer_manifest = payload.get("viewer_manifest")
+    if not isinstance(viewer_manifest, dict):
+        viewer_manifest = _nested_dict(payload, "summary", "viewer_manifest")
+    if isinstance(viewer_manifest, dict) and "visual_asset_manifest_count" in viewer_manifest:
+        _merge_p5_g28_live_category(
+            categories["visual_asset"],
+            {
+                "observed": True,
+                "retained_bytes": 0,
+                "byte_limit": 0,
+                "eviction_count": 0,
+                "evicted_estimated_bytes": 0,
+            },
+        )
+    return categories
+
+
+def _append_p5_g28_live_sample(
+    target: dict[str, Any],
+    *,
+    source_index: int,
+    source_path: Path,
+    observation: dict[str, Any],
+) -> None:
+    samples = target.get("samples")
+    if not isinstance(samples, list):
+        samples = []
+        target["samples"] = samples
+    retained = _as_int(observation.get("retained_bytes"))
+    limit = _as_int(observation.get("byte_limit"))
+    sample = {
+        "source_index": int(source_index),
+        "path": str(source_path),
+        "retained_bytes": int(retained),
+        "byte_limit": int(limit),
+        "within_limit": bool(limit <= 0 or retained <= limit),
+    }
+    samples.append(sample)
+    target["sample_count"] = len(samples)
+
+
+def _finalize_p5_g28_live_counter_slopes(
+    categories: dict[str, dict[str, Any]],
+    *,
+    target_bytes_per_run: int,
+) -> tuple[bool, int, int]:
+    target_bytes_per_run = max(0, int(target_bytes_per_run))
+    max_slope = 0
+    invalid_category_count = 0
+    for item in categories.values():
+        item["tail_slope_target_bytes_per_run"] = target_bytes_per_run
+        samples = item.get("samples") if isinstance(item.get("samples"), list) else []
+        item["sample_count"] = len(samples)
+        if len(samples) < 2:
+            item["tail_slope_bytes_per_run"] = 0
+            item["tail_slope_ok"] = True
+            continue
+        previous = samples[-2]
+        current = samples[-1]
+        span = max(
+            1,
+            _as_int(current.get("source_index")) - _as_int(previous.get("source_index")),
+        )
+        delta = _as_int(current.get("retained_bytes")) - _as_int(
+            previous.get("retained_bytes")
+        )
+        slope = max(0, int(math.ceil(delta / span)))
+        item["tail_slope_bytes_per_run"] = int(slope)
+        item["tail_slope_ok"] = slope <= target_bytes_per_run
+        max_slope = max(max_slope, slope)
+        if item["tail_slope_ok"] is not True:
+            invalid_category_count += 1
+    return invalid_category_count == 0, int(max_slope), int(invalid_category_count)
+
+
+def _p5_g28_live_cache_counter_summary(args: argparse.Namespace) -> dict[str, Any]:
+    paths = _p5_g28_counter_paths(args)
+    categories = _empty_p5_g28_live_categories()
+    sources: list[dict[str, Any]] = []
+    issues: list[str] = []
+    readable_source_count = 0
+    min_source_count = max(1, _as_int(getattr(args, "p5_g28_live_counter_min_sources", 1), 1))
+    tail_slope_target = max(
+        0,
+        _as_int(getattr(args, "p5_g28_live_counter_tail_slope_target_bytes", 0), 0),
+    )
+
+    for source_index, path in enumerate(paths):
+        payload = _read_json_dict(path)
+        source = {
+            "path": str(path),
+            "readable": isinstance(payload, dict),
+            "observed_categories": [],
+        }
+        if payload is None:
+            issues.append(f"{path}: validation summary missing or unreadable")
+            sources.append(source)
+            continue
+        readable_source_count += 1
+        source_categories = _p5_g28_live_source_categories(payload)
+        for category, item in source_categories.items():
+            if item.get("observed") is not True:
+                continue
+            source["observed_categories"].append(category)
+            _append_p5_g28_live_sample(
+                categories[category],
+                source_index=source_index,
+                source_path=path,
+                observation=item,
+            )
+            _merge_p5_g28_live_category(categories[category], item)
+            categories[category]["source_count"] = _as_int(
+                categories[category].get("source_count")
+            ) + 1
+        sources.append(source)
+
+    tail_slope_ok, tail_slope_max, tail_slope_invalid_category_count = (
+        _finalize_p5_g28_live_counter_slopes(
+            categories,
+            target_bytes_per_run=tail_slope_target,
+        )
+    )
+    invalid_counter_count = 0
+    for category, item in categories.items():
+        if item.get("observed") is not True:
+            continue
+        retained = _as_int(item.get("retained_bytes"))
+        limit = _as_int(item.get("byte_limit"))
+        eviction_count = _as_int(item.get("eviction_count"))
+        evicted_bytes = _as_int(item.get("evicted_estimated_bytes"))
+        if (
+            retained < 0
+            or limit < 0
+            or eviction_count < 0
+            or evicted_bytes < 0
+            or item.get("has_negative_counter") is True
+        ):
+            invalid_counter_count += 1
+            item["within_limit"] = False
+            issues.append(f"{category}: live cache counters must not be negative")
+        if limit > 0 and retained > limit:
+            invalid_counter_count += 1
+            item["within_limit"] = False
+            issues.append(f"{category}: retained_bytes must be <= byte_limit")
+        if item.get("tail_slope_ok") is not True:
+            issues.append(
+                f"{category}: tail_slope_bytes_per_run must be <= "
+                "tail_slope_target_bytes_per_run"
+            )
+
+    observed_category_count = sum(1 for item in categories.values() if item.get("observed") is True)
+    if paths and readable_source_count <= 0:
+        issues.append("p5_g28 live cache counters require at least one readable validation summary")
+    if paths and readable_source_count < min_source_count:
+        issues.append(
+            "p5_g28 live cache counters require at least "
+            f"{min_source_count} readable validation summaries"
+        )
+    if paths and observed_category_count <= 0:
+        issues.append("p5_g28 live cache counters require at least one recognized cache counter")
+    within_limits = all(
+        item.get("within_limit") is True
+        for item in categories.values()
+        if item.get("observed") is True
+    )
+    return {
+        "supplied": bool(paths),
+        "source_count": int(readable_source_count),
+        "source_paths": [str(path) for path in paths],
+        "sources": sources,
+        "categories": categories,
+        "min_source_count": int(min_source_count),
+        "observed_category_count": int(observed_category_count),
+        "invalid_counter_count": int(invalid_counter_count),
+        "within_limits": bool(within_limits),
+        "tail_slope_ok": bool(tail_slope_ok),
+        "tail_slope_max_bytes_per_run": int(tail_slope_max),
+        "tail_slope_target_bytes_per_run": int(tail_slope_target),
+        "tail_slope_invalid_category_count": int(tail_slope_invalid_category_count),
+        "issues": issues,
+        "passed": not issues and (not paths or readable_source_count > 0),
+    }
+
+
+def _p5_g28_contract_summary(payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    probe = (
+        payload.get("p5_tile_retention_probe", {})
+        if isinstance(payload.get("p5_tile_retention_probe"), dict)
+        else {}
+    )
+    write_ms = probe.get("write_ms", {}) if isinstance(probe.get("write_ms"), dict) else {}
+    event_loop_gap = (
+        probe.get("event_loop_gap", {})
+        if isinstance(probe.get("event_loop_gap"), dict)
+        else {}
+    )
+    retained_bytes = _as_int(probe.get("retained_bytes"))
+    byte_limit = _as_int(probe.get("byte_limit"))
+    eviction_count = _as_int(probe.get("eviction_count"))
+    evicted_estimated_bytes = _as_int(probe.get("evicted_estimated_bytes"))
+    eviction_reason_counts = dict(probe.get("eviction_reason_counts") or {})
+    orphan_bytes = _as_int(probe.get("orphan_bytes"))
+    orphan_pair_count = _as_int(probe.get("orphan_pair_count"))
+    stale_manifest_count = _as_int(probe.get("stale_manifest_count"))
+    single_entry_over_cap_count = _as_int(probe.get("single_entry_over_cap_count"))
+    prune_p95_ms = _as_float(write_ms.get("p95_ms"))
+    event_loop_gap_p95_ms = _as_float(event_loop_gap.get("p95_ms"))
+    event_loop_over_500ms_count = _as_int(event_loop_gap.get("over_500ms_count"))
+    prune_target_ms = _as_float(
+        getattr(args, "p5_tile_retention_prune_p95_target_ms", 500.0),
+        500.0,
+    )
+    event_loop_gap_target_ms = _as_float(
+        getattr(args, "p5_tile_retention_gap_p95_target_ms", 150.0),
+        150.0,
+    )
+    completed = bool(probe.get("completed"))
+    byte_plateau_ok = byte_limit > 0 and retained_bytes <= byte_limit
+    eviction_observed = eviction_count >= 1 and evicted_estimated_bytes > 0
+    byte_limit_eviction_reason_present = _as_int(eviction_reason_counts.get("byte_limit")) >= 1
+    orphan_payloads_zero = orphan_bytes == 0 and orphan_pair_count == 0
+    stale_manifest_zero = stale_manifest_count == 0
+    hot_pair_retained = bool(probe.get("hot_pair_retained"))
+    evicted_pair_cache_miss = bool(probe.get("evicted_pair_miss"))
+    single_entry_over_cap_zero = single_entry_over_cap_count == 0
+    prune_within_budget = prune_p95_ms <= prune_target_ms
+    event_loop_within_budget = event_loop_gap_p95_ms <= event_loop_gap_target_ms
+    event_loop_over_500ms_zero = event_loop_over_500ms_count == 0
+    category_breakdown_raw = probe.get("cache_category_breakdown")
+    category_breakdown = (
+        category_breakdown_raw
+        if isinstance(category_breakdown_raw, dict)
+        else {}
+    )
+    category_summaries: dict[str, dict[str, Any]] = {}
+    for category in P5_G28_CACHE_CATEGORY_NAMES:
+        item = category_breakdown.get(category)
+        if not isinstance(item, dict):
+            item = {}
+        retained = _as_int(item.get("retained_bytes"))
+        limit = _as_int(item.get("byte_limit"))
+        evicted = _as_int(item.get("evicted_entry_count"))
+        orphan_bytes_category = _as_int(item.get("orphan_bytes"))
+        orphan_entries = _as_int(item.get("orphan_entry_count"))
+        stale_entries = _as_int(item.get("stale_entry_count"))
+        tail_slope = _as_int(item.get("tail_slope_bytes_per_run"))
+        tail_slope_target = _as_int(item.get("tail_slope_target_bytes_per_run"))
+        plateau_ok = (
+            bool(item.get("plateau_ok"))
+            and limit > 0
+            and retained <= limit
+            and evicted >= 1
+            and orphan_bytes_category == 0
+            and orphan_entries == 0
+            and stale_entries == 0
+            and tail_slope <= tail_slope_target
+        )
+        category_summaries[category] = {
+            "retained_bytes": int(retained),
+            "byte_limit": int(limit),
+            "retained_entry_count": _as_int(item.get("retained_entry_count")),
+            "evicted_entry_count": int(evicted),
+            "evicted_estimated_bytes": _as_int(item.get("evicted_estimated_bytes")),
+            "orphan_bytes": int(orphan_bytes_category),
+            "orphan_entry_count": int(orphan_entries),
+            "stale_entry_count": int(stale_entries),
+            "tail_slope_bytes_per_run": int(tail_slope),
+            "tail_slope_target_bytes_per_run": int(tail_slope_target),
+            "plateau_ok": bool(plateau_ok),
+        }
+    category_breakdown_present = set(P5_G28_CACHE_CATEGORY_NAMES) <= set(category_breakdown)
+    display_list_cache_plateau = category_summaries["display_list"]["plateau_ok"]
+    dxf_index_cache_plateau = category_summaries["dxf_index"]["plateau_ok"]
+    visual_asset_cache_plateau = category_summaries["visual_asset"]["plateau_ok"]
+    overlay_cache_plateau = category_summaries["overlay"]["plateau_ok"]
+    spool_namespace_plateau = category_summaries["spool"]["plateau_ok"]
+    category_orphans_zero = all(
+        item["orphan_bytes"] == 0 and item["orphan_entry_count"] == 0
+        for item in category_summaries.values()
+    )
+    category_stale_entries_zero = all(
+        item["stale_entry_count"] == 0 for item in category_summaries.values()
+    )
+    category_tail_slope_ok = all(
+        item["tail_slope_bytes_per_run"] <= item["tail_slope_target_bytes_per_run"]
+        for item in category_summaries.values()
+    )
+    live_cache_counters = _p5_g28_live_cache_counter_summary(args)
+    live_cache_counters_ok = (
+        not bool(live_cache_counters.get("supplied"))
+        or live_cache_counters.get("passed") is True
+    )
+    passed = all(
+        (
+            completed,
+            byte_plateau_ok,
+            eviction_observed,
+            byte_limit_eviction_reason_present,
+            orphan_payloads_zero,
+            stale_manifest_zero,
+            hot_pair_retained,
+            evicted_pair_cache_miss,
+            single_entry_over_cap_zero,
+            prune_within_budget,
+            event_loop_within_budget,
+            event_loop_over_500ms_zero,
+            category_breakdown_present,
+            display_list_cache_plateau,
+            dxf_index_cache_plateau,
+            visual_asset_cache_plateau,
+            overlay_cache_plateau,
+            spool_namespace_plateau,
+            category_orphans_zero,
+            category_stale_entries_zero,
+            category_tail_slope_ok,
+            live_cache_counters_ok,
+        )
+    )
+    return {
+        "passed": bool(passed),
+        "tile_retention_completed": bool(completed),
+        "tile_retained_bytes": int(retained_bytes),
+        "tile_byte_limit": int(byte_limit),
+        "tile_byte_plateau_ok": bool(byte_plateau_ok),
+        "tile_eviction_count": int(eviction_count),
+        "tile_evicted_estimated_bytes": int(evicted_estimated_bytes),
+        "tile_eviction_observed": bool(eviction_observed),
+        "tile_byte_limit_eviction_reason_present": bool(byte_limit_eviction_reason_present),
+        "tile_orphan_bytes": int(orphan_bytes),
+        "tile_orphan_pair_count": int(orphan_pair_count),
+        "tile_orphan_payloads_zero": bool(orphan_payloads_zero),
+        "tile_stale_manifest_count": int(stale_manifest_count),
+        "tile_stale_manifest_zero": bool(stale_manifest_zero),
+        "tile_hot_pair_retained": bool(hot_pair_retained),
+        "tile_evicted_pair_cache_miss": bool(evicted_pair_cache_miss),
+        "single_entry_over_cap_count": int(single_entry_over_cap_count),
+        "single_entry_over_cap_zero": bool(single_entry_over_cap_zero),
+        "prune_p95_ms": float(prune_p95_ms),
+        "prune_p95_target_ms": float(prune_target_ms),
+        "event_loop_gap_p95_ms": float(event_loop_gap_p95_ms),
+        "event_loop_gap_p95_target_ms": float(event_loop_gap_target_ms),
+        "event_loop_over_500ms_count": int(event_loop_over_500ms_count),
+        "event_loop_over_500ms_zero": bool(event_loop_over_500ms_zero),
+        "eviction_reason_counts": eviction_reason_counts,
+        "cache_category_names": list(P5_G28_CACHE_CATEGORY_NAMES),
+        "cache_category_breakdown": category_summaries,
+        "cache_category_breakdown_present": bool(category_breakdown_present),
+        "display_list_cache_plateau": bool(display_list_cache_plateau),
+        "dxf_index_cache_plateau": bool(dxf_index_cache_plateau),
+        "visual_asset_cache_plateau": bool(visual_asset_cache_plateau),
+        "overlay_cache_plateau": bool(overlay_cache_plateau),
+        "spool_namespace_plateau": bool(spool_namespace_plateau),
+        "cache_category_orphans_zero": bool(category_orphans_zero),
+        "cache_category_stale_entries_zero": bool(category_stale_entries_zero),
+        "cache_plateau_tail_slope_ok": bool(category_tail_slope_ok),
+        "cache_category_retained_bytes_total": int(
+            sum(item["retained_bytes"] for item in category_summaries.values())
+        ),
+        "cache_category_byte_limit_total": int(
+            sum(item["byte_limit"] for item in category_summaries.values())
+        ),
+        "cache_category_evicted_entry_count": int(
+            sum(item["evicted_entry_count"] for item in category_summaries.values())
+        ),
+        "cache_category_orphan_bytes_total": int(
+            sum(item["orphan_bytes"] for item in category_summaries.values())
+        ),
+        "cache_category_stale_entry_count": int(
+            sum(item["stale_entry_count"] for item in category_summaries.values())
+        ),
+        "cache_category_tail_slope_max_bytes_per_run": int(
+            max(
+                (item["tail_slope_bytes_per_run"] for item in category_summaries.values()),
+                default=0,
+            )
+        ),
+        "live_cache_counters": live_cache_counters,
+        "live_cache_counters_supplied": bool(live_cache_counters.get("supplied")),
+        "live_cache_counters_source_count": _as_int(live_cache_counters.get("source_count")),
+        "live_cache_counters_observed_category_count": _as_int(
+            live_cache_counters.get("observed_category_count")
+        ),
+        "live_cache_counters_within_limits": bool(live_cache_counters.get("within_limits")),
+        "live_cache_counters_invalid_counter_count": _as_int(
+            live_cache_counters.get("invalid_counter_count")
+        ),
+        "live_cache_counters_tail_slope_ok": bool(
+            live_cache_counters.get("tail_slope_ok")
+        ),
+        "live_cache_counters_tail_slope_max_bytes_per_run": _as_int(
+            live_cache_counters.get("tail_slope_max_bytes_per_run")
+        ),
+        "live_cache_counters_tail_slope_target_bytes_per_run": _as_int(
+            live_cache_counters.get("tail_slope_target_bytes_per_run")
+        ),
+        "live_cache_counters_tail_slope_invalid_category_count": _as_int(
+            live_cache_counters.get("tail_slope_invalid_category_count")
+        ),
+    }
+
+
+def _p5_g28_contract_gates(contract: dict[str, Any]) -> list[GateResult]:
+    eviction_reason_counts = (
+        contract.get("eviction_reason_counts")
+        if isinstance(contract.get("eviction_reason_counts"), dict)
+        else {}
+    )
+    category_breakdown = (
+        contract.get("cache_category_breakdown")
+        if isinstance(contract.get("cache_category_breakdown"), dict)
+        else {}
+    )
+    def _category_retained(category: str) -> int:
+        item = category_breakdown.get(category)
+        return _as_int(item.get("retained_bytes")) if isinstance(item, dict) else 0
+
+    def _category_limit(category: str) -> int:
+        item = category_breakdown.get(category)
+        return _as_int(item.get("byte_limit")) if isinstance(item, dict) else 0
+
+    gates = [
+        GateResult(
+            "p5_g28_tile_retention_completed",
+            bool(contract.get("tile_retention_completed")),
+            bool(contract.get("tile_retention_completed")),
+            True,
+            "P5-G28 tile cache plateau probe completed the requested lifecycle writes.",
+        ),
+        GateResult(
+            "p5_g28_tile_cache_byte_plateau",
+            bool(contract.get("tile_byte_plateau_ok")),
+            _as_int(contract.get("tile_retained_bytes")),
+            _as_int(contract.get("tile_byte_limit")),
+            "Retained tile/overlay bytes must plateau within the configured cache cap.",
+        ),
+        GateResult(
+            "p5_g28_tile_cache_eviction_observed",
+            bool(contract.get("tile_eviction_observed")),
+            _as_int(contract.get("tile_eviction_count")),
+            ">= 1 with evicted bytes > 0",
+            "Over-limit cache lifecycle must prove real eviction rather than silent growth.",
+        ),
+        GateResult(
+            "p5_g28_tile_cache_eviction_reason_present",
+            bool(contract.get("tile_byte_limit_eviction_reason_present")),
+            _as_int(eviction_reason_counts.get("byte_limit")),
+            ">= 1",
+            "P5-G28 eviction evidence must include at least one byte-limit eviction reason.",
+        ),
+        GateResult(
+            "p5_g28_tile_cache_orphan_payloads_zero",
+            bool(contract.get("tile_orphan_payloads_zero")),
+            _as_int(contract.get("tile_orphan_bytes")),
+            0,
+            "Eviction must leave zero tile/overlay payload bytes outside the materialized manifest.",
+        ),
+        GateResult(
+            "p5_g28_tile_cache_stale_manifest_zero",
+            bool(contract.get("tile_stale_manifest_zero")),
+            _as_int(contract.get("tile_stale_manifest_count")),
+            0,
+            "Materialized tile manifest must contain no stale records after eviction.",
+        ),
+        GateResult(
+            "p5_g28_hot_pair_retained",
+            bool(contract.get("tile_hot_pair_retained")),
+            bool(contract.get("tile_hot_pair_retained")),
+            True,
+            "Repeatedly accessed hot pair must remain available while colder pairs are evicted.",
+        ),
+        GateResult(
+            "p5_g28_evicted_pair_cache_miss",
+            bool(contract.get("tile_evicted_pair_cache_miss")),
+            bool(contract.get("tile_evicted_pair_cache_miss")),
+            True,
+            "At least one evicted pair must no longer report as a current cache hit.",
+        ),
+        GateResult(
+            "p5_g28_single_entry_over_cap_count",
+            _as_int(contract.get("single_entry_over_cap_count")) == 0,
+            _as_int(contract.get("single_entry_over_cap_count")),
+            0,
+            "No individual tile-cache entry may exceed the configured byte cap by itself.",
+        ),
+        GateResult(
+            "p5_g28_prune_p95_ms",
+            _as_float(contract.get("prune_p95_ms"))
+            <= _as_float(contract.get("prune_p95_target_ms"), 500.0),
+            _as_float(contract.get("prune_p95_ms")),
+            _as_float(contract.get("prune_p95_target_ms"), 500.0),
+            "Tile write plus retention prune p95 must stay within budget.",
+        ),
+        GateResult(
+            "p5_g28_event_loop_gap_p95_ms",
+            _as_float(contract.get("event_loop_gap_p95_ms"))
+            <= _as_float(contract.get("event_loop_gap_p95_target_ms"), 150.0),
+            _as_float(contract.get("event_loop_gap_p95_ms")),
+            _as_float(contract.get("event_loop_gap_p95_target_ms"), 150.0),
+            "Event-loop heartbeat p95 gap must stay bounded during retention writes.",
+        ),
+        GateResult(
+            "p5_g28_event_loop_over_500ms_count",
+            _as_int(contract.get("event_loop_over_500ms_count")) == 0,
+            _as_int(contract.get("event_loop_over_500ms_count")),
+            0,
+            "Tile retention lifecycle must introduce no event-loop gap above 500 ms.",
+        ),
+        GateResult(
+            "p5_g28_cache_category_breakdown_present",
+            bool(contract.get("cache_category_breakdown_present")),
+            sorted(category_breakdown),
+            list(P5_G28_CACHE_CATEGORY_NAMES),
+            "P5-G28 must report cache plateau categories for display_list, dxf_index, visual_asset, overlay, and spool.",
+        ),
+        GateResult(
+            "p5_g28_display_list_cache_plateau",
+            bool(contract.get("display_list_cache_plateau")),
+            _category_retained("display_list"),
+            _category_limit("display_list"),
+            "DisplayList cache retained bytes must plateau within its category budget.",
+        ),
+        GateResult(
+            "p5_g28_dxf_index_cache_plateau",
+            bool(contract.get("dxf_index_cache_plateau")),
+            _category_retained("dxf_index"),
+            _category_limit("dxf_index"),
+            "DXF index cache retained bytes must plateau within its category budget.",
+        ),
+        GateResult(
+            "p5_g28_visual_asset_cache_plateau",
+            bool(contract.get("visual_asset_cache_plateau")),
+            _category_retained("visual_asset"),
+            _category_limit("visual_asset"),
+            "Visual asset cache retained bytes must plateau within its category budget.",
+        ),
+        GateResult(
+            "p5_g28_overlay_cache_plateau",
+            bool(contract.get("overlay_cache_plateau")),
+            _category_retained("overlay"),
+            _category_limit("overlay"),
+            "Overlay payload cache retained bytes must plateau within its category budget.",
+        ),
+        GateResult(
+            "p5_g28_spool_namespace_plateau",
+            bool(contract.get("spool_namespace_plateau")),
+            _category_retained("spool"),
+            _category_limit("spool"),
+            "Spool namespace retained bytes must plateau within its category budget.",
+        ),
+        GateResult(
+            "p5_g28_cache_category_orphans_zero",
+            bool(contract.get("cache_category_orphans_zero")),
+            _as_int(contract.get("cache_category_orphan_bytes_total")),
+            0,
+            "Category cache eviction must leave zero orphan payload bytes.",
+        ),
+        GateResult(
+            "p5_g28_cache_category_stale_entries_zero",
+            bool(contract.get("cache_category_stale_entries_zero")),
+            _as_int(contract.get("cache_category_stale_entry_count")),
+            0,
+            "Category cache manifests must contain no stale entries after pruning.",
+        ),
+        GateResult(
+            "p5_g28_cache_plateau_tail_slope",
+            bool(contract.get("cache_plateau_tail_slope_ok")),
+            _as_int(contract.get("cache_category_tail_slope_max_bytes_per_run")),
+            0,
+            "Category retained-byte tail slope must be flat after cache pruning.",
+        ),
+    ]
+    live_cache_counters = contract.get("live_cache_counters")
+    if isinstance(live_cache_counters, dict) and live_cache_counters.get("supplied") is True:
+        live_source_count = _as_int(live_cache_counters.get("source_count"))
+        live_min_source_count = max(
+            1,
+            _as_int(live_cache_counters.get("min_source_count"), 1),
+        )
+        live_observed_category_count = _as_int(
+            live_cache_counters.get("observed_category_count")
+        )
+        gates.extend(
+            [
+                GateResult(
+                    "p5_g28_live_cache_counters_present",
+                    live_source_count >= live_min_source_count
+                    and live_observed_category_count > 0,
+                    live_source_count,
+                    f">= {live_min_source_count} sources and > 0 observed categories",
+                    "Explicit P5-G28 validation summaries must expose enough readable sources and at least one recognized live cache counter.",
+                ),
+                GateResult(
+                    "p5_g28_live_cache_counters_within_limits",
+                    live_cache_counters.get("within_limits") is True
+                    and _as_int(live_cache_counters.get("invalid_counter_count")) == 0,
+                    _as_int(live_cache_counters.get("invalid_counter_count")),
+                    "0 invalid counters and retained <= limit where limits exist",
+                    "Explicit P5-G28 live cache counters must be non-negative and remain within runtime cache byte limits.",
+                ),
+                GateResult(
+                    "p5_g28_live_cache_counters_tail_slope",
+                    live_cache_counters.get("tail_slope_ok") is True
+                    and _as_int(live_cache_counters.get("tail_slope_invalid_category_count")) == 0,
+                    _as_int(live_cache_counters.get("tail_slope_max_bytes_per_run")),
+                    _as_int(live_cache_counters.get("tail_slope_target_bytes_per_run")),
+                    "Repeated P5-G28 validation summaries must not show retained live cache bytes growing in the tail sample.",
+                ),
+            ]
+        )
+    return gates
 
 
 def _rss_slope_summary(
@@ -1732,6 +2551,7 @@ def _run_p5_tile_retention_probe(
     gaps_ms: list[float] = []
     evicted_pairs: set[str] = set()
     evicted_bytes = 0
+    eviction_reason_counts: dict[str, int] = {}
     last_tick = time.perf_counter()
     started = time.perf_counter()
     hot_pair = "p5_tile_retention_pair_0000"
@@ -1755,6 +2575,11 @@ def _run_p5_tile_retention_probe(
                 cache_key=f"p5-retention-{idx}",
             )
             write_ms.append(round((time.perf_counter() - write_started) * 1000.0, 3))
+            eviction_reason = str(manifest.get("eviction_reason") or "")
+            if eviction_reason:
+                eviction_reason_counts[eviction_reason] = (
+                    eviction_reason_counts.get(eviction_reason, 0) + 1
+                )
             evicted_pairs.update(str(value) for value in manifest.get("evicted_pairs", []) if value)
             evicted_bytes += int(manifest.get("evicted_estimated_bytes") or 0)
             append_pair_to_tiles_manifest_jsonl(viewer_root, manifest)
@@ -1813,6 +2638,10 @@ def _run_p5_tile_retention_probe(
             ):
                 first_evicted_pair = pair_name
                 break
+        cache_category_breakdown = _run_p5_g28_cache_category_probe(
+            viewer_root,
+            pair_count=pair_count,
+        )
         return {
             "completed": True,
             "pair_count": int(pair_count),
@@ -1826,6 +2655,11 @@ def _run_p5_tile_retention_probe(
             "eviction_count": int(len(evicted_pairs)),
             "evicted_pair_count": int(len(evicted_pairs)),
             "evicted_estimated_bytes": int(evicted_bytes),
+            "eviction_reason_counts": dict(eviction_reason_counts),
+            "single_entry_over_cap_count": int(
+                eviction_reason_counts.get("current_entry_exceeds_limit", 0)
+            ),
+            "byte_limit_eviction_count": int(eviction_reason_counts.get("byte_limit", 0)),
             "first_evicted_pair": first_evicted_pair,
             "evicted_pair_miss": bool(first_evicted_pair),
             "hot_pair": hot_pair,
@@ -1833,6 +2667,7 @@ def _run_p5_tile_retention_probe(
             "stale_manifest_count": int(stale_manifest_count),
             "orphan_pair_count": int(len(orphan_pairs)),
             "orphan_bytes": int(orphan_bytes),
+            "cache_category_breakdown": cache_category_breakdown,
             "write_ms": _latency_summary(write_ms),
             "event_loop_gap": _event_loop_gap_summary(gaps_ms),
             "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
@@ -1842,6 +2677,98 @@ def _run_p5_tile_retention_probe(
             os.environ.pop("DRAWING_COMPARE_TILE_CACHE_MB", None)
         else:
             os.environ["DRAWING_COMPARE_TILE_CACHE_MB"] = old_tile_env
+
+
+def _run_p5_g28_cache_category_probe(
+    viewer_root: Path,
+    *,
+    pair_count: int,
+) -> dict[str, Any]:
+    category_specs = {
+        "display_list": (".displaylist", 768),
+        "dxf_index": (".dxfindex", 640),
+        "visual_asset": (".visual", 896),
+        "overlay": (".overlay", 512),
+        "spool": (".spool", 704),
+    }
+    category_root = viewer_root / "p5_g28_cache_categories"
+    category_root.mkdir(parents=True, exist_ok=True)
+    lifecycle_count = max(5, int(pair_count))
+    result: dict[str, Any] = {}
+    for category in P5_G28_CACHE_CATEGORY_NAMES:
+        suffix, payload_bytes = category_specs[category]
+        root = category_root / category
+        root.mkdir(parents=True, exist_ok=True)
+        byte_limit = payload_bytes * 3
+        retained_order: list[str] = []
+        retained_bytes_samples: list[int] = []
+        evicted_count = 0
+        evicted_bytes = 0
+        for index in range(lifecycle_count):
+            pair_id = f"p5_g28_{category}_{index:04d}"
+            pair_dir = root / pair_id
+            pair_dir.mkdir(parents=True, exist_ok=True)
+            payload = (
+                f"{category}:{pair_id}:cache-plateau\n".encode("utf-8")
+                + bytes([index % 251]) * payload_bytes
+            )
+            payload_path = pair_dir / f"payload{suffix}"
+            payload_path.write_bytes(payload)
+            retained_order.append(pair_id)
+            while _directory_payload_bytes(root) > byte_limit and retained_order:
+                victim = retained_order.pop(0)
+                victim_dir = root / victim
+                victim_bytes = _directory_payload_bytes(victim_dir)
+                if victim_dir.exists():
+                    shutil.rmtree(victim_dir)
+                evicted_count += 1
+                evicted_bytes += victim_bytes
+            retained_bytes_samples.append(_directory_payload_bytes(root))
+
+        retained_pairs = [
+            path.name
+            for path in sorted(root.iterdir())
+            if path.is_dir()
+        ]
+        manifest_path = root / "cache_manifest.json"
+        manifest_path.write_text(
+            json.dumps({"category": category, "retained_pairs": retained_pairs}),
+            encoding="utf-8",
+        )
+        manifest_pairs = set(retained_pairs)
+        actual_pairs = {
+            path.name
+            for path in root.iterdir()
+            if path.is_dir()
+        }
+        stale_entries = actual_pairs - manifest_pairs
+        orphan_entries = manifest_pairs - actual_pairs
+        retained_bytes = _directory_payload_bytes(root, suffixes=(suffix,))
+        tail_slope = 0
+        if len(retained_bytes_samples) >= 2:
+            tail_slope = max(0, retained_bytes_samples[-1] - retained_bytes_samples[-2])
+        result[category] = {
+            "retained_bytes": int(retained_bytes),
+            "byte_limit": int(byte_limit),
+            "retained_entry_count": int(len(actual_pairs)),
+            "evicted_entry_count": int(evicted_count),
+            "evicted_estimated_bytes": int(evicted_bytes),
+            "orphan_bytes": int(
+                sum(_directory_payload_bytes(root / name) for name in orphan_entries)
+            ),
+            "orphan_entry_count": int(len(orphan_entries)),
+            "stale_entry_count": int(len(stale_entries)),
+            "tail_slope_bytes_per_run": int(tail_slope),
+            "tail_slope_target_bytes_per_run": 0,
+            "plateau_ok": bool(
+                retained_bytes <= byte_limit
+                and evicted_count >= 1
+                and not stale_entries
+                and not orphan_entries
+                and tail_slope <= 0
+            ),
+        }
+    return result
 
 
 def _run_first_review_tile_probe(scratch: Path, viewer_root: Path) -> dict[str, Any]:
@@ -3587,6 +4514,7 @@ def _gate_summary(payload: dict[str, Any], args: argparse.Namespace) -> list[Gat
     real_pdf_prewarm_probe = payload.get("real_pdf_prewarm_cache_probe", {})
     p5_g26_contract = payload.get("p5_g26_contract") or payload.get("p5_g26_evidence") or {}
     p5_g27_contract = payload.get("p5_g27_contract") or payload.get("p5_g27_evidence") or {}
+    p5_g28_contract = payload.get("p5_g28_contract") or payload.get("p5_g28_evidence") or {}
     p5_g27_real_renderer_bridge = payload.get("p5_g27_real_renderer_bridge")
     p5_g27_bridge_required = bool(
         getattr(args, "p5_g27_require_real_renderer_bridge", False)
@@ -3601,6 +4529,10 @@ def _gate_summary(payload: dict[str, Any], args: argparse.Namespace) -> list[Gat
         p5_g27_contract,
         dict,
     ) and bool(p5_g27_contract)
+    include_p5_g28_contract = bool(getattr(args, "include_p5_g28_cache_plateau", False)) or isinstance(
+        p5_g28_contract,
+        dict,
+    ) and bool(p5_g28_contract)
     if include_p5_g26_contract and not isinstance(p5_g26_contract, dict):
         p5_g26_contract = {}
     if include_p5_g26_contract and not p5_g26_contract:
@@ -3609,6 +4541,10 @@ def _gate_summary(payload: dict[str, Any], args: argparse.Namespace) -> list[Gat
         p5_g27_contract = {}
     if include_p5_g27_contract and not p5_g27_contract:
         p5_g27_contract = _p5_g27_contract_summary(payload, args)
+    if include_p5_g28_contract and not isinstance(p5_g28_contract, dict):
+        p5_g28_contract = {}
+    if include_p5_g28_contract and not p5_g28_contract:
+        p5_g28_contract = _p5_g28_contract_summary(payload, args)
     if not isinstance(p5_g27_real_renderer_bridge, dict):
         p5_g27_real_renderer_bridge = {}
     cached_p95 = float(selection["cached_pdf"]["p95_ms"])
@@ -4846,6 +5782,8 @@ def _gate_summary(payload: dict[str, Any], args: argparse.Namespace) -> list[Gat
         gates.extend(_p5_g27_contract_gates(p5_g27_contract))
         if p5_g27_bridge_required:
             gates.extend(_p5_g27_real_renderer_bridge_gates(p5_g27_real_renderer_bridge))
+    if include_p5_g28_contract:
+        gates.extend(_p5_g28_contract_gates(p5_g28_contract))
     return gates
 
 
@@ -5038,6 +5976,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--p5-g27-event-loop-gap-max-target-ms", type=float, default=500.0)
     parser.add_argument("--p5-g27-real-renderer-bridge-json", type=Path)
     parser.add_argument("--p5-g27-require-real-renderer-bridge", action="store_true")
+    parser.add_argument("--include-p5-g28-cache-plateau", action="store_true")
+    parser.add_argument("--p5-g28-validation-summary", type=Path, action="append", default=[])
+    parser.add_argument("--p5-g28-live-counter-min-sources", type=int, default=1)
+    parser.add_argument("--p5-g28-live-counter-tail-slope-target-bytes", type=int, default=0)
     parser.add_argument("--real-corpus-validation-output", type=Path)
     parser.add_argument("--real-corpus-viewer-root", type=Path)
     parser.add_argument("--real-corpus-customer-evidence-manifest", type=Path)
@@ -5196,6 +6138,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "p5_g27_require_real_renderer_bridge": bool(
                 args.p5_g27_require_real_renderer_bridge
             ),
+            "include_p5_g28_cache_plateau": bool(args.include_p5_g28_cache_plateau),
+            "p5_g28_validation_summary": [
+                str(path) for path in (args.p5_g28_validation_summary or [])
+            ],
+            "p5_g28_live_counter_min_sources": int(args.p5_g28_live_counter_min_sources),
+            "p5_g28_live_counter_tail_slope_target_bytes": int(
+                args.p5_g28_live_counter_tail_slope_target_bytes
+            ),
         },
     }
     payload["pair_selection"] = _run_pair_selection_probe(
@@ -5305,7 +6255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             viewport_size=int(args.p4_visible_viewport_size),
             prefetch_radius=int(args.p4_visible_prefetch_radius),
         )
-    if args.include_p5_tile_retention_soak:
+    if args.include_p5_tile_retention_soak or args.include_p5_g28_cache_plateau:
         p5_tile_retention_viewer_root = viewer_root / "p5_tile_retention_probe"
         p5_tile_retention_viewer_root.mkdir(parents=True, exist_ok=True)
         payload["p5_tile_retention_probe"] = _run_p5_tile_retention_probe(
@@ -5373,6 +6323,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload["p5_g27_real_renderer_bridge_required_gate_names"] = list(
                 P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES
             )
+    if args.include_p5_g28_cache_plateau:
+        payload["benchmark_id"] = P5_G28_BENCHMARK_ID
+        payload["profile"] = P5_G28_PROFILE
+        p5_g28_evidence = _p5_g28_contract_summary(payload, args)
+        payload["p5_g28_evidence"] = p5_g28_evidence
+        payload["p5_g28_contract"] = p5_g28_evidence
+        payload["p5_g28_required_gate_names"] = list(P5_G28_REQUIRED_GATE_NAMES)
     gates = _gate_summary(payload, args)
     payload["gates"] = [gate.to_dict() for gate in gates]
     payload["status"] = "passed" if all(gate.passed for gate in gates) else "failed"

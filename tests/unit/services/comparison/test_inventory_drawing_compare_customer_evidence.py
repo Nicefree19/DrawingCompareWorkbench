@@ -517,6 +517,115 @@ def _write_p5_g27_selected_zone_crop(path: Path) -> None:
     )
 
 
+def _write_p5_g28_cache_plateau(
+    path: Path,
+    *,
+    passed: bool = True,
+    failed_gate: str | None = None,
+    required_false_gate: str | None = None,
+) -> None:
+    gate_names = sorted(inventory.P5_G28_REQUIRED_GATES)
+    eviction_reason_count = 1 if passed else 0
+    category_breakdown = {
+        name: {
+            "retained_bytes": 900,
+            "byte_limit": 1000,
+            "retained_entry_count": 3,
+            "evicted_entry_count": 2,
+            "evicted_estimated_bytes": 500,
+            "orphan_bytes": 0,
+            "orphan_entry_count": 0,
+            "stale_entry_count": 0,
+            "tail_slope_bytes_per_run": 0,
+            "tail_slope_target_bytes_per_run": 0,
+            "plateau_ok": True,
+        }
+        for name in ("display_list", "dxf_index", "visual_asset", "overlay", "spool")
+    }
+    contract = {
+        "passed": passed,
+        "tile_retention_completed": True,
+        "tile_retained_bytes": 512 * 1024,
+        "tile_byte_limit": 1024 * 1024,
+        "tile_byte_plateau_ok": True,
+        "tile_eviction_count": 3,
+        "tile_evicted_estimated_bytes": 256 * 1024,
+        "tile_eviction_observed": True,
+        "tile_byte_limit_eviction_reason_present": passed,
+        "tile_orphan_bytes": 0,
+        "tile_orphan_pair_count": 0,
+        "tile_orphan_payloads_zero": True,
+        "tile_stale_manifest_count": 0,
+        "tile_stale_manifest_zero": True,
+        "tile_hot_pair_retained": True,
+        "tile_evicted_pair_cache_miss": True,
+        "single_entry_over_cap_count": 0,
+        "single_entry_over_cap_zero": True,
+        "prune_p95_ms": 20.0,
+        "prune_p95_target_ms": 500.0,
+        "event_loop_gap_p95_ms": 30.0,
+        "event_loop_gap_p95_target_ms": 150.0,
+        "event_loop_over_500ms_count": 0,
+        "event_loop_over_500ms_zero": True,
+        "eviction_reason_counts": {"byte_limit": eviction_reason_count},
+        "cache_category_names": [
+            "display_list",
+            "dxf_index",
+            "visual_asset",
+            "overlay",
+            "spool",
+        ],
+        "cache_category_breakdown": category_breakdown,
+        "cache_category_breakdown_present": True,
+        "display_list_cache_plateau": True,
+        "dxf_index_cache_plateau": True,
+        "visual_asset_cache_plateau": True,
+        "overlay_cache_plateau": True,
+        "spool_namespace_plateau": True,
+        "cache_category_orphans_zero": True,
+        "cache_category_stale_entries_zero": True,
+        "cache_plateau_tail_slope_ok": True,
+        "cache_category_retained_bytes_total": 4500,
+        "cache_category_byte_limit_total": 5000,
+        "cache_category_evicted_entry_count": 10,
+        "cache_category_orphan_bytes_total": 0,
+        "cache_category_stale_entry_count": 0,
+        "cache_category_tail_slope_max_bytes_per_run": 0,
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g28_cache_plateau_soak",
+                "profile": "tile_cache_plateau_lifecycle_seed",
+                "status": "passed" if passed else "failed",
+                "p5_g28_required_gate_names": gate_names,
+                "p5_g28_contract": contract,
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": (
+                            name != failed_gate
+                            if failed_gate is not None
+                            else (
+                                passed
+                                if name == "p5_g28_tile_cache_eviction_reason_present"
+                                else True
+                            )
+                        ),
+                        "required": name != required_false_gate,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_ready_inventory_fixture(
     tmp_path: Path,
     *,
@@ -616,6 +725,9 @@ def test_inventory_reports_ready_for_manifest_when_customer_evidence_is_present(
     assert report["summary"]["first_interactive_ready_passed"] is True
     assert report["summary"]["bbox_quality_passed"] is True
     assert report["summary"]["p5_g24_visual_asset_policy_passed"] is True
+    assert report["summary"]["p5_g28_cache_plateau_count"] == 0
+    assert report["summary"]["p5_g28_cache_plateau_passed_count"] == 0
+    assert report["summary"]["p5_g28_cache_plateau_failed_count"] == 0
     assert report["summary"]["audited_review_ground_truth_rows"] == 12
     assert report["issues"] == []
     assert report["diagnostics"]["missing_format_coverage"] == []
@@ -644,8 +756,13 @@ def test_inventory_reports_ready_for_manifest_when_customer_evidence_is_present(
     assert report["bbox_quality"]["status"] == "passed"
     assert report["p5_g24_visual_asset_policy"]["status"] == "passed"
     assert report["p5_g24_visual_asset_policy"]["manifest_count"] == 2
+    assert report["p5_g28_cache_plateau_jsons"] == []
+    assert report["p5_g28_cache_plateau"] == []
     assert report["diagnostics"]["p5_g24_visual_asset_policy_status"] == "passed"
     assert report["diagnostics"]["p5_g24_visual_asset_policy_issues"] == []
+    assert report["diagnostics"]["p5_g28_cache_plateau_candidate_count"] == 0
+    assert report["diagnostics"]["p5_g28_cache_plateau_passed"] == []
+    assert report["diagnostics"]["p5_g28_cache_plateau_failed"] == []
     assert report["bbox_quality"]["relative_only_ratio"] == 0.0
     assert report["large_dwg_probe"]["resource_probe_status"] == "passed"
     assert report["large_dwg_probe"]["peak_rss_mb"] == 1024.0
@@ -661,6 +778,10 @@ def test_inventory_reports_ready_for_manifest_when_customer_evidence_is_present(
     assert "python scripts\\audit_drawing_compare_mvp_exit.py" in (
         report["recommended_commands"]["final_audit_command"]
     )
+    assert "--p5-g28-cache-plateau-json" not in report["recommended_commands"]["prepare_manifest_command"]
+    assert "--p5-g28-cache-plateau-json" not in report["recommended_commands"]["final_audit_command"]
+    assert "--require-p5-g28-cache-plateau-soak" not in report["recommended_commands"]["prepare_manifest_command"]
+    assert "--require-p5-g28-cache-plateau-soak" not in report["recommended_commands"]["final_audit_command"]
     assert "--large-dwg-probe" in report["recommended_commands"]["final_audit_command"]
     assert "--require-large-dwg-probe" in report["recommended_commands"]["final_audit_command"]
 
@@ -781,6 +902,172 @@ def test_inventory_discovers_p5_g27_selected_zone_crop_and_recommends_pipeline_f
     assert str(soak_json) in report["recommended_commands"]["final_audit_command"]
     assert "--p5-g27-selected-zone-crop-json" in report["recommended_commands"]["prepare_manifest_command"]
     assert "--p5-g27-selected-zone-crop-json" in report["recommended_commands"]["final_audit_command"]
+
+
+def test_inventory_discovers_p5_g28_cache_plateau_and_recommends_optional_pipeline_flags(tmp_path: Path) -> None:
+    _cad, pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(tmp_path)
+    soak_json = pdf / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau(soak_json)
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "ready_for_manifest"
+    assert "p5_g28_tile_cache_eviction_reason_present" in inventory.P5_G28_REQUIRED_GATES
+    assert report["summary"]["p5_g28_cache_plateau_count"] == 1
+    assert report["summary"]["p5_g28_cache_plateau_passed_count"] == 1
+    assert report["summary"]["p5_g28_cache_plateau_failed_count"] == 0
+    assert report["p5_g28_cache_plateau_jsons"] == [str(soak_json)]
+    assert report["p5_g28_cache_plateau"][0]["status"] == "passed"
+    assert report["p5_g28_cache_plateau"][0]["passed_required_gate_count"] == len(
+        inventory.P5_G28_REQUIRED_GATES
+    )
+    assert report["p5_g28_cache_plateau"][0]["failed_required_gate_count"] == 0
+    assert report["diagnostics"]["p5_g28_cache_plateau_passed"][0]["path"] == str(soak_json)
+    assert report["diagnostics"]["p5_g28_cache_plateau_failed"] == []
+    prepare_command = report["recommended_commands"]["prepare_manifest_command"]
+    final_audit_command = report["recommended_commands"]["final_audit_command"]
+    assert str(soak_json) in prepare_command
+    assert str(soak_json) in final_audit_command
+    assert "--p5-g28-cache-plateau-json" in prepare_command
+    assert "--p5-g28-cache-plateau-json" in final_audit_command
+    assert "--require-p5-g28-cache-plateau-soak" not in prepare_command
+    assert "--require-p5-g28-cache-plateau-soak" not in final_audit_command
+
+
+def test_inventory_reports_failed_p5_g28_cache_plateau_diagnostics(tmp_path: Path) -> None:
+    _cad, pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(tmp_path)
+    soak_json = pdf / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau(soak_json, passed=False)
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "incomplete"
+    assert report["summary"]["p5_g28_cache_plateau_count"] == 1
+    assert report["summary"]["p5_g28_cache_plateau_passed_count"] == 0
+    assert report["summary"]["p5_g28_cache_plateau_failed_count"] == 1
+    assert "P5-G28 cache plateau evidence was found but failed strict validation" in report["issues"]
+    assert report["diagnostics"]["p5_g28_cache_plateau_passed"] == []
+    failed = report["diagnostics"]["p5_g28_cache_plateau_failed"][0]
+    assert failed["path"] == str(soak_json)
+    assert failed["failed_required_gate_count"] == 1
+    assert any(
+        "p5_g28_contract.eviction_reason_counts.byte_limit must be > 0" == issue
+        for issue in failed["issues"]
+    )
+    assert any(
+        "required gates failed: p5_g28_tile_cache_eviction_reason_present" == issue
+        for issue in failed["issues"]
+    )
+    assert "--p5-g28-cache-plateau-json" in report["recommended_commands"]["prepare_manifest_command"]
+    assert "--require-p5-g28-cache-plateau-soak" not in report["recommended_commands"]["prepare_manifest_command"]
+
+
+def test_inventory_reports_failed_p5_g28_missing_cache_category_breakdown(
+    tmp_path: Path,
+) -> None:
+    _cad, pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(tmp_path)
+    soak_json = pdf / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau(soak_json)
+    payload = json.loads(soak_json.read_text(encoding="utf-8"))
+    contract = payload["p5_g28_contract"]
+    contract.pop("cache_category_breakdown")
+    contract["cache_category_breakdown_present"] = False
+    contract["passed"] = False
+    payload["status"] = "failed"
+    for gate in payload["gates"]:
+        if gate["name"] == "p5_g28_cache_category_breakdown_present":
+            gate["passed"] = False
+    soak_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "incomplete"
+    failed = report["diagnostics"]["p5_g28_cache_plateau_failed"][0]
+    assert failed["failed_required_gate_count"] == 1
+    assert any(
+        "p5_g28_contract.cache_category_breakdown missing" == issue
+        for issue in failed["issues"]
+    )
+
+
+def test_inventory_reports_failed_p5_g28_invalid_live_cache_counters(
+    tmp_path: Path,
+) -> None:
+    _cad, pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(tmp_path)
+    soak_json = pdf / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau(soak_json)
+    payload = json.loads(soak_json.read_text(encoding="utf-8"))
+    payload["p5_g28_contract"]["live_cache_counters"] = {
+        "supplied": True,
+        "source_count": 1,
+        "observed_category_count": 1,
+        "passed": False,
+        "within_limits": False,
+        "invalid_counter_count": 1,
+        "tail_slope_ok": False,
+        "tail_slope_max_bytes_per_run": 100,
+        "tail_slope_target_bytes_per_run": 0,
+        "tail_slope_invalid_category_count": 1,
+        "issues": ["display_list: retained_bytes must be <= byte_limit"],
+        "categories": {
+            "display_list": {
+                "observed": True,
+                "sample_count": 2,
+                "retained_bytes": 2000,
+                "byte_limit": 1000,
+                "eviction_count": 0,
+                "evicted_estimated_bytes": 0,
+                "tail_slope_ok": False,
+                "tail_slope_bytes_per_run": 100,
+                "tail_slope_target_bytes_per_run": 0,
+                "within_limit": False,
+            }
+        },
+    }
+    payload["p5_g28_contract"]["live_cache_counters_supplied"] = True
+    payload["p5_g28_contract"]["live_cache_counters_source_count"] = 1
+    payload["p5_g28_contract"]["live_cache_counters_observed_category_count"] = 1
+    payload["p5_g28_contract"]["live_cache_counters_within_limits"] = False
+    payload["p5_g28_contract"]["live_cache_counters_invalid_counter_count"] = 1
+    soak_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "incomplete"
+    failed = report["diagnostics"]["p5_g28_cache_plateau_failed"][0]
+    assert failed["live_cache_counters_supplied"] is True
+    assert failed["live_cache_counters_tail_slope_ok"] is False
+    assert failed["live_cache_counters_tail_slope_max_bytes_per_run"] == 100
+    assert any(
+        issue == "p5_g28_contract.live_cache_counters.passed must be true when supplied"
+        for issue in failed["issues"]
+    )
+    assert any(
+        issue == "p5_g28_contract.live_cache_counters.tail_slope_ok must be true when supplied"
+        for issue in failed["issues"]
+    )
+
+
+def test_inventory_rejects_p5_g28_required_gate_marked_not_required_but_failed(
+    tmp_path: Path,
+) -> None:
+    _cad, pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(tmp_path)
+    soak_json = pdf / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau(
+        soak_json,
+        failed_gate="p5_g28_prune_p95_ms",
+        required_false_gate="p5_g28_prune_p95_ms",
+    )
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "incomplete"
+    failed = report["diagnostics"]["p5_g28_cache_plateau_failed"][0]
+    assert failed["failed_required_gate_count"] == 1
+    assert any(
+        "required gates failed: p5_g28_prune_p95_ms" == issue
+        for issue in failed["issues"]
+    )
 
 
 def test_inventory_reports_p5_g7_forced_tile_eviction_candidate_without_counting_as_customer_corpus(

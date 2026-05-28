@@ -119,6 +119,8 @@ def test_closeout_dry_run_writes_plan_without_running_subprocesses(
     _write_validation_output(proof_dir, forced_tile_eviction=True)
     common = _write_common_inputs(tmp_path)
     plan_json = tmp_path / "closeout" / "plan.json"
+    p5_g28_json = tmp_path / "p5_g28_cache_plateau_soak.json"
+    p5_g28_json.write_text("{}", encoding="utf-8")
 
     def fail_run(*args, **kwargs):
         raise AssertionError("dry-run must not execute subprocesses")
@@ -141,6 +143,8 @@ def test_closeout_dry_run_writes_plan_without_running_subprocesses(
             "--require-p5-g7-tile-eviction-proof",
             "--p5-g6-tile-cache-mb",
             "0.25",
+            "--p5-g28-cache-plateau-json",
+            str(p5_g28_json),
             *common,
         ]
     )
@@ -148,10 +152,12 @@ def test_closeout_dry_run_writes_plan_without_running_subprocesses(
     assert code == 0
     plan = closeout.json.loads(plan_json.read_text(encoding="utf-8"))
     step_names = [step["name"] for step in plan["steps"]]
-    assert step_names[-4:] == [
-        "prepare_customer_evidence_manifest",
+    assert step_names[-6:] == [
+        "prepare_customer_evidence_manifest_seed",
         "p5_g16_real_corpus_replay_1",
+        "p5_g27_selected_zone_crop_1",
         "p5_g22_actual_gui_soak_1",
+        "prepare_customer_evidence_manifest",
         "final_customer_grade_audit",
     ]
     readiness = closeout.json.loads(
@@ -171,6 +177,11 @@ def test_closeout_dry_run_writes_plan_without_running_subprocesses(
     assert readiness["routing_expectations"]["proof_result_count"] == 1
     assert readiness["routing_expectations"]["p5_g16_real_corpus_replay_generation_enabled"] is True
     assert readiness["routing_expectations"]["p5_g22_actual_gui_soak_generation_enabled"] is True
+    assert readiness["routing_expectations"]["p5_g27_selected_zone_crop_generation_enabled"] is True
+    assert readiness["routing_expectations"]["generated_p5_g27_selected_zone_crop_count"] == 1
+    assert readiness["inputs"]["p5_g28_cache_plateau_jsons"] == [str(p5_g28_json.resolve())]
+    assert readiness["routing_expectations"]["p5_g28_cache_plateau_explicit_json_count"] == 1
+    assert readiness["routing_expectations"]["p5_g28_cache_plateau_planned_json_count"] == 1
     readiness_steps = {
         step["name"]: step["command_context"]
         for step in readiness["plan"]["steps"]
@@ -183,16 +194,30 @@ def test_closeout_dry_run_writes_plan_without_running_subprocesses(
     ]
     assert str(standard_dir.resolve()) in readiness_steps["inventory"]["root"]
     assert str(proof_dir.resolve()) in readiness_steps["inventory"]["root"]
+    assert readiness_steps["prepare_customer_evidence_manifest_seed"]["results_dir"] == [
+        str(standard_dir.resolve())
+    ]
     assert plan["invariants"]["final_audit_results_dir_count"] == 1
     assert plan["invariants"]["proof_dirs_excluded_from_final_audit_results_dir"] is True
     assert plan["invariants"]["final_audit_results_dirs_equal_standard_result_dirs"] is True
     assert plan["invariants"]["final_audit_p5_g16_benchmark_jsons_equal_plan"] is True
     assert plan["invariants"]["final_audit_p5_g22_gui_soak_jsons_equal_plan"] is True
+    assert plan["invariants"]["final_audit_p5_g28_cache_plateau_jsons_equal_plan"] is True
+    assert plan["invariants"]["final_audit_p5_g28_cache_plateau_require_matches_plan"] is True
     prepare_command = next(
         step["command"]
         for step in plan["steps"]
         if step["name"] == "prepare_customer_evidence_manifest"
     )
+    seed_prepare_command = next(
+        step["command"]
+        for step in plan["steps"]
+        if step["name"] == "prepare_customer_evidence_manifest_seed"
+    )
+    assert "--p5-g16-benchmark-json" not in seed_prepare_command
+    assert "--p5-g22-gui-soak-json" not in seed_prepare_command
+    assert "--p5-g27-selected-zone-crop-json" not in seed_prepare_command
+    assert "--p5-g28-cache-plateau-json" not in seed_prepare_command
     assert str(proof_dir.resolve()) in _values_after(
         prepare_command,
         "--p5-g7-tile-eviction-proof-dir",
@@ -209,6 +234,34 @@ def test_closeout_dry_run_writes_plan_without_running_subprocesses(
     p5_g22_json = str(standard_dir.resolve() / "p5_g22_actual_gui_soak.json")
     assert _values_after(prepare_command, "--p5-g22-gui-soak-json") == [p5_g22_json]
     assert _values_after(audit_command, "--p5-g22-gui-soak-json") == [p5_g22_json]
+    p5_g27_json = str(standard_dir.resolve() / "p5_g27_selected_zone_crop_soak.json")
+    assert plan["generated_p5_g27_selected_zone_crop_jsons"] == [p5_g27_json]
+    assert plan["generated_p5_g27_selected_zone_crop_bridges"] == [
+        {
+            "output_json": p5_g27_json,
+            "bridge_json": p5_g16_json,
+        }
+    ]
+    assert _values_after(prepare_command, "--p5-g27-selected-zone-crop-json") == [p5_g27_json]
+    assert _values_after(audit_command, "--p5-g27-selected-zone-crop-json") == [p5_g27_json]
+    assert plan["p5_g28_cache_plateau_jsons"] == [str(p5_g28_json.resolve())]
+    assert _values_after(prepare_command, "--p5-g28-cache-plateau-json") == [
+        str(p5_g28_json.resolve())
+    ]
+    assert _values_after(audit_command, "--p5-g28-cache-plateau-json") == [
+        str(p5_g28_json.resolve())
+    ]
+    assert "--require-p5-g28-cache-plateau-soak" in audit_command
+    p5_g27_command = next(
+        step["command"]
+        for step in plan["steps"]
+        if step["name"] == "p5_g27_selected_zone_crop_1"
+    )
+    assert p5_g27_command[1] == str(source / "scripts" / "benchmark_workbench_gui_hotpath.py")
+    assert "--include-p5-g27-selected-zone-crop-first" in p5_g27_command
+    assert "--p5-g27-require-real-renderer-bridge" in p5_g27_command
+    assert _values_after(p5_g27_command, "--p5-g27-real-renderer-bridge-json") == [p5_g16_json]
+    assert _values_after(p5_g27_command, "--output") == [p5_g27_json]
 
 
 def test_closeout_dry_run_plans_manifest_validation_steps_without_running(
@@ -256,6 +309,195 @@ def test_closeout_dry_run_plans_manifest_validation_steps_without_running(
         "p5_g7_tile_eviction_proof_1",
     ]
     assert plan["invariants"]["proof_dirs_excluded_from_final_audit_results_dir"] is True
+
+
+def test_closeout_dry_run_auto_generates_p5_g28_from_repeated_validation_summaries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _write_source_checkout(tmp_path / "source")
+    standard_a = tmp_path / "standard_validation_a"
+    standard_b = tmp_path / "standard_validation_b"
+    _write_validation_output(standard_a)
+    _write_validation_output(standard_b)
+    common = _write_common_inputs(tmp_path)
+    plan_json = tmp_path / "closeout" / "plan.json"
+
+    monkeypatch.setattr(
+        closeout.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry-run must not run")),
+    )
+
+    code = closeout.main(
+        [
+            "--dry-run",
+            "--plan-json",
+            str(plan_json),
+            "--source-checkout",
+            str(source),
+            "--out",
+            str(tmp_path / "closeout"),
+            "--standard-results-dir",
+            str(standard_a),
+            "--standard-results-dir",
+            str(standard_b),
+            "--skip-p5-g16-real-corpus-replay",
+            "--skip-p5-g22-actual-gui-soak",
+            "--skip-p5-g27-selected-zone-crop-first",
+            "--p5-g28-live-counter-min-sources",
+            "2",
+            "--p5-g28-live-counter-tail-slope-target-bytes",
+            "0",
+            *common,
+        ]
+    )
+
+    assert code == 0
+    plan = closeout.json.loads(plan_json.read_text(encoding="utf-8"))
+    generated_json = str((tmp_path / "closeout" / "p5_g28_cache_plateau_soak.json").resolve())
+    validation_summaries = [
+        str(standard_a.resolve() / "validation_summary.json"),
+        str(standard_b.resolve() / "validation_summary.json"),
+    ]
+
+    assert plan["generated_p5_g28_cache_plateau_jsons"] == [generated_json]
+    assert plan["p5_g28_cache_plateau_jsons"] == [generated_json]
+    assert plan["p5_g28_validation_summaries"] == validation_summaries
+    assert plan["p5_g28_live_counter_min_sources"] == 2
+    assert plan["p5_g28_live_counter_tail_slope_target_bytes"] == 0
+    step_names = [step["name"] for step in plan["steps"]]
+    assert step_names[-3:] == [
+        "p5_g28_cache_plateau_soak_1",
+        "prepare_customer_evidence_manifest",
+        "final_customer_grade_audit",
+    ]
+
+    p5_g28_command = next(
+        step["command"]
+        for step in plan["steps"]
+        if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    assert p5_g28_command[1] == str(source / "scripts" / "benchmark_workbench_gui_hotpath.py")
+    assert "--include-p5-g28-cache-plateau" in p5_g28_command
+    assert _values_after(p5_g28_command, "--p5-g28-validation-summary") == validation_summaries
+    assert _values_after(p5_g28_command, "--p5-g28-live-counter-min-sources") == ["2"]
+    assert _values_after(p5_g28_command, "--p5-g28-live-counter-tail-slope-target-bytes") == ["0"]
+    assert _values_after(p5_g28_command, "--output") == [generated_json]
+
+    prepare_command = next(
+        step["command"]
+        for step in plan["steps"]
+        if step["name"] == "prepare_customer_evidence_manifest"
+    )
+    audit_command = next(
+        step["command"]
+        for step in plan["steps"]
+        if step["name"] == "final_customer_grade_audit"
+    )
+    assert _values_after(prepare_command, "--p5-g28-cache-plateau-json") == [generated_json]
+    assert _values_after(audit_command, "--p5-g28-cache-plateau-json") == [generated_json]
+    assert "--require-p5-g28-cache-plateau-soak" in audit_command
+
+    readiness = closeout.json.loads(
+        (tmp_path / "closeout" / "closeout_readiness.json").read_text(encoding="utf-8")
+    )
+    assert readiness["routing_expectations"]["p5_g28_cache_plateau_generation_enabled"] is True
+    assert readiness["routing_expectations"]["generated_p5_g28_cache_plateau_count"] == 1
+    assert readiness["routing_expectations"]["p5_g28_validation_summary_count"] == 2
+    p5_g28_context = next(
+        step["command_context"]
+        for step in readiness["plan"]["steps"]
+        if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    assert p5_g28_context["p5_g28_validation_summary"] == validation_summaries
+
+
+def test_closeout_dry_run_plans_p5_g28_lifecycle_validation_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _write_source_checkout(tmp_path / "source")
+    standard_dir = tmp_path / "standard_validation"
+    _write_validation_output(standard_dir)
+    p5_g28_manifest = tmp_path / "p5_g28_lifecycle_manifest.json"
+    p5_g28_manifest.write_text("{}", encoding="utf-8")
+    common = _write_common_inputs(tmp_path)
+    plan_json = tmp_path / "closeout" / "plan.json"
+
+    monkeypatch.setattr(
+        closeout.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry-run must not run")),
+    )
+
+    code = closeout.main(
+        [
+            "--dry-run",
+            "--plan-json",
+            str(plan_json),
+            "--source-checkout",
+            str(source),
+            "--out",
+            str(tmp_path / "closeout"),
+            "--standard-results-dir",
+            str(standard_dir),
+            "--skip-p5-g16-real-corpus-replay",
+            "--skip-p5-g22-actual-gui-soak",
+            "--skip-p5-g27-selected-zone-crop-first",
+            "--p5-g28-cache-plateau-validation-manifest",
+            str(p5_g28_manifest),
+            "--p5-g28-cache-plateau-runs",
+            "2",
+            *common,
+        ]
+    )
+
+    assert code == 0
+    plan = closeout.json.loads(plan_json.read_text(encoding="utf-8"))
+    lifecycle_dirs = [
+        str((tmp_path / "closeout" / "p5_g28_cache_plateau_lifecycle_1_1").resolve()),
+        str((tmp_path / "closeout" / "p5_g28_cache_plateau_lifecycle_1_2").resolve()),
+    ]
+    validation_summaries = [
+        str(Path(path) / "validation_summary.json") for path in lifecycle_dirs
+    ]
+    generated_json = str((tmp_path / "closeout" / "p5_g28_cache_plateau_soak.json").resolve())
+
+    assert plan["standard_result_dirs"] == [str(standard_dir.resolve())]
+    assert plan["p5_g28_cache_plateau_lifecycle_dirs"] == lifecycle_dirs
+    assert plan["p5_g28_validation_summaries"] == validation_summaries
+    assert plan["generated_p5_g28_cache_plateau_jsons"] == [generated_json]
+    lifecycle_steps = [
+        step for step in plan["steps"] if step["name"].startswith("p5_g28_cache_plateau_validation_")
+    ]
+    assert [step["name"] for step in lifecycle_steps] == [
+        "p5_g28_cache_plateau_validation_1_1",
+        "p5_g28_cache_plateau_validation_1_2",
+    ]
+    assert [_values_after(step["command"], "--manifest") for step in lifecycle_steps] == [
+        [str(p5_g28_manifest)],
+        [str(p5_g28_manifest)],
+    ]
+    assert [_values_after(step["command"], "--out") for step in lifecycle_steps] == [
+        [lifecycle_dirs[0]],
+        [lifecycle_dirs[1]],
+    ]
+
+    p5_g28_command = next(
+        step["command"]
+        for step in plan["steps"]
+        if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    assert _values_after(p5_g28_command, "--p5-g28-validation-summary") == validation_summaries
+    audit_command = next(
+        step["command"]
+        for step in plan["steps"]
+        if step["name"] == "final_customer_grade_audit"
+    )
+    assert _values_after(audit_command, "--results-dir") == [str(standard_dir.resolve())]
+    for lifecycle_dir in lifecycle_dirs:
+        assert lifecycle_dir not in _values_after(audit_command, "--results-dir")
 
 
 def test_closeout_applies_tile_cache_env_only_to_p5_g7_proof_validation(
@@ -360,9 +602,11 @@ def test_closeout_writes_failure_report_when_subprocess_fails(
     assert context["out"] == [str((tmp_path / "closeout" / "p5_g7_tile_eviction_proof_1").resolve())]
     assert report["remaining_steps"] == [
         "inventory",
-        "prepare_customer_evidence_manifest",
+        "prepare_customer_evidence_manifest_seed",
         "p5_g16_real_corpus_replay_1",
+        "p5_g27_selected_zone_crop_1",
         "p5_g22_actual_gui_soak_1",
+        "prepare_customer_evidence_manifest",
         "final_customer_grade_audit",
     ]
     assert "tile eviction" in " ".join(report["triage_hints"])
@@ -597,6 +841,7 @@ def _write_source_checkout(path: Path) -> Path:
         "audit_drawing_compare_mvp_exit.py",
         "benchmark_real_corpus_replay.py",
         "benchmark_actual_gui_soak.py",
+        "benchmark_workbench_gui_hotpath.py",
     ):
         (scripts_dir / name).write_text("# placeholder\n", encoding="utf-8")
     provenance = path / "src" / "services" / "comparison" / "manifest_provenance.py"
@@ -621,6 +866,19 @@ def _write_validation_output(path: Path, *, forced_tile_eviction: bool = False) 
                 },
             }
         }
+    summary["viewer_perf_summary"] = {
+        "pdf_display_list_cache_max_total_bytes": 1024,
+        "pdf_display_list_cache_byte_limit": 4096,
+        "dxf_index_cache_max_total_bytes": 2048,
+        "dxf_index_cache_byte_limit": 8192,
+        "overlay_cache_max_total_bytes": 512,
+        "overlay_cache_byte_limit": 4096,
+    }
+    summary["runtime_budget"] = {
+        "peak_disk_spool_mb": 1,
+        "max_peak_disk_spool_mb": 4,
+    }
+    summary["viewer_manifest"] = {"visual_asset_manifest_count": 1}
     (path / "validation_summary.json").write_text(
         closeout.json.dumps(summary),
         encoding="utf-8",

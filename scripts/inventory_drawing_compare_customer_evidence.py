@@ -78,6 +78,38 @@ DEFAULT_IGNORED_DIRS = {
     "node_modules",
     "site-packages",
 }
+P5_G28_BENCHMARK_ID = "p5_g28_cache_plateau_soak"
+P5_G28_PROFILE = "tile_cache_plateau_lifecycle_seed"
+P5_G28_CACHE_CATEGORY_NAMES = {
+    "display_list",
+    "dxf_index",
+    "visual_asset",
+    "overlay",
+    "spool",
+}
+P5_G28_REQUIRED_GATES = {
+    "p5_g28_tile_retention_completed",
+    "p5_g28_tile_cache_byte_plateau",
+    "p5_g28_tile_cache_eviction_observed",
+    "p5_g28_tile_cache_eviction_reason_present",
+    "p5_g28_tile_cache_orphan_payloads_zero",
+    "p5_g28_tile_cache_stale_manifest_zero",
+    "p5_g28_hot_pair_retained",
+    "p5_g28_evicted_pair_cache_miss",
+    "p5_g28_single_entry_over_cap_count",
+    "p5_g28_prune_p95_ms",
+    "p5_g28_event_loop_gap_p95_ms",
+    "p5_g28_event_loop_over_500ms_count",
+    "p5_g28_cache_category_breakdown_present",
+    "p5_g28_display_list_cache_plateau",
+    "p5_g28_dxf_index_cache_plateau",
+    "p5_g28_visual_asset_cache_plateau",
+    "p5_g28_overlay_cache_plateau",
+    "p5_g28_spool_namespace_plateau",
+    "p5_g28_cache_category_orphans_zero",
+    "p5_g28_cache_category_stale_entries_zero",
+    "p5_g28_cache_plateau_tail_slope",
+}
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -258,6 +290,13 @@ def inventory_roots(
         _summarize_p5_g27_selected_zone_crop(path)
         for path in sorted(scan["p5_g27_selected_zone_crop_jsons"])
     ]
+    p5_g28_cache_plateau_jsons = sorted(
+        str(path) for path in scan["p5_g28_cache_plateau_jsons"]
+    )
+    p5_g28_cache_plateau = [
+        _summarize_p5_g28_cache_plateau(path)
+        for path in sorted(scan["p5_g28_cache_plateau_jsons"])
+    ]
     p5_g24_visual_asset_policy = summarize_p5_g24_visual_asset_policy(
         [
             {
@@ -336,6 +375,11 @@ def inventory_roots(
         issues.append("missing passing P5-G7 forced tile-eviction proof validation output")
     if p5_g24_visual_asset_policy.get("status") != "passed":
         issues.append("P5-G24 visual asset policy is missing or failing for one or more completed validation outputs")
+    p5_g28_cache_plateau_failed = [
+        item for item in p5_g28_cache_plateau if item.get("status") != "passed"
+    ]
+    if p5_g28_cache_plateau_failed:
+        issues.append("P5-G28 cache plateau evidence was found but failed strict validation")
 
     status = "ready_for_manifest" if not issues else "incomplete"
     commands = _recommended_commands(
@@ -361,6 +405,7 @@ def inventory_roots(
         p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
         p5_g26_selection_latency_jsons=p5_g26_selection_latency_jsons,
         p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
+        p5_g28_cache_plateau_jsons=p5_g28_cache_plateau_jsons,
     )
     diagnostics = _diagnostics(
         validations=customer_validations,
@@ -390,6 +435,7 @@ def inventory_roots(
         p5_g22_gui_soaks=p5_g22_gui_soaks,
         p5_g26_selection_latency=p5_g26_selection_latency,
         p5_g27_selected_zone_crop=p5_g27_selected_zone_crop,
+        p5_g28_cache_plateau=p5_g28_cache_plateau,
         p5_g24_visual_asset_policy=p5_g24_visual_asset_policy,
     )
     report = {
@@ -436,6 +482,11 @@ def inventory_roots(
             "p5_g27_selected_zone_crop_passed_count": len(
                 [item for item in p5_g27_selected_zone_crop if item.get("status") == "passed"]
             ),
+            "p5_g28_cache_plateau_count": len(p5_g28_cache_plateau),
+            "p5_g28_cache_plateau_passed_count": len(
+                [item for item in p5_g28_cache_plateau if item.get("status") == "passed"]
+            ),
+            "p5_g28_cache_plateau_failed_count": len(p5_g28_cache_plateau_failed),
             "p5_g24_visual_asset_policy_passed": p5_g24_visual_asset_policy.get("status") == "passed",
         },
         "validation_outputs": validations,
@@ -456,6 +507,8 @@ def inventory_roots(
         "p5_g26_selection_latency": p5_g26_selection_latency,
         "p5_g27_selected_zone_crop_jsons": p5_g27_selected_zone_crop_jsons,
         "p5_g27_selected_zone_crop": p5_g27_selected_zone_crop,
+        "p5_g28_cache_plateau_jsons": p5_g28_cache_plateau_jsons,
+        "p5_g28_cache_plateau": p5_g28_cache_plateau,
         "p5_g24_visual_asset_policy": p5_g24_visual_asset_policy,
         "large_dwg_probe": large_dwg_probe_summary,
         "first_interactive_readiness": first_interactive_readiness,
@@ -518,6 +571,7 @@ def _scan_paths(roots: Sequence[Path], *, include_ignored_dirs: bool) -> dict[st
         "p5_g22_gui_soak_jsons": set(),
         "p5_g26_selection_latency_jsons": set(),
         "p5_g27_selected_zone_crop_jsons": set(),
+        "p5_g28_cache_plateau_jsons": set(),
     }
     for root in roots:
         if root.is_file():
@@ -565,6 +619,8 @@ def _classify_file(path: Path, found: dict[str, set[Path]]) -> None:
         found["p5_g26_selection_latency_jsons"].add(path)
     elif lower == "p5_g27_selected_zone_crop_soak.json":
         found["p5_g27_selected_zone_crop_jsons"].add(path)
+    elif lower == "p5_g28_cache_plateau_soak.json":
+        found["p5_g28_cache_plateau_jsons"].add(path)
     elif path.stem.endswith("_confirmed") and suffix in CONFIRMED_EXPORT_SUFFIXES:
         found["confirmed_artifacts"].add(path)
 
@@ -672,6 +728,7 @@ def _recommended_commands(
     p5_g22_gui_soak_jsons: Sequence[str],
     p5_g26_selection_latency_jsons: Sequence[str],
     p5_g27_selected_zone_crop_jsons: Sequence[str],
+    p5_g28_cache_plateau_jsons: Sequence[str],
 ) -> dict[str, str]:
     result_args = " ".join(f'--results-dir "{item["path"]}"' for item in validations)
     p5_g7_proof_args = " ".join(
@@ -764,6 +821,12 @@ def _recommended_commands(
     )
     if p5_g27_audit_args:
         p5_g27_audit_args = p5_g27_audit_args + " "
+    p5_g28_args = " ".join(
+        f'--p5-g28-cache-plateau-json "{path}"'
+        for path in p5_g28_cache_plateau_jsons
+    )
+    if p5_g28_args:
+        p5_g28_args = p5_g28_args + " "
     # Plan §17 Phase B-5 (GPT Pro F3): the legacy 10000/2000 ms defaults
     # below trigger a deprecation warning on stderr. Once Phase B-2
     # (PyMuPDF DisplayList) + B-3 (DXF pre-filter) + B-4 (prefetch) have
@@ -786,6 +849,7 @@ def _recommended_commands(
         f"{p5_g22_args}"
         f"{p5_g26_prepare_args}"
         f"{p5_g27_prepare_args}"
+        f"{p5_g28_args}"
         f"{p5_g7_require_arg}{p5_g6_tile_cache_arg}"
         "--operator-reviewer-role structural_review_lead "
         f"--operator-notes-file \"{notes}\" --confirmed-export-artifact \"{confirmed}\" "
@@ -803,6 +867,7 @@ def _recommended_commands(
         f"{p5_g22_args}"
         f"{p5_g26_audit_args}"
         f"{p5_g27_audit_args}"
+        f"{p5_g28_args}"
         f"--min-total-pairs {min_total_pairs} --max-total-pairs {max_total_pairs} "
         "--max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 "
         "--max-cache-hit-zone-render-ms 2000 --out <mvp_exit_audit.json> "
@@ -1093,6 +1158,316 @@ def _summarize_p5_g27_selected_zone_crop(path: Path) -> dict[str, Any]:
     }
 
 
+def _p5_g28_live_cache_counter_issues(contract: dict[str, Any]) -> list[str]:
+    live = contract.get("live_cache_counters")
+    if not isinstance(live, dict) or live.get("supplied") is not True:
+        return []
+    issues: list[str] = []
+    prefix = "p5_g28_contract.live_cache_counters"
+    if _int(live.get("source_count")) <= 0:
+        issues.append(f"{prefix}.source_count must be > 0 when supplied")
+    if _int(live.get("observed_category_count")) <= 0:
+        issues.append(f"{prefix}.observed_category_count must be > 0 when supplied")
+    if live.get("passed") is not True:
+        issues.append(f"{prefix}.passed must be true when supplied")
+    if live.get("within_limits") is not True:
+        issues.append(f"{prefix}.within_limits must be true when supplied")
+    if _int(live.get("invalid_counter_count")) != 0:
+        issues.append(f"{prefix}.invalid_counter_count must be 0 when supplied")
+    min_source_count = max(1, _int(live.get("min_source_count")) or 1)
+    if _int(live.get("source_count")) < min_source_count:
+        issues.append(f"{prefix}.source_count must be >= min_source_count when supplied")
+    if "tail_slope_ok" in live and live.get("tail_slope_ok") is not True:
+        issues.append(f"{prefix}.tail_slope_ok must be true when supplied")
+    if _int(live.get("tail_slope_invalid_category_count")) != 0:
+        issues.append(f"{prefix}.tail_slope_invalid_category_count must be 0 when supplied")
+    for issue in live.get("issues") or []:
+        if str(issue or "").strip():
+            issues.append(f"{prefix}.issues: {issue}")
+    categories = live.get("categories")
+    if not isinstance(categories, dict):
+        issues.append(f"{prefix}.categories missing")
+        return issues
+    for category in sorted(P5_G28_CACHE_CATEGORY_NAMES):
+        item = categories.get(category)
+        if not isinstance(item, dict) or item.get("observed") is not True:
+            continue
+        category_prefix = f"{prefix}.categories.{category}"
+        retained = _int(item.get("retained_bytes"))
+        limit = _int(item.get("byte_limit"))
+        eviction_count = _int(item.get("eviction_count"))
+        evicted_bytes = _int(item.get("evicted_estimated_bytes"))
+        if retained < 0 or limit < 0 or eviction_count < 0 or evicted_bytes < 0:
+            issues.append(f"{category_prefix} counters must not be negative")
+        if limit > 0 and retained > limit:
+            issues.append(f"{category_prefix}.retained_bytes must be <= byte_limit")
+        if item.get("within_limit") is not True:
+            issues.append(f"{category_prefix}.within_limit must be true")
+        if _int(item.get("sample_count")) >= 2:
+            if item.get("tail_slope_ok") is not True:
+                issues.append(f"{category_prefix}.tail_slope_ok must be true")
+            if _int(item.get("tail_slope_bytes_per_run")) > _int(
+                item.get("tail_slope_target_bytes_per_run")
+            ):
+                issues.append(
+                    f"{category_prefix}.tail_slope_bytes_per_run must be <= "
+                    "tail_slope_target_bytes_per_run"
+                )
+    return issues
+
+
+def _summarize_p5_g28_cache_plateau(path: Path) -> dict[str, Any]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return {
+            "path": str(path),
+            "readable": False,
+            "status": "failed",
+            "benchmark_id": "",
+            "profile": "",
+            "issues": ["p5_g28_cache_plateau JSON is missing or unreadable"],
+        }
+    contract = payload.get("p5_g28_contract")
+    if not isinstance(contract, dict):
+        contract = payload.get("p5_g28_evidence")
+    if not isinstance(contract, dict):
+        contract = {}
+    gates = payload.get("gates")
+    gate_by_name = (
+        {
+            str(gate.get("name") or ""): gate
+            for gate in gates
+            if isinstance(gate, dict) and str(gate.get("name") or "")
+        }
+        if isinstance(gates, list)
+        else {}
+    )
+    issues: list[str] = []
+    if payload.get("schema_version") != "workbench-gui-hotpath-benchmark/v1":
+        issues.append("schema_version must be workbench-gui-hotpath-benchmark/v1")
+    if payload.get("benchmark_id") != P5_G28_BENCHMARK_ID:
+        issues.append(f"benchmark_id must be {P5_G28_BENCHMARK_ID}")
+    if payload.get("profile") != P5_G28_PROFILE:
+        issues.append(f"profile must be {P5_G28_PROFILE}")
+    if payload.get("status") != "passed":
+        issues.append(f"status={payload.get('status') or '<missing>'}")
+    if not contract:
+        issues.append("p5_g28_contract missing")
+    else:
+        if contract.get("passed") is not True:
+            issues.append("p5_g28_contract.passed must be true")
+        for key in (
+            "tile_retention_completed",
+            "tile_byte_plateau_ok",
+            "tile_eviction_observed",
+            "tile_byte_limit_eviction_reason_present",
+            "tile_orphan_payloads_zero",
+            "tile_stale_manifest_zero",
+            "tile_hot_pair_retained",
+            "tile_evicted_pair_cache_miss",
+            "single_entry_over_cap_zero",
+            "event_loop_over_500ms_zero",
+            "cache_category_breakdown_present",
+            "display_list_cache_plateau",
+            "dxf_index_cache_plateau",
+            "visual_asset_cache_plateau",
+            "overlay_cache_plateau",
+            "spool_namespace_plateau",
+            "cache_category_orphans_zero",
+            "cache_category_stale_entries_zero",
+            "cache_plateau_tail_slope_ok",
+        ):
+            if contract.get(key) is not True:
+                issues.append(f"p5_g28_contract.{key} must be true")
+        reasons = contract.get("eviction_reason_counts")
+        reasons = reasons if isinstance(reasons, dict) else {}
+        if _int(reasons.get("byte_limit")) <= 0:
+            issues.append("p5_g28_contract.eviction_reason_counts.byte_limit must be > 0")
+        if _int(contract.get("tile_retained_bytes")) > _int(contract.get("tile_byte_limit")):
+            issues.append("p5_g28_contract.tile_retained_bytes must be <= tile_byte_limit")
+        if _int(contract.get("tile_eviction_count")) <= 0:
+            issues.append("p5_g28_contract.tile_eviction_count must be > 0")
+        if _int(contract.get("tile_evicted_estimated_bytes")) <= 0:
+            issues.append("p5_g28_contract.tile_evicted_estimated_bytes must be > 0")
+        if _int(contract.get("tile_orphan_bytes")) != 0:
+            issues.append("p5_g28_contract.tile_orphan_bytes must be 0")
+        if _int(contract.get("tile_orphan_pair_count")) != 0:
+            issues.append("p5_g28_contract.tile_orphan_pair_count must be 0")
+        if _int(contract.get("tile_stale_manifest_count")) != 0:
+            issues.append("p5_g28_contract.tile_stale_manifest_count must be 0")
+        if _int(contract.get("single_entry_over_cap_count")) != 0:
+            issues.append("p5_g28_contract.single_entry_over_cap_count must be 0")
+        if _float(contract.get("prune_p95_ms")) > _float(contract.get("prune_p95_target_ms")):
+            issues.append("p5_g28_contract.prune_p95_ms must be <= prune_p95_target_ms")
+        if _float(contract.get("event_loop_gap_p95_ms")) > _float(
+            contract.get("event_loop_gap_p95_target_ms")
+        ):
+            issues.append(
+                "p5_g28_contract.event_loop_gap_p95_ms must be <= event_loop_gap_p95_target_ms"
+            )
+        if _int(contract.get("event_loop_over_500ms_count")) != 0:
+            issues.append("p5_g28_contract.event_loop_over_500ms_count must be 0")
+        breakdown = contract.get("cache_category_breakdown")
+        if not isinstance(breakdown, dict):
+            issues.append("p5_g28_contract.cache_category_breakdown missing")
+            breakdown = {}
+        missing_categories = sorted(P5_G28_CACHE_CATEGORY_NAMES - set(breakdown))
+        if missing_categories:
+            issues.append(
+                "p5_g28_contract.cache_category_breakdown missing: "
+                + ", ".join(missing_categories)
+            )
+        for category in sorted(P5_G28_CACHE_CATEGORY_NAMES):
+            item = breakdown.get(category)
+            if not isinstance(item, dict):
+                continue
+            prefix = f"p5_g28_contract.cache_category_breakdown.{category}"
+            if _int(item.get("retained_bytes")) > _int(item.get("byte_limit")):
+                issues.append(f"{prefix}.retained_bytes must be <= byte_limit")
+            if _int(item.get("evicted_entry_count")) <= 0:
+                issues.append(f"{prefix}.evicted_entry_count must be > 0")
+            if _int(item.get("orphan_bytes")) != 0:
+                issues.append(f"{prefix}.orphan_bytes must be 0")
+            if _int(item.get("orphan_entry_count")) != 0:
+                issues.append(f"{prefix}.orphan_entry_count must be 0")
+            if _int(item.get("stale_entry_count")) != 0:
+                issues.append(f"{prefix}.stale_entry_count must be 0")
+            if _int(item.get("tail_slope_bytes_per_run")) > _int(
+                item.get("tail_slope_target_bytes_per_run")
+            ):
+                issues.append(
+                    f"{prefix}.tail_slope_bytes_per_run must be <= "
+                    "tail_slope_target_bytes_per_run"
+                )
+        issues.extend(_p5_g28_live_cache_counter_issues(contract))
+    declared = payload.get("p5_g28_required_gate_names")
+    declared_set = (
+        {str(item) for item in declared if str(item or "")}
+        if isinstance(declared, list)
+        else set()
+    )
+    if not declared_set:
+        issues.append("p5_g28_required_gate_names missing")
+    else:
+        missing_declared = sorted(P5_G28_REQUIRED_GATES - declared_set)
+        if missing_declared:
+            issues.append("p5_g28_required_gate_names missing: " + ", ".join(missing_declared))
+    if not isinstance(gates, list):
+        issues.append("gates[] missing")
+    else:
+        missing = sorted(P5_G28_REQUIRED_GATES - set(gate_by_name))
+        if missing:
+            issues.append("required gates missing: " + ", ".join(missing))
+        failed = sorted(
+            gate_name
+            for gate_name, gate in gate_by_name.items()
+            if gate_name in P5_G28_REQUIRED_GATES
+            and gate.get("passed") is not True
+        )
+        if failed:
+            issues.append("required gates failed: " + ", ".join(failed))
+    reasons = contract.get("eviction_reason_counts")
+    reasons = reasons if isinstance(reasons, dict) else {}
+    passed_gate_count = len(
+        [
+            gate
+            for name, gate in gate_by_name.items()
+            if name in P5_G28_REQUIRED_GATES
+            and gate.get("passed") is True
+        ]
+    )
+    failed_gate_count = len(P5_G28_REQUIRED_GATES) - passed_gate_count
+    live_counters = (
+        contract.get("live_cache_counters")
+        if isinstance(contract.get("live_cache_counters"), dict)
+        else {}
+    )
+    return {
+        "path": str(path),
+        "readable": True,
+        "status": "passed" if not issues else "failed",
+        "benchmark_id": str(payload.get("benchmark_id") or ""),
+        "profile": str(payload.get("profile") or ""),
+        "tile_retention_completed": contract.get("tile_retention_completed") is True,
+        "tile_byte_plateau_ok": contract.get("tile_byte_plateau_ok") is True,
+        "tile_eviction_observed": contract.get("tile_eviction_observed") is True,
+        "tile_byte_limit_eviction_reason_present": (
+            contract.get("tile_byte_limit_eviction_reason_present") is True
+        ),
+        "tile_retained_bytes": _int(contract.get("tile_retained_bytes")),
+        "tile_byte_limit": _int(contract.get("tile_byte_limit")),
+        "tile_eviction_count": _int(contract.get("tile_eviction_count")),
+        "byte_limit_reason_count": _int(reasons.get("byte_limit")),
+        "cache_category_breakdown_present": (
+            contract.get("cache_category_breakdown_present") is True
+        ),
+        "cache_category_retained_bytes_total": _int(
+            contract.get("cache_category_retained_bytes_total")
+        ),
+        "cache_category_byte_limit_total": _int(
+            contract.get("cache_category_byte_limit_total")
+        ),
+        "cache_category_evicted_entry_count": _int(
+            contract.get("cache_category_evicted_entry_count")
+        ),
+        "cache_category_orphan_bytes_total": _int(
+            contract.get("cache_category_orphan_bytes_total")
+        ),
+        "cache_category_stale_entry_count": _int(
+            contract.get("cache_category_stale_entry_count")
+        ),
+        "cache_category_tail_slope_max_bytes_per_run": _int(
+            contract.get("cache_category_tail_slope_max_bytes_per_run")
+        ),
+        "live_cache_counters_supplied": (
+            contract.get("live_cache_counters_supplied") is True
+            or live_counters.get("supplied") is True
+        ),
+        "live_cache_counters_source_count": _int(
+            contract.get("live_cache_counters_source_count")
+            if contract.get("live_cache_counters_source_count") is not None
+            else live_counters.get("source_count")
+        ),
+        "live_cache_counters_observed_category_count": _int(
+            contract.get("live_cache_counters_observed_category_count")
+            if contract.get("live_cache_counters_observed_category_count") is not None
+            else live_counters.get("observed_category_count")
+        ),
+        "live_cache_counters_within_limits": (
+            contract.get("live_cache_counters_within_limits") is True
+            or live_counters.get("within_limits") is True
+        ),
+        "live_cache_counters_invalid_counter_count": _int(
+            contract.get("live_cache_counters_invalid_counter_count")
+            if contract.get("live_cache_counters_invalid_counter_count") is not None
+            else live_counters.get("invalid_counter_count")
+        ),
+        "live_cache_counters_tail_slope_ok": (
+            contract.get("live_cache_counters_tail_slope_ok") is True
+            or live_counters.get("tail_slope_ok") is True
+        ),
+        "live_cache_counters_tail_slope_max_bytes_per_run": _int(
+            contract.get("live_cache_counters_tail_slope_max_bytes_per_run")
+            if contract.get("live_cache_counters_tail_slope_max_bytes_per_run") is not None
+            else live_counters.get("tail_slope_max_bytes_per_run")
+        ),
+        "live_cache_counters_tail_slope_target_bytes_per_run": _int(
+            contract.get("live_cache_counters_tail_slope_target_bytes_per_run")
+            if contract.get("live_cache_counters_tail_slope_target_bytes_per_run") is not None
+            else live_counters.get("tail_slope_target_bytes_per_run")
+        ),
+        "live_cache_counters_tail_slope_invalid_category_count": _int(
+            contract.get("live_cache_counters_tail_slope_invalid_category_count")
+            if contract.get("live_cache_counters_tail_slope_invalid_category_count") is not None
+            else live_counters.get("tail_slope_invalid_category_count")
+        ),
+        "required_gate_count": len(P5_G28_REQUIRED_GATES),
+        "passed_required_gate_count": passed_gate_count,
+        "failed_required_gate_count": failed_gate_count,
+        "issues": issues,
+    }
+
+
 def _diagnostics(
     *,
     validations: Sequence[dict[str, Any]],
@@ -1122,6 +1497,7 @@ def _diagnostics(
     p5_g22_gui_soaks: Sequence[dict[str, Any]],
     p5_g26_selection_latency: Sequence[dict[str, Any]],
     p5_g27_selected_zone_crop: Sequence[dict[str, Any]],
+    p5_g28_cache_plateau: Sequence[dict[str, Any]],
     p5_g24_visual_asset_policy: dict[str, Any],
 ) -> dict[str, Any]:
     completed = [item for item in validations if int(item["completed_pairs"]) > 0]
@@ -1265,6 +1641,20 @@ def _diagnostics(
         ],
         "p5_g27_selected_zone_crop_failed": [
             item for item in p5_g27_selected_zone_crop if item.get("status") != "passed"
+        ],
+        "p5_g28_cache_plateau_candidate_count": len(p5_g28_cache_plateau),
+        "p5_g28_cache_plateau_passed_count": len(
+            [item for item in p5_g28_cache_plateau if item.get("status") == "passed"]
+        ),
+        "p5_g28_cache_plateau_failed_count": len(
+            [item for item in p5_g28_cache_plateau if item.get("status") != "passed"]
+        ),
+        "p5_g28_cache_plateau_candidates": list(p5_g28_cache_plateau),
+        "p5_g28_cache_plateau_passed": [
+            item for item in p5_g28_cache_plateau if item.get("status") == "passed"
+        ],
+        "p5_g28_cache_plateau_failed": [
+            item for item in p5_g28_cache_plateau if item.get("status") != "passed"
         ],
         "p5_g24_visual_asset_policy_status": p5_g24_visual_asset_policy.get("status"),
         "p5_g24_visual_asset_policy_issues": list(p5_g24_visual_asset_policy.get("issues") or []),

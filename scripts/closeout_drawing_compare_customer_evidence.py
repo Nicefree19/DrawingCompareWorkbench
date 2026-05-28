@@ -195,6 +195,55 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Existing P5-G27 selected-zone crop-first JSON to forward to manifest preparation and final audit.",
     )
     parser.add_argument(
+        "--p5-g28-cache-plateau-json",
+        "--p5-g28-cache-plateau-soak",
+        dest="p5_g28_cache_plateau_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Existing standalone P5-G28 cache plateau JSON to forward to "
+            "manifest preparation and the final audit. This does not enable "
+            "P5-G28 auto-generation or make it a default customer-grade gate."
+        ),
+    )
+    parser.add_argument(
+        "--skip-p5-g28-cache-plateau-soak",
+        action="store_true",
+        help=(
+            "Do not generate P5-G28 cache plateau JSON from standard or lifecycle "
+            "validation summaries. Use only when valid --p5-g28-cache-plateau-json "
+            "artifacts are supplied elsewhere."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g28-cache-plateau-validation-manifest",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Validation manifest to run repeatedly as a P5-G28 lifecycle source. "
+            "Generated validation outputs feed p5_g28_cache_plateau_soak.json but "
+            "are not added to the final customer corpus --results-dir list."
+        ),
+    )
+    parser.add_argument(
+        "--skip-p5-g27-selected-zone-crop-first",
+        action="store_true",
+        help=(
+            "Do not generate bridge-bearing P5-G27 selected-zone crop-first JSON "
+            "after P5-G16. Use only when valid --p5-g27-selected-zone-crop-json "
+            "artifacts are supplied elsewhere."
+        ),
+    )
+    parser.add_argument("--p5-g27-zone-selection-runs", type=int, default=20)
+    parser.add_argument("--p5-g27-zone-selection-count", type=int, default=1000)
+    parser.add_argument("--p5-g27-crop-visible-p95-target-ms", type=float, default=500.0)
+    parser.add_argument("--p5-g27-event-loop-gap-max-target-ms", type=float, default=500.0)
+    parser.add_argument("--p5-g28-live-counter-min-sources", type=int, default=2)
+    parser.add_argument("--p5-g28-live-counter-tail-slope-target-bytes", type=int, default=0)
+    parser.add_argument("--p5-g28-cache-plateau-runs", type=int, default=2)
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate inputs and print/write the command plan without running subprocesses.",
@@ -250,6 +299,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--p5-g22-zone-render-wait-ms must be >= 0")
     if args.p5_g22_min_page_navigation_count < 0:
         parser.error("--p5-g22-min-page-navigation-count must be >= 0")
+    if args.p5_g27_zone_selection_runs <= 0:
+        parser.error("--p5-g27-zone-selection-runs must be greater than 0")
+    if args.p5_g27_zone_selection_count <= 0:
+        parser.error("--p5-g27-zone-selection-count must be greater than 0")
+    if args.p5_g27_crop_visible_p95_target_ms <= 0:
+        parser.error("--p5-g27-crop-visible-p95-target-ms must be greater than 0")
+    if args.p5_g27_event_loop_gap_max_target_ms <= 0:
+        parser.error("--p5-g27-event-loop-gap-max-target-ms must be greater than 0")
+    if args.p5_g28_live_counter_min_sources <= 0:
+        parser.error("--p5-g28-live-counter-min-sources must be greater than 0")
+    if args.p5_g28_live_counter_tail_slope_target_bytes < 0:
+        parser.error("--p5-g28-live-counter-tail-slope-target-bytes must be >= 0")
+    if args.p5_g28_cache_plateau_runs <= 0:
+        parser.error("--p5-g28-cache-plateau-runs must be greater than 0")
     if args.p5_g7_proof_validation_manifest and args.p5_g6_tile_cache_mb is None:
         parser.error("--p5-g7-proof-validation-manifest requires --p5-g6-tile-cache-mb")
     if (
@@ -304,6 +367,29 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         )
         proof_dirs.append(proof_out.resolve())
 
+    p5_g28_lifecycle_dirs: list[Path] = []
+    for manifest_index, manifest in enumerate(args.p5_g28_cache_plateau_validation_manifest, start=1):
+        for run_index in range(1, int(args.p5_g28_cache_plateau_runs) + 1):
+            lifecycle_out = out_dir / (
+                f"p5_g28_cache_plateau_lifecycle_{manifest_index}_{run_index}"
+            )
+            leading_steps.append(
+                {
+                    "name": (
+                        f"p5_g28_cache_plateau_validation_{manifest_index}_{run_index}"
+                    ),
+                    "cwd": str(source_checkout),
+                    "command": _standard_validation_command(
+                        args,
+                        source_checkout,
+                        manifest,
+                        lifecycle_out,
+                    ),
+                    "env_overrides": {},
+                }
+            )
+            p5_g28_lifecycle_dirs.append(lifecycle_out.resolve())
+
     generated_p5_g16_benchmark_jsons = _planned_p5_g16_benchmark_jsons(
         standard_result_dirs,
         skip=args.skip_p5_g16_real_corpus_replay,
@@ -318,8 +404,39 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
     p5_g22_gui_soak_jsons = _unique_paths(
         [*[path.resolve() for path in args.p5_g22_gui_soak_json], *generated_p5_g22_gui_soak_jsons]
     )
+    generated_p5_g27_selected_zone_crop_specs = _planned_p5_g27_selected_zone_crop_specs(
+        standard_result_dirs,
+        p5_g16_benchmark_jsons=p5_g16_benchmark_jsons,
+        explicit_paths=[path.resolve() for path in args.p5_g27_selected_zone_crop_json],
+        skip=args.skip_p5_g27_selected_zone_crop_first,
+    )
+    generated_p5_g27_selected_zone_crop_jsons = [
+        spec["output_json"] for spec in generated_p5_g27_selected_zone_crop_specs
+    ]
     p5_g27_selected_zone_crop_jsons = _unique_paths(
-        [path.resolve() for path in args.p5_g27_selected_zone_crop_json]
+        [
+            *[path.resolve() for path in args.p5_g27_selected_zone_crop_json],
+            *generated_p5_g27_selected_zone_crop_jsons,
+        ]
+    )
+    p5_g28_validation_summary_dirs = (
+        p5_g28_lifecycle_dirs if p5_g28_lifecycle_dirs else standard_result_dirs
+    )
+    p5_g28_validation_summaries = _p5_g28_validation_summary_paths(
+        p5_g28_validation_summary_dirs
+    )
+    generated_p5_g28_cache_plateau_jsons = _planned_p5_g28_cache_plateau_jsons(
+        out_dir=out_dir,
+        validation_summaries=p5_g28_validation_summaries,
+        explicit_paths=[path.resolve() for path in args.p5_g28_cache_plateau_json],
+        min_source_count=args.p5_g28_live_counter_min_sources,
+        skip=args.skip_p5_g28_cache_plateau_soak,
+    )
+    p5_g28_cache_plateau_jsons = _unique_paths(
+        [
+            *[path.resolve() for path in args.p5_g28_cache_plateau_json],
+            *generated_p5_g28_cache_plateau_jsons,
+        ]
     )
 
     inventory_json = (args.inventory_json or out_dir / "inventory.json").resolve()
@@ -337,6 +454,11 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
         generated_p5_g22_gui_soak_jsons=generated_p5_g22_gui_soak_jsons,
         p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
+        generated_p5_g27_selected_zone_crop_specs=generated_p5_g27_selected_zone_crop_specs,
+        p5_g28_cache_plateau_jsons=p5_g28_cache_plateau_jsons,
+        generated_p5_g28_cache_plateau_jsons=generated_p5_g28_cache_plateau_jsons,
+        p5_g28_lifecycle_dirs=p5_g28_lifecycle_dirs,
+        p5_g28_validation_summaries=p5_g28_validation_summaries,
         inventory_json=inventory_json,
         audit_json=audit_json,
         failure_json=failure_json,
@@ -367,6 +489,15 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
             "p5_g22_gui_soak_jsons": [str(path) for path in p5_g22_gui_soak_jsons],
             "p5_g27_selected_zone_crop_jsons": [
                 str(path) for path in p5_g27_selected_zone_crop_jsons
+            ],
+            "p5_g28_cache_plateau_jsons": [
+                str(path) for path in p5_g28_cache_plateau_jsons
+            ],
+            "generated_p5_g28_cache_plateau_jsons": [
+                str(path) for path in generated_p5_g28_cache_plateau_jsons
+            ],
+            "p5_g28_cache_plateau_lifecycle_dirs": [
+                str(path) for path in p5_g28_lifecycle_dirs
             ],
             "inventory_json": str(inventory_json),
             "customer_evidence_manifest": str(args.customer_evidence_manifest.resolve()),
@@ -414,6 +545,9 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         "p5_g22_gui_soak_jsons": [str(path) for path in p5_g22_gui_soak_jsons],
         "p5_g27_selected_zone_crop_jsons": [
             str(path) for path in p5_g27_selected_zone_crop_jsons
+        ],
+        "p5_g28_cache_plateau_jsons": [
+            str(path) for path in p5_g28_cache_plateau_jsons
         ],
         "inventory_json": str(inventory_json),
         "customer_evidence_manifest": str(args.customer_evidence_manifest.resolve()),
@@ -470,6 +604,7 @@ def _preflight_issues(
         source_checkout / "scripts" / "audit_drawing_compare_mvp_exit.py",
         source_checkout / "scripts" / "benchmark_real_corpus_replay.py",
         source_checkout / "scripts" / "benchmark_actual_gui_soak.py",
+        source_checkout / "scripts" / "benchmark_workbench_gui_hotpath.py",
         source_checkout / "src" / "services" / "comparison" / "manifest_provenance.py",
     ]
     for path in source_required:
@@ -481,6 +616,7 @@ def _preflight_issues(
         cli_dir / "audit_drawing_compare_mvp_exit.py",
         cli_dir / "benchmark_real_corpus_replay.py",
         cli_dir / "benchmark_actual_gui_soak.py",
+        cli_dir / "benchmark_workbench_gui_hotpath.py",
     ]
     for path in cli_required:
         if not path.exists():
@@ -509,6 +645,10 @@ def _preflight_issues(
         _require_file(issues, "--p5-g22-gui-soak-json", path)
     for path in args.p5_g27_selected_zone_crop_json:
         _require_file(issues, "--p5-g27-selected-zone-crop-json", path)
+    for path in args.p5_g28_cache_plateau_json:
+        _require_file(issues, "--p5-g28-cache-plateau-json", path)
+    for path in args.p5_g28_cache_plateau_validation_manifest:
+        _require_file(issues, "--p5-g28-cache-plateau-validation-manifest", path)
     for path in args.standard_results_dir:
         _require_validation_output(issues, "--standard-results-dir", path)
         if _is_forced_tile_eviction_output(path):
@@ -577,6 +717,10 @@ def _build_readiness_report(
             "p5_g27_selected_zone_crop_jsons": _path_strings(
                 args.p5_g27_selected_zone_crop_json
             ),
+            "p5_g28_cache_plateau_jsons": _path_strings(args.p5_g28_cache_plateau_json),
+            "p5_g28_cache_plateau_validation_manifests": _path_strings(
+                args.p5_g28_cache_plateau_validation_manifest
+            ),
             "release_manifest": str(args.release_manifest.resolve()),
             "large_dwg_probe": str(args.large_dwg_probe.resolve()),
             "review_ground_truth": str(args.review_ground_truth.resolve()),
@@ -623,7 +767,53 @@ def _build_readiness_report(
             "p5_g22_timeout_s": args.p5_g22_timeout_s,
             "p5_g22_zone_render_wait_ms": args.p5_g22_zone_render_wait_ms,
             "p5_g22_min_page_navigation_count": args.p5_g22_min_page_navigation_count,
-            "p5_g27_selected_zone_crop_json_count": len(args.p5_g27_selected_zone_crop_json),
+            "p5_g27_selected_zone_crop_generation_enabled": not bool(
+                args.skip_p5_g27_selected_zone_crop_first
+            ),
+            "p5_g27_zone_selection_runs": args.p5_g27_zone_selection_runs,
+            "p5_g27_zone_selection_count": args.p5_g27_zone_selection_count,
+            "p5_g27_crop_visible_p95_target_ms": args.p5_g27_crop_visible_p95_target_ms,
+            "p5_g27_event_loop_gap_max_target_ms": args.p5_g27_event_loop_gap_max_target_ms,
+            "p5_g27_selected_zone_crop_explicit_json_count": len(args.p5_g27_selected_zone_crop_json),
+            "p5_g27_selected_zone_crop_planned_json_count": (
+                len(plan.get("p5_g27_selected_zone_crop_jsons", []))
+                if isinstance(plan, dict)
+                else len(args.p5_g27_selected_zone_crop_json)
+            ),
+            "generated_p5_g27_selected_zone_crop_count": (
+                len(plan.get("generated_p5_g27_selected_zone_crop_jsons", []))
+                if isinstance(plan, dict)
+                else 0
+            ),
+            "p5_g28_cache_plateau_explicit_json_count": len(args.p5_g28_cache_plateau_json),
+            "p5_g28_cache_plateau_planned_json_count": (
+                len(plan.get("p5_g28_cache_plateau_jsons", []))
+                if isinstance(plan, dict)
+                else len(args.p5_g28_cache_plateau_json)
+            ),
+            "p5_g28_cache_plateau_generation_enabled": not bool(
+                args.skip_p5_g28_cache_plateau_soak
+            ),
+            "p5_g28_cache_plateau_runs": args.p5_g28_cache_plateau_runs,
+            "p5_g28_live_counter_min_sources": args.p5_g28_live_counter_min_sources,
+            "p5_g28_live_counter_tail_slope_target_bytes": (
+                args.p5_g28_live_counter_tail_slope_target_bytes
+            ),
+            "generated_p5_g28_cache_plateau_count": (
+                len(plan.get("generated_p5_g28_cache_plateau_jsons", []))
+                if isinstance(plan, dict)
+                else 0
+            ),
+            "p5_g28_cache_plateau_lifecycle_result_count": (
+                len(plan.get("p5_g28_cache_plateau_lifecycle_dirs", []))
+                if isinstance(plan, dict)
+                else 0
+            ),
+            "p5_g28_validation_summary_count": (
+                len(plan.get("p5_g28_validation_summaries", []))
+                if isinstance(plan, dict)
+                else 0
+            ),
         },
         "plan": _readiness_plan_summary(plan),
     }
@@ -669,6 +859,14 @@ def _result_dir_collision_issues(args: argparse.Namespace) -> list[str]:
         args.out / f"p5_g7_tile_eviction_proof_{index}"
         for index, _ in enumerate(args.p5_g7_proof_validation_manifest, start=1)
     ]
+    generated_p5_g28_lifecycle = [
+        args.out / f"p5_g28_cache_plateau_lifecycle_{manifest_index}_{run_index}"
+        for manifest_index, _ in enumerate(
+            args.p5_g28_cache_plateau_validation_manifest,
+            start=1,
+        )
+        for run_index in range(1, int(args.p5_g28_cache_plateau_runs) + 1)
+    ]
     for label, paths, seen in (
         ("--standard-results-dir", args.standard_results_dir, standard_keys),
         ("--p5-g7-tile-eviction-proof-dir", args.p5_g7_tile_eviction_proof_dir, proof_keys),
@@ -700,6 +898,18 @@ def _result_dir_collision_issues(args: argparse.Namespace) -> list[str]:
         if key in proof_keys:
             issues.append(
                 "--p5-g7-tile-eviction-proof-dir collides with generated proof validation output: "
+                f"{proof_keys[key]} and {path}"
+            )
+    for path in generated_p5_g28_lifecycle:
+        key = _path_key(path)
+        if key in standard_keys:
+            issues.append(
+                "--standard-results-dir collides with generated P5-G28 lifecycle output: "
+                f"{standard_keys[key]} and {path}"
+            )
+        if key in proof_keys:
+            issues.append(
+                "--p5-g7-tile-eviction-proof-dir collides with generated P5-G28 lifecycle output: "
                 f"{proof_keys[key]} and {path}"
             )
     overlap = set(standard_keys) & set(proof_keys)
@@ -804,6 +1014,68 @@ def _planned_p5_g22_gui_soak_jsons(
     ]
 
 
+def _planned_p5_g27_selected_zone_crop_specs(
+    standard_result_dirs: Sequence[Path],
+    *,
+    p5_g16_benchmark_jsons: Sequence[Path],
+    explicit_paths: Sequence[Path],
+    skip: bool,
+) -> list[dict[str, Path]]:
+    if skip:
+        return []
+    explicit_keys = {_path_key(path) for path in explicit_paths}
+    bridge_by_result_dir = {
+        _path_key(path.parent): path.resolve()
+        for path in p5_g16_benchmark_jsons
+    }
+    fallback_bridge = p5_g16_benchmark_jsons[0].resolve() if p5_g16_benchmark_jsons else None
+    specs: list[dict[str, Path]] = []
+    seen_outputs: set[str] = set()
+    for result_dir in standard_result_dirs:
+        resolved_dir = result_dir.resolve()
+        if not _should_generate_p5_g27_selected_zone_crop(resolved_dir):
+            continue
+        output_json = resolved_dir / "p5_g27_selected_zone_crop_soak.json"
+        output_key = _path_key(output_json)
+        if output_key in explicit_keys or output_key in seen_outputs:
+            continue
+        bridge_json = bridge_by_result_dir.get(_path_key(resolved_dir)) or fallback_bridge
+        if bridge_json is None:
+            continue
+        specs.append(
+            {
+                "result_dir": resolved_dir,
+                "output_json": output_json,
+                "bridge_json": bridge_json,
+            }
+        )
+        seen_outputs.add(output_key)
+    return specs
+
+
+def _p5_g28_validation_summary_paths(standard_result_dirs: Sequence[Path]) -> list[Path]:
+    return [path.resolve() / "validation_summary.json" for path in standard_result_dirs]
+
+
+def _planned_p5_g28_cache_plateau_jsons(
+    *,
+    out_dir: Path,
+    validation_summaries: Sequence[Path],
+    explicit_paths: Sequence[Path],
+    min_source_count: int,
+    skip: bool,
+) -> list[Path]:
+    if skip:
+        return []
+    if len(validation_summaries) < max(1, int(min_source_count)):
+        return []
+    output_json = out_dir.resolve() / "p5_g28_cache_plateau_soak.json"
+    explicit_keys = {_path_key(path) for path in explicit_paths}
+    if _path_key(output_json) in explicit_keys:
+        return []
+    return [output_json]
+
+
 def _should_generate_p5_g16_replay(result_dir: Path) -> bool:
     summary_path = result_dir / "validation_summary.json"
     if not summary_path.exists():
@@ -820,6 +1092,10 @@ def _should_generate_p5_g16_replay(result_dir: Path) -> bool:
 
 
 def _should_generate_p5_g22_gui_soak(result_dir: Path) -> bool:
+    return _should_generate_p5_g16_replay(result_dir)
+
+
+def _should_generate_p5_g27_selected_zone_crop(result_dir: Path) -> bool:
     return _should_generate_p5_g16_replay(result_dir)
 
 
@@ -875,11 +1151,39 @@ def _build_command_plan(
     p5_g22_gui_soak_jsons: Sequence[Path],
     generated_p5_g22_gui_soak_jsons: Sequence[Path],
     p5_g27_selected_zone_crop_jsons: Sequence[Path],
+    generated_p5_g27_selected_zone_crop_specs: Sequence[dict[str, Path]],
+    p5_g28_cache_plateau_jsons: Sequence[Path],
+    generated_p5_g28_cache_plateau_jsons: Sequence[Path],
+    p5_g28_lifecycle_dirs: Sequence[Path],
+    p5_g28_validation_summaries: Sequence[Path],
     inventory_json: Path,
     audit_json: Path,
     failure_json: Path,
     leading_steps: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
+    needs_seed_manifest = bool(
+        generated_p5_g16_benchmark_jsons
+        or generated_p5_g22_gui_soak_jsons
+        or generated_p5_g27_selected_zone_crop_specs
+    )
+    seed_prepare_steps = [
+        {
+            "name": "prepare_customer_evidence_manifest_seed",
+            "cwd": str(source_checkout),
+            "env_overrides": {},
+            "command": _prepare_command(
+                args,
+                cli_dir,
+                source_checkout,
+                standard_result_dirs=standard_result_dirs,
+                proof_dirs=proof_dirs,
+                p5_g16_benchmark_jsons=[],
+                p5_g22_gui_soak_jsons=[],
+                p5_g27_selected_zone_crop_jsons=[],
+                p5_g28_cache_plateau_jsons=[],
+            ),
+        }
+    ] if needs_seed_manifest else []
     steps = [
         *leading_steps,
         {
@@ -895,21 +1199,7 @@ def _build_command_plan(
                 inventory_json=inventory_json,
             ),
         },
-        {
-            "name": "prepare_customer_evidence_manifest",
-            "cwd": str(source_checkout),
-            "env_overrides": {},
-            "command": _prepare_command(
-                args,
-                cli_dir,
-                source_checkout,
-                standard_result_dirs=standard_result_dirs,
-                proof_dirs=proof_dirs,
-                p5_g16_benchmark_jsons=p5_g16_benchmark_jsons,
-                p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
-                p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
-            ),
-        },
+        *seed_prepare_steps,
         *[
             {
                 "name": f"p5_g16_real_corpus_replay_{index}",
@@ -927,6 +1217,21 @@ def _build_command_plan(
         ],
         *[
             {
+                "name": f"p5_g27_selected_zone_crop_{index}",
+                "cwd": str(source_checkout),
+                "env_overrides": {},
+                "command": _p5_g27_selected_zone_crop_command(
+                    args,
+                    cli_dir,
+                    source_checkout,
+                    output_json=spec["output_json"],
+                    bridge_json=spec["bridge_json"],
+                ),
+            }
+            for index, spec in enumerate(generated_p5_g27_selected_zone_crop_specs, start=1)
+        ],
+        *[
+            {
                 "name": f"p5_g22_actual_gui_soak_{index}",
                 "cwd": str(source_checkout),
                 "env_overrides": {},
@@ -940,6 +1245,37 @@ def _build_command_plan(
             }
             for index, output_json in enumerate(generated_p5_g22_gui_soak_jsons, start=1)
         ],
+        *[
+            {
+                "name": f"p5_g28_cache_plateau_soak_{index}",
+                "cwd": str(source_checkout),
+                "env_overrides": {},
+                "command": _p5_g28_cache_plateau_command(
+                    args,
+                    cli_dir,
+                    source_checkout,
+                    output_json=output_json,
+                    validation_summaries=p5_g28_validation_summaries,
+                ),
+            }
+            for index, output_json in enumerate(generated_p5_g28_cache_plateau_jsons, start=1)
+        ],
+        {
+            "name": "prepare_customer_evidence_manifest",
+            "cwd": str(source_checkout),
+            "env_overrides": {},
+            "command": _prepare_command(
+                args,
+                cli_dir,
+                source_checkout,
+                standard_result_dirs=standard_result_dirs,
+                proof_dirs=proof_dirs,
+                p5_g16_benchmark_jsons=p5_g16_benchmark_jsons,
+                p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
+                p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
+                p5_g28_cache_plateau_jsons=p5_g28_cache_plateau_jsons,
+            ),
+        },
         {
             "name": "final_customer_grade_audit",
             "cwd": str(source_checkout),
@@ -952,6 +1288,7 @@ def _build_command_plan(
                 p5_g16_benchmark_jsons=p5_g16_benchmark_jsons,
                 p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
                 p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
+                p5_g28_cache_plateau_jsons=p5_g28_cache_plateau_jsons,
                 audit_json=audit_json,
             ),
         },
@@ -972,6 +1309,32 @@ def _build_command_plan(
         ],
         "p5_g27_selected_zone_crop_jsons": [
             str(path) for path in p5_g27_selected_zone_crop_jsons
+        ],
+        "p5_g28_cache_plateau_jsons": [
+            str(path) for path in p5_g28_cache_plateau_jsons
+        ],
+        "generated_p5_g28_cache_plateau_jsons": [
+            str(path) for path in generated_p5_g28_cache_plateau_jsons
+        ],
+        "p5_g28_cache_plateau_lifecycle_dirs": [
+            str(path) for path in p5_g28_lifecycle_dirs
+        ],
+        "p5_g28_validation_summaries": [
+            str(path) for path in p5_g28_validation_summaries
+        ],
+        "p5_g28_live_counter_min_sources": int(args.p5_g28_live_counter_min_sources),
+        "p5_g28_live_counter_tail_slope_target_bytes": int(
+            args.p5_g28_live_counter_tail_slope_target_bytes
+        ),
+        "generated_p5_g27_selected_zone_crop_jsons": [
+            str(spec["output_json"]) for spec in generated_p5_g27_selected_zone_crop_specs
+        ],
+        "generated_p5_g27_selected_zone_crop_bridges": [
+            {
+                "output_json": str(spec["output_json"]),
+                "bridge_json": str(spec["bridge_json"]),
+            }
+            for spec in generated_p5_g27_selected_zone_crop_specs
         ],
         "inventory_json": str(inventory_json),
         "customer_evidence_manifest": str(args.customer_evidence_manifest.resolve()),
@@ -999,6 +1362,15 @@ def _build_command_plan(
                 "--p5-g27-selected-zone-crop-json",
             )
             == [str(path) for path in p5_g27_selected_zone_crop_jsons],
+            "final_audit_p5_g28_cache_plateau_jsons_equal_plan": _values_after(
+                steps[-1]["command"],
+                "--p5-g28-cache-plateau-json",
+            )
+            == [str(path) for path in p5_g28_cache_plateau_jsons],
+            "final_audit_p5_g28_cache_plateau_require_matches_plan": (
+                "--require-p5-g28-cache-plateau-soak" in steps[-1]["command"]
+            )
+            == bool(p5_g28_cache_plateau_jsons),
         },
         "steps": steps,
     }
@@ -1091,6 +1463,58 @@ def _p5_g22_gui_soak_command(
     ]
 
 
+def _p5_g27_selected_zone_crop_command(
+    args: argparse.Namespace,
+    cli_dir: Path,
+    source_checkout: Path,
+    *,
+    output_json: Path,
+    bridge_json: Path,
+) -> list[str]:
+    return [
+        args.python,
+        str(_evidence_script(source_checkout, cli_dir, "benchmark_workbench_gui_hotpath.py")),
+        "--include-p5-g27-selected-zone-crop-first",
+        "--p5-g27-zone-selection-runs",
+        str(args.p5_g27_zone_selection_runs),
+        "--p5-g27-zone-selection-count",
+        str(args.p5_g27_zone_selection_count),
+        "--p5-g27-crop-visible-p95-target-ms",
+        _format_number(args.p5_g27_crop_visible_p95_target_ms),
+        "--p5-g27-event-loop-gap-max-target-ms",
+        _format_number(args.p5_g27_event_loop_gap_max_target_ms),
+        "--p5-g27-real-renderer-bridge-json",
+        str(bridge_json),
+        "--p5-g27-require-real-renderer-bridge",
+        "--output",
+        str(output_json),
+    ]
+
+
+def _p5_g28_cache_plateau_command(
+    args: argparse.Namespace,
+    cli_dir: Path,
+    source_checkout: Path,
+    *,
+    output_json: Path,
+    validation_summaries: Sequence[Path],
+) -> list[str]:
+    command = [
+        args.python,
+        str(_evidence_script(source_checkout, cli_dir, "benchmark_workbench_gui_hotpath.py")),
+        "--include-p5-g28-cache-plateau",
+        "--p5-g28-live-counter-min-sources",
+        str(args.p5_g28_live_counter_min_sources),
+        "--p5-g28-live-counter-tail-slope-target-bytes",
+        str(args.p5_g28_live_counter_tail_slope_target_bytes),
+        "--output",
+        str(output_json),
+    ]
+    for summary in validation_summaries:
+        command.extend(["--p5-g28-validation-summary", str(summary)])
+    return command
+
+
 def _inventory_command(
     args: argparse.Namespace,
     cli_dir: Path,
@@ -1133,6 +1557,7 @@ def _prepare_command(
     p5_g16_benchmark_jsons: Sequence[Path],
     p5_g22_gui_soak_jsons: Sequence[Path],
     p5_g27_selected_zone_crop_jsons: Sequence[Path],
+    p5_g28_cache_plateau_jsons: Sequence[Path],
 ) -> list[str]:
     command = [
         args.python,
@@ -1188,6 +1613,8 @@ def _prepare_command(
         command.extend(["--p5-g22-gui-soak-json", str(soak_json)])
     for crop_json in p5_g27_selected_zone_crop_jsons:
         command.extend(["--p5-g27-selected-zone-crop-json", str(crop_json)])
+    for cache_json in p5_g28_cache_plateau_jsons:
+        command.extend(["--p5-g28-cache-plateau-json", str(cache_json)])
     for release_manifest in args.p5_g7_tile_eviction_release_manifest:
         command.extend(["--p5-g7-tile-eviction-release-manifest", str(release_manifest)])
     if args.operator_screenshots_dir:
@@ -1210,6 +1637,7 @@ def _audit_command(
     p5_g16_benchmark_jsons: Sequence[Path],
     p5_g22_gui_soak_jsons: Sequence[Path],
     p5_g27_selected_zone_crop_jsons: Sequence[Path],
+    p5_g28_cache_plateau_jsons: Sequence[Path],
     audit_json: Path,
 ) -> list[str]:
     command = [
@@ -1246,6 +1674,10 @@ def _audit_command(
         command.extend(["--p5-g22-gui-soak-json", str(soak_json)])
     for crop_json in p5_g27_selected_zone_crop_jsons:
         command.extend(["--p5-g27-selected-zone-crop-json", str(crop_json)])
+    for cache_json in p5_g28_cache_plateau_jsons:
+        command.extend(["--p5-g28-cache-plateau-json", str(cache_json)])
+    if p5_g28_cache_plateau_jsons:
+        command.append("--require-p5-g28-cache-plateau-soak")
     if args.strict_zone_render_budget:
         command.append("--strict-zone-render-budget")
     return command
@@ -1358,6 +1790,7 @@ def _command_context(command: Sequence[str]) -> dict[str, Any]:
         "manifest": _values_after(command, "--manifest"),
         "out": _values_after(command, "--out"),
         "output_json": _values_after(command, "--output-json"),
+        "output": _values_after(command, "--output"),
         "root": _values_after(command, "--root"),
         "results_dir": _values_after(command, "--results-dir"),
         "proof_dir": _values_after(command, "--p5-g7-tile-eviction-proof-dir"),
@@ -1367,6 +1800,26 @@ def _command_context(command: Sequence[str]) -> dict[str, Any]:
         "p5_g27_selected_zone_crop_json": _values_after(
             command,
             "--p5-g27-selected-zone-crop-json",
+        ),
+        "p5_g28_cache_plateau_json": _values_after(
+            command,
+            "--p5-g28-cache-plateau-json",
+        ),
+        "p5_g28_validation_summary": _values_after(
+            command,
+            "--p5-g28-validation-summary",
+        ),
+        "p5_g28_live_counter_min_sources": _values_after(
+            command,
+            "--p5-g28-live-counter-min-sources",
+        ),
+        "p5_g28_live_counter_tail_slope_target_bytes": _values_after(
+            command,
+            "--p5-g28-live-counter-tail-slope-target-bytes",
+        ),
+        "p5_g27_real_renderer_bridge_json": _values_after(
+            command,
+            "--p5-g27-real-renderer-bridge-json",
         ),
     }
 
@@ -1382,6 +1835,11 @@ def _triage_hints_for_step(step_name: str) -> list[str]:
             "Confirm the proof manifest is intentionally separate from the standard corpus.",
             "Verify DRAWING_COMPARE_TILE_CACHE_MB and tile eviction thresholds match the release claim.",
         ]
+    if step_name.startswith("p5_g28_cache_plateau_validation_"):
+        return [
+            "Inspect the P5-G28 lifecycle validation output folder named by command_context.out.",
+            "Confirm validation_summary.json contains viewer_perf_summary/runtime_budget live cache counters and _SUCCESS.",
+        ]
     if step_name.startswith("p5_g16_real_corpus_replay_"):
         return [
             "Inspect the validation_summary path and generated p5_g16_real_corpus_replay.json.",
@@ -1391,6 +1849,16 @@ def _triage_hints_for_step(step_name: str) -> list[str]:
         return [
             "Inspect the validation_summary path and generated p5_g22_actual_gui_soak.json.",
             "Check GUI event-loop, blank/stale, RSS/native-resource, and worker cleanup gates.",
+        ]
+    if step_name.startswith("p5_g27_selected_zone_crop_"):
+        return [
+            "Inspect the generated p5_g27_selected_zone_crop_soak.json and its P5-G16 bridge JSON.",
+            "Check crop-first gates plus p5_g27_real_renderer_bridge_* gates before rerunning closeout.",
+        ]
+    if step_name.startswith("p5_g28_cache_plateau_soak_"):
+        return [
+            "Inspect the generated p5_g28_cache_plateau_soak.json and every supplied validation_summary path.",
+            "Check live_cache_counters source_count, within_limits, and tail_slope gates before rerunning closeout.",
         ]
     if step_name == "inventory":
         return [

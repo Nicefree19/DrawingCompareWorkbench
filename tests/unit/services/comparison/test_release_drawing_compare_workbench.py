@@ -477,6 +477,7 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     p5_g16 = tmp_path / "p5_g16_real_corpus_replay.json"
     p5_g22 = tmp_path / "p5_g22_actual_gui_soak.json"
     p5_g27 = tmp_path / "p5_g27_selected_zone_crop_soak.json"
+    p5_g28 = tmp_path / "p5_g28_cache_plateau_soak.json"
     release_manifest = out_dir / "release_manifest.json"
     audit_json = out_dir / "mvp_exit_audit.json"
     old_dir.mkdir()
@@ -489,6 +490,7 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     p5_g16.write_text("{}", encoding="utf-8")
     p5_g22.write_text("{}", encoding="utf-8")
     p5_g27.write_text("{}", encoding="utf-8")
+    p5_g28.write_text("{}", encoding="utf-8")
 
     args = release.parse_args(
         [
@@ -509,6 +511,8 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
             str(p5_g22),
             "--p5-g27-selected-zone-crop-json",
             str(p5_g27),
+            "--p5-g28-cache-plateau-json",
+            str(p5_g28),
             "--require-large-dwg-probe",
             "--require-p5-g3-tile-eviction",
             "--p5-g3-min-tile-evicted-pairs",
@@ -547,6 +551,7 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     assert command[command.index("--p5-g16-benchmark-json") + 1] == str(p5_g16.resolve())
     assert command[command.index("--p5-g22-gui-soak-json") + 1] == str(p5_g22.resolve())
     assert command[command.index("--p5-g27-selected-zone-crop-json") + 1] == str(p5_g27.resolve())
+    assert command[command.index("--p5-g28-cache-plateau-json") + 1] == str(p5_g28.resolve())
     assert "--require-p5-g3-tile-eviction" in command
     assert command[command.index("--p5-g3-min-tile-evicted-pairs") + 1] == "2"
     assert command[command.index("--p5-g3-min-tile-evicted-bytes") + 1] == "4096"
@@ -571,6 +576,24 @@ def test_release_accepts_p5_g27_selected_zone_crop_soak_alias(tmp_path: Path) ->
     assert args.p5_g27_selected_zone_crop_json == [p5_g27]
 
 
+def test_release_accepts_p5_g28_cache_plateau_soak_alias(tmp_path: Path) -> None:
+    out_dir = tmp_path / "release"
+    p5_g28 = tmp_path / "p5_g28_cache_plateau_soak.json"
+    p5_g28.write_text("{}", encoding="utf-8")
+
+    args = release.parse_args(
+        [
+            "--out",
+            str(out_dir),
+            "--skip-realset",
+            "--p5-g28-cache-plateau-soak",
+            str(p5_g28),
+        ]
+    )
+
+    assert args.p5_g28_cache_plateau_json == [p5_g28]
+
+
 def test_release_rejects_missing_p5_g27_selected_zone_crop_json(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         release.parse_args(
@@ -580,6 +603,19 @@ def test_release_rejects_missing_p5_g27_selected_zone_crop_json(tmp_path: Path) 
                 "--skip-realset",
                 "--p5-g27-selected-zone-crop-json",
                 str(tmp_path / "missing_p5_g27.json"),
+            ]
+        )
+
+
+def test_release_rejects_missing_p5_g28_cache_plateau_json(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        release.parse_args(
+            [
+                "--out",
+                str(tmp_path / "release"),
+                "--skip-realset",
+                "--p5-g28-cache-plateau-json",
+                str(tmp_path / "missing_p5_g28.json"),
             ]
         )
 
@@ -683,18 +719,40 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "p5_g16_real_corpus_replay.json" in readme
     assert "p5_g22_actual_gui_soak.json" in readme
     assert "p5_g26_selection_latency_soak.json" in readme
-    assert "--p5-g27-selected-zone-crop-json <p5_g27_selected_zone_crop_soak.json>" in readme
+    assert "--p5-g27-real-renderer-bridge-json <p5_g16_real_corpus_replay.json>" in readme
     assert "p5_g27_selected_zone_crop_soak.json" in readme
     assert "p5_g27_real_renderer_bridge" in readme
     assert "nonblank real selected-zone render artifacts" in readme
+    assert "standalone P5-G28 cache-plateau gate" in readme
+    assert "--p5-g28-cache-plateau-json" in readme
+    assert "--p5-g28-cache-plateau-validation-manifest <manifest>" in readme
+    assert "--p5-g28-cache-plateau-runs 2" in readme
+    assert "--p5-g28-live-counter-min-sources" in readme
+    assert "--p5-g28-live-counter-tail-slope-target-bytes" in readme
+    assert "--skip-p5-g28-cache-plateau-soak" in readme
+    assert "lifecycle validation outputs feed the P5-G28 soak" in readme
+    assert "p5_g28_cache_plateau_soak.json" in readme
+    assert "P5-G28 remains outside the default customer-grade/P5-G30 blockers" in readme
     assert "P5-G30 composite customer visual-performance release gate" in readme
     assert "p5_g30_customer_visual_performance_release_gate" in readme
     assert "visual-performance gates" in readme
     assert "routing_expectations.p5_g16_real_corpus_replay_generation_enabled" in readme
     assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in readme
+    assert "routing_expectations.p5_g27_selected_zone_crop_generation_enabled" in readme
+    assert "routing_expectations.generated_p5_g27_selected_zone_crop_count" in readme
+    assert "routing_expectations.p5_g28_cache_plateau_generation_enabled" in readme
+    assert "routing_expectations.p5_g28_cache_plateau_runs" in readme
+    assert "routing_expectations.p5_g28_live_counter_min_sources" in readme
+    assert "routing_expectations.p5_g28_live_counter_tail_slope_target_bytes" in readme
+    assert "routing_expectations.generated_p5_g28_cache_plateau_count" in readme
+    assert "routing_expectations.p5_g28_cache_plateau_lifecycle_result_count" in readme
+    assert "routing_expectations.p5_g28_validation_summary_count" in readme
+    assert "routing_expectations.p5_g28_cache_plateau_planned_json_count" in readme
     assert "plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan=true" in readme
     assert "plan.invariants.final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in readme
     assert "plan.invariants.final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in readme
+    assert "plan.invariants.final_audit_p5_g28_cache_plateau_jsons_equal_plan=true" in readme
+    assert "plan.invariants.final_audit_p5_g28_cache_plateau_require_matches_plan=true" in readme
     assert "--dry-run --plan-json <closeout_plan.json> --readiness-json <closeout_readiness.json>" in readme
     assert "--require-ready --out <closeout_readiness_audit.json>" in readme
     assert "closeout_readiness_audit.json" in readme
@@ -823,6 +881,12 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "p5_g27_real_renderer_bridge" in prompt_checklist
     assert "real selected-zone render artifacts are nonblank/present" in prompt_checklist
     assert "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in prompt_checklist
+    assert "Optional P5-G28 cache plateau evidence is routed only when planned or generated" in prompt_checklist
+    assert "p5_g28_cache_plateau_soak.json" in prompt_checklist
+    assert "lifecycle validation dirs stay out of final audit `--results-dir`" in prompt_checklist
+    assert "final_audit_p5_g28_cache_plateau_jsons_equal_plan=true" in prompt_checklist
+    assert "final_audit_p5_g28_cache_plateau_require_matches_plan=true" in prompt_checklist
+    assert "P5-G28 is not a customer-grade/P5-G30 blocker" in prompt_checklist
     assert "P5-G30 composite customer visual-performance release gate passes" in prompt_checklist
     assert "p5_g30_customer_visual_performance_release_gate" in prompt_checklist
     assert "p5_g24_visual_asset_policy" in prompt_checklist
@@ -860,10 +924,22 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in closeout_packet
     assert "final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in closeout_packet
     assert "p5_g27_selected_zone_crop_soak.json" in closeout_packet
-    assert "supplied P5-G27 crop-first JSON is not routed" in closeout_packet
+    assert "bridge-bearing P5-G27 crop-first JSON" in closeout_packet
+    assert "not routed through final prepare/evidence/final-audit steps" in closeout_packet
     assert "p5_g27_real_renderer_bridge" in closeout_packet
     assert "crop-first lifecycle safety to real nonblank selected-zone render artifacts" in closeout_packet
     assert "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in closeout_packet
+    assert "planned/generated P5-G28 cache plateau JSON" in closeout_packet
+    assert "--p5-g28-cache-plateau-validation-manifest <manifest>" in closeout_packet
+    assert "--p5-g28-live-counter-min-sources" in closeout_packet
+    assert "--p5-g28-live-counter-tail-slope-target-bytes" in closeout_packet
+    assert "--skip-p5-g28-cache-plateau-soak" in closeout_packet
+    assert "P5-G28 lifecycle validation dirs enter final audit `--results-dir`" in closeout_packet
+    assert "p5_g28_cache_plateau_soak.json" in closeout_packet
+    assert "--require-p5-g28-cache-plateau-soak" in closeout_packet
+    assert "routing_expectations.p5_g28_cache_plateau_planned_json_count" in closeout_packet
+    assert "final_audit_p5_g28_cache_plateau_jsons_equal_plan=true" in closeout_packet
+    assert "final_audit_p5_g28_cache_plateau_require_matches_plan=true" in closeout_packet
     assert "p5_g30_customer_visual_performance_release_gate" in closeout_packet
     assert "P5-G24" in closeout_packet
     assert "P5-G26" in closeout_packet
@@ -979,9 +1055,11 @@ def test_release_manifest_lists_operator_checklist_template(tmp_path: Path, monk
     new_dir = tmp_path / "new"
     out_dir = tmp_path / "release"
     p5_g27 = tmp_path / "p5_g27_selected_zone_crop_soak.json"
+    p5_g28 = tmp_path / "p5_g28_cache_plateau_soak.json"
     old_dir.mkdir()
     new_dir.mkdir()
     p5_g27.write_text("{}", encoding="utf-8")
+    p5_g28.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(release, "_oda_preflight", lambda python: {"status": "skipped"})
     monkeypatch.setattr(release, "_run_step", lambda *args, **kwargs: 0)
 
@@ -1000,6 +1078,8 @@ def test_release_manifest_lists_operator_checklist_template(tmp_path: Path, monk
             "--skip-packaged-launch-smoke",
             "--p5-g27-selected-zone-crop-json",
             str(p5_g27),
+            "--p5-g28-cache-plateau-json",
+            str(p5_g28),
         ]
     )
 
@@ -1009,6 +1089,10 @@ def test_release_manifest_lists_operator_checklist_template(tmp_path: Path, monk
     assert manifest["artifacts"]["p5_g27_selected_zone_crop_json"] == str(p5_g27.resolve())
     assert manifest["artifacts"]["p5_g27_selected_zone_crop_jsons"] == [
         str(p5_g27.resolve())
+    ]
+    assert manifest["artifacts"]["p5_g28_cache_plateau_json"] == str(p5_g28.resolve())
+    assert manifest["artifacts"]["p5_g28_cache_plateau_jsons"] == [
+        str(p5_g28.resolve())
     ]
     checklist = Path(manifest["artifacts"]["operator_dry_run_checklist_template"])
     assert checklist.name == "operator_dry_run_checklist_template.md"

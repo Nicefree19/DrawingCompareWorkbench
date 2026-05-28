@@ -249,8 +249,9 @@ def _check_plan(readiness: dict[str, Any], plan: dict[str, Any]) -> list[Readine
     checks.append(_check_p5_g16_replay_routing(plan, steps))
     checks.append(_check_p5_g22_gui_soak_routing(plan, steps))
     checks.append(_check_p5_g27_selected_zone_crop_routing(plan, steps))
+    checks.append(_check_p5_g28_cache_plateau_routing(plan, steps))
     checks.append(_check_tile_cache_env_isolation(readiness, plan, steps))
-    checks.append(_check_final_audit_command(steps))
+    checks.append(_check_final_audit_command(plan, steps))
     return checks
 
 
@@ -264,28 +265,68 @@ def _check_required_step_order(steps: list[Any]) -> ReadinessCheck:
         else:
             positions[required] = names.index(required)
     if not failures:
+        seed_position = (
+            names.index("prepare_customer_evidence_manifest_seed")
+            if "prepare_customer_evidence_manifest_seed" in names
+            else None
+        )
         if not (
             positions["inventory"]
             < positions["prepare_customer_evidence_manifest"]
             < positions["final_customer_grade_audit"]
         ):
             failures.append("inventory, prepare, and final audit are out of order")
+        if seed_position is not None and not (
+            positions["inventory"] < seed_position < positions["prepare_customer_evidence_manifest"]
+        ):
+            failures.append("prepare_customer_evidence_manifest_seed must run after inventory and before final prepare")
         if positions["final_customer_grade_audit"] != len(names) - 1:
             failures.append("final_customer_grade_audit must be the final step")
+        seed_required_generated_positions = [
+            index
+            for index, name in enumerate(names)
+            if name.startswith("p5_g16_real_corpus_replay_")
+            or name.startswith("p5_g22_actual_gui_soak_")
+            or name.startswith("p5_g27_selected_zone_crop_")
+        ]
+        if seed_required_generated_positions and seed_position is None:
+            failures.append(
+                "prepare_customer_evidence_manifest_seed is required before generated evidence steps "
+                "that need the customer manifest"
+            )
         for index, name in enumerate(names):
+            if name.startswith("p5_g28_cache_plateau_soak_"):
+                if not (
+                    positions["inventory"]
+                    < index
+                    < positions["prepare_customer_evidence_manifest"]
+                ):
+                    failures.append(f"{name} must run after inventory and before final prepare")
+                continue
             if (
                 name.startswith("p5_g16_real_corpus_replay_")
                 or name.startswith("p5_g22_actual_gui_soak_")
+                or name.startswith("p5_g27_selected_zone_crop_")
             ) and not (
-                positions["prepare_customer_evidence_manifest"]
+                (seed_position if seed_position is not None else positions["inventory"])
                 < index
-                < positions["final_customer_grade_audit"]
+                < positions["prepare_customer_evidence_manifest"]
             ):
-                failures.append(f"{name} must run after prepare and before final audit")
+                failures.append(f"{name} must run after seed manifest and before final prepare")
+        p5_g16_positions = [
+            index
+            for index, name in enumerate(names)
+            if name.startswith("p5_g16_real_corpus_replay_")
+        ]
+        if p5_g16_positions:
+            first_p5_g16 = min(p5_g16_positions)
+            for index, name in enumerate(names):
+                if name.startswith("p5_g27_selected_zone_crop_") and index <= first_p5_g16:
+                    failures.append(f"{name} must run after P5-G16 replay generation")
     return ReadinessCheck(
         "required_step_order",
         not failures,
-        "inventory, prepare, optional P5-G16/P5-G22 evidence, and final audit are ordered"
+        "inventory, optional seed manifest, P5-G16/P5-G27/P5-G22/P5-G28 evidence, final prepare, and final audit are ordered"
         if not failures
         else "; ".join(failures),
         names,
@@ -312,6 +353,14 @@ def _check_plan_invariants(plan: dict[str, Any]) -> ReadinessCheck:
         failures.append(
             "plan.invariants.final_audit_p5_g27_selected_zone_crop_jsons_equal_plan must be true"
         )
+    if invariants.get("final_audit_p5_g28_cache_plateau_jsons_equal_plan") is not True:
+        failures.append(
+            "plan.invariants.final_audit_p5_g28_cache_plateau_jsons_equal_plan must be true"
+        )
+    if invariants.get("final_audit_p5_g28_cache_plateau_require_matches_plan") is not True:
+        failures.append(
+            "plan.invariants.final_audit_p5_g28_cache_plateau_require_matches_plan must be true"
+        )
     if _as_int(invariants.get("final_audit_results_dir_count")) < 1:
         failures.append("plan.invariants.final_audit_results_dir_count must be >= 1")
     return ReadinessCheck(
@@ -325,6 +374,7 @@ def _check_plan_invariants(plan: dict[str, Any]) -> ReadinessCheck:
 def _check_final_audit_results(plan: dict[str, Any], steps: list[Any]) -> ReadinessCheck:
     standard_dirs = _path_key_list(plan.get("standard_result_dirs"))
     proof_dirs = _path_key_list(plan.get("p5_g7_tile_eviction_proof_dirs"))
+    p5_g28_lifecycle_dirs = _path_key_list(plan.get("p5_g28_cache_plateau_lifecycle_dirs"))
     final_step = _step_by_name(steps, "final_customer_grade_audit")
     final_results = _context_values(final_step, "results_dir")
     failures: list[str] = []
@@ -337,6 +387,13 @@ def _check_final_audit_results(plan: dict[str, Any], steps: list[Any]) -> Readin
     proof_in_final = sorted(set(_path_key(Path(value)) for value in final_results) & set(proof_dirs))
     if proof_in_final:
         failures.append(f"proof dirs appear in final audit --results-dir: {proof_in_final}")
+    p5_g28_in_final = sorted(
+        set(_path_key(Path(value)) for value in final_results) & set(p5_g28_lifecycle_dirs)
+    )
+    if p5_g28_in_final:
+        failures.append(
+            f"P5-G28 lifecycle dirs appear in final audit --results-dir: {p5_g28_in_final}"
+        )
     return ReadinessCheck(
         "final_audit_results_dir_purity",
         not failures,
@@ -349,23 +406,41 @@ def _check_inventory_and_prepare_routing(plan: dict[str, Any], steps: list[Any])
     standard_dirs = [str(Path(path).resolve()) for path in plan.get("standard_result_dirs", []) if isinstance(path, str)]
     proof_dirs = [str(Path(path).resolve()) for path in plan.get("p5_g7_tile_eviction_proof_dirs", []) if isinstance(path, str)]
     inventory = _step_by_name(steps, "inventory")
+    seed_prepare = _step_by_name(steps, "prepare_customer_evidence_manifest_seed")
     prepare = _step_by_name(steps, "prepare_customer_evidence_manifest")
     inventory_roots = _context_values(inventory, "root")
+    seed_results = _context_values(seed_prepare, "results_dir")
+    seed_proofs = _context_values(seed_prepare, "proof_dir")
     prepare_results = _context_values(prepare, "results_dir")
     prepare_proofs = _context_values(prepare, "proof_dir")
     failures: list[str] = []
     for path in standard_dirs:
         if path not in inventory_roots:
             failures.append(f"standard result missing from inventory roots: {path}")
+        if seed_prepare and path not in seed_results:
+            failures.append(f"standard result missing from seed prepare --results-dir: {path}")
         if path not in prepare_results:
             failures.append(f"standard result missing from prepare --results-dir: {path}")
     for path in proof_dirs:
         if path not in inventory_roots:
             failures.append(f"proof result missing from inventory roots: {path}")
+        if seed_prepare and path not in seed_proofs:
+            failures.append(f"proof result missing from seed prepare proof channel: {path}")
+        if seed_prepare and path in seed_results:
+            failures.append(f"proof result appears in seed prepare --results-dir: {path}")
         if path not in prepare_proofs:
             failures.append(f"proof result missing from prepare proof channel: {path}")
         if path in prepare_results:
             failures.append(f"proof result appears in prepare --results-dir: {path}")
+    seed_command = _command_values(seed_prepare)
+    for flag in (
+        "--p5-g16-benchmark-json",
+        "--p5-g22-gui-soak-json",
+        "--p5-g27-selected-zone-crop-json",
+        "--p5-g28-cache-plateau-json",
+    ):
+        if flag in seed_command:
+            failures.append(f"seed prepare command must not include generated evidence flag {flag}")
     return ReadinessCheck(
         "proof_and_corpus_routing",
         not failures,
@@ -453,6 +528,21 @@ def _check_p5_g27_selected_zone_crop_routing(plan: dict[str, Any], steps: list[A
         for path in plan.get("p5_g27_selected_zone_crop_jsons", [])
         if isinstance(path, str)
     ]
+    generated_jsons = [
+        str(path)
+        for path in plan.get("generated_p5_g27_selected_zone_crop_jsons", [])
+        if isinstance(path, str)
+    ]
+    generated_bridges = {
+        str(item.get("output_json") or ""): str(item.get("bridge_json") or "")
+        for item in plan.get("generated_p5_g27_selected_zone_crop_bridges", [])
+        if isinstance(item, dict)
+    }
+    planned_p5_g16_jsons = {
+        str(path)
+        for path in plan.get("p5_g16_benchmark_jsons", [])
+        if isinstance(path, str)
+    }
     prepare = _step_by_name(steps, "prepare_customer_evidence_manifest")
     final_step = _step_by_name(steps, "final_customer_grade_audit")
     prepare_jsons = _values_after(
@@ -463,6 +553,17 @@ def _check_p5_g27_selected_zone_crop_routing(plan: dict[str, Any], steps: list[A
         _command_values(final_step),
         "--p5-g27-selected-zone-crop-json",
     )
+    generation_steps = [
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and str(step.get("name", "")).startswith("p5_g27_selected_zone_crop_")
+    ]
+    generated_step_outputs = [
+        value
+        for step in generation_steps
+        for value in _values_after(_command_values(step), "--output")
+    ]
     failures: list[str] = []
     if planned_jsons and prepare_jsons != planned_jsons:
         failures.append(
@@ -474,13 +575,175 @@ def _check_p5_g27_selected_zone_crop_routing(plan: dict[str, Any], steps: list[A
             "final audit --p5-g27-selected-zone-crop-json values must equal "
             "plan.p5_g27_selected_zone_crop_jsons"
         )
+    if generated_jsons and generated_step_outputs != generated_jsons:
+        failures.append(
+            "P5-G27 generation step --output values must equal "
+            "plan.generated_p5_g27_selected_zone_crop_jsons"
+        )
+    for step in generation_steps:
+        command = _command_values(step)
+        output_values = _values_after(command, "--output")
+        bridge_values = _values_after(command, "--p5-g27-real-renderer-bridge-json")
+        if "--include-p5-g27-selected-zone-crop-first" not in command:
+            failures.append(f"{step.get('name')} must include --include-p5-g27-selected-zone-crop-first")
+        if "--p5-g27-require-real-renderer-bridge" not in command:
+            failures.append(f"{step.get('name')} must include --p5-g27-require-real-renderer-bridge")
+        if not bridge_values:
+            failures.append(f"{step.get('name')} must include --p5-g27-real-renderer-bridge-json")
+        for output in output_values:
+            bridge = generated_bridges.get(str(output), "")
+            if bridge and bridge not in bridge_values:
+                failures.append(f"{step.get('name')} bridge JSON must match plan for {output}")
+            if bridge and planned_p5_g16_jsons and bridge not in planned_p5_g16_jsons:
+                failures.append(f"{step.get('name')} bridge JSON must be listed in plan.p5_g16_benchmark_jsons")
     return ReadinessCheck(
         "p5_g27_selected_zone_crop_routing",
         not failures,
-        "P5-G27 selected-zone crop-first JSON is routed through prepare and final audit"
+        "P5-G27 selected-zone crop-first JSON is generated with a P5-G16 bridge and routed through prepare/final audit"
         if not failures
         else "; ".join(failures),
-        planned_jsons,
+        [*planned_jsons, *generated_step_outputs],
+    )
+
+
+def _check_p5_g28_cache_plateau_routing(plan: dict[str, Any], steps: list[Any]) -> ReadinessCheck:
+    planned_jsons = [
+        str(path)
+        for path in plan.get("p5_g28_cache_plateau_jsons", [])
+        if isinstance(path, str)
+    ]
+    generated_jsons = [
+        str(path)
+        for path in plan.get("generated_p5_g28_cache_plateau_jsons", [])
+        if isinstance(path, str)
+    ]
+    lifecycle_dirs = [
+        str(path)
+        for path in plan.get("p5_g28_cache_plateau_lifecycle_dirs", [])
+        if isinstance(path, str)
+    ]
+    validation_summaries = [
+        str(path)
+        for path in plan.get("p5_g28_validation_summaries", [])
+        if isinstance(path, str)
+    ]
+    expected_min_sources = str(plan.get("p5_g28_live_counter_min_sources", "")).strip()
+    expected_tail_slope_target = str(
+        plan.get("p5_g28_live_counter_tail_slope_target_bytes", "")
+    ).strip()
+    expected_min_source_count = _as_int(plan.get("p5_g28_live_counter_min_sources"))
+    prepare = _step_by_name(steps, "prepare_customer_evidence_manifest")
+    final_step = _step_by_name(steps, "final_customer_grade_audit")
+    prepare_jsons = _values_after(
+        _command_values(prepare),
+        "--p5-g28-cache-plateau-json",
+    )
+    final_jsons = _values_after(
+        _command_values(final_step),
+        "--p5-g28-cache-plateau-json",
+    )
+    final_command = _command_values(final_step)
+    require_present = "--require-p5-g28-cache-plateau-soak" in final_command
+    failures: list[str] = []
+    if prepare_jsons != planned_jsons:
+        failures.append(
+            "prepare --p5-g28-cache-plateau-json values must equal "
+            "plan.p5_g28_cache_plateau_jsons"
+        )
+    if final_jsons != planned_jsons:
+        failures.append(
+            "final audit --p5-g28-cache-plateau-json values must equal "
+            "plan.p5_g28_cache_plateau_jsons"
+        )
+    if planned_jsons and not require_present:
+        failures.append(
+            "final audit command must include --require-p5-g28-cache-plateau-soak "
+            "when plan.p5_g28_cache_plateau_jsons is non-empty"
+        )
+    if not planned_jsons and require_present:
+        failures.append(
+            "final audit command must not include --require-p5-g28-cache-plateau-soak "
+            "without planned P5-G28 cache plateau JSONs"
+        )
+    missing_generated_from_plan = [
+        path for path in generated_jsons if path not in planned_jsons
+    ]
+    if missing_generated_from_plan:
+        failures.append(
+            "plan.generated_p5_g28_cache_plateau_jsons must be included in "
+            "plan.p5_g28_cache_plateau_jsons"
+        )
+    if generated_jsons and expected_min_source_count > len(validation_summaries):
+        failures.append(
+            "generated P5-G28 cache plateau evidence must have at least "
+            "plan.p5_g28_live_counter_min_sources validation summaries"
+        )
+    generated_steps = [
+        step
+        for step in steps
+        if str((step or {}).get("name", "")).startswith("p5_g28_cache_plateau_soak_")
+    ]
+    lifecycle_steps = [
+        step
+        for step in steps
+        if str((step or {}).get("name", "")).startswith("p5_g28_cache_plateau_validation_")
+    ]
+    lifecycle_outputs = [
+        value
+        for step in lifecycle_steps
+        for value in _values_after(_command_values(step), "--out")
+    ]
+    expected_lifecycle_summaries = [
+        str(Path(path) / "validation_summary.json") for path in lifecycle_dirs
+    ]
+    if sorted(lifecycle_outputs) != sorted(lifecycle_dirs):
+        failures.append(
+            "generated P5-G28 lifecycle validation step outputs must equal "
+            "plan.p5_g28_cache_plateau_lifecycle_dirs"
+        )
+    if lifecycle_dirs and validation_summaries != expected_lifecycle_summaries:
+        failures.append(
+            "plan.p5_g28_validation_summaries must be derived from "
+            "plan.p5_g28_cache_plateau_lifecycle_dirs"
+        )
+    if len(generated_steps) != len(generated_jsons):
+        failures.append(
+            "generated P5-G28 cache plateau step count must equal "
+            "plan.generated_p5_g28_cache_plateau_jsons"
+        )
+    for index, expected_json in enumerate(generated_jsons):
+        step = generated_steps[index] if index < len(generated_steps) else None
+        command = _command_values(step)
+        if "--include-p5-g28-cache-plateau" not in command:
+            failures.append("generated P5-G28 command must include --include-p5-g28-cache-plateau")
+        if _values_after(command, "--output") != [expected_json]:
+            failures.append("generated P5-G28 command --output must match the generated JSON")
+        if _values_after(command, "--p5-g28-validation-summary") != validation_summaries:
+            failures.append(
+                "generated P5-G28 command validation summaries must equal "
+                "plan.p5_g28_validation_summaries"
+            )
+        if _values_after(command, "--p5-g28-live-counter-min-sources") != [
+            expected_min_sources
+        ]:
+            failures.append(
+                "generated P5-G28 command min-source target must equal "
+                "plan.p5_g28_live_counter_min_sources"
+            )
+        if _values_after(command, "--p5-g28-live-counter-tail-slope-target-bytes") != [
+            expected_tail_slope_target
+        ]:
+            failures.append(
+                "generated P5-G28 command tail-slope target must equal "
+                "plan.p5_g28_live_counter_tail_slope_target_bytes"
+            )
+    return ReadinessCheck(
+        "p5_g28_cache_plateau_routing",
+        not failures,
+        "P5-G28 cache plateau JSON is routed through prepare/final audit when planned"
+        if not failures
+        else "; ".join(failures),
+        planned_jsons or [*prepare_jsons, *final_jsons, *generated_jsons],
     )
 
 
@@ -514,7 +777,7 @@ def _check_tile_cache_env_isolation(
     )
 
 
-def _check_final_audit_command(steps: list[Any]) -> ReadinessCheck:
+def _check_final_audit_command(plan: dict[str, Any], steps: list[Any]) -> ReadinessCheck:
     final_step = _step_by_name(steps, "final_customer_grade_audit")
     command_values = _command_values(final_step)
     failures: list[str] = []
@@ -526,10 +789,12 @@ def _check_final_audit_command(steps: list[Any]) -> ReadinessCheck:
         failures.append("final audit command must include --require-large-dwg-probe")
     if "--customer-evidence-manifest" not in command_values:
         failures.append("final audit command must include --customer-evidence-manifest")
-    if "--p5-g16-benchmark-json" not in command_values:
+    if plan.get("p5_g16_benchmark_jsons") and "--p5-g16-benchmark-json" not in command_values:
         failures.append("final audit command must include --p5-g16-benchmark-json")
-    if "--p5-g22-gui-soak-json" not in command_values:
+    if plan.get("p5_g22_gui_soak_jsons") and "--p5-g22-gui-soak-json" not in command_values:
         failures.append("final audit command must include --p5-g22-gui-soak-json")
+    if plan.get("p5_g27_selected_zone_crop_jsons") and "--p5-g27-selected-zone-crop-json" not in command_values:
+        failures.append("final audit command must include --p5-g27-selected-zone-crop-json")
     return ReadinessCheck(
         "final_customer_grade_audit_command",
         not failures,
@@ -604,6 +869,7 @@ def _context_values(step: dict[str, Any], key: str) -> list[str]:
             "p5_g16_benchmark_json": "--p5-g16-benchmark-json",
             "p5_g22_gui_soak_json": "--p5-g22-gui-soak-json",
             "p5_g27_selected_zone_crop_json": "--p5-g27-selected-zone-crop-json",
+            "p5_g28_cache_plateau_json": "--p5-g28-cache-plateau-json",
         }.get(key)
         if option:
             return _values_after([str(value) for value in command], option)

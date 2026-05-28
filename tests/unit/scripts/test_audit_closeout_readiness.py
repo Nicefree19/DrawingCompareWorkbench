@@ -25,6 +25,7 @@ def test_audit_passes_closeout_dry_run_readiness(tmp_path: Path, monkeypatch) ->
     assert checks["proof_and_corpus_routing"]["passed"] is True
     assert checks["p5_g16_replay_routing"]["passed"] is True
     assert checks["p5_g27_selected_zone_crop_routing"]["passed"] is True
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is True
     assert checks["tile_cache_env_isolation"]["passed"] is True
 
 
@@ -206,6 +207,410 @@ def test_audit_rejects_mismatched_p5_g27_selected_zone_crop_routing(
     ]["detail"]
 
 
+def test_audit_validates_explicit_p5_g28_cache_plateau_routing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        include_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    expected = plan["p5_g28_cache_plateau_jsons"]
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "passed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is True
+    assert checks["p5_g28_cache_plateau_routing"]["evidence"] == expected
+
+
+def test_audit_validates_generated_p5_g28_cache_plateau_command(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        generated_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    expected = plan["p5_g28_cache_plateau_jsons"]
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "passed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is True
+    assert checks["p5_g28_cache_plateau_routing"]["evidence"] == expected
+
+
+def test_audit_validates_p5_g28_lifecycle_dirs_outside_final_results(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        p5_g28_lifecycle_manifest=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    lifecycle_dir = plan["p5_g28_cache_plateau_lifecycle_dirs"][0]
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "passed"
+    assert checks["final_audit_results_dir_purity"]["passed"] is True
+    assert lifecycle_dir not in checks["final_audit_results_dir_purity"]["evidence"]
+
+
+def test_audit_rejects_p5_g28_lifecycle_dir_in_final_results(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        p5_g28_lifecycle_manifest=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    lifecycle_dir = plan["p5_g28_cache_plateau_lifecycle_dirs"][0]
+    final_step = next(
+        step for step in plan["steps"] if step["name"] == "final_customer_grade_audit"
+    )
+    final_step["command"].extend(["--results-dir", lifecycle_dir])
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["final_audit_results_dir_purity"]["passed"] is False
+    assert "P5-G28 lifecycle dirs appear" in checks["final_audit_results_dir_purity"][
+        "detail"
+    ]
+
+
+def test_audit_rejects_generated_p5_g28_summary_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        generated_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    p5_g28_step = next(
+        step for step in plan["steps"] if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    flag_index = p5_g28_step["command"].index("--p5-g28-validation-summary")
+    p5_g28_step["command"][flag_index + 1] = str(tmp_path / "wrong_validation_summary.json")
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "validation summaries must equal" in checks["p5_g28_cache_plateau_routing"][
+        "detail"
+    ]
+
+
+def test_audit_rejects_generated_p5_g28_min_source_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        generated_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    p5_g28_step = next(
+        step for step in plan["steps"] if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    flag_index = p5_g28_step["command"].index("--p5-g28-live-counter-min-sources")
+    p5_g28_step["command"][flag_index + 1] = "1"
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "min-source target must equal" in checks["p5_g28_cache_plateau_routing"][
+        "detail"
+    ]
+
+
+def test_audit_rejects_generated_p5_g28_tail_slope_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        generated_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    p5_g28_step = next(
+        step for step in plan["steps"] if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    flag_index = p5_g28_step["command"].index(
+        "--p5-g28-live-counter-tail-slope-target-bytes"
+    )
+    p5_g28_step["command"][flag_index + 1] = "10"
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "tail-slope target must equal" in checks["p5_g28_cache_plateau_routing"][
+        "detail"
+    ]
+
+
+def test_audit_rejects_generated_p5_g28_missing_from_planned_jsons(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        generated_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    plan["p5_g28_cache_plateau_jsons"] = []
+    final_step = next(
+        step for step in plan["steps"] if step["name"] == "final_customer_grade_audit"
+    )
+    while "--p5-g28-cache-plateau-json" in final_step["command"]:
+        index = final_step["command"].index("--p5-g28-cache-plateau-json")
+        del final_step["command"][index : index + 2]
+    if "--require-p5-g28-cache-plateau-soak" in final_step["command"]:
+        final_step["command"].remove("--require-p5-g28-cache-plateau-soak")
+    prepare_step = next(
+        step for step in plan["steps"] if step["name"] == "prepare_customer_evidence_manifest"
+    )
+    while "--p5-g28-cache-plateau-json" in prepare_step["command"]:
+        index = prepare_step["command"].index("--p5-g28-cache-plateau-json")
+        del prepare_step["command"][index : index + 2]
+    plan["invariants"]["final_audit_p5_g28_cache_plateau_require_matches_plan"] = True
+    plan["invariants"]["final_audit_p5_g28_cache_plateau_jsons_equal_plan"] = True
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "generated_p5_g28_cache_plateau_jsons must be included" in checks[
+        "p5_g28_cache_plateau_routing"
+    ]["detail"]
+
+
+def test_audit_rejects_p5_g28_lifecycle_summary_not_derived_from_lifecycle_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        p5_g28_lifecycle_manifest=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    plan["p5_g28_validation_summaries"][0] = str(tmp_path / "stale_validation_summary.json")
+    p5_g28_step = next(
+        step for step in plan["steps"] if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    flag_index = p5_g28_step["command"].index("--p5-g28-validation-summary")
+    p5_g28_step["command"][flag_index + 1] = plan["p5_g28_validation_summaries"][0]
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "validation_summaries must be derived" in checks[
+        "p5_g28_cache_plateau_routing"
+    ]["detail"]
+
+
+def test_audit_rejects_generated_p5_g28_below_min_source_count(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        generated_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    plan["p5_g28_validation_summaries"] = plan["p5_g28_validation_summaries"][:1]
+    p5_g28_step = next(
+        step for step in plan["steps"] if step["name"] == "p5_g28_cache_plateau_soak_1"
+    )
+    while "--p5-g28-validation-summary" in p5_g28_step["command"]:
+        index = p5_g28_step["command"].index("--p5-g28-validation-summary")
+        del p5_g28_step["command"][index : index + 2]
+    p5_g28_step["command"].extend(
+        ["--p5-g28-validation-summary", plan["p5_g28_validation_summaries"][0]]
+    )
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "must have at least" in checks["p5_g28_cache_plateau_routing"]["detail"]
+
+
+def test_audit_accepts_p5_g28_only_generated_plan_without_seed_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        generated_p5_g28=True,
+        p5_g28_only=True,
+    )
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "passed"
+    assert checks["required_step_order"]["passed"] is True
+    assert checks["final_customer_grade_audit_command"]["passed"] is True
+
+
+def test_audit_rejects_p5_g28_cache_plateau_without_required_final_audit_flag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        include_p5_g28=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    final_step = next(
+        step for step in plan["steps"] if step["name"] == "final_customer_grade_audit"
+    )
+    final_step["command"].remove("--require-p5-g28-cache-plateau-soak")
+    plan["invariants"]["final_audit_p5_g28_cache_plateau_require_matches_plan"] = False
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "--require-p5-g28-cache-plateau-soak" in checks[
+        "p5_g28_cache_plateau_routing"
+    ]["detail"]
+    assert checks["plan_invariants"]["passed"] is False
+    assert "final_audit_p5_g28_cache_plateau_require_matches_plan" in checks[
+        "plan_invariants"
+    ]["detail"]
+
+
+def test_audit_rejects_unplanned_p5_g28_cache_plateau_json_routing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    stray_json = tmp_path / "p5_g28_cache_plateau_soak.json"
+    stray_json.write_text("{}", encoding="utf-8")
+    for step_name in (
+        "prepare_customer_evidence_manifest",
+        "final_customer_grade_audit",
+    ):
+        step = next(step for step in plan["steps"] if step["name"] == step_name)
+        step["command"].extend(
+            ["--p5-g28-cache-plateau-json", str(stray_json.resolve())]
+        )
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g28_cache_plateau_routing"]["passed"] is False
+    assert "plan.p5_g28_cache_plateau_jsons" in checks[
+        "p5_g28_cache_plateau_routing"
+    ]["detail"]
+    assert checks["p5_g28_cache_plateau_routing"]["evidence"] == [
+        str(stray_json.resolve()),
+        str(stray_json.resolve()),
+    ]
+
+
 def test_audit_rejects_mismatched_tile_cache_env_on_generated_proof_step(
     tmp_path: Path,
     monkeypatch,
@@ -271,10 +676,17 @@ def _write_closeout_readiness_packet(
     *,
     generated_proof: bool = False,
     include_p5_g27: bool = False,
+    include_p5_g28: bool = False,
+    generated_p5_g28: bool = False,
+    p5_g28_lifecycle_manifest: bool = False,
+    p5_g28_only: bool = False,
 ) -> tuple[Path, Path]:
     source = _write_source_checkout(tmp_path / "source")
     standard_dir = tmp_path / "standard_validation"
     _write_validation_output(standard_dir)
+    standard_dir_b = tmp_path / "standard_validation_b"
+    if generated_p5_g28:
+        _write_validation_output(standard_dir_b)
     proof_dir = tmp_path / "proof_validation"
     _write_validation_output(proof_dir, forced_tile_eviction=True)
     common = _write_common_inputs(tmp_path)
@@ -302,6 +714,27 @@ def _write_closeout_readiness_packet(
         "0.25",
         *common,
     ]
+    if generated_p5_g28:
+        argv.extend(["--standard-results-dir", str(standard_dir_b)])
+    if p5_g28_only:
+        argv.extend(
+            [
+                "--skip-p5-g16-real-corpus-replay",
+                "--skip-p5-g22-actual-gui-soak",
+                "--skip-p5-g27-selected-zone-crop-first",
+            ]
+        )
+    if p5_g28_lifecycle_manifest:
+        p5_g28_manifest = tmp_path / "p5_g28_lifecycle_manifest.json"
+        p5_g28_manifest.write_text("{}", encoding="utf-8")
+        argv.extend(
+            [
+                "--p5-g28-cache-plateau-validation-manifest",
+                str(p5_g28_manifest),
+                "--p5-g28-cache-plateau-runs",
+                "2",
+            ]
+        )
     if generated_proof:
         proof_manifest = tmp_path / "proof_manifest.json"
         proof_manifest.write_text("{}", encoding="utf-8")
@@ -311,7 +744,17 @@ def _write_closeout_readiness_packet(
     if include_p5_g27:
         p5_g27 = tmp_path / "p5_g27_selected_zone_crop_soak.json"
         p5_g27.write_text("{}", encoding="utf-8")
-        argv.extend(["--p5-g27-selected-zone-crop-json", str(p5_g27)])
+        argv.extend(
+            [
+                "--skip-p5-g27-selected-zone-crop-first",
+                "--p5-g27-selected-zone-crop-json",
+                str(p5_g27),
+            ]
+        )
+    if include_p5_g28:
+        p5_g28 = tmp_path / "p5_g28_cache_plateau_soak.json"
+        p5_g28.write_text("{}", encoding="utf-8")
+        argv.extend(["--p5-g28-cache-plateau-json", str(p5_g28)])
     assert closeout.main(argv) == 0
     return readiness_json, plan_json
 
@@ -326,6 +769,7 @@ def _write_source_checkout(path: Path) -> Path:
         "audit_drawing_compare_mvp_exit.py",
         "benchmark_real_corpus_replay.py",
         "benchmark_actual_gui_soak.py",
+        "benchmark_workbench_gui_hotpath.py",
     ):
         (scripts_dir / name).write_text("# placeholder\n", encoding="utf-8")
     provenance = path / "src" / "services" / "comparison" / "manifest_provenance.py"
@@ -350,6 +794,19 @@ def _write_validation_output(path: Path, *, forced_tile_eviction: bool = False) 
                 },
             }
         }
+    summary["viewer_perf_summary"] = {
+        "pdf_display_list_cache_max_total_bytes": 1024,
+        "pdf_display_list_cache_byte_limit": 4096,
+        "dxf_index_cache_max_total_bytes": 2048,
+        "dxf_index_cache_byte_limit": 8192,
+        "overlay_cache_max_total_bytes": 512,
+        "overlay_cache_byte_limit": 4096,
+    }
+    summary["runtime_budget"] = {
+        "peak_disk_spool_mb": 1,
+        "max_peak_disk_spool_mb": 4,
+    }
+    summary["viewer_manifest"] = {"visual_asset_manifest_count": 1}
     (path / "validation_summary.json").write_text(json.dumps(summary), encoding="utf-8")
     (path / "_SUCCESS").write_text("{}", encoding="utf-8")
 

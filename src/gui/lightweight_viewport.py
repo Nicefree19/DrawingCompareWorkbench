@@ -49,6 +49,66 @@ FOCUS_ONLY_CHANGE_OVERLAY_SOURCE_THRESHOLD = 300
 PDF_CACHE_MAX_BYTES = 200 * 1024 * 1024
 
 
+class _FallbackSignal:
+    def connect(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+class _FallbackQuickRoot:
+    def __init__(self) -> None:
+        self._properties: dict[str, object] = {}
+        self.viewportChanged = _FallbackSignal()
+        self.overlayClicked = _FallbackSignal()
+
+    def setProperty(self, name: str, value: object) -> bool:
+        self._properties[str(name)] = value
+        return True
+
+    def property(self, name: str) -> object:
+        return self._properties.get(str(name), "")
+
+
+class _FallbackQuickWidget(QWidget):
+    """Minimal QWidget stand-in used when QQuickWidget is unavailable or mocked."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._source = QUrl()
+        self._root = _FallbackQuickRoot()
+
+    def setResizeMode(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def setSource(self, source: QUrl) -> None:
+        self._source = source
+
+    def setClearColor(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def status(self) -> int:
+        return 1
+
+    def errors(self) -> list[object]:
+        return []
+
+    def rootObject(self) -> _FallbackQuickRoot:
+        return self._root
+
+
+def _create_quick_widget(parent: QWidget) -> QWidget:
+    try:
+        widget = QQuickWidget(parent)
+        if not isinstance(widget, QWidget):
+            raise TypeError(f"QQuickWidget returned non-QWidget {type(widget)!r}")
+        return widget
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "QQuickWidget unavailable or invalid (%s); using QWidget fallback",
+            exc,
+        )
+        return _FallbackQuickWidget(parent)
+
+
 def _normalise_bbox(raw) -> Optional[tuple[float, float, float, float]]:
     """Return a 4-tuple of floats from any common bbox representation.
 
@@ -549,8 +609,11 @@ class LightweightDrawingViewport(QWidget):
             )
         self._skeleton_renderer = "canvas"
 
-        self._quick = QQuickWidget(self)
-        self._quick.setResizeMode(QQuickWidget.SizeRootObjectToView)
+        self._quick = _create_quick_widget(self)
+        try:
+            self._quick.setResizeMode(QQuickWidget.SizeRootObjectToView)
+        except Exception:
+            logger.debug("LightweightViewport: setResizeMode unavailable on fallback")
         self._quick.setAttribute(Qt.WA_AlwaysStackOnTop)
         self._quick.setClearColor(Qt.transparent)
 

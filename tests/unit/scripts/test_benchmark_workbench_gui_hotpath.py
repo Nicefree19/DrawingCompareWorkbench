@@ -34,6 +34,8 @@ def test_module_imports_and_exposes_expected_helpers(benchmark_module) -> None:
     assert benchmark_module.P5_G26_PROFILE == "selection_latency_hard_gate"
     assert benchmark_module.P5_G27_BENCHMARK_ID == "p5_g27_selected_zone_crop_soak"
     assert benchmark_module.P5_G27_PROFILE == "selected_zone_crop_first_lifecycle"
+    assert benchmark_module.P5_G28_BENCHMARK_ID == "p5_g28_cache_plateau_soak"
+    assert benchmark_module.P5_G28_PROFILE == "tile_cache_plateau_lifecycle_seed"
     assert hasattr(benchmark_module, "main")
     assert hasattr(benchmark_module, "_run_pair_selection_probe")
     assert hasattr(benchmark_module, "_run_first_review_tile_probe")
@@ -245,6 +247,26 @@ def test_parse_args_exposes_p5_tile_retention_targets(benchmark_module) -> None:
     assert args.p5_tile_retention_prune_p95_target_ms == 250.0
 
 
+def test_parse_args_exposes_p5_g28_cache_plateau_contract(benchmark_module) -> None:
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g28-cache-plateau",
+            "--p5-g28-validation-summary",
+            "validation_summary.json",
+            "--p5-g28-live-counter-min-sources",
+            "2",
+            "--p5-g28-live-counter-tail-slope-target-bytes",
+            "128",
+        ]
+    )
+
+    assert args.include_p5_g28_cache_plateau is True
+    assert args.include_p5_tile_retention_soak is False
+    assert args.p5_g28_validation_summary == [Path("validation_summary.json")]
+    assert args.p5_g28_live_counter_min_sources == 2
+    assert args.p5_g28_live_counter_tail_slope_target_bytes == 128
+
+
 def test_parse_args_exposes_real_corpus_replay_targets(benchmark_module) -> None:
     args = benchmark_module.parse_args(
         [
@@ -281,6 +303,25 @@ def test_parse_args_exposes_real_corpus_replay_targets(benchmark_module) -> None
     assert args.real_corpus_max_customer_sheet_count == 50
 
 
+def _p5_g28_cache_category_breakdown() -> dict:
+    return {
+        name: {
+            "retained_bytes": 900,
+            "byte_limit": 1000,
+            "retained_entry_count": 3,
+            "evicted_entry_count": 2,
+            "evicted_estimated_bytes": 500,
+            "orphan_bytes": 0,
+            "orphan_entry_count": 0,
+            "stale_entry_count": 0,
+            "tail_slope_bytes_per_run": 0,
+            "tail_slope_target_bytes_per_run": 0,
+            "plateau_ok": True,
+        }
+        for name in ("display_list", "dxf_index", "visual_asset", "overlay", "spool")
+    }
+
+
 def _passing_gate_payload() -> dict:
     return {
         "pair_selection": {
@@ -311,9 +352,13 @@ def _passing_gate_payload() -> dict:
             "eviction_count": 2,
             "evicted_estimated_bytes": 500,
             "orphan_bytes": 0,
+            "orphan_pair_count": 0,
             "stale_manifest_count": 0,
             "hot_pair_retained": True,
             "evicted_pair_miss": True,
+            "eviction_reason_counts": {"byte_limit": 2},
+            "single_entry_over_cap_count": 0,
+            "cache_category_breakdown": _p5_g28_cache_category_breakdown(),
             "write_ms": {"p95_ms": 20.0},
             "event_loop_gap": {"p95_ms": 10.0, "over_500ms_count": 0},
         },
@@ -706,6 +751,305 @@ def test_gate_summary_passes_p5_g27_real_renderer_bridge(
     )
     for gate_name in benchmark_module.P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES:
         assert by_name[gate_name].passed is True
+
+
+def test_gate_summary_flags_p5_g28_cache_plateau_failures(benchmark_module) -> None:
+    args = benchmark_module.parse_args(["--include-p5-g28-cache-plateau"])
+    payload = _passing_gate_payload()
+    payload["p5_g28_contract"] = benchmark_module._p5_g28_contract_summary(payload, args)
+    contract = payload["p5_g28_contract"]
+    contract["tile_retention_completed"] = False
+    contract["tile_byte_plateau_ok"] = False
+    contract["tile_retained_bytes"] = 1001
+    contract["tile_byte_limit"] = 1000
+    contract["tile_eviction_observed"] = False
+    contract["tile_eviction_count"] = 0
+    contract["tile_byte_limit_eviction_reason_present"] = False
+    contract["eviction_reason_counts"] = {}
+    contract["tile_orphan_payloads_zero"] = False
+    contract["tile_orphan_bytes"] = 1
+    contract["tile_stale_manifest_zero"] = False
+    contract["tile_stale_manifest_count"] = 1
+    contract["tile_hot_pair_retained"] = False
+    contract["tile_evicted_pair_cache_miss"] = False
+    contract["single_entry_over_cap_count"] = 1
+    contract["prune_p95_ms"] = 501.0
+    contract["event_loop_gap_p95_ms"] = 151.0
+    contract["event_loop_over_500ms_count"] = 1
+    contract["cache_category_breakdown_present"] = False
+    contract["display_list_cache_plateau"] = False
+    contract["dxf_index_cache_plateau"] = False
+    contract["visual_asset_cache_plateau"] = False
+    contract["overlay_cache_plateau"] = False
+    contract["spool_namespace_plateau"] = False
+    contract["cache_category_orphans_zero"] = False
+    contract["cache_category_stale_entries_zero"] = False
+    contract["cache_plateau_tail_slope_ok"] = False
+    contract["cache_category_orphan_bytes_total"] = 1
+    contract["cache_category_stale_entry_count"] = 1
+    contract["cache_category_tail_slope_max_bytes_per_run"] = 1
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert by_name["p5_g28_tile_retention_completed"].passed is False
+    assert by_name["p5_g28_tile_cache_byte_plateau"].passed is False
+    assert by_name["p5_g28_tile_cache_eviction_observed"].passed is False
+    assert by_name["p5_g28_tile_cache_eviction_reason_present"].passed is False
+    assert by_name["p5_g28_tile_cache_orphan_payloads_zero"].passed is False
+    assert by_name["p5_g28_tile_cache_stale_manifest_zero"].passed is False
+    assert by_name["p5_g28_hot_pair_retained"].passed is False
+    assert by_name["p5_g28_evicted_pair_cache_miss"].passed is False
+    assert by_name["p5_g28_single_entry_over_cap_count"].passed is False
+    assert by_name["p5_g28_prune_p95_ms"].passed is False
+    assert by_name["p5_g28_event_loop_gap_p95_ms"].passed is False
+    assert by_name["p5_g28_event_loop_over_500ms_count"].passed is False
+    assert by_name["p5_g28_cache_category_breakdown_present"].passed is False
+    assert by_name["p5_g28_display_list_cache_plateau"].passed is False
+    assert by_name["p5_g28_dxf_index_cache_plateau"].passed is False
+    assert by_name["p5_g28_visual_asset_cache_plateau"].passed is False
+    assert by_name["p5_g28_overlay_cache_plateau"].passed is False
+    assert by_name["p5_g28_spool_namespace_plateau"].passed is False
+    assert by_name["p5_g28_cache_category_orphans_zero"].passed is False
+    assert by_name["p5_g28_cache_category_stale_entries_zero"].passed is False
+    assert by_name["p5_g28_cache_plateau_tail_slope"].passed is False
+
+
+def test_gate_summary_passes_p5_g28_cache_plateau_success_payload(benchmark_module) -> None:
+    args = benchmark_module.parse_args(["--include-p5-g28-cache-plateau"])
+    payload = _passing_gate_payload()
+    payload["p5_g28_contract"] = benchmark_module._p5_g28_contract_summary(payload, args)
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert set(benchmark_module.P5_G28_REQUIRED_GATE_NAMES) <= set(by_name)
+    assert payload["p5_g28_contract"]["passed"] is True
+    for gate_name in benchmark_module.P5_G28_REQUIRED_GATE_NAMES:
+        assert by_name[gate_name].passed is True
+
+
+def test_p5_g28_contract_bridges_live_validation_cache_counters(
+    benchmark_module,
+    tmp_path: Path,
+) -> None:
+    validation_summary = tmp_path / "validation_summary.json"
+    validation_summary.write_text(
+        json.dumps(
+            {
+                "viewer_perf_summary": {
+                    "pdf_display_list_cache_max_total_bytes": 800,
+                    "pdf_display_list_cache_byte_limit": 1000,
+                    "dxf_index_cache_max_total_bytes": 700,
+                    "dxf_index_cache_byte_limit": 1000,
+                    "overlay_cache_max_total_bytes": 600,
+                    "overlay_cache_byte_limit": 1000,
+                },
+                "runtime_budget": {"peak_disk_spool_mb": 1.0},
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g28-cache-plateau",
+            "--p5-g28-validation-summary",
+            str(validation_summary),
+        ]
+    )
+    payload = _passing_gate_payload()
+    payload["p5_g28_contract"] = benchmark_module._p5_g28_contract_summary(payload, args)
+
+    contract = payload["p5_g28_contract"]
+    live = contract["live_cache_counters"]
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert contract["passed"] is True
+    assert live["supplied"] is True
+    assert live["source_count"] == 1
+    assert live["observed_category_count"] == 4
+    assert live["categories"]["display_list"]["retained_bytes"] == 800
+    assert live["categories"]["dxf_index"]["retained_bytes"] == 700
+    assert live["categories"]["overlay"]["retained_bytes"] == 600
+    assert live["categories"]["spool"]["retained_bytes"] == 1024 * 1024
+    assert by_name["p5_g28_live_cache_counters_present"].passed is True
+    assert by_name["p5_g28_live_cache_counters_within_limits"].passed is True
+
+
+def test_p5_g28_contract_fails_invalid_live_validation_cache_counters(
+    benchmark_module,
+    tmp_path: Path,
+) -> None:
+    validation_summary = tmp_path / "validation_summary.json"
+    validation_summary.write_text(
+        json.dumps(
+            {
+                "viewer_perf_summary": {
+                    "pdf_display_list_cache_max_total_bytes": 2000,
+                    "pdf_display_list_cache_byte_limit": 1000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g28-cache-plateau",
+            "--p5-g28-validation-summary",
+            str(validation_summary),
+        ]
+    )
+    payload = _passing_gate_payload()
+    payload["p5_g28_contract"] = benchmark_module._p5_g28_contract_summary(payload, args)
+
+    contract = payload["p5_g28_contract"]
+    live = contract["live_cache_counters"]
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert contract["passed"] is False
+    assert live["passed"] is False
+    assert live["within_limits"] is False
+    assert "display_list: retained_bytes must be <= byte_limit" in live["issues"]
+    assert by_name["p5_g28_live_cache_counters_present"].passed is True
+    assert by_name["p5_g28_live_cache_counters_within_limits"].passed is False
+
+
+def test_p5_g28_contract_accepts_flat_live_counter_tail_slope(
+    benchmark_module,
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "validation_summary_1.json"
+    second = tmp_path / "validation_summary_2.json"
+    for path, retained in ((first, 800), (second, 800)):
+        path.write_text(
+            json.dumps(
+                {
+                    "viewer_perf_summary": {
+                        "pdf_display_list_cache_max_total_bytes": retained,
+                        "pdf_display_list_cache_byte_limit": 1000,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g28-cache-plateau",
+            "--p5-g28-validation-summary",
+            str(first),
+            "--p5-g28-validation-summary",
+            str(second),
+            "--p5-g28-live-counter-min-sources",
+            "2",
+            "--p5-g28-live-counter-tail-slope-target-bytes",
+            "0",
+        ]
+    )
+    payload = _passing_gate_payload()
+    payload["p5_g28_contract"] = benchmark_module._p5_g28_contract_summary(payload, args)
+
+    live = payload["p5_g28_contract"]["live_cache_counters"]
+    by_name = {gate.name: gate for gate in benchmark_module._gate_summary(payload, args)}
+
+    assert payload["p5_g28_contract"]["passed"] is True
+    assert live["source_count"] == 2
+    assert live["categories"]["display_list"]["sample_count"] == 2
+    assert live["categories"]["display_list"]["tail_slope_bytes_per_run"] == 0
+    assert live["tail_slope_ok"] is True
+    assert by_name["p5_g28_live_cache_counters_tail_slope"].passed is True
+
+
+def test_p5_g28_contract_fails_growing_live_counter_tail_slope(
+    benchmark_module,
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "validation_summary_1.json"
+    second = tmp_path / "validation_summary_2.json"
+    for path, retained in ((first, 800), (second, 900)):
+        path.write_text(
+            json.dumps(
+                {
+                    "viewer_perf_summary": {
+                        "pdf_display_list_cache_max_total_bytes": retained,
+                        "pdf_display_list_cache_byte_limit": 1000,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g28-cache-plateau",
+            "--p5-g28-validation-summary",
+            str(first),
+            "--p5-g28-validation-summary",
+            str(second),
+            "--p5-g28-live-counter-min-sources",
+            "2",
+            "--p5-g28-live-counter-tail-slope-target-bytes",
+            "0",
+        ]
+    )
+    payload = _passing_gate_payload()
+    payload["p5_g28_contract"] = benchmark_module._p5_g28_contract_summary(payload, args)
+
+    live = payload["p5_g28_contract"]["live_cache_counters"]
+    by_name = {gate.name: gate for gate in benchmark_module._gate_summary(payload, args)}
+
+    assert payload["p5_g28_contract"]["passed"] is False
+    assert live["tail_slope_ok"] is False
+    assert live["tail_slope_max_bytes_per_run"] == 100
+    assert (
+        "display_list: tail_slope_bytes_per_run must be <= "
+        "tail_slope_target_bytes_per_run"
+    ) in live["issues"]
+    assert by_name["p5_g28_live_cache_counters_within_limits"].passed is True
+    assert by_name["p5_g28_live_cache_counters_tail_slope"].passed is False
+
+
+def test_p5_g28_contract_fails_when_live_counter_sources_below_minimum(
+    benchmark_module,
+    tmp_path: Path,
+) -> None:
+    validation_summary = tmp_path / "validation_summary.json"
+    validation_summary.write_text(
+        json.dumps(
+            {
+                "viewer_perf_summary": {
+                    "pdf_display_list_cache_max_total_bytes": 800,
+                    "pdf_display_list_cache_byte_limit": 1000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g28-cache-plateau",
+            "--p5-g28-validation-summary",
+            str(validation_summary),
+            "--p5-g28-live-counter-min-sources",
+            "2",
+        ]
+    )
+    payload = _passing_gate_payload()
+    payload["p5_g28_contract"] = benchmark_module._p5_g28_contract_summary(payload, args)
+
+    live = payload["p5_g28_contract"]["live_cache_counters"]
+    by_name = {gate.name: gate for gate in benchmark_module._gate_summary(payload, args)}
+
+    assert payload["p5_g28_contract"]["passed"] is False
+    assert live["source_count"] == 1
+    assert live["min_source_count"] == 2
+    assert (
+        "p5_g28 live cache counters require at least 2 readable validation summaries"
+    ) in live["issues"]
+    assert by_name["p5_g28_live_cache_counters_present"].passed is False
+    assert by_name["p5_g28_live_cache_counters_present"].target == (
+        ">= 2 sources and > 0 observed categories"
+    )
 
 
 def test_zone_selection_hotpath_probe_records_selection_events(benchmark_module, tmp_path: Path) -> None:
@@ -1524,6 +1868,7 @@ def test_main_runs_smallest_workload_and_writes_json(benchmark_module, tmp_path:
                 "--p4-visible-max-materialized-tiles",
                 "2",
                 "--include-p5-tile-retention-soak",
+                "--include-p5-g28-cache-plateau",
                 "--p5-tile-retention-pairs",
                 "3",
                 "--p5-tile-retention-image-size",
@@ -1606,6 +1951,18 @@ def test_main_runs_smallest_workload_and_writes_json(benchmark_module, tmp_path:
     assert payload["p5_tile_retention_probe"]["retained_bytes"] <= payload["p5_tile_retention_probe"]["byte_limit"]
     assert payload["p5_tile_retention_probe"]["stale_manifest_count"] == 0
     assert payload["p5_tile_retention_probe"]["orphan_bytes"] == 0
+    assert payload["benchmark_id"] == benchmark_module.P5_G28_BENCHMARK_ID
+    assert payload["profile"] == benchmark_module.P5_G28_PROFILE
+    assert payload["p5_g28_contract"]["passed"] is True
+    assert payload["p5_g28_evidence"] == payload["p5_g28_contract"]
+    assert payload["p5_g28_contract"]["tile_byte_limit_eviction_reason_present"] is True
+    assert payload["p5_g28_contract"]["eviction_reason_counts"]["byte_limit"] >= 1
+    assert payload["p5_g28_contract"]["cache_category_breakdown_present"] is True
+    assert payload["p5_g28_contract"]["cache_category_evicted_entry_count"] >= 5
+    assert payload["p5_g28_contract"]["cache_category_tail_slope_max_bytes_per_run"] == 0
+    assert set(payload["p5_g28_required_gate_names"]) == set(
+        benchmark_module.P5_G28_REQUIRED_GATE_NAMES
+    )
     assert {gate["name"] for gate in payload["gates"]} >= {
         "cached_pdf_pair_selection_p95",
         "cold_pdf_pair_selection_p95",
@@ -1691,6 +2048,7 @@ def test_main_runs_smallest_workload_and_writes_json(benchmark_module, tmp_path:
         "p5_tile_cache_prune_p95_ms",
         "p5_tile_cache_event_loop_gap_p95_ms",
         "p5_tile_cache_event_loop_over_500ms_count",
+        *benchmark_module.P5_G28_REQUIRED_GATE_NAMES,
     }
     stdout_payload = json.loads([line for line in buf.getvalue().splitlines() if line.strip()][-1])
     assert stdout_payload["status"] == payload["status"]

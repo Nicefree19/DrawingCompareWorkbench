@@ -582,6 +582,28 @@ def test_parse_args_accepts_p5_g27_selected_zone_crop_json(tmp_path: Path) -> No
     assert args.require_p5_g27_selected_zone_crop_soak is True
 
 
+def test_parse_args_accepts_p5_g28_cache_plateau_json(tmp_path: Path) -> None:
+    result_dir = tmp_path / "validation"
+    result_dir.mkdir()
+    soak_a = tmp_path / "p5_g28_a.json"
+    soak_b = tmp_path / "p5_g28_b.json"
+
+    args = audit.parse_args(
+        [
+            "--results-dir",
+            str(result_dir),
+            "--p5-g28-cache-plateau-json",
+            str(soak_a),
+            "--p5-g28-cache-plateau-soak",
+            str(soak_b),
+            "--require-p5-g28-cache-plateau-soak",
+        ]
+    )
+
+    assert args.p5_g28_cache_plateau_json == [soak_a, soak_b]
+    assert args.require_p5_g28_cache_plateau_soak is True
+
+
 def _ai_policy() -> dict:
     return {
         "schema_version": 1,
@@ -1148,6 +1170,112 @@ def _write_p5_g27_selected_zone_crop_soak_json(
             "timeout_count": 0,
             "cancel_count": 0,
         }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_p5_g28_cache_plateau_soak_json(
+    path: Path,
+    *,
+    status: str = "passed",
+    failed_gate: str | None = None,
+    omit_gate: str | None = None,
+    include_reason: bool = True,
+    required_false_gate: str | None = None,
+) -> None:
+    gate_names = sorted(audit.P5_G28_REQUIRED_GATES)
+    category_breakdown = {
+        name: {
+            "retained_bytes": 900,
+            "byte_limit": 1000,
+            "retained_entry_count": 3,
+            "evicted_entry_count": 2,
+            "evicted_estimated_bytes": 500,
+            "orphan_bytes": 0,
+            "orphan_entry_count": 0,
+            "stale_entry_count": 0,
+            "tail_slope_bytes_per_run": 0,
+            "tail_slope_target_bytes_per_run": 0,
+            "plateau_ok": True,
+        }
+        for name in ("display_list", "dxf_index", "visual_asset", "overlay", "spool")
+    }
+    gates = [
+        {
+            "name": name,
+            "domain": "unit",
+            "passed": name != failed_gate
+            and (
+                include_reason
+                or name != "p5_g28_tile_cache_eviction_reason_present"
+            ),
+            "observed": 0,
+            "threshold": 0,
+            "actual": 0,
+            "target": 0,
+            "op": "==",
+            "required": name != required_false_gate,
+            "detail": "",
+        }
+        for name in gate_names
+        if name != omit_gate
+    ]
+    reason_counts = {"byte_limit": 2} if include_reason else {}
+    payload = {
+        "schema_version": "workbench-gui-hotpath-benchmark/v1",
+        "benchmark_id": "p5_g28_cache_plateau_soak",
+        "profile": "tile_cache_plateau_lifecycle_seed",
+        "status": status,
+        "p5_g28_required_gate_names": gate_names,
+        "p5_g28_contract": {
+            "passed": failed_gate is None and status == "passed" and include_reason,
+            "tile_retention_completed": True,
+            "tile_retained_bytes": 900,
+            "tile_byte_limit": 1000,
+            "tile_byte_plateau_ok": True,
+            "tile_eviction_count": 2,
+            "tile_evicted_estimated_bytes": 500,
+            "tile_eviction_observed": True,
+            "tile_byte_limit_eviction_reason_present": include_reason,
+            "tile_orphan_bytes": 0,
+            "tile_orphan_pair_count": 0,
+            "tile_orphan_payloads_zero": True,
+            "tile_stale_manifest_count": 0,
+            "tile_stale_manifest_zero": True,
+            "tile_hot_pair_retained": True,
+            "tile_evicted_pair_cache_miss": True,
+            "single_entry_over_cap_count": 0,
+            "single_entry_over_cap_zero": True,
+            "prune_p95_ms": 20.0,
+            "prune_p95_target_ms": 500.0,
+            "event_loop_gap_p95_ms": 10.0,
+            "event_loop_gap_p95_target_ms": 150.0,
+            "event_loop_over_500ms_count": 0,
+            "event_loop_over_500ms_zero": True,
+            "eviction_reason_counts": reason_counts,
+            "cache_category_names": ["display_list", "dxf_index", "visual_asset", "overlay", "spool"],
+            "cache_category_breakdown": category_breakdown,
+            "cache_category_breakdown_present": True,
+            "display_list_cache_plateau": True,
+            "dxf_index_cache_plateau": True,
+            "visual_asset_cache_plateau": True,
+            "overlay_cache_plateau": True,
+            "spool_namespace_plateau": True,
+            "cache_category_orphans_zero": True,
+            "cache_category_stale_entries_zero": True,
+            "cache_plateau_tail_slope_ok": True,
+            "cache_category_retained_bytes_total": 4500,
+            "cache_category_byte_limit_total": 5000,
+            "cache_category_evicted_entry_count": 10,
+            "cache_category_orphan_bytes_total": 0,
+            "cache_category_stale_entry_count": 0,
+            "cache_category_tail_slope_max_bytes_per_run": 0,
+        },
+        "gates": gates,
+    }
+    if failed_gate == "p5_g28_tile_cache_eviction_reason_present":
+        payload["p5_g28_contract"]["passed"] = False
+        payload["p5_g28_contract"]["tile_byte_limit_eviction_reason_present"] = False
+        payload["p5_g28_contract"]["eviction_reason_counts"] = {}
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -1770,6 +1898,254 @@ def test_customer_grade_audit_rejects_failed_p5_g27_real_renderer_bridge(
     assert check["passed"] is False
     assert "p5_g27_real_renderer_bridge.p5_g16_passed must be true" in check["detail"]
     assert "real renderer bridge gates failed" in check["detail"]
+
+
+def test_audit_accepts_required_p5_g28_cache_plateau_soak(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    p5_g28 = pdf_dir / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau_soak_json(p5_g28)
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+        p5_g28_cache_plateau_json=[p5_g28],
+        require_p5_g28_cache_plateau_soak=True,
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert report["status"] == "passed"
+    assert check["passed"] is True
+    assert "byte_limit_reason_count=2" in check["detail"]
+
+
+def test_audit_rejects_p5_g28_when_later_repeatable_json_fails(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    passing_p5_g28 = pdf_dir / "p5_g28_cache_plateau_soak_pass.json"
+    failing_p5_g28 = pdf_dir / "p5_g28_cache_plateau_soak_fail.json"
+    _write_p5_g28_cache_plateau_soak_json(passing_p5_g28)
+    _write_p5_g28_cache_plateau_soak_json(failing_p5_g28, include_reason=False)
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+        p5_g28_cache_plateau_json=[passing_p5_g28, failing_p5_g28],
+        require_p5_g28_cache_plateau_soak=True,
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert str(passing_p5_g28) in check["detail"]
+    assert str(failing_p5_g28) in check["detail"]
+    assert str(passing_p5_g28) in check["evidence"]
+    assert str(failing_p5_g28) in check["evidence"]
+    assert (
+        "p5_g28_contract.eviction_reason_counts.byte_limit must be > 0"
+        in check["detail"]
+    )
+
+
+def test_audit_requires_p5_g28_cache_plateau_soak_when_requested(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+        require_p5_g28_cache_plateau_soak=True,
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "artifact missing" in check["detail"]
+
+
+def test_audit_rejects_p5_g28_without_eviction_reason(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    p5_g28 = pdf_dir / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau_soak_json(p5_g28, include_reason=False)
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+        p5_g28_cache_plateau_json=[p5_g28],
+        require_p5_g28_cache_plateau_soak=True,
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "p5_g28_contract.eviction_reason_counts.byte_limit must be > 0" in check["detail"]
+    assert "required gates failed: p5_g28_tile_cache_eviction_reason_present" in check["detail"]
+
+
+def test_audit_rejects_p5_g28_without_cache_category_breakdown(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    p5_g28 = pdf_dir / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau_soak_json(p5_g28)
+    payload = json.loads(p5_g28.read_text(encoding="utf-8"))
+    contract = payload["p5_g28_contract"]
+    contract.pop("cache_category_breakdown")
+    contract["cache_category_breakdown_present"] = False
+    contract["passed"] = False
+    payload["status"] = "failed"
+    for gate in payload["gates"]:
+        if gate["name"] == "p5_g28_cache_category_breakdown_present":
+            gate["passed"] = False
+    p5_g28.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+        p5_g28_cache_plateau_json=[p5_g28],
+        require_p5_g28_cache_plateau_soak=True,
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert report["status"] == "failed"
+    assert "p5_g28_contract.cache_category_breakdown missing" in check["detail"]
+    assert "required gates failed: p5_g28_cache_category_breakdown_present" in check["detail"]
+
+
+def test_audit_rejects_p5_g28_invalid_live_cache_counters(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    p5_g28 = pdf_dir / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau_soak_json(p5_g28)
+    payload = json.loads(p5_g28.read_text(encoding="utf-8"))
+    payload["p5_g28_contract"]["live_cache_counters"] = {
+        "supplied": True,
+        "source_count": 1,
+        "observed_category_count": 1,
+        "passed": False,
+        "within_limits": False,
+        "invalid_counter_count": 1,
+        "tail_slope_ok": False,
+        "tail_slope_max_bytes_per_run": 100,
+        "tail_slope_target_bytes_per_run": 0,
+        "tail_slope_invalid_category_count": 1,
+        "issues": ["display_list: retained_bytes must be <= byte_limit"],
+        "categories": {
+            "display_list": {
+                "observed": True,
+                "sample_count": 2,
+                "retained_bytes": 2000,
+                "byte_limit": 1000,
+                "eviction_count": 0,
+                "evicted_estimated_bytes": 0,
+                "tail_slope_ok": False,
+                "tail_slope_bytes_per_run": 100,
+                "tail_slope_target_bytes_per_run": 0,
+                "within_limit": False,
+            }
+        },
+    }
+    payload["p5_g28_contract"]["live_cache_counters_supplied"] = True
+    payload["p5_g28_contract"]["live_cache_counters_source_count"] = 1
+    payload["p5_g28_contract"]["live_cache_counters_observed_category_count"] = 1
+    payload["p5_g28_contract"]["live_cache_counters_within_limits"] = False
+    payload["p5_g28_contract"]["live_cache_counters_invalid_counter_count"] = 1
+    p5_g28.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+        p5_g28_cache_plateau_json=[p5_g28],
+        require_p5_g28_cache_plateau_soak=True,
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert check["passed"] is False
+    assert "p5_g28_contract.live_cache_counters.passed must be true when supplied" in check["detail"]
+    assert (
+        "p5_g28_contract.live_cache_counters.categories.display_list.retained_bytes "
+        "must be <= byte_limit"
+    ) in check["detail"]
+    assert "p5_g28_contract.live_cache_counters.tail_slope_ok must be true when supplied" in check["detail"]
+    assert (
+        "p5_g28_contract.live_cache_counters.categories.display_list.tail_slope_bytes_per_run "
+        "must be <= tail_slope_target_bytes_per_run"
+    ) in check["detail"]
+
+
+def test_audit_rejects_p5_g28_required_gate_marked_not_required_but_failed(
+    tmp_path: Path,
+) -> None:
+    pdf_dir = tmp_path / "pdf"
+    _write_result(pdf_dir, kind="pdf", completed_pairs=1)
+    p5_g28 = pdf_dir / "p5_g28_cache_plateau_soak.json"
+    _write_p5_g28_cache_plateau_soak_json(
+        p5_g28,
+        failed_gate="p5_g28_prune_p95_ms",
+        required_false_gate="p5_g28_prune_p95_ms",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[pdf_dir],
+        evidence_level="customer_grade",
+        customer_evidence_manifest=None,
+        p5_g28_cache_plateau_json=[p5_g28],
+        require_p5_g28_cache_plateau_soak=True,
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert check["passed"] is False
+    assert "required gates failed: p5_g28_prune_p95_ms" in check["detail"]
+
+
+def test_audit_discovers_p5_g28_cache_plateau_result_dir_sibling(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g28_cache_plateau_soak_json(pdf_dir / "p5_g28_cache_plateau_soak.json")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g28_cache_plateau_soak")
+    assert report["status"] == "passed"
+    assert check["passed"] is True
+    assert str(pdf_dir / "p5_g28_cache_plateau_soak.json") in check["evidence"][0]
 
 
 def test_customer_grade_audit_rejects_p5_g22_missing_shared_summaries(

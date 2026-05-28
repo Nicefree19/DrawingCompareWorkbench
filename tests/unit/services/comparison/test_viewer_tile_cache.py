@@ -133,7 +133,8 @@ def test_visible_overlays_are_capped_or_clustered() -> None:
     assert len(capped["items"]) == 10
 
 
-def test_write_pair_tile_cache_and_merge_manifest(tmp_path: Path) -> None:
+def test_write_pair_tile_cache_and_merge_manifest(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("DRAWING_COMPARE_TILE_CACHE_MB", raising=False)
     before = tmp_path / "before.png"
     after = tmp_path / "after.png"
     Image.new("RGB", (1024, 1024), "white").save(before)
@@ -245,7 +246,11 @@ def test_visible_tile_model_honors_manifest_cache_root(tmp_path: Path) -> None:
     assert model["tiles"][0]["source"].startswith((cache_root / "tiles").resolve().as_uri())
 
 
-def test_write_visible_pair_tile_cache_materializes_only_visible_window(tmp_path: Path) -> None:
+def test_write_visible_pair_tile_cache_materializes_only_visible_window(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("DRAWING_COMPARE_TILE_CACHE_MB", raising=False)
     before = tmp_path / "before.png"
     after = tmp_path / "after.png"
     Image.new("RGB", (4096, 4096), "white").save(before)

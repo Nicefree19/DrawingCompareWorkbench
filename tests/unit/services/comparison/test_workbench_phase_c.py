@@ -1192,8 +1192,14 @@ def test_initial_zone_selection_defers_crop_and_vector_until_after_pair_paint(qa
     from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
 
     scheduled: list[tuple[int, object]] = []
-    monkeypatch.setattr(dcw.QTimer, "singleShot", lambda delay, callback: scheduled.append((delay, callback)))
     workbench = DrawingCompareWorkbenchV2()
+    monkeypatch.setattr(
+        dcw,
+        "QTimer",
+        SimpleNamespace(
+            singleShot=lambda delay, callback: scheduled.append((delay, callback))
+        ),
+    )
     try:
         workbench._active_row = {"pair_id": "pair"}
         workbench._active_overlays_by_zone = {
