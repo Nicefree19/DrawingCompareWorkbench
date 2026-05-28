@@ -75,11 +75,21 @@ S1.2 inventory 결과: 7개 지점 작업 (Point 7 zone crop stale 제외 — �
   - [x] pytest: **27 passed in 2.65s** (test_render_failure_codes 24 → 27)
   - [x] cad_policy_gate: passed
   - [x] monolith 0줄
-- [ ] **S1.3.4** — Point 3, 4 통합 (`lightweight_viewport.py`)
-  - [ ] `_FallbackQuickWidget`에 `failure_code` 클래스 속성
-  - [ ] `LightweightDrawingViewport`에 `render_failure_codes() -> list[RenderFailureCode]` API
-  - [ ] QSGLineItem fallback 발신
-  - [ ] viewport 단위 테스트
+- [x] **S1.3.4** — Point 3, 4 통합 (`lightweight_viewport.py`) ✅ 완료 (2026-05-28)
+  - [x] `_FallbackQuickWidget`에 `failure_code: RenderFailureCode` 클래스 속성 (`"backend_fallback_qquickwidget"`)
+  - [x] `LightweightDrawingViewport.__init__`에 `_render_failure_codes: list` 누적 모델
+  - [x] Point 3 (line 612-616): `isinstance(self._quick, _FallbackQuickWidget)` 검사 후 append
+  - [x] Point 4 (line 595-602): `_qsg_available = False` 시 `backend_fallback_canvas_skeleton` append
+  - [x] `LightweightDrawingViewport.render_failure_codes() -> tuple[...]` public API (immutable)
+  - [x] 5 신규 테스트 (offscreen Qt + monkey patch)
+    - fallback_quick_widget_carries_static_failure_code (Qt 없이)
+    - render_failure_codes_returns_tuple (Qt + 타입 검증)
+    - canvas_skeleton_code_present_in_test_env (Point 4 런타임 계약)
+    - qquickwidget_fallback_surfaces_code (Point 3 monkey patch)
+    - render_failure_codes_method_returns_immutable_copy (튜플 보장)
+  - [x] pytest: **69 passed in 7.31s** (5 신규 + 64 회귀)
+  - [x] cad_policy_gate: passed
+  - [x] monolith 0줄
 - [ ] **S1.3.5** — Point 5 통합 (`embedding_classifier.py`)
   - [ ] `EmbeddingClassifier`에 `failure_code` 속성 + getter
   - [ ] L422, L484 양 지점에서 `ai_heuristic_fallback` 설정

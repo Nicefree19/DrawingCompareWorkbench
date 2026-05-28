@@ -35,6 +35,7 @@ from PySide6.QtGui import QImageReader
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QStackedLayout, QWidget
 
+from src.services.comparison.render_failure_codes import RenderFailureCode
 from src.services.comparison.render_modes import RenderMode, style_for
 from src.services.comparison.transform import (
     convert_bbox_to_world_space as _convert_bbox_to_world_space_contract,
@@ -69,7 +70,14 @@ class _FallbackQuickRoot:
 
 
 class _FallbackQuickWidget(QWidget):
-    """Minimal QWidget stand-in used when QQuickWidget is unavailable or mocked."""
+    """Minimal QWidget stand-in used when QQuickWidget is unavailable or mocked.
+
+    S1.3.4: callers can detect this stand-in via ``isinstance`` and the
+    ``failure_code`` class attribute lets static analysis confirm the
+    code that the GUI badge (S1.4) will display.
+    """
+
+    failure_code: RenderFailureCode = "backend_fallback_qquickwidget"
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -570,6 +578,10 @@ class LightweightDrawingViewport(QWidget):
         self._world_bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
         self._loaded_pack_path: Optional[str] = None
         self._primitive_count: int = 0
+        # S1.3.4: silent-fallback codes accumulated during __init__.
+        # Surfaces QSGLineItem unavailability (Point 4) and QQuickWidget
+        # fallback (Point 3) so the FailureBadge (S1.4) can show them.
+        self._render_failure_codes: list[RenderFailureCode] = []
         # Phase G2.7-FU2 — track per-PDF render state so we can re-render
         # at higher DPI when the user zooms in. Cleared on non-PDF loads.
         # Keys:
@@ -597,6 +609,9 @@ class LightweightDrawingViewport(QWidget):
                 "QSGLineItem unavailable (%s); using Canvas skeleton", exc
             )
             self._qsg_available = False
+            # S1.3.4 Point 4: surface the Canvas fallback so the badge
+            # can show ℹ️ "QSGLineItem 모듈 없음 — 표준 Canvas 사용".
+            self._render_failure_codes.append("backend_fallback_canvas_skeleton")
 
         # Resolve renderer choice from env var (operator override). This
         # standalone QML is Canvas-safe; do not allow WORKBENCH_QSG=qsg to
@@ -610,6 +625,10 @@ class LightweightDrawingViewport(QWidget):
         self._skeleton_renderer = "canvas"
 
         self._quick = _create_quick_widget(self)
+        # S1.3.4 Point 3: surface the QQuickWidget fallback so the badge
+        # can show ⚠️ "Qt Quick 위젯 사용 불가 — 호환 모드 동작 중".
+        if isinstance(self._quick, _FallbackQuickWidget):
+            self._render_failure_codes.append("backend_fallback_qquickwidget")
         try:
             self._quick.setResizeMode(QQuickWidget.SizeRootObjectToView)
         except Exception:
@@ -649,6 +668,31 @@ class LightweightDrawingViewport(QWidget):
                     "LightweightViewport: skeletonRenderer property unavailable",
                     exc_info=True,
                 )
+
+    # ------------------------------------------------------------------
+    # S1.3.4 — Silent fallback visibility
+    # ------------------------------------------------------------------
+
+    def render_failure_codes(self) -> tuple[RenderFailureCode, ...]:
+        """Return RenderFailureCodes accumulated during viewport setup.
+
+        S1.3.4: the constructor accumulates fallback events into
+        ``self._render_failure_codes``:
+
+        * ``backend_fallback_canvas_skeleton`` (info) — when the
+          optional QSGLineItem extension isn't importable. Canvas
+          rendering is the normal degraded path on packaged builds.
+        * ``backend_fallback_qquickwidget`` (warn) — when QQuickWidget
+          itself isn't constructible (rare; signals a broken Qt
+          install). The viewport uses ``_FallbackQuickWidget`` as a
+          stand-in but the user should know they aren't seeing the
+          real QML output.
+
+        The future GUI badge (S1.4) reads this tuple at the workbench
+        level and renders the highest-severity colour chip.
+        """
+
+        return tuple(self._render_failure_codes)
 
     # ------------------------------------------------------------------
     # Phase G3 — QSG line layer plumbing
