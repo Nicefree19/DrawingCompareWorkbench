@@ -67,10 +67,14 @@ S1.2 inventory 결과: 7개 지점 작업 (Point 7 zone crop stale 제외 — �
   - [x] cad_policy_gate: passed
   - [x] monolith 0줄
   - [x] **발견**: 같은 stem `.previous.dxf` 파일은 normal cache hit(6a)가 아닌 fallback(6b) 경로 (테스트 작성 중 발견)
-- [ ] **S1.3.3** — Point 2 통합 (`dwg_importer.py` + `import_pipeline.py`)
-  - [ ] `DwgFailureCode` → `RenderFailureCode` mapping 함수 추가
-  - [ ] `ImportPipelineResult`에 `render_failure_code` 필드 추가 (선택)
-  - [ ] mapping 함수 테스트
+- [x] **S1.3.3** — Point 2 통합 (`dwg_importer.py` + `import_pipeline.py`) ✅ 완료 (2026-05-28)
+  - [x] `DwgFailureCode` → `RenderFailureCode` mapping 함수 추가 (`from_dwg_failure_code`)
+  - [-] `ImportPipelineResult`에 `render_failure_code` 필드 추가 (S1.3.3에서 deferred — caller 영향 분석 부담 회피, 다음 슬라이스 또는 별도 PR로)
+  - [x] mapping 함수 테스트 3개 (UNSUPPORTED_VERSION 매핑, 모든 unmapped → vector_draw_failed fallback, 실제 DwgFailureCode constant integration)
+  - [x] dwg_importer.py 변경 0줄 (mapping은 render_failure_codes.py 안에서)
+  - [x] pytest: **27 passed in 2.65s** (test_render_failure_codes 24 → 27)
+  - [x] cad_policy_gate: passed
+  - [x] monolith 0줄
 - [ ] **S1.3.4** — Point 3, 4 통합 (`lightweight_viewport.py`)
   - [ ] `_FallbackQuickWidget`에 `failure_code` 클래스 속성
   - [ ] `LightweightDrawingViewport`에 `render_failure_codes() -> list[RenderFailureCode]` API

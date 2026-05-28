@@ -238,3 +238,58 @@ def test_payload_is_json_serialisable() -> None:
         encoded = json.dumps(payload, ensure_ascii=False)
         decoded = json.loads(encoded)
         assert decoded["code"] == code
+
+
+# ---------------------------------------------------------------------------
+# S1.3.3 — DwgFailureCode bridge tests
+# ---------------------------------------------------------------------------
+
+
+def test_from_dwg_failure_code_maps_unsupported_version() -> None:
+    """S1.3.3: DWG_UNSUPPORTED_VERSION maps to dwg_unsupported_version."""
+
+    from src.services.comparison.render_failure_codes import from_dwg_failure_code
+
+    assert from_dwg_failure_code("DWG_UNSUPPORTED_VERSION") == "dwg_unsupported_version"
+
+
+def test_from_dwg_failure_code_falls_back_to_vector_draw_failed() -> None:
+    """S1.3.3: any unmapped DWG code surfaces as vector_draw_failed.
+
+    Better to show a generic error than to silently hide a failure.
+    """
+
+    from src.services.comparison.render_failure_codes import from_dwg_failure_code
+
+    for unmapped in (
+        "DWG_CORRUPTED",
+        "DWG_ENCRYPTED",
+        "DWG_ADAPTER_UNAVAILABLE",
+        "DWG_ADAPTER_FAILED",
+        "DWG_FORBIDDEN_LICENSE",
+        "DWG_NO_READABLE_ENTITIES",
+        "DWG_UNSUPPORTED_ENTITY",
+        "DWG_IMPORT_TIMEOUT",
+        "DWG_IMPORT_CANCELLED",
+        "DWG_ENTITY_LIMIT_EXCEEDED",
+        "",
+        "future_unknown_code",
+    ):
+        assert from_dwg_failure_code(unmapped) == "vector_draw_failed"
+
+
+def test_from_dwg_failure_code_uses_real_dwg_importer_constant() -> None:
+    """S1.3.3: integration — verify the constant value stays in sync.
+
+    Imports the real DwgFailureCode class so a future rename of the
+    constant breaks this test instead of silently producing the
+    fallback code.
+    """
+
+    from src.services.comparison.dwg_importer import DwgFailureCode
+    from src.services.comparison.render_failure_codes import from_dwg_failure_code
+
+    assert (
+        from_dwg_failure_code(DwgFailureCode.UNSUPPORTED_VERSION)
+        == "dwg_unsupported_version"
+    )

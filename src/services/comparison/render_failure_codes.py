@@ -256,6 +256,43 @@ def highest_severity(*codes: RenderFailureCode) -> Severity:
     return best
 
 
+# ---------------------------------------------------------------------------
+# S1.3.3 — DwgFailureCode bridge
+# ---------------------------------------------------------------------------
+
+
+def from_dwg_failure_code(dwg_code: str) -> RenderFailureCode:
+    """Map a ``DwgFailureCode`` string to a ``RenderFailureCode``.
+
+    The DWG importer (``src/services/comparison/dwg_importer.py``)
+    defines its own taxonomy of failure codes
+    (``DwgFailureCode.UNSUPPORTED_VERSION`` etc.) — they remain
+    untouched so existing CAD pipeline behaviour is preserved. This
+    helper bridges those codes into the RenderFailureCode taxonomy
+    used by the GUI badge (S1.4).
+
+    Unmapped codes default to ``"vector_draw_failed"`` so the badge
+    surfaces a generic error rather than masking it. Adding a finer
+    mapping later (e.g. ``DWG_IMPORT_TIMEOUT`` → a dedicated timeout
+    code) only requires extending the table here.
+
+    Args:
+        dwg_code: A ``DwgFailureCode`` value (string), e.g.
+            ``"DWG_UNSUPPORTED_VERSION"``. Type is plain ``str`` so we
+            avoid importing the heavy ``dwg_importer`` module from this
+            pure-Python failure-code module.
+
+    Returns:
+        The closest matching RenderFailureCode. Falls back to
+        ``"vector_draw_failed"`` for any code not in the table.
+    """
+
+    mapping: dict[str, RenderFailureCode] = {
+        "DWG_UNSUPPORTED_VERSION": "dwg_unsupported_version",
+    }
+    return mapping.get(dwg_code, "vector_draw_failed")
+
+
 __all__ = [
     "RenderFailureCode",
     "ALL_FAILURE_CODES",
@@ -274,4 +311,5 @@ __all__ = [
     "severity_of",
     "to_payload",
     "highest_severity",
+    "from_dwg_failure_code",
 ]
