@@ -576,6 +576,14 @@ P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATES = {
     "p5_g27_real_renderer_bridge_zone_images_present",
     "p5_g27_real_renderer_bridge_fallback_reasons",
 }
+P5_G30_REQUIRED_CHECKS = (
+    "p5_g3_realset_release_gate",
+    "p5_g16_real_corpus_replay",
+    "p5_g22_actual_gui_soak",
+    "p5_g24_visual_asset_policy",
+    "p5_g26_selection_latency_soak",
+    "p5_g27_selected_zone_crop_soak",
+)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1494,6 +1502,12 @@ def run_audit(
                 composition_mode=composition_mode,
             )
         )
+    checks.append(
+        _check_p5_g30_customer_visual_performance_release_gate(
+            checks,
+            evidence_level=evidence_level,
+        )
+    )
     passed = all(check.passed for check in checks)
     return {
         "schema_version": 1,
@@ -3433,6 +3447,47 @@ def _check_p5_g27_selected_zone_crop_soak(
         name=name,
         passed=not failures,
         detail=", ".join(detail_parts),
+        evidence=evidence,
+    )
+
+
+def _check_p5_g30_customer_visual_performance_release_gate(
+    checks: Sequence[AuditCheck],
+    *,
+    evidence_level: str,
+) -> AuditCheck:
+    name = "p5_g30_customer_visual_performance_release_gate"
+    if evidence_level != "customer_grade":
+        return AuditCheck(
+            name=name,
+            passed=True,
+            detail="P5-G30 composite visual-performance release gate is advisory outside customer_grade",
+            evidence=[],
+        )
+
+    by_name = {check.name: check for check in checks}
+    missing = [check_name for check_name in P5_G30_REQUIRED_CHECKS if check_name not in by_name]
+    failed = [
+        check_name
+        for check_name in P5_G30_REQUIRED_CHECKS
+        if check_name in by_name and not by_name[check_name].passed
+    ]
+    evidence = [
+        f"{check_name}: passed={by_name[check_name].passed}; detail={by_name[check_name].detail}"
+        for check_name in P5_G30_REQUIRED_CHECKS
+        if check_name in by_name
+    ]
+    detail_parts = [f"required_checks={len(P5_G30_REQUIRED_CHECKS)}"]
+    if missing:
+        detail_parts.append("missing=" + ", ".join(missing))
+    if failed:
+        detail_parts.append("failed=" + ", ".join(failed))
+    if not missing and not failed:
+        detail_parts.append("all required customer visual-performance gates passed")
+    return AuditCheck(
+        name=name,
+        passed=not missing and not failed,
+        detail="; ".join(detail_parts),
         evidence=evidence,
     )
 

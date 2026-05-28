@@ -47,7 +47,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+QT_QUICK_DISABLED = _env_flag("DRAWING_COMPARE_DISABLE_QT_QUICK")
 try:
+    if QT_QUICK_DISABLED:
+        raise ImportError("Qt Quick disabled by DRAWING_COMPARE_DISABLE_QT_QUICK")
     from PySide6.QtQuickWidgets import QQuickWidget
 
     QT_QUICK_AVAILABLE = True
@@ -196,7 +204,7 @@ GPU_VIEWER_MAX_VISIBLE_OVERLAYS = 120
 GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD = 300
 GPU_VIEWER_MEMORY_BUDGET_MB = 512
 GPU_VIEWER_RENDER_TIMEOUT_SECONDS = 30
-DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = True
+DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = QT_QUICK_AVAILABLE
 GUI_FIRST_SELECTION_ZONE_LIMIT = 500
 GUI_FULL_ZONE_TREE_IDLE_DELAY_MS = 120
 GUI_INITIAL_ZONE_SELECT_DELAY_MS = 75
@@ -4418,6 +4426,45 @@ def _preview_status_label(status, available=None) -> str:
     return "렌더대기"
 
 
+class QtQuickUnavailableLightweightViewport(QWidget):
+    """No-op stand-in used when Qt Quick is disabled for startup stability."""
+
+    viewportChanged = Signal(float, float, float)
+    overlayClicked = Signal(str)
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        side: str = "after",
+    ) -> None:
+        super().__init__(parent)
+        self._side = side
+        self._pdf_render_state: Optional[dict] = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._notice = QLabel("Qt Quick viewer disabled; compatibility preview is active.")
+        self._notice.setProperty("role", "muted")
+        self._notice.setAlignment(Qt.AlignCenter)
+        self._notice.setWordWrap(True)
+        layout.addWidget(self._notice)
+
+    def load_scene_pack(self, *_args, empty_notice: str = "", **_kwargs) -> bool:
+        if empty_notice:
+            self._notice.setText(empty_notice)
+        return False
+
+    def load_pdf_page(self, *_args, **_kwargs) -> bool:
+        self._notice.setText("PDF lightweight viewer unavailable in compatibility mode.")
+        return False
+
+    def set_overlays(self, *_args, **_kwargs) -> None:
+        return None
+
+    def set_overlay_opacity_scale(self, *_args, **_kwargs) -> None:
+        return None
+
+
 class DrawingCompareWorkbenchV2(QMainWindow):
     """Korean, single-action drawing comparison UX."""
 
@@ -4853,7 +4900,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         self.act_lightweight_viewer_v2.setCheckable(True)
         self.act_lightweight_viewer_v2.setChecked(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
-        if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+        if not QT_QUICK_AVAILABLE:
+            self.act_lightweight_viewer_v2.setEnabled(False)
+            self.act_lightweight_viewer_v2.setVisible(False)
+        elif DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             self.act_lightweight_viewer_v2.setEnabled(False)
             self.act_lightweight_viewer_v2.setVisible(False)
         else:
@@ -5548,8 +5598,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # Phase G2.2 — lightweight viewport (hidden by default; toggled
         # via Ctrl+L from the View menu). Created up-front so the toggle
         # action is instant and the layout doesn't shift.
-        from src.gui.lightweight_viewport import LightweightDrawingViewport
-        self.preview_before_lightweight_v2 = LightweightDrawingViewport(side="before")
+        if QT_QUICK_AVAILABLE and QQuickWidget is not None:
+            from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+            self.preview_before_lightweight_v2 = LightweightDrawingViewport(side="before")
+        else:
+            self.preview_before_lightweight_v2 = QtQuickUnavailableLightweightViewport(side="before")
         self.preview_before_lightweight_v2.setVisible(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
         # Phase G2.3 — camera sync: when the user pans/zooms one side,
         # mirror the camera state to the other so before/after stay aligned
@@ -5566,7 +5620,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.preview_after_v2 = GpuDrawingViewport()
         self.preview_after_v2.setVisible(not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
         after_layout.addWidget(self.preview_after_v2)
-        self.preview_after_lightweight_v2 = LightweightDrawingViewport(side="after")
+        if QT_QUICK_AVAILABLE and QQuickWidget is not None:
+            self.preview_after_lightweight_v2 = LightweightDrawingViewport(side="after")
+        else:
+            self.preview_after_lightweight_v2 = QtQuickUnavailableLightweightViewport(side="after")
         self.preview_after_lightweight_v2.setVisible(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
         self.preview_after_lightweight_v2.viewportChanged.connect(
             lambda cx, cy, upp: self._on_lightweight_camera_changed_v2("after", cx, cy, upp)
@@ -7592,13 +7649,17 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         dialog.exec()
 
     def _is_lightweight_viewer_active_v2(self) -> bool:
+        if not QT_QUICK_AVAILABLE:
+            return False
         if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             return True
         action = getattr(self, "act_lightweight_viewer_v2", None)
         return bool(action is not None and action.isChecked())
 
     def _set_lightweight_viewer_visible_v2(self, enabled: bool) -> None:
-        if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+        if not QT_QUICK_AVAILABLE:
+            enabled = False
+        elif DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             enabled = True
         for widget, visible in (
             (getattr(self, "preview_before_v2", None), not enabled),
@@ -7622,6 +7683,9 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         """
 
         if not hasattr(self, "act_lightweight_viewer_v2"):
+            return
+        if not QT_QUICK_AVAILABLE:
+            self._set_lightweight_viewer_visible_v2(False)
             return
         if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             if not self.act_lightweight_viewer_v2.isChecked():
@@ -10430,6 +10494,19 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         auto-enable logic for DXF/DWG runs doesn't overwrite their explicit
         choice on the next pair selection.
         """
+
+        if not QT_QUICK_AVAILABLE:
+            checked = False
+            action = getattr(self, "act_lightweight_viewer_v2", None)
+            if action is not None and action.isChecked():
+                previous = action.blockSignals(True)
+                try:
+                    action.setChecked(False)
+                finally:
+                    action.blockSignals(previous)
+            self._user_picked_lightweight_v2 = False
+            self._set_lightweight_viewer_visible_v2(False)
+            return
 
         if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             checked = True

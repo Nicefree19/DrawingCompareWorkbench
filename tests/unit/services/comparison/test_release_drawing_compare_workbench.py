@@ -648,6 +648,7 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert (out_dir / "cli" / "audit_closeout_readiness.py").exists()
     assert (out_dir / "cli" / "benchmark_real_corpus_replay.py").exists()
     assert (out_dir / "cli" / "benchmark_actual_gui_soak.py").exists()
+    assert (out_dir / "cli" / "benchmark_workbench_gui_hotpath.py").exists()
     readme = (out_dir / "README_INTERNAL_PILOT.md").read_text(encoding="utf-8")
     assert "## Validation (source checkout)" in readme
     assert "## Resume (source checkout)" in readme
@@ -674,14 +675,21 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "audit_closeout_readiness.py" in readme
     assert "benchmark_real_corpus_replay.py" in readme
     assert "benchmark_actual_gui_soak.py" in readme
+    assert "benchmark_workbench_gui_hotpath.py" in readme
     assert "--p5-g16-benchmark-json <p5_g16_real_corpus_replay.json>" in readme
     assert "--p5-g22-gui-soak-json" in readme
+    assert "--include-p5-g26-contract" in readme
+    assert "--p5-g26-selection-latency-json" in readme
     assert "p5_g16_real_corpus_replay.json" in readme
     assert "p5_g22_actual_gui_soak.json" in readme
+    assert "p5_g26_selection_latency_soak.json" in readme
     assert "--p5-g27-selected-zone-crop-json <p5_g27_selected_zone_crop_soak.json>" in readme
     assert "p5_g27_selected_zone_crop_soak.json" in readme
     assert "p5_g27_real_renderer_bridge" in readme
     assert "nonblank real selected-zone render artifacts" in readme
+    assert "P5-G30 composite customer visual-performance release gate" in readme
+    assert "p5_g30_customer_visual_performance_release_gate" in readme
+    assert "visual-performance gates" in readme
     assert "routing_expectations.p5_g16_real_corpus_replay_generation_enabled" in readme
     assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in readme
     assert "plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan=true" in readme
@@ -807,11 +815,18 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "P5-G22 actual GUI soak passes" in prompt_checklist
     assert "p5_g22_actual_gui_soak.json" in prompt_checklist
     assert "final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in prompt_checklist
+    assert "P5-G26 selection-latency soak passes" in prompt_checklist
+    assert "p5_g26_selection_latency_soak.json" in prompt_checklist
+    assert "p5_g26_selection_latency_soak" in prompt_checklist
     assert "P5-G27 selected-zone crop-first soak passes" in prompt_checklist
     assert "p5_g27_selected_zone_crop_soak.json" in prompt_checklist
     assert "p5_g27_real_renderer_bridge" in prompt_checklist
     assert "real selected-zone render artifacts are nonblank/present" in prompt_checklist
     assert "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in prompt_checklist
+    assert "P5-G30 composite customer visual-performance release gate passes" in prompt_checklist
+    assert "p5_g30_customer_visual_performance_release_gate" in prompt_checklist
+    assert "p5_g24_visual_asset_policy" in prompt_checklist
+    assert "p5_g26_selection_latency_soak" in prompt_checklist
     assert "closeout_readiness.json" in prompt_checklist
     assert "closeout_readiness_audit.json" in prompt_checklist
     assert "preflight.issue_count=0" in prompt_checklist
@@ -841,6 +856,7 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "routing_expectations.p5_g16_real_corpus_replay_generation_enabled" in closeout_packet
     assert "final_audit_p5_g16_benchmark_jsons_equal_plan=true" in closeout_packet
     assert "p5_g22_actual_gui_soak.json" in closeout_packet
+    assert "p5_g26_selection_latency_soak.json" in closeout_packet
     assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in closeout_packet
     assert "final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in closeout_packet
     assert "p5_g27_selected_zone_crop_soak.json" in closeout_packet
@@ -848,6 +864,9 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "p5_g27_real_renderer_bridge" in closeout_packet
     assert "crop-first lifecycle safety to real nonblank selected-zone render artifacts" in closeout_packet
     assert "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in closeout_packet
+    assert "p5_g30_customer_visual_performance_release_gate" in closeout_packet
+    assert "P5-G24" in closeout_packet
+    assert "P5-G26" in closeout_packet
     assert "closeout_readiness_audit.json" in closeout_packet
     assert "closeout_readiness.json" in closeout_packet
     assert "status=preflight_failed" in closeout_packet

@@ -236,7 +236,7 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     drawing_end = SOURCE.index("    def _viewer_overlays_for_pair_v2", drawing_start)
     drawing_body = SOURCE[drawing_start:drawing_end]
 
-    assert "DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = True" in SOURCE
+    assert "DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = QT_QUICK_AVAILABLE" in SOURCE
     assert "def _is_lightweight_viewer_active_v2" in SOURCE
     assert "def _set_lightweight_viewer_visible_v2" in SOURCE
     assert "self._lightweight_raster_pairs: set[str] = set()" in SOURCE

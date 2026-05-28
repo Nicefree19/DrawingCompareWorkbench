@@ -1494,6 +1494,37 @@ def test_mvp_exit_audit_passes_with_complete_evidence(tmp_path: Path) -> None:
 
     assert report["status"] == "passed"
     assert report["summary"]["failed"] == 0
+    composite = _check_by_name(report, "p5_g30_customer_visual_performance_release_gate")
+    assert composite["passed"] is True
+    for check_name in audit.P5_G30_REQUIRED_CHECKS:
+        assert check_name in composite["detail"] or any(
+            item.startswith(f"{check_name}: passed=True")
+            for item in composite["evidence"]
+        )
+
+
+def test_customer_grade_audit_p5_g30_composite_fails_when_required_gate_fails(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    (pdf_dir / "p5_g26_selection_latency_soak.json").unlink()
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    p5_g26 = _check_by_name(report, "p5_g26_selection_latency_soak")
+    composite = _check_by_name(report, "p5_g30_customer_visual_performance_release_gate")
+    assert report["status"] == "failed"
+    assert p5_g26["passed"] is False
+    assert composite["passed"] is False
+    assert "failed=p5_g26_selection_latency_soak" in composite["detail"]
 
 
 def test_customer_grade_audit_requires_p5_g22_actual_gui_soak_by_default(

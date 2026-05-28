@@ -4182,3 +4182,61 @@ Next slice:
 3. If renderer failures still appear in live runs, add a targeted production
    P5-G27 mode that opens real viewer packages and measures crop-first ordering
    directly rather than through the P5-G16 bridge.
+
+## 34. 2026-05-28 P5-G30 Composite Customer Visual Performance Release Gate
+
+This slice adds the final composite release blocker for the currently
+implemented customer visual-performance evidence chain. Instead of
+recomputing every child condition, the gate joins the existing final-audit
+checks so the release decision cannot drift from the detailed audit evidence.
+
+Implemented behavior:
+
+- `audit_drawing_compare_mvp_exit.py` now appends
+  `p5_g30_customer_visual_performance_release_gate` to every MVP exit audit;
+- outside `customer_grade` the gate is advisory, but for customer-grade audits
+  it fails unless `p5_g3_realset_release_gate`,
+  `p5_g16_real_corpus_replay`, `p5_g22_actual_gui_soak`,
+  `p5_g24_visual_asset_policy`, `p5_g26_selection_latency_soak`, and
+  `p5_g27_selected_zone_crop_soak` are all present and passed;
+- the composite check records child-check pass/detail evidence so a failed
+  release packet points directly at the missing or failed underlying gate;
+- release README, prompt-to-artifact checklist, and closeout-packet text now
+  state that `p5_g30_customer_visual_performance_release_gate` is the final
+  composite visual-performance blocker before MVP completion.
+
+Validation evidence:
+
+- `python -m py_compile scripts\audit_drawing_compare_mvp_exit.py
+  scripts\release_drawing_compare_workbench.py
+  src\gui\drawing_compare_workbench.py
+  tests\unit\services\comparison\test_audit_drawing_compare_mvp_exit.py
+  tests\unit\services\comparison\test_release_drawing_compare_workbench.py`;
+- focused P5-G30 audit/release and Qt Quick fallback tests passed with
+  `4 passed`;
+- full final-audit/release-template/Qt Quick fallback regression files passed;
+- Qt Quick disable/import-failure fallback regression tests passed with
+  `3 passed`.
+
+Self-review findings:
+
+- P5-G30 intentionally consumes the existing child `AuditCheck` results rather
+  than parsing raw artifacts again. That keeps the composite release decision
+  consistent with the detailed failure reasons already maintained by P5-G3,
+  P5-G16, P5-G22, P5-G24, P5-G26, and P5-G27.
+- The gate currently reflects the implemented production evidence chain. Future
+  P5-G28/P5-G29 cache-plateau or telemetry-overhead gates should be added to
+  the composite only after their standalone final-audit checks exist.
+- During live execution verification, Qt Quick/QML startup was found to hang on
+  this Windows session. The Workbench now has an operator fallback:
+  `DRAWING_COMPARE_DISABLE_QT_QUICK=1` forces the legacy widget preview path
+  when Qt Quick is disabled or unavailable.
+
+Next slice:
+
+1. Decide whether bridge-bearing P5-G27 should remain an explicit supplied
+   closeout artifact or be generated automatically after P5-G16.
+2. If live renderer failures continue, add a production P5-G27 mode that opens
+   real viewer packages and measures crop-first ordering directly.
+3. Add future standalone P5-G28/P5-G29 gates before expanding the P5-G30 child
+   gate list.
