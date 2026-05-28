@@ -42,13 +42,37 @@
 - [x] commit (다음 단계)
 - [x] 사용자 검증 요청 ← 다음 응답에서
 
-### S1.3 — 발신 통합 (N개 지점)
-S1.2 결과에 따라 결정. 각 지점마다:
-- [ ] Edit 해당 파일 (~5-10줄 추가)
-- [ ] Write 또는 Edit 해당 unit test (~10줄)
-- [ ] Run 해당 unit test
-- [ ] commit per file (또는 한 commit으로 묶음)
-- [ ] 사용자 검증 요청
+### S1.3 — 발신 통합 (7개 지점, 5개 sub-슬라이스)
+S1.2 inventory 결과: 7개 지점 작업 (Point 7 zone crop stale 제외 — 후속).
+
+- [x] **S1.3.1** — RenderFailureCode enum 확장 (`dwg_vector_normalise_failed`) ✅ 완료 (2026-05-28)
+  - [x] Edit `render_failure_codes.py`: Literal + ALL_FAILURE_CODES + FAILURE_CODE_INFO에 신규 entry
+  - [x] Edit `test_render_failure_codes.py`: ten → eleven rename + 2 신규 테스트
+  - [x] pytest: **24 passed in 2.73s**
+  - [x] cad_policy_gate: passed
+  - [x] monolith: **0줄 변경**
+  - [x] commit
+- [ ] **S1.3.2** — Point 1, 6a, 6b 통합 (`zone_vector_renderer.py`)
+  - [ ] `ZoneVectorRenderResult`에 `failure_code: RenderFailureCode = "ok"` 필드 추가
+  - [ ] Point 1 (line 631-652): `vector_draw_failed` 설정 + 부분 성공 시 `vector_draw_partial`
+  - [ ] Point 6a (line 139, 152, 173): `dwg_using_cached_dxf` 발신
+  - [ ] Point 6b (line 191-197): `dwg_vector_normalise_failed` 발신
+  - [ ] 신규 또는 기존 테스트에 발신 검증 추가
+- [ ] **S1.3.3** — Point 2 통합 (`dwg_importer.py` + `import_pipeline.py`)
+  - [ ] `DwgFailureCode` → `RenderFailureCode` mapping 함수 추가
+  - [ ] `ImportPipelineResult`에 `render_failure_code` 필드 추가 (선택)
+  - [ ] mapping 함수 테스트
+- [ ] **S1.3.4** — Point 3, 4 통합 (`lightweight_viewport.py`)
+  - [ ] `_FallbackQuickWidget`에 `failure_code` 클래스 속성
+  - [ ] `LightweightDrawingViewport`에 `render_failure_codes() -> list[RenderFailureCode]` API
+  - [ ] QSGLineItem fallback 발신
+  - [ ] viewport 단위 테스트
+- [ ] **S1.3.5** — Point 5 통합 (`embedding_classifier.py`)
+  - [ ] `EmbeddingClassifier`에 `failure_code` 속성 + getter
+  - [ ] L422, L484 양 지점에서 `ai_heuristic_fallback` 설정
+  - [ ] 단위 테스트
+- [ ] commit per sub-slice
+- [ ] 사용자 검증 요청 (각 sub-slice 종료 시)
 
 ### S1.4 — FailureBadge GUI 위젯
 - [ ] Read 기존 GUI 위젯 패턴 (`src/gui/region_match_dialog.py` 참고)

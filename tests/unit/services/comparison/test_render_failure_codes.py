@@ -21,10 +21,14 @@ from src.services.comparison.render_failure_codes import (
 )
 
 
-def test_ten_codes_present() -> None:
-    """The taxonomy must have exactly 10 codes (S1.1 contract)."""
+def test_eleven_codes_present() -> None:
+    """The taxonomy must have exactly 11 codes (S1.1 + S1.3.1 contract).
 
-    assert len(ALL_FAILURE_CODES) == 10
+    S1.3.1 added ``dwg_vector_normalise_failed`` to distinguish a
+    failed-then-cached path (warn) from normal DWG cache reuse (info).
+    """
+
+    assert len(ALL_FAILURE_CODES) == 11
     assert "ok" in ALL_FAILURE_CODES
     assert set(ALL_FAILURE_CODES) == {
         "ok",
@@ -35,9 +39,44 @@ def test_ten_codes_present() -> None:
         "backend_fallback_canvas_skeleton",
         "ai_heuristic_fallback",
         "dwg_using_cached_dxf",
+        "dwg_vector_normalise_failed",
         "zone_crop_stale",
         "zone_crop_cancelled",
     }
+
+
+def test_dwg_vector_normalise_failed_is_warn_with_user_action() -> None:
+    """S1.3.1: the failed-then-cached DWG path must be visible as warn.
+
+    Distinguishes from ``dwg_using_cached_dxf`` (info) which is a normal
+    cache reuse. The warn variant tells the reviewer that the result
+    they see is from a stale cache because the live normalisation
+    failed — so they should treat differences with extra scrutiny.
+    """
+
+    info = FAILURE_CODE_INFO["dwg_vector_normalise_failed"]
+    assert info.severity == "warn"
+    assert info.requires_user_action is True
+    assert "dwg_vector_normalise_failed" in USER_ACTION_REQUIRED_CODES
+    assert "dwg_vector_normalise_failed" in WARN_CODES
+    assert "dwg_vector_normalise_failed" not in INFO_CODES
+    assert "DWG" in info.message_ko
+    assert "캐시" in info.message_ko or "정규화" in info.message_ko
+
+
+def test_dwg_cached_dxf_and_normalise_failed_are_distinct() -> None:
+    """Sibling codes must have different severity tiers.
+
+    Plan S1.3.1: ``dwg_using_cached_dxf`` = normal reuse (info),
+    ``dwg_vector_normalise_failed`` = degraded reuse after failure (warn).
+    """
+
+    info_normal = FAILURE_CODE_INFO["dwg_using_cached_dxf"]
+    info_failed = FAILURE_CODE_INFO["dwg_vector_normalise_failed"]
+    assert info_normal.severity == "info"
+    assert info_failed.severity == "warn"
+    assert info_normal.requires_user_action is False
+    assert info_failed.requires_user_action is True
 
 
 def test_every_code_has_info_entry() -> None:

@@ -24,7 +24,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, FrozenSet, Literal, Tuple
 
-#: 10 codes (1 OK + 9 fallback). String literal — JSON-serialisable as-is.
+#: 11 codes (1 OK + 10 fallback). String literal — JSON-serialisable as-is.
+#: Added in S1.3.1: ``dwg_vector_normalise_failed`` to distinguish a
+#: failed-then-cached path (warn) from a normal cache reuse (info).
 RenderFailureCode = Literal[
     "ok",
     "dwg_unsupported_version",
@@ -34,6 +36,7 @@ RenderFailureCode = Literal[
     "backend_fallback_canvas_skeleton",
     "ai_heuristic_fallback",
     "dwg_using_cached_dxf",
+    "dwg_vector_normalise_failed",
     "zone_crop_stale",
     "zone_crop_cancelled",
 ]
@@ -47,6 +50,7 @@ ALL_FAILURE_CODES: Final[Tuple[RenderFailureCode, ...]] = (
     "backend_fallback_canvas_skeleton",
     "ai_heuristic_fallback",
     "dwg_using_cached_dxf",
+    "dwg_vector_normalise_failed",
     "zone_crop_stale",
     "zone_crop_cancelled",
 )
@@ -146,6 +150,19 @@ FAILURE_CODE_INFO: Final[dict[RenderFailureCode, FailureCodeInfo]] = {
         message_ko="ℹ️ 이전에 변환된 DXF 캐시를 재사용 중입니다.",
         suggested_action_ko="원본 DWG가 변경됐다면 캐시를 삭제하고 다시 시도하세요.",
         requires_user_action=False,
+    ),
+    "dwg_vector_normalise_failed": FailureCodeInfo(
+        code="dwg_vector_normalise_failed",
+        severity="warn",
+        message_ko=(
+            "⚠️ DWG 벡터 정규화 실패 — 이전에 변환된 DXF 캐시로 대체했습니다. "
+            "원본 도면이 변경됐다면 결과가 실제와 다를 수 있습니다."
+        ),
+        suggested_action_ko=(
+            "원본 DWG를 다시 사용하려면 캐시를 삭제하고 재시도하거나, "
+            "CAD 도구에서 DXF로 다시 export하세요."
+        ),
+        requires_user_action=True,
     ),
     "zone_crop_stale": FailureCodeInfo(
         code="zone_crop_stale",
