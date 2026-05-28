@@ -156,6 +156,10 @@ ai_models/*.pkl
 !docs/*_CHECKLIST.md
 !docs/PHASE*.md
 !docs/WEEK*.md
+# 예외: docs/work-memory/ 전체는 Layer 0 Work Memory 프로토콜 영구 보존
+!docs/work-memory/**
+# 예외: docs/adr/ 전체는 ADR 영구 보존
+!docs/adr/**
 *_REPORT_*.md
 *_FIX_REPORT.md
 *_FIX_SUMMARY.md
