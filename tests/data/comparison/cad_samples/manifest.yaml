@@ -1,0 +1,160 @@
+schema_version: cad-samples/v1
+description: Canonical CAD format regression samples for importer, normalizer, and diff checks.
+
+samples:
+  - id: simple_base
+    category: simple
+    format: dxf
+    source:
+      kind: file
+      path: tests/data/comparison/cad_samples/dxf/simple_base.dxf
+    tags: [line, circle, arc, polyline]
+
+  - id: simple_modified
+    category: simple
+    format: dxf
+    source:
+      kind: file
+      path: tests/data/comparison/cad_samples/dxf/simple_modified.dxf
+    tags: [line, circle, arc, polyline, modified_pair_target]
+
+  - id: block_centered
+    category: block_centered
+    format: dxf
+    source:
+      kind: file
+      path: tests/data/comparison/cad_samples/dxf/block_centered.dxf
+    tags: [block, insert, attributes]
+
+  - id: text_centered
+    category: text_centered
+    format: dxf
+    source:
+      kind: file
+      path: tests/data/comparison/cad_samples/dxf/text_centered.dxf
+    tags: [text, mtext, korean]
+
+  - id: hatch_centered
+    category: hatch_centered
+    format: dxf
+    source:
+      kind: file
+      path: tests/data/comparison/cad_samples/dxf/hatch_centered.dxf
+    tags: [hatch, closed_boundary]
+
+  - id: large_grid
+    category: large
+    format: dxf
+    source:
+      kind: generated
+      generator: grid_lines
+      line_count: 120
+      layer: GRID
+      spacing_mm: 10
+    tags: [large, generated, crash_guard]
+
+  - id: unsupported_objects
+    category: unsupported_objects
+    format: dxf
+    source:
+      kind: file
+      path: tests/data/comparison/cad_samples/dxf/unsupported_objects.dxf
+    tags: [unsupported, warning]
+
+generated_sample_sets:
+  - id_prefix: gen_simple
+    category: simple
+    format: dxf
+    generator: parametric_entities
+    profile: simple
+    count: 20
+    line_count: 2
+    layer: GEN_SIMPLE
+    spacing_mm: 7
+    tags: [generated, simple, line, circle, arc, polyline]
+
+  - id_prefix: gen_block
+    category: block_centered
+    format: dxf
+    generator: parametric_entities
+    profile: block_centered
+    count: 15
+    line_count: 1
+    layer: GEN_BLOCK
+    spacing_mm: 10
+    tags: [generated, block, insert]
+
+  - id_prefix: gen_text
+    category: text_centered
+    format: dxf
+    generator: parametric_entities
+    profile: text_centered
+    count: 15
+    line_count: 1
+    layer: GEN_TEXT
+    spacing_mm: 10
+    tags: [generated, text, mtext]
+
+  - id_prefix: gen_hatch_dimension
+    category: hatch_dimension_centered
+    format: dxf
+    generator: parametric_entities
+    profile: hatch_dimension_centered
+    count: 10
+    line_count: 1
+    layer: GEN_DETAIL
+    spacing_mm: 10
+    tags: [generated, hatch, dimension]
+
+  - id_prefix: gen_unsupported
+    category: unsupported_malformed
+    format: dxf
+    generator: parametric_entities
+    profile: unsupported_malformed
+    count: 10
+    line_count: 1
+    layer: GEN_UNSUPPORTED
+    spacing_mm: 10
+    tags: [generated, unsupported, warning]
+
+  - id_prefix: gen_large
+    category: large_synthetic
+    format: dxf
+    generator: parametric_entities
+    profile: large_synthetic
+    count: 15
+    line_count: 25
+    layer: GEN_LARGE
+    spacing_mm: 2
+    tags: [generated, large, crash_guard]
+
+  - id_prefix: gen_customer_sanitized
+    category: customer_sanitized
+    format: dxf
+    generator: parametric_entities
+    profile: customer_sanitized
+    count: 8
+    line_count: 1
+    layer: GEN_CUSTOMER
+    spacing_mm: 10
+    tags: [generated, customer_sanitized, no_project_data]
+
+diff_cases:
+  - id: simple_base_vs_modified
+    old_sample: simple_base
+    new_sample: simple_modified
+    options:
+      position_tolerance_mm: 0.01
+      search_radius_mm: 20.0
+
+fuzz_cases:
+  - id: truncated_header
+    mutation: truncate_bytes
+    sample: simple_base
+    byte_count: 21
+    expected_error: DxfParseError
+  - id: malformed_group_code
+    mutation: replace_first_group_code
+    sample: simple_base
+    replacement: XX
+    expected_error: DxfParseError

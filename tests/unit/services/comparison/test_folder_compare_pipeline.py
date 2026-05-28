@@ -11,6 +11,7 @@ import json
 import pytest
 from PIL import Image
 
+from src.services.comparison.base import ComparisonResult
 from src.services.comparison import folder_compare_pipeline as pipeline
 from src.services.comparison.drawing_batch import (
     BatchCompareItemResult,
@@ -30,6 +31,47 @@ def _descriptor(path: Path, kind: DrawingKind = DrawingKind.CAD) -> DrawingFileD
         extension=path.suffix,
         identity=parse_filename_identity(path),
     )
+
+
+def test_compare_failure_records_include_canonical_and_fallback_details(tmp_path: Path) -> None:
+    old = tmp_path / "old.dwg"
+    new = tmp_path / "new.dwg"
+    old.write_bytes(b"old")
+    new.write_bytes(b"new")
+    candidate = MatchCandidate(
+        _descriptor(old),
+        _descriptor(new),
+        score=0.95,
+        status=MatchStatus.AUTO_CONFIRMED,
+    )
+    result = ComparisonResult(source_a=str(old), source_b=str(new))
+    result.metadata.update(
+        {
+            "error_code": "COMPARE_IMPORT_FAILED",
+            "pipeline_status": "failed",
+            "message": "CAD compare import failed: {'b': 'CAD_TOKEN_LIMIT_EXCEEDED'}",
+            "canonical_fallback_used": False,
+            "canonical_fallback_reason": "COMPARE_IMPORT_FAILED",
+            "dxf_cache_resolution_notes": ["cache miss"],
+        }
+    )
+    result.warnings.append("token limit")
+    summary = BatchCompareSummary(started_at=datetime.now(), requested_pairs=1)
+    summary.items.append(
+        BatchCompareItemResult(
+            candidate=candidate,
+            result=result,
+            status="failed",
+            error="COMPARE_IMPORT_FAILED: CAD compare import failed",
+        )
+    )
+
+    records = pipeline._compare_failure_records(summary)
+
+    assert records[0]["error_code"] == "COMPARE_IMPORT_FAILED"
+    assert "CAD_TOKEN_LIMIT_EXCEEDED" in records[0]["message"]
+    assert records[0]["dxf_cache_resolution_notes"] == ["cache miss"]
+    assert records[0]["warnings"] == ["token limit"]
 
 
 def test_folder_compare_pipeline_runs_all_outputs_without_input_cache(tmp_path, monkeypatch) -> None:
@@ -193,9 +235,23 @@ def test_folder_compare_pipeline_runs_all_outputs_without_input_cache(tmp_path, 
     assert Path(result.run_manifest_path).exists()
     assert Path(result.success_sentinel_path).exists()
     assert Path(result.preflight_report_path).exists()
+    perf_summary_path = Path(result.output_dir) / "perf_events_summary.json"
+    assert perf_summary_path.exists()
+    assert not (Path(result.output_dir) / "perf_events.jsonl").exists()
+    perf_summary = json.loads(perf_summary_path.read_text(encoding="utf-8"))
+    assert perf_summary["status"] == "ready"
+    assert perf_summary["stage_counts"]["scan"] == 1
+    assert perf_summary["stage_counts"]["match"] == 1
+    assert perf_summary["stage_counts"]["compare"] == 1
+    assert perf_summary["stage_counts"]["viewer"] == 1
+    assert perf_summary["stage_counts"]["export_profile"] == 1
     run_manifest = json.loads(Path(result.run_manifest_path).read_text(encoding="utf-8"))
     assert run_manifest["status"] == "completed"
     assert run_manifest["stages"]["artifact"]["status"] == "completed"
+    assert run_manifest["stages"]["viewer"]["status"] == "completed"
+    assert run_manifest["stages"]["export_profile"]["status"] == "completed"
+    assert "perf_events_summary_json" in run_manifest["outputs"]
+    assert "perf_events_jsonl" not in run_manifest["outputs"]
     assert all(
         stage.get("status") != "running"
         for stage in run_manifest["stages"].values()
@@ -489,7 +545,14 @@ def test_folder_compare_pipeline_writes_failed_sentinel_on_exception(tmp_path, m
 #   and concluding the app crashed.
 
 
-def _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch):
+def _build_pipeline_with_capturing_doubles(
+    tmp_path,
+    monkeypatch,
+    *,
+    candidate_count: int = 1,
+    artifact_zone_count: int = 0,
+    artifact_raw_change_count: int = 0,
+):
     """Set up a working folder-compare pipeline with mocked downstream
     exporters and return a captured-kwargs dict the caller can assert on."""
 
@@ -497,13 +560,22 @@ def _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch):
     new_dir = tmp_path / "new"
     old_dir.mkdir()
     new_dir.mkdir()
-    old = old_dir / "S-100_REV0.dxf"
-    new = new_dir / "S-100_REV1.dxf"
-    old.write_text("0\nEOF\n", encoding="utf-8")
-    new.write_text("0\nEOF\n", encoding="utf-8")
-    desc_a = _descriptor(old)
-    desc_b = _descriptor(new)
-    candidate = MatchCandidate(desc_a, desc_b, score=0.95, status=MatchStatus.AUTO_CONFIRMED)
+    descriptors_a = []
+    descriptors_b = []
+    candidates = []
+    for index in range(max(1, int(candidate_count or 1))):
+        suffix = f"{index + 1:03d}"
+        old = old_dir / f"S-{suffix}_REV0.dxf"
+        new = new_dir / f"S-{suffix}_REV1.dxf"
+        old.write_text("0\nEOF\n", encoding="utf-8")
+        new.write_text("0\nEOF\n", encoding="utf-8")
+        desc_a = _descriptor(old)
+        desc_b = _descriptor(new)
+        descriptors_a.append(desc_a)
+        descriptors_b.append(desc_b)
+        candidates.append(
+            MatchCandidate(desc_a, desc_b, score=0.95, status=MatchStatus.AUTO_CONFIRMED)
+        )
 
     captured: dict = {
         "artifact_kwargs": None,
@@ -512,7 +584,7 @@ def _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch):
     }
 
     def fake_scan(source, options):
-        return [desc_a] if Path(source) == old_dir else [desc_b]
+        return descriptors_a if Path(source) == old_dir else descriptors_b
 
     class FakeJob:
         def __init__(self, candidates, options):
@@ -527,8 +599,12 @@ def _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch):
             (stream_dir / "pair.jsonl").write_text('{"key":"line_1"}\n', encoding="utf-8")
             if self.options.write_compare_state_json:
                 (state_dir / "compare_state.json").write_text("{}", encoding="utf-8")
-            summary = BatchCompareSummary(started_at=datetime.now(), requested_pairs=1)
-            summary.items.append(BatchCompareItemResult(candidate=candidate, status="completed"))
+            summary = BatchCompareSummary(
+                started_at=datetime.now(),
+                requested_pairs=len(self.candidates),
+            )
+            for candidate in self.candidates:
+                summary.items.append(BatchCompareItemResult(candidate=candidate, status="completed"))
             summary.finished_at = datetime.now()
             return summary
 
@@ -537,8 +613,8 @@ def _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         return SimpleNamespace(
             output_paths={"artifact_manifest_json": str(Path(output_dir) / "artifact_manifest.json")},
-            raw_change_count=0,
-            zone_count=0,
+            raw_change_count=artifact_raw_change_count,
+            zone_count=artifact_zone_count,
             cloud_region_count=0,
             cloud_omitted_zone_count=0,
             to_dict=lambda: {},
@@ -577,7 +653,7 @@ def _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(pipeline, "scan_drawing_inputs", fake_scan)
-    monkeypatch.setattr(pipeline, "match_drawing_sets", lambda a, b, options: [candidate])
+    monkeypatch.setattr(pipeline, "match_drawing_sets", lambda a, b, options: candidates)
     monkeypatch.setattr(pipeline, "BatchCompareJob", FakeJob)
     monkeypatch.setattr(pipeline, "export_change_artifacts", fake_artifacts)
     monkeypatch.setattr(pipeline, "export_preview_artifacts", fake_preview)
@@ -661,6 +737,29 @@ def test_render_timeout_seconds_flows_into_export_viewer_package(tmp_path, monke
     assert captured["viewer_kwargs"]["render_timeout_seconds"] == 300
 
 
+def test_cad_visual_options_flow_into_export_viewer_package(tmp_path, monkeypatch) -> None:
+    old_dir, new_dir, captured = _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch)
+
+    request_default = pipeline.FolderCompareRunRequest(old_dir, new_dir, tmp_path / "out_default")
+    assert request_default.cad_visual_backend == ""
+    assert request_default.cad_visual_conversion_timeout_seconds == 180
+    pipeline.FolderComparePipeline(request_default).run()
+    assert captured["viewer_kwargs"]["cad_visual_backend"] == ""
+    assert captured["viewer_kwargs"]["cad_visual_conversion_timeout_seconds"] == 180
+
+    captured["viewer_kwargs"] = None
+    request_enabled = pipeline.FolderCompareRunRequest(
+        old_dir,
+        new_dir,
+        tmp_path / "out_enabled",
+        cad_visual_backend="fake_pdf",
+        cad_visual_conversion_timeout_seconds=42,
+    )
+    pipeline.FolderComparePipeline(request_enabled).run()
+    assert captured["viewer_kwargs"]["cad_visual_backend"] == "fake_pdf"
+    assert captured["viewer_kwargs"]["cad_visual_conversion_timeout_seconds"] == 42
+
+
 def test_fast_first_review_defers_heavy_exports_and_tiles(tmp_path, monkeypatch) -> None:
     old_dir, new_dir, captured = _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch)
 
@@ -684,6 +783,9 @@ def test_fast_first_review_defers_heavy_exports_and_tiles(tmp_path, monkeypatch)
     assert captured["artifact_kwargs"]["export_cloud_marks"] is False
     assert captured["viewer_kwargs"]["render_policy"] == "top-issues"
     assert captured["viewer_kwargs"]["max_zone_tiles"] == 0
+    assert captured["viewer_kwargs"]["max_viewer_pages"] == 1
+    assert captured["viewer_kwargs"]["render_timeout_seconds"] == 30
+    assert captured["viewer_kwargs"]["max_overlay_records_per_pair"] == 500
     assert captured["viewer_kwargs"]["export_marked_pdf"] is False
     assert captured["viewer_kwargs"]["marked_pdf_mode"] == "off"
     assert captured["viewer_kwargs"]["prefetch_neighbor_tiles"] is False
@@ -695,10 +797,186 @@ def test_fast_first_review_defers_heavy_exports_and_tiles(tmp_path, monkeypatch)
     assert run_manifest["stages"]["first_review_ready"]["cloud_marks_deferred"] is True
     assert run_manifest["stages"]["first_review_ready"]["marked_pdf_deferred"] is True
     assert run_manifest["stages"]["first_review_ready"]["build_lod_tiles"] is False
+    assert run_manifest["stages"]["first_review_ready"]["max_viewer_pages"] == 1
+    assert run_manifest["stages"]["first_review_ready"]["render_timeout_seconds"] == 30
+    assert run_manifest["stages"]["first_review_ready"]["max_overlay_records_per_pair"] == 500
+    ready_artifacts = run_manifest["stages"]["first_review_ready"]["ready_artifacts"]
+    deferred_outputs = run_manifest["stages"]["first_review_ready"]["deferred_outputs"]
+    assert ready_artifacts["review_dashboard_json"]
+    assert ready_artifacts["viewer_manifest_json"]
+    assert ready_artifacts["preview_manifest_json"]
+    assert deferred_outputs["cloud_marks"] == "deferred"
+    assert deferred_outputs["marked_pdf"] == "deferred"
+    assert deferred_outputs["lod_tiles"] == "deferred"
+    assert deferred_outputs["compare_state_json"] == "deferred"
+    assert deferred_outputs["export_profile"] == "pending"
+    assert deferred_outputs["package_success_sentinel"] == "pending"
     assert run_manifest["stages"]["fast_state_cleanup"]["status"] == "completed"
     assert run_manifest["stages"]["fast_state_cleanup"]["removed_file_count"] == 1
     assert not (Path(result.compare_state_dir) / "streams").exists()
     assert not (Path(result.compare_state_dir) / "compare_state.json").exists()
+
+
+def test_first_review_ready_callback_fires_before_package_complete(tmp_path, monkeypatch) -> None:
+    old_dir, new_dir, _captured = _build_pipeline_with_capturing_doubles(tmp_path, monkeypatch)
+    events: list[str] = []
+    review_ready_results = []
+    original_apply = pipeline._apply_export_profile_outputs
+
+    def record_apply(*args, **kwargs):
+        events.append("export_profile_apply")
+        return original_apply(*args, **kwargs)
+
+    def on_review_ready(result):
+        events.append("review_ready")
+        review_ready_results.append(result)
+        manifest = json.loads(Path(result.run_manifest_path).read_text(encoding="utf-8"))
+        assert manifest["stages"]["first_review_ready"]["status"] == "completed"
+        assert manifest["stages"]["first_review_ready"]["package_complete"] is False
+        assert manifest["stages"]["first_review_ready"]["ready_artifacts"]["viewer_manifest_json"]
+        assert manifest["stages"]["first_review_ready"]["deferred_outputs"]["export_profile"] == "pending"
+        assert manifest["stages"]["first_review_ready"]["deferred_outputs"]["package_success_sentinel"] == "pending"
+        assert "export_profile" not in manifest["stages"]
+        assert not Path(result.success_sentinel_path).exists()
+
+    monkeypatch.setattr(pipeline, "_apply_export_profile_outputs", record_apply)
+
+    request = pipeline.FolderCompareRunRequest(old_dir, new_dir, tmp_path / "out")
+    result = pipeline.FolderComparePipeline(request).run(
+        first_review_ready_callback=on_review_ready,
+    )
+
+    assert events[0] == "review_ready"
+    assert "export_profile_apply" in events[1:]
+    assert len(review_ready_results) == 1
+    assert review_ready_results[0].result_state == "review_ready"
+    assert review_ready_results[0].package_complete is False
+    assert review_ready_results[0].first_review_ready_at
+    assert review_ready_results[0].package_completed_at == ""
+    assert review_ready_results[0].first_review_metadata["ready_artifacts"]["viewer_manifest_json"]
+    assert review_ready_results[0].first_review_metadata["deferred_outputs"]["export_profile"] == "pending"
+    assert result.result_state == "package_complete"
+    assert result.package_complete is True
+    assert result.first_review_ready_at == review_ready_results[0].first_review_ready_at
+    assert result.package_completed_at
+    assert result.first_review_metadata["ready_artifacts"]["viewer_manifest_json"]
+    assert result.first_review_metadata["deferred_outputs"]["package_success_sentinel"] == "pending"
+    assert Path(result.success_sentinel_path).exists()
+
+
+def test_large_default_run_auto_enables_fast_first_review(tmp_path, monkeypatch) -> None:
+    old_dir, new_dir, captured = _build_pipeline_with_capturing_doubles(
+        tmp_path,
+        monkeypatch,
+        candidate_count=25,
+    )
+
+    request = pipeline.FolderCompareRunRequest(
+        old_dir,
+        new_dir,
+        tmp_path / "out",
+        viewer_render_policy="all",
+        max_zone_tiles=300,
+        export_marked_pdf=True,
+        auto_export_structural_clouds=True,
+    )
+
+    result = pipeline.FolderComparePipeline(request).run()
+    run_manifest = json.loads(Path(result.run_manifest_path).read_text(encoding="utf-8"))
+
+    assert captured["write_compare_state_json"] is False
+    assert captured["artifact_kwargs"]["export_cloud_marks"] is False
+    assert captured["viewer_kwargs"]["render_policy"] == "top-issues"
+    assert captured["viewer_kwargs"]["max_zone_tiles"] == 0
+    assert captured["viewer_kwargs"]["max_viewer_pages"] == 1
+    assert captured["viewer_kwargs"]["render_timeout_seconds"] == 30
+    assert captured["viewer_kwargs"]["max_overlay_records_per_pair"] == 500
+    assert captured["viewer_kwargs"]["export_marked_pdf"] is False
+    assert captured["viewer_kwargs"]["build_lod_tiles"] is False
+    assert run_manifest["stages"]["fast_first_review_auto"]["status"] == "completed"
+    assert run_manifest["stages"]["fast_first_review_auto"]["pair_count"] == 25
+    assert run_manifest["stages"]["first_review_ready"]["fast_first_review"] is True
+    assert run_manifest["stages"]["first_review_ready"]["fast_first_review_auto"] is True
+    deferred_outputs = run_manifest["stages"]["first_review_ready"]["deferred_outputs"]
+    assert deferred_outputs["cloud_marks"] == "deferred"
+    assert deferred_outputs["marked_pdf"] == "deferred"
+    assert deferred_outputs["lod_tiles"] == "deferred"
+
+
+def test_single_large_zone_run_auto_enables_viewer_fast_first_review(tmp_path, monkeypatch) -> None:
+    old_dir, new_dir, captured = _build_pipeline_with_capturing_doubles(
+        tmp_path,
+        monkeypatch,
+        candidate_count=1,
+        artifact_zone_count=1200,
+    )
+
+    request = pipeline.FolderCompareRunRequest(
+        old_dir,
+        new_dir,
+        tmp_path / "out",
+        viewer_render_policy="all",
+        max_zone_tiles=300,
+        export_marked_pdf=True,
+    )
+
+    result = pipeline.FolderComparePipeline(request).run()
+    run_manifest = json.loads(Path(result.run_manifest_path).read_text(encoding="utf-8"))
+
+    assert captured["write_compare_state_json"] is True
+    assert captured["artifact_kwargs"]["export_cloud_marks"] is True
+    assert captured["viewer_kwargs"]["render_policy"] == "top-issues"
+    assert captured["viewer_kwargs"]["max_viewer_pages"] == 1
+    assert captured["viewer_kwargs"]["render_timeout_seconds"] == 30
+    assert captured["viewer_kwargs"]["max_overlay_records_per_pair"] == 500
+    assert captured["viewer_kwargs"]["export_marked_pdf"] is False
+    assert run_manifest["stages"]["fast_first_review_auto"]["reason"] == "large_run_zone_count"
+    assert run_manifest["stages"]["fast_first_review_auto"]["scope"] == "viewer_only"
+    assert run_manifest["stages"]["first_review_ready"]["fast_first_review"] is True
+    assert run_manifest["stages"]["first_review_ready"]["cloud_marks_deferred"] is False
+    assert run_manifest["stages"]["first_review_ready"]["marked_pdf_deferred"] is True
+    deferred_outputs = run_manifest["stages"]["first_review_ready"]["deferred_outputs"]
+    assert deferred_outputs["cloud_marks"] == "completed"
+    assert deferred_outputs["marked_pdf"] == "deferred"
+    assert deferred_outputs["lod_tiles"] == "deferred"
+
+
+def test_large_run_can_disable_auto_fast_first_review(tmp_path, monkeypatch) -> None:
+    old_dir, new_dir, captured = _build_pipeline_with_capturing_doubles(
+        tmp_path,
+        monkeypatch,
+        candidate_count=25,
+    )
+
+    request = pipeline.FolderCompareRunRequest(
+        old_dir,
+        new_dir,
+        tmp_path / "out",
+        auto_fast_first_review=False,
+        viewer_render_policy="all",
+        max_zone_tiles=300,
+        export_marked_pdf=True,
+    )
+
+    result = pipeline.FolderComparePipeline(request).run()
+    run_manifest = json.loads(Path(result.run_manifest_path).read_text(encoding="utf-8"))
+
+    assert captured["write_compare_state_json"] is True
+    assert captured["artifact_kwargs"]["export_cloud_marks"] is True
+    assert captured["viewer_kwargs"]["render_policy"] == "all"
+    assert captured["viewer_kwargs"]["max_zone_tiles"] == 300
+    assert captured["viewer_kwargs"]["max_viewer_pages"] == 30
+    assert captured["viewer_kwargs"]["render_timeout_seconds"] == 180
+    assert captured["viewer_kwargs"]["max_overlay_records_per_pair"] is None
+    assert captured["viewer_kwargs"]["export_marked_pdf"] is True
+    assert captured["viewer_kwargs"]["build_lod_tiles"] is True
+    assert "fast_first_review_auto" not in run_manifest["stages"]
+    assert run_manifest["stages"]["first_review_ready"]["fast_first_review"] is False
+    deferred_outputs = run_manifest["stages"]["first_review_ready"]["deferred_outputs"]
+    assert deferred_outputs["cloud_marks"] == "completed"
+    assert deferred_outputs["marked_pdf"] == "completed"
+    assert deferred_outputs["lod_tiles"] == "completed"
+    assert deferred_outputs["compare_state_json"] == "ready"
 
 
 def test_progress_callback_breaks_silent_block_between_88_and_100(tmp_path, monkeypatch) -> None:

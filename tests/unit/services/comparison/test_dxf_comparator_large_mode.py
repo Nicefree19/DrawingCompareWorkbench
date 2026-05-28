@@ -223,7 +223,10 @@ def test_dwg_differ_large_mode_preserves_full_counts_after_truncation(mock_ezdxf
         max_change_records_in_memory=2,
         use_spatial_index=False,
     )
-    differ = DwgDiffer(comparison_config=config)
+    differ = DwgDiffer(
+        comparison_config=config,
+        config={"use_legacy_ezdxf_pipeline": True},
+    )
     mock_extractor = Mock()
     mock_extractor.extract.side_effect = [
         {"LINE": [entity(f"old-{index}", (float(index), 0.0)) for index in range(5)]},
@@ -397,7 +400,10 @@ def test_build_comparison_result_propagates_peak_changes_pre_truncate(
         large_drawing_mode="auto",
         use_spatial_index=False,
     )
-    differ = DwgDiffer(comparison_config=config)
+    differ = DwgDiffer(
+        comparison_config=config,
+        config={"use_legacy_ezdxf_pipeline": True},
+    )
     mock_extractor = Mock()
     mock_extractor.extract.side_effect = [
         {"LINE": [entity(f"old-{i}", (float(i), 0.0)) for i in range(3)]},
@@ -432,7 +438,10 @@ def test_build_comparison_result_propagates_time_to_first_stream_record_ms(
         large_drawing_mode="auto",
         use_spatial_index=False,
     )
-    differ = DwgDiffer(comparison_config=config)
+    differ = DwgDiffer(
+        comparison_config=config,
+        config={"use_legacy_ezdxf_pipeline": True},
+    )
     mock_extractor = Mock()
     mock_extractor.extract.side_effect = [
         {"LINE": [entity("solo", (0.0, 0.0))]},

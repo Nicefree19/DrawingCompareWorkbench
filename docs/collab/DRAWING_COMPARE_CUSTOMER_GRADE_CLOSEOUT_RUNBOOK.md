@@ -137,6 +137,55 @@ The generated manifest must contain:
 - `dataset_provenance.approval_status=approved_for_mvp_exit`
 - `cad_policy_evidence.block_text_detection_without_expansion=true`
 
+## P5-G16 Real-Corpus Replay Evidence
+
+For a direct manual audit, generate the replay JSON after the customer evidence
+manifest exists and pass it explicitly to the final audit:
+
+```powershell
+python scripts\benchmark_real_corpus_replay.py `
+  --validation-summary tmp\drawing_compare_release_mvp_smoke_review_truth_gate\realset_validation\validation_summary.json `
+  --output-json tmp\p5_g16_real_corpus_replay_customer_grade.json `
+  --customer-evidence-manifest tmp\customer_evidence_manifest_customer_grade.json `
+  --require-customer-corpus `
+  --min-customer-sheet-count 20 `
+  --max-customer-sheet-count 50 `
+  --visits 100 `
+  --warmup-visits 20 `
+  --timeout-s 60
+```
+
+The closeout runner performs this step automatically when it can identify a
+standard validation output with completed pairs, then routes the generated
+`p5_g16_real_corpus_replay.json` through prepare, readiness audit, and the final
+customer-grade audit.
+
+## P5-G22 Actual GUI Soak Evidence
+
+For a direct manual audit, generate the actual GUI soak JSON after the customer
+evidence manifest exists and pass it explicitly to the final audit:
+
+```powershell
+python scripts\benchmark_actual_gui_soak.py `
+  --validation-summary tmp\drawing_compare_release_mvp_smoke_review_truth_gate\realset_validation\validation_summary.json `
+  --output-json tmp\p5_g22_actual_gui_soak_customer_grade.json `
+  --customer-evidence-manifest tmp\customer_evidence_manifest_customer_grade.json `
+  --require-customer-corpus `
+  --min-customer-sheet-count 20 `
+  --max-customer-sheet-count 50 `
+  --visits 100 `
+  --warmup-visits 20 `
+  --timeout-s 120 `
+  --zone-render-wait-ms 250
+```
+
+The closeout runner performs this step automatically for standard validation
+outputs with completed pairs, then routes the generated
+`p5_g22_actual_gui_soak.json` through prepare, readiness audit, and the final
+customer-grade audit. Customer-grade audit fails if the GUI soak artifact is
+missing, stale, tied to a different manifest hash, or fails blank/stale/RSS,
+native-resource, event-loop, page/zone navigation, or worker-cleanup gates.
+
 ## Final Customer-Grade Audit
 
 Run:
@@ -160,12 +209,41 @@ python scripts\audit_drawing_compare_mvp_exit.py `
   --max-first-review-ready-s 1800 `
   --max-cold-zone-render-ms 10000 `
   --max-cache-hit-zone-render-ms 2000 `
+  --p5-g16-benchmark-json tmp\p5_g16_real_corpus_replay_customer_grade.json `
+  --p5-g22-gui-soak-json tmp\p5_g22_actual_gui_soak_customer_grade.json `
   --out tmp\drawing_compare_mvp_exit_audit_customer_grade.json
 ```
 
 Completion can be declared only when
 `tmp\drawing_compare_mvp_exit_audit_customer_grade.json` reports
 `status=passed` with zero failed checks.
+
+## Closeout Readiness Audit
+
+Before running full closeout, run the closeout runner once in dry-run mode and
+audit the generated readiness packet:
+
+```powershell
+python cli\closeout_drawing_compare_customer_evidence.py `
+  --dry-run `
+  --plan-json <closeout_plan.json> `
+  --readiness-json <closeout_readiness.json> `
+  <same closeout arguments as the real run>
+
+python cli\audit_closeout_readiness.py `
+  --readiness-json <closeout_readiness.json> `
+  --plan-json <closeout_plan.json> `
+  --require-ready `
+  --out <closeout_readiness_audit.json>
+```
+
+Do not proceed to full closeout unless
+`closeout_readiness_audit.json` has `status=passed`. This audit cross-checks
+that the readiness summary matches the plan, proof outputs are not passed as
+final audit `--results-dir`, and `DRAWING_COMPARE_TILE_CACHE_MB` is isolated to
+forced P5-G7 proof validation steps. It also checks that P5-G16 replay JSON
+paths and P5-G22 actual GUI soak JSON paths are routed consistently from the
+closeout plan into prepare and the final customer-grade audit.
 
 ## Audit Gates Reinforcement (External Audit Recommendations, 2026-05-15)
 

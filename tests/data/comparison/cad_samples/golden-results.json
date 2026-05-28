@@ -1,0 +1,3404 @@
+{
+  "description": "Golden importer, normalizer, and diff snapshots for CAD format regression tests.",
+  "diff_cases": {
+    "simple_base_vs_modified": {
+      "change_types": [
+        "added",
+        "modified",
+        "modified",
+        "unchanged",
+        "unchanged"
+      ],
+      "entity_types": [
+        "text",
+        "circle",
+        "line",
+        "arc",
+        "polyline"
+      ],
+      "fingerprint": "drawing-diff:v1:sha256:0c08f73be8c0cda9639b862c0bc9f0432570fffb76c087f0078fa89483ed5182",
+      "summary": {
+        "added": 1,
+        "modified": 2,
+        "removed": 0,
+        "total_changes": 3,
+        "total_records": 5,
+        "unchanged": 2
+      }
+    }
+  },
+  "normalization_options": {
+    "angle_quantum_deg": 0.001,
+    "bbox_quantum_mm": 0.01,
+    "coordinate_quantum_mm": 0.01,
+    "flatten_curves": true,
+    "flatten_tolerance_mm": 0.1,
+    "max_flatten_segments": 128,
+    "near_zero_area_mm2": 0.0001,
+    "near_zero_length_mm": 0.01,
+    "normalize_polyline_direction": true,
+    "normalize_polyline_vertices": true,
+    "normalize_text": true,
+    "remove_near_zero_geometry": false,
+    "resolve_bylayer_byblock": true,
+    "scale_quantum": 1e-09,
+    "strip_mtext_formatting": true,
+    "update_hashes": true,
+    "vertex_merge_tolerance_mm": 0.01
+  },
+  "samples": {
+    "block_centered": {
+      "bbox": {
+        "max_x": 145.0,
+        "max_y": 110.0,
+        "max_z": 0.0,
+        "min_x": -8.0,
+        "min_y": -5.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 8,
+      "entity_types": {
+        "block_reference": 2,
+        "circle": 3,
+        "line": 3
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:59254294f2f9662406ea4463298640595790ae65681c1ff9ec2ec8660614c0ad",
+      "layer_count": 2,
+      "normalization": {
+        "changed_entity_count": 8,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 8,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 2
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_001": {
+      "bbox": {
+        "max_x": 10.0,
+        "max_y": 8.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 5,
+      "entity_types": {
+        "block_reference": 1,
+        "circle": 2,
+        "line": 2
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:e61e0771a437c0be8c692a09447c3a8ded07432605b16603201511842227c1c6",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 5,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 5,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_002": {
+      "bbox": {
+        "max_x": 40.0,
+        "max_y": 24.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 8,
+      "entity_types": {
+        "block_reference": 2,
+        "circle": 3,
+        "line": 3
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:89031488e7a39fa4c45031507e6aea0c03cf9c75effaef4ed9316a2f5902904c",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 8,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 8,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_003": {
+      "bbox": {
+        "max_x": 70.0,
+        "max_y": 40.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 11,
+      "entity_types": {
+        "block_reference": 3,
+        "circle": 4,
+        "line": 4
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:ded8758a6ae610a4ef73e3ae63f6d5d6782cfa2c2f6d0d9c4a737dda3024c138",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 11,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 11,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_004": {
+      "bbox": {
+        "max_x": 40.0,
+        "max_y": 7.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 5,
+      "entity_types": {
+        "block_reference": 1,
+        "circle": 2,
+        "line": 2
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:21fad19a6f5c08077386f4e79e75b65f830e0fcc9aea3a5566daed52ba4da6d8",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 5,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 5,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_005": {
+      "bbox": {
+        "max_x": 70.0,
+        "max_y": 23.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 8,
+      "entity_types": {
+        "block_reference": 2,
+        "circle": 3,
+        "line": 3
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:cd1331e2e2a583fb1c8274732c4a1f5f20b4425025e8779544128da2fa833720",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 8,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 8,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_006": {
+      "bbox": {
+        "max_x": 100.0,
+        "max_y": 39.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 11,
+      "entity_types": {
+        "block_reference": 3,
+        "circle": 4,
+        "line": 4
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:c55846f539c5c57370f93d0c5eecf6f36bd8381e8716b0619838d9439449df8a",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 11,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 11,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_007": {
+      "bbox": {
+        "max_x": 70.0,
+        "max_y": 10.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 5,
+      "entity_types": {
+        "block_reference": 1,
+        "circle": 2,
+        "line": 2
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:130bb3974f9de8620a74d1f814148b3cccf39dd23d88c0154b2cf6d6e0f27396",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 5,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 5,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_008": {
+      "bbox": {
+        "max_x": 100.0,
+        "max_y": 22.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 8,
+      "entity_types": {
+        "block_reference": 2,
+        "circle": 3,
+        "line": 3
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:672b61926a08da3843bf86dc7c1b123ef24adfe0df30433bd5527958546fea3f",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 8,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 8,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_009": {
+      "bbox": {
+        "max_x": 130.0,
+        "max_y": 38.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 11,
+      "entity_types": {
+        "block_reference": 3,
+        "circle": 4,
+        "line": 4
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:c2fbf35d3b1609dafe33176a961ecf52f67f51b8bd6e59305cbae1cd3acfa5c1",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 11,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 11,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_010": {
+      "bbox": {
+        "max_x": 100.0,
+        "max_y": 9.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 5,
+      "entity_types": {
+        "block_reference": 1,
+        "circle": 2,
+        "line": 2
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:13d7b9c79f31abb329e3c69d72b6cb9fe6d0a6847fbc20f3ec9e5779704a7740",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 5,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 5,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_011": {
+      "bbox": {
+        "max_x": 130.0,
+        "max_y": 25.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 8,
+      "entity_types": {
+        "block_reference": 2,
+        "circle": 3,
+        "line": 3
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:ff668fe9c1f403a3281df69a06d0eef8f14fe4d065032d5bc83a02f0d2fbeb5c",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 8,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 8,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_012": {
+      "bbox": {
+        "max_x": 160.0,
+        "max_y": 37.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 11,
+      "entity_types": {
+        "block_reference": 3,
+        "circle": 4,
+        "line": 4
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:fb81201b477419aabc05d5965db53ae66925d2e00e059602e72dd6712249195f",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 11,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 11,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_013": {
+      "bbox": {
+        "max_x": 130.0,
+        "max_y": 8.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 5,
+      "entity_types": {
+        "block_reference": 1,
+        "circle": 2,
+        "line": 2
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:b1594b7fd7495837ebfd121414574f911d57830f79b5c10cba5fad4d41cf47b9",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 5,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 5,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_014": {
+      "bbox": {
+        "max_x": 160.0,
+        "max_y": 24.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 8,
+      "entity_types": {
+        "block_reference": 2,
+        "circle": 3,
+        "line": 3
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:0c7b1f17768b45ddb420844d649b40d236f1f3b4d8cb7600e679e4bfcc0c2aa8",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 8,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 8,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_block_015": {
+      "bbox": {
+        "max_x": 190.0,
+        "max_y": 40.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "block_centered",
+      "entity_count": 11,
+      "entity_types": {
+        "block_reference": 3,
+        "circle": 4,
+        "line": 4
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:38ad75d353225dad30747ced3e50b4dab50ea644227baadd84ef59e45f80af9e",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 11,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 11,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_001": {
+      "bbox": {
+        "max_x": 81.0,
+        "max_y": 61.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:1665de940b9520f1be62df683528ce74aaf770e202466c5ae7910dd496d889cb",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_002": {
+      "bbox": {
+        "max_x": 82.0,
+        "max_y": 62.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:3b675f9247b022eacd936f4ade6825750a5772befb4b0ea94d8c2292fa3306a6",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_003": {
+      "bbox": {
+        "max_x": 83.0,
+        "max_y": 63.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:8e74ce511c3257fa6040c894730b18cc2cb645b68c8dbb0631827db588121d92",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_004": {
+      "bbox": {
+        "max_x": 84.0,
+        "max_y": 64.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:5a6a968edd0d7bae6b2620c7d916d595b619e9f61eddfb47a9786db9dd8b08d1",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_005": {
+      "bbox": {
+        "max_x": 85.0,
+        "max_y": 65.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:0e4de7df288cee8ffa5434e30c365f99a2133214cc165f45652d61a7f4eb4e03",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_006": {
+      "bbox": {
+        "max_x": 86.0,
+        "max_y": 66.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:521c164e721e2134e63bd9acfcfad41b1006a5f715926b61634a91222f9a97f3",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_007": {
+      "bbox": {
+        "max_x": 87.0,
+        "max_y": 67.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:f04e4e5b4d314853203e9e751ac39360f0157a796adabe20fcb08de5571e0bec",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_customer_sanitized_008": {
+      "bbox": {
+        "max_x": 88.0,
+        "max_y": 68.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "customer_sanitized",
+      "entity_count": 4,
+      "entity_types": {
+        "circle": 1,
+        "line": 2,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:a6608228e57f5c758dc580667026e0dec24c0e30a6de27f27c2e14f0079c0dd5",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_001": {
+      "bbox": {
+        "max_x": 21.0,
+        "max_y": 11.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:061516248871ad21448e3073ca370beb46173448fcf4502789686dee54c0973e",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_002": {
+      "bbox": {
+        "max_x": 22.0,
+        "max_y": 12.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:352c1a99e6a03967460d8d6267c5f7bf6a85f1787ec41b98f42a14ec84d36fed",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_003": {
+      "bbox": {
+        "max_x": 23.0,
+        "max_y": 13.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:3e133bfe0ff645fb253b9fe1aa19a0126a29950518e61353ccc5ee57da422914",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_004": {
+      "bbox": {
+        "max_x": 24.0,
+        "max_y": 14.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:67b2011f666d9e7c5283fbe4c924e46ffaa1da9b480273650165f901f667b0cc",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_005": {
+      "bbox": {
+        "max_x": 25.0,
+        "max_y": 15.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:5b91e909e6c18915e839b15c083acb49c451d6c8cb6e223ddfd15c037207cba3",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_006": {
+      "bbox": {
+        "max_x": 26.0,
+        "max_y": 16.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:e07321313f4e1cf5a3c5b84ccd952ee5e33d523107d135f569e82ae0d80199ad",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_007": {
+      "bbox": {
+        "max_x": 27.0,
+        "max_y": 17.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:ea599bb04c76b99c580d391a1989aaf26595cffb5f524bbb68cd751500c19742",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_008": {
+      "bbox": {
+        "max_x": 28.0,
+        "max_y": 18.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:faf0040fb29481c8ef40d2c0763109cc0847423956230cd3509dbce4ca29b54c",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_009": {
+      "bbox": {
+        "max_x": 29.0,
+        "max_y": 19.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:48f0e4c4bb6c3b7e4b2efd142aa2091feedf072c867cff5c96323a5c9fdc5908",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_hatch_dimension_010": {
+      "bbox": {
+        "max_x": 30.0,
+        "max_y": 20.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_dimension_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "dimension": 1,
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:3b85387a61296a1761337c5a23aea1455a34f77e02373bacbe1815fab5f1564b",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_001": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 48.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 25,
+      "entity_types": {
+        "line": 25
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:78e934548ab260427f159cb914428a6eb86ae3cf37902ee5c5202e0133c6fcf4",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 25,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 25,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_002": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 50.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 26,
+      "entity_types": {
+        "line": 26
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4a3f51cdc01c41e5dc2f5200df4484a4be969b3cfc16dea10c0c00ea42862cb6",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 26,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 26,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_003": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 52.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 27,
+      "entity_types": {
+        "line": 27
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:92d516f9c2c79c9664eed250ccac92caa35c937d92cc350866bfc6fa7541bdab",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 27,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 27,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_004": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 54.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 28,
+      "entity_types": {
+        "line": 28
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:480569e919d91f634461c50c5d509a308f866b19730836a27439927970af7049",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 28,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 28,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_005": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 56.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 29,
+      "entity_types": {
+        "line": 29
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:95f3b8ec30ee97597a644d315d2a69bd0b982bc091fab38a30c259a7883d0f6b",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 29,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 29,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_006": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 58.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 30,
+      "entity_types": {
+        "line": 30
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:0782fa37a2fd0991f2f856de0ff6881de5ac8a7b14360add898e40d9865b3aa6",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 30,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 30,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_007": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 60.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 31,
+      "entity_types": {
+        "line": 31
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:b4fa1d0796043515375b0149660721117205d47394635c95e20e738003e68c61",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 31,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 31,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_008": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 62.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 32,
+      "entity_types": {
+        "line": 32
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:45ea04c91916a9c8acd5dd706828eebe49e9ae81508207191c561c4aa1b2c1ac",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 32,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 32,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_009": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 64.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 33,
+      "entity_types": {
+        "line": 33
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:d6efcc3645a39ebdb9cb72f9d0f97ff1f6e4251a92b0c6d5fc3bd7527fecf82d",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 33,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 33,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_010": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 66.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 34,
+      "entity_types": {
+        "line": 34
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:6cd6acd547511e9e83670941d151486e4d468022755f3c285a95120600393cc0",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 34,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 34,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_011": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 68.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 35,
+      "entity_types": {
+        "line": 35
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:c566786d39f36190d4669cb8f7575dd6be9b9956fb33fb6b716de23670610328",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 35,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 35,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_012": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 70.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 36,
+      "entity_types": {
+        "line": 36
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:172c9474a5c21d81c416135da3ab6b4145c4cc7c395eb24bb5aebea380c0b62a",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 36,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 36,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_013": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 72.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 37,
+      "entity_types": {
+        "line": 37
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:779909603e564fdc2a1a40391fc7ffbc888940f5ee92d32ea389f21d53856adc",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 37,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 37,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_014": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 74.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 38,
+      "entity_types": {
+        "line": 38
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:c9589bce74b020c65c969faed58db42f49869875fc511578017be8ffd99549ef",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 38,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 38,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_large_015": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 76.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large_synthetic",
+      "entity_count": 39,
+      "entity_types": {
+        "line": 39
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:63c80262893bcf900feef665af697758170fe276887858ead357037bbcb5a05f",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 39,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 39,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_001": {
+      "bbox": {
+        "max_x": 101.0,
+        "max_y": 53.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 5,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 2,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:58bdd15fa0dbebd3245fb2205051b7445498d7e2401c2e4376fa553257f846f7",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 5,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 5,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_002": {
+      "bbox": {
+        "max_x": 102.0,
+        "max_y": 54.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 6,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 3,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:b290c1498c3d17de2c68ef920dbe28956ed8243c0ca9b0d2188c2039de8afaba",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 6,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 6,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_003": {
+      "bbox": {
+        "max_x": 103.0,
+        "max_y": 55.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 7,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 4,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:3e29fa7acb819a0ce495b970a6af04d7f95e6667b5e6fc6725f1b16aced5c8d7",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 7,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 7,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_004": {
+      "bbox": {
+        "max_x": 104.0,
+        "max_y": 56.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 8,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 5,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:ecfada448d22b3df690244a572ebf8e9ac39bf0b01fd98e7f17420c767b9cf81",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 8,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 8,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_005": {
+      "bbox": {
+        "max_x": 105.0,
+        "max_y": 57.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 9,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 6,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:2993c1a814b595f173f974d0c6038bfb3c243dcc355a4b0d42d158d293d4d511",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 9,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 9,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_006": {
+      "bbox": {
+        "max_x": 106.0,
+        "max_y": 58.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 10,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 7,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:a8e8ecc9fd136b2d2f6df08dd79810edd5e41f5b90f1a726ec762530c2880dbe",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 10,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 10,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_007": {
+      "bbox": {
+        "max_x": 107.0,
+        "max_y": 59.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 11,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 8,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:706a009e64fece5f945258f3a2185c0fc7ef4923becadc7d0bb6a06c73452496",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 11,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 11,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_008": {
+      "bbox": {
+        "max_x": 108.0,
+        "max_y": 60.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 12,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 9,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:499cfbe09e7a26b14ff1415485627049c695807170450ed71b9ec140dc69a8dd",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 12,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 12,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_009": {
+      "bbox": {
+        "max_x": 109.0,
+        "max_y": 63.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 13,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 10,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:b7b2a7318c5f1ffcc4087e95f21c9bc7fc76137bc777f7e5f7f159e749c14c92",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 13,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 13,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_010": {
+      "bbox": {
+        "max_x": 110.0,
+        "max_y": 70.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 14,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 11,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:14664916dca990fc494cdba5629e63621e4cda6b1f77df029735b9d405b36c2c",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 14,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 14,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_011": {
+      "bbox": {
+        "max_x": 111.0,
+        "max_y": 77.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 15,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 12,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:cd43b9f8055195e96d7ac6bda7f227047db1160adcb510ec90aebdfc213ccd04",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 15,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 15,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_012": {
+      "bbox": {
+        "max_x": 112.0,
+        "max_y": 84.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 16,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 13,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:49d1d8ffbfd2b1af3f7775e39edf2dd90264c625a6a053c0d3ff56bb37a30617",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 16,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 16,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_013": {
+      "bbox": {
+        "max_x": 113.0,
+        "max_y": 91.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 17,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 14,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:f961c97a89f7c06e81878faea49ea965e96f3ba9552bc371228b0967c2b412bb",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 17,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 17,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_014": {
+      "bbox": {
+        "max_x": 114.0,
+        "max_y": 98.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 18,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 15,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:48c6c2e6232eece0e96c45d683807372b0c5ac36671c82a601cb11dcc049dcdb",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 18,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 18,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_015": {
+      "bbox": {
+        "max_x": 115.0,
+        "max_y": 105.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 19,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 16,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:e6ed395e740a7e974fd60593d31c281da69b18f65e82406f618eb19f3a2a9b76",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 19,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 19,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_016": {
+      "bbox": {
+        "max_x": 116.0,
+        "max_y": 112.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 20,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 17,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:6f0d851dfdf1e5a81e416dc581eb27f4ecd61025b29f75c000c1fe4164d38f8c",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 20,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 20,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_017": {
+      "bbox": {
+        "max_x": 117.0,
+        "max_y": 119.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 21,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 18,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:157fc687cacab8857df29528d7250537918190de0e3a9d5b135b7ac7becba899",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 21,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 21,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_018": {
+      "bbox": {
+        "max_x": 118.0,
+        "max_y": 126.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 22,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 19,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:60c2209168c92083f3517a18a79f117a9a150df8fc5dc0b725e3074e809bdb3a",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 22,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 22,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_019": {
+      "bbox": {
+        "max_x": 119.0,
+        "max_y": 133.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 23,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 20,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:643b9ab0e915868ca5996548265b3249c4603069f007be548d97cbb1921cc67e",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 23,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 23,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_simple_020": {
+      "bbox": {
+        "max_x": 120.0,
+        "max_y": 140.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 24,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 21,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:1c4ad23ee2a1f87c3d1dbb57ca5e319e0a5e5714067d2bbf96bdf9f755316f91",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 24,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 24,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 1
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_001": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 6.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 2.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:8230eab93bb8b467ae1f26b5593763f0465ce9c6955aaf35b5c824d8d7e58625",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_002": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 10.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 4.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:b573319c03c53a8e50dc7e7ad4044f32439bab830c0de9c824b9ab4e81b85c17",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_003": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 14.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 6.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:98f89b462343ad3f100ab8b57e294164b8e0958b042ce9a7096d6bdcfd46f68a",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_004": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 18.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 8.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:a654b1607e2e55d9d8e76d431ac8b8427fdb888e347a976c73e47cf114b21f5e",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_005": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 22.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 10.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:05f6383175210681491028899ea40d47568e37e68b7702911fa9d5a44ee89c42",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_006": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 26.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 12.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:3eef58d61c44d4b02a2eddc0409bc523c1a5022dbaf4cf171cfdb532eca93164",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_007": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 30.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 14.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:41c860948a34b6f2ff06c8624994d2c76ef0f5954d7977ab4cd44e85bfd36b7c",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_008": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 34.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 16.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:6a52a8744836facdc73b71aadd22a5b807a60fddd3b396c8f66f21481f866bfe",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_009": {
+      "bbox": {
+        "max_x": 9.0,
+        "max_y": 38.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 18.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:43fee076c8a35457e04ce116c610fa92c5b1cd7d940d7ce361d9086f1ec3767b",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_010": {
+      "bbox": {
+        "max_x": 10.5,
+        "max_y": 42.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 20.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:430699d8733a480e8cd239dfc8109e39da08dbc0e3d011d31ee07bcd239ed3fa",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_011": {
+      "bbox": {
+        "max_x": 10.5,
+        "max_y": 46.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 22.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:b86e5d5fac4541444b9de71ce706c8c9e0a8be4fcc0c842b7553a2d2ace57f0a",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_012": {
+      "bbox": {
+        "max_x": 10.5,
+        "max_y": 50.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 24.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:5e330ecded23972d79bbb6d3477f7c877f561f302d445f1e78555afe96ae60e6",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_013": {
+      "bbox": {
+        "max_x": 10.5,
+        "max_y": 54.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 26.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:bb831ed4774ecfaeffdce971dfcfac2b2dfda3315b4d250188fd23cc4366e681",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_014": {
+      "bbox": {
+        "max_x": 10.5,
+        "max_y": 58.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 28.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:fda7c0cbe1f4120603c2f2495b05ba0dd2b4efce774b64d97fa7743c2e4b645b",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_text_015": {
+      "bbox": {
+        "max_x": 10.5,
+        "max_y": 62.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 30.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "mtext": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:a2b9d1ee0f4789de61ecc8872ab84c5c52c1c465deb62c40ef2096bbb05115c8",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "gen_unsupported_001": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_002": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_003": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_004": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_005": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_006": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_007": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_008": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_009": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "gen_unsupported_010": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_malformed",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 5,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    },
+    "hatch_centered": {
+      "bbox": {
+        "max_x": 40.0,
+        "max_y": 40.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "hatch_centered",
+      "entity_count": 2,
+      "entity_types": {
+        "hatch": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:11bd3336b473de3783a90e29831f9da917d47cc8def7ee265c9e4f884884fcd7",
+      "layer_count": 2,
+      "normalization": {
+        "changed_entity_count": 2,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 1,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 2,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "large_grid": {
+      "bbox": {
+        "max_x": 1000.0,
+        "max_y": 1190.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "exact"
+      },
+      "category": "large",
+      "entity_count": 120,
+      "entity_types": {
+        "line": 120
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:8b48a0b237d0fafd68e32c761d72b98ae518dde63baad36be446775ebdb93cfb",
+      "layer_count": 2,
+      "normalization": {
+        "changed_entity_count": 120,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 120,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "simple_base": {
+      "bbox": {
+        "max_x": 100.0,
+        "max_y": 110.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 4,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 1,
+        "polyline": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:523cbc02185bde7c337d9c362612b034c9df31d3280cf8153b88965914fe0f35",
+      "layer_count": 2,
+      "normalization": {
+        "changed_entity_count": 4,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 4,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "simple_modified": {
+      "bbox": {
+        "max_x": 110.0,
+        "max_y": 110.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "simple",
+      "entity_count": 5,
+      "entity_types": {
+        "arc": 1,
+        "circle": 1,
+        "line": 1,
+        "polyline": 1,
+        "text": 1
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:e0ed7dcc8d4230a69290a8a2db7785b910fc3ee5024f74a70cec89879d96082d",
+      "layer_count": 2,
+      "normalization": {
+        "changed_entity_count": 5,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 5,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "text_centered": {
+      "bbox": {
+        "max_x": 36.5,
+        "max_y": 22.5,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "estimated"
+      },
+      "category": "text_centered",
+      "entity_count": 3,
+      "entity_types": {
+        "mtext": 1,
+        "text": 2
+      },
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:1e0104abc43220e9de1696bd8bf383ba83b7d2342963e74813cff2d21cecc29a",
+      "layer_count": 2,
+      "normalization": {
+        "changed_entity_count": 3,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 1,
+        "recomputed_hash_count": 3,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "ok",
+      "unsupported_entity_count": 0,
+      "warning_codes": {},
+      "warning_count": 0
+    },
+    "unsupported_objects": {
+      "bbox": {
+        "max_x": 0.0,
+        "max_y": 0.0,
+        "max_z": 0.0,
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "min_z": 0.0,
+        "quality": "missing"
+      },
+      "category": "unsupported_objects",
+      "entity_count": 0,
+      "entity_types": {},
+      "format": "dxf",
+      "geometry_hash": "cad-geom:v1:sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_count": 2,
+      "normalization": {
+        "changed_entity_count": 0,
+        "flattened_curve_count": 0,
+        "normalized_polyline_count": 0,
+        "normalized_text_count": 0,
+        "recomputed_hash_count": 0,
+        "removed_entity_count": 0,
+        "rounded_coordinate_count": 0
+      },
+      "status": "partial",
+      "unsupported_entity_count": 3,
+      "warning_codes": {
+        "UNSUPPORTED_ENTITY": 3
+      },
+      "warning_count": 3
+    }
+  },
+  "schema_version": "cad-golden-results/v1"
+}

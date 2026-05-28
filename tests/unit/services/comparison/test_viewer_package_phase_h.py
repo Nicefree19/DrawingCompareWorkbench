@@ -61,6 +61,52 @@ def test_render_pdf_to_png_explicit_page_index(multipage_pdf: Path, tmp_path: Pa
     assert out["page"] == 2
 
 
+def test_render_pdf_to_png_records_effective_dpi_when_edge_capped(
+    multipage_pdf: Path, tmp_path: Path,
+) -> None:
+    """Transforms must expose the actual raster DPI, not just the requested DPI."""
+
+    from src.services.comparison.viewer_package import _render_pdf_to_png
+
+    out = _render_pdf_to_png(
+        multipage_pdf,
+        tmp_path / "capped.png",
+        dpi=144,
+        max_edge_px=100,
+        page_index=0,
+    )
+
+    assert out["requested_dpi"] == pytest.approx(144.0)
+    assert out["effective_dpi"] == pytest.approx(36.0)
+    assert out["dpi"] == pytest.approx(out["effective_dpi"])
+    assert out["pdf_dpi"] == pytest.approx(out["effective_dpi"])
+    assert out["render_scale"] == pytest.approx(0.5)
+
+
+def test_worker_render_pdf_to_png_matches_effective_dpi_contract(
+    multipage_pdf: Path, tmp_path: Path,
+) -> None:
+    """The killable worker must emit the same PDF transform schema."""
+
+    from src.services.comparison.viewer_render_worker import (
+        _render_pdf_to_png as _render_pdf_to_png_worker,
+    )
+
+    out = _render_pdf_to_png_worker(
+        multipage_pdf,
+        tmp_path / "worker_capped.png",
+        dpi=144,
+        max_edge_px=100,
+        page_index=0,
+    )
+
+    assert out["requested_dpi"] == pytest.approx(144.0)
+    assert out["effective_dpi"] == pytest.approx(36.0)
+    assert out["dpi"] == pytest.approx(out["effective_dpi"])
+    assert out["pdf_dpi"] == pytest.approx(out["effective_dpi"])
+    assert out["render_scale"] == pytest.approx(0.5)
+
+
 def test_render_pdf_to_png_clamps_oor_index(multipage_pdf: Path, tmp_path: Path) -> None:
     """Out-of-range page_index should clamp to 0 with a warning."""
 
@@ -156,6 +202,27 @@ def test_render_pair_backgrounds_pdf_oor_clamps(multipage_pdf: Path, tmp_path: P
 # ---------------------------------------------------------------------------
 
 
+def test_render_pair_backgrounds_keeps_one_sided_pdf_blank(
+    multipage_pdf: Path, tmp_path: Path,
+) -> None:
+    from src.services.comparison.viewer_package import _render_pair_backgrounds
+
+    out = _render_pair_backgrounds(
+        pair_id="one-sided",
+        source_a=multipage_pdf,
+        source_b=multipage_pdf,
+        image_dir=tmp_path,
+        dxf_cache_dir=tmp_path / "dxf",
+        dpi=72, max_edge_px=500,
+        page_a=1, page_b=-1,
+    )
+
+    assert out["render_status"] == "rendered"
+    assert out["before_transform"]["page"] == 1
+    assert out["after_image"] == ""
+    assert out["after_transform"] is None
+
+
 def test_primary_page_pair_empty_rows() -> None:
     from src.services.comparison.viewer_package import _primary_page_pair_for_pair
     assert _primary_page_pair_for_pair([]) == (0, 0)
@@ -197,12 +264,12 @@ def test_primary_page_pair_returns_first_match() -> None:
     assert _primary_page_pair_for_pair(rows) == (0, 2)
 
 
-def test_primary_page_pair_negative_clamped_to_zero() -> None:
-    """Negative sentinel values (e.g. unmatched marker) clamp to 0."""
+def test_primary_page_pair_preserves_negative_sentinel() -> None:
+    """Negative sentinels model one-sided PDF page matches."""
 
     from src.services.comparison.viewer_package import _primary_page_pair_for_pair
     rows = [{"zone_id": "z1", "page_a": -1, "page_b": 3}]
-    assert _primary_page_pair_for_pair(rows) == (0, 3)
+    assert _primary_page_pair_for_pair(rows) == (-1, 3)
 
 
 def test_primary_page_pair_skips_invalid_then_finds_valid() -> None:
@@ -254,9 +321,8 @@ def test_all_page_pairs_dedupes_and_sorts() -> None:
     ]
 
 
-def test_all_page_pairs_negative_sentinels_dropped() -> None:
-    """Unmatched-side sentinels (page_a == -1 or page_b == -1) shouldn't
-    appear as render targets."""
+def test_all_page_pairs_preserves_negative_sentinels() -> None:
+    """Unmatched-side sentinels are first-class page navigation targets."""
 
     from src.services.comparison.viewer_package import _all_page_pairs_for_pair
     rows = [
@@ -264,7 +330,7 @@ def test_all_page_pairs_negative_sentinels_dropped() -> None:
         {"zone_id": "z2", "page_a": 1, "page_b": 2},
     ]
     out = _all_page_pairs_for_pair(rows)
-    assert out == [{"page_a": 1, "page_b": 2}]
+    assert out == [{"page_a": 0, "page_b": -1}, {"page_a": 1, "page_b": 2}]
 
 
 def test_all_page_pairs_nested_metadata() -> None:
@@ -278,3 +344,39 @@ def test_all_page_pairs_nested_metadata() -> None:
         {"page_a": 0, "page_b": 0},
         {"page_a": 1, "page_b": 4},
     ]
+
+
+def test_overlay_from_zone_row_carries_pdf_page_contract() -> None:
+    from src.services.comparison.viewer_package import _overlay_from_zone_row
+
+    row = {
+        "pair_id": "pdf-pair",
+        "zone_id": "C-001",
+        "change_type": "modified",
+        "raw_change_count": "1",
+        "bbox_min_x": "10",
+        "bbox_min_y": "20",
+        "bbox_max_x": "30",
+        "bbox_max_y": "40",
+        "page_a": "2",
+        "page_b": "5",
+        "page_match_status": "auto_confirmed",
+        "page_match_score": "0.94",
+    }
+
+    overlay = _overlay_from_zone_row(
+        row,
+        (0, 0, 100, 100),
+        priority=None,
+        selected=False,
+        before_transform=None,
+        after_transform=None,
+        bbox_coordinate_space="image_pixels",
+        pdf_dpi=150.0,
+    )
+
+    assert overlay["page_a"] == 2
+    assert overlay["page_b"] == 5
+    assert overlay["pdf_page"] == 2
+    assert overlay["page_match_status"] == "auto_confirmed"
+    assert overlay["page_match_score"] == "0.94"

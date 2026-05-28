@@ -29,8 +29,11 @@ from src.services.comparison.zone_render_service import (
     _INDEX_CACHE_ORDER,
     _MAX_INDEX_CACHE_ENTRIES,
     _clear_index_cache,
+    _estimate_render_index_bytes,
     _evict_to_capacity,
+    _resolve_index_cache_byte_limit,
     _resolve_max_cache_entries,
+    render_index_cache_stats,
 )
 
 
@@ -38,24 +41,37 @@ from src.services.comparison.zone_render_service import (
 def _isolate_cache():
     """Each test starts with an empty cache and gets the env clean on exit."""
     _clear_index_cache()
-    original_env = os.environ.pop("DRAWING_COMPARE_INDEX_CACHE_SIZE", None)
+    env_names = (
+        "DRAWING_COMPARE_INDEX_CACHE_SIZE",
+        "DRAWING_COMPARE_DXF_INDEX_CACHE_MB",
+        "DRAWING_COMPARE_RENDER_CACHE_MB",
+    )
+    original_env = {name: os.environ.pop(name, None) for name in env_names}
     try:
         yield
     finally:
         _clear_index_cache()
-        if original_env is None:
-            os.environ.pop("DRAWING_COMPARE_INDEX_CACHE_SIZE", None)
-        else:
-            os.environ["DRAWING_COMPARE_INDEX_CACHE_SIZE"] = original_env
+        for name, value in original_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
-def _index(handle: str, *, entity_count: int = 100, render_time_ms: float = 50.0) -> DrawingRenderIndex:
+def _index(
+    handle: str,
+    *,
+    entity_count: int = 100,
+    render_time_ms: float = 50.0,
+    estimated_bytes: int = 0,
+    source_size: int = 0,
+) -> DrawingRenderIndex:
     """Build a minimal DrawingRenderIndex for cache tests."""
     from pathlib import Path
 
     return DrawingRenderIndex(
         dxf_path=Path(f"/synthetic/{handle}.dxf"),
-        source_signature={"handle": handle},
+        source_signature={"handle": handle, "size": source_size},
         render_environment_hash="test_env",
         doc=None,
         modelspace=None,
@@ -63,7 +79,16 @@ def _index(handle: str, *, entity_count: int = 100, render_time_ms: float = 50.0
         envelopes=[],
         entity_count=entity_count,
         render_time_ms=render_time_ms,
+        estimated_bytes=estimated_bytes,
     )
+
+
+def _put_index(key: str, index: DrawingRenderIndex) -> None:
+    import src.services.comparison.zone_render_service as zrs
+
+    _INDEX_CACHE[key] = index
+    _INDEX_CACHE_ORDER.append(key)
+    zrs._INDEX_CACHE_TOTAL_ESTIMATED_BYTES += int(index.estimated_bytes or 0)
 
 
 class TestResolveMaxCacheEntries:
@@ -109,12 +134,24 @@ class TestResolveMaxCacheEntries:
         with patch("psutil.virtual_memory", return_value=_StubMem()):
             assert _resolve_max_cache_entries() == 16
 
+    def test_specific_byte_budget_env_takes_priority(self):
+        os.environ["DRAWING_COMPARE_RENDER_CACHE_MB"] = "128"
+        os.environ["DRAWING_COMPARE_DXF_INDEX_CACHE_MB"] = "1.5"
+
+        assert _resolve_index_cache_byte_limit() == int(1.5 * 1024 * 1024)
+
+    def test_shared_byte_budget_env_is_fallback(self):
+        os.environ["DRAWING_COMPARE_RENDER_CACHE_MB"] = "2"
+
+        assert _resolve_index_cache_byte_limit() == 2 * 1024 * 1024
+
 
 class TestDrawingRenderIndexMetadata:
     def test_dataclass_carries_entity_count_and_render_time_ms(self):
-        idx = _index("h1", entity_count=350, render_time_ms=120.5)
+        idx = _index("h1", entity_count=350, render_time_ms=120.5, estimated_bytes=777)
         assert idx.entity_count == 350
         assert idx.render_time_ms == 120.5
+        assert idx.estimated_bytes == 777
 
     def test_dataclass_defaults_zero_when_unset(self):
         # Legacy callers that build the index without the new fields still
@@ -132,6 +169,16 @@ class TestDrawingRenderIndexMetadata:
         )
         assert legacy.entity_count == 0
         assert legacy.render_time_ms == 0.0
+        assert legacy.estimated_bytes == 0
+
+    def test_estimated_bytes_has_minimum_source_size_and_entity_scaling(self):
+        assert _estimate_render_index_bytes(_index("small", entity_count=1)) == 256 * 1024
+
+        source_sized = _index("source-sized", entity_count=1, source_size=3 * 1024 * 1024)
+        assert _estimate_render_index_bytes(source_sized) == 3 * 1024 * 1024
+
+        entity_scaled = _index("entity-scaled", entity_count=1000)
+        assert _estimate_render_index_bytes(entity_scaled) > 256 * 1024
 
 
 class TestEvictToCapacity:
@@ -178,3 +225,31 @@ class TestEvictToCapacity:
 
         assert "legacy" not in _INDEX_CACHE
         assert "newish" in _INDEX_CACHE
+
+    def test_byte_budget_evicts_oldest_until_within_limit(self):
+        _put_index("a", _index("a", estimated_bytes=400 * 1024))
+        _put_index("b", _index("b", estimated_bytes=400 * 1024))
+
+        _evict_to_capacity(10, byte_limit=512 * 1024)
+
+        stats = render_index_cache_stats()
+        assert list(_INDEX_CACHE.keys()) == ["b"]
+        assert _INDEX_CACHE_ORDER == ["b"]
+        assert stats["total_estimated_bytes"] == 400 * 1024
+        assert stats["eviction_count"] == 1
+        assert stats["evicted_estimated_bytes"] == 400 * 1024
+        assert stats["last_eviction_reason"] == "byte_capacity"
+
+    def test_clear_index_cache_resets_byte_stats(self):
+        _put_index("a", _index("a", estimated_bytes=400 * 1024))
+        _evict_to_capacity(0, byte_limit=1024 * 1024)
+
+        assert render_index_cache_stats()["eviction_count"] == 1
+        _clear_index_cache()
+
+        stats = render_index_cache_stats()
+        assert stats["entries"] == 0
+        assert stats["total_estimated_bytes"] == 0
+        assert stats["hit_count"] == 0
+        assert stats["miss_count"] == 0
+        assert stats["eviction_count"] == 0

@@ -77,7 +77,7 @@ def test_korean_workbench_zone_review_viewer_controls_are_declared() -> None:
     assert "zone_render_process" in SUBPROCESS_SOURCE
     assert "render_environment_signature" in SOURCE
     assert "_start_zone_crop_render_v2" in SOURCE
-    assert "PDF 위치 좌표 없음" in SOURCE
+    assert "PDF 위치 좌표가 없어" in SOURCE
     assert "렌더 중 - 변경구역 위치를 준비하고 있습니다" in SOURCE
     assert "상대위치 표시" in SOURCE
     assert "이전 변경" in SOURCE
@@ -106,6 +106,14 @@ def test_korean_workbench_zone_review_viewer_controls_are_declared() -> None:
     assert "#005FCC" in qml_source
 
 
+def test_selected_zone_fallback_reasons_are_user_facing_korean() -> None:
+    assert "def _zone_render_reason_message_ko" in SOURCE
+    assert "source_render_failed" in SOURCE
+    assert "missing_page_bbox" in SOURCE
+    assert "상대 위치 캔버스로 표시합니다" in SOURCE
+    assert 'f"{message}\\n{warnings[0]}"' not in SOURCE
+
+
 def test_v15_drawing_selection_is_metadata_first_and_zone_selection_renders_crop() -> None:
     drawing_start = SOURCE.index("    def _on_drawing_selected_v2")
     drawing_end = SOURCE.index("    def _viewer_overlays_for_pair_v2", drawing_start)
@@ -119,11 +127,74 @@ def test_v15_drawing_selection_is_metadata_first_and_zone_selection_renders_crop
     assert "_start_zone_crop_render_v2" in zone_body
 
 
+def test_workbench_drawing_selection_uses_lazy_initial_zone_tree() -> None:
+    drawing_start = SOURCE.index("    def _on_drawing_selected_v2")
+    drawing_end = SOURCE.index("    def _viewer_overlays_for_pair_v2", drawing_start)
+    drawing_body = SOURCE[drawing_start:drawing_end]
+    worker_start = SOURCE.index("class PairPreviewRenderWorker")
+    worker_end = SOURCE.index("class ZoneRenderProcessController", worker_start)
+    worker_body = SOURCE[worker_start:worker_end]
+
+    assert "GUI_FIRST_SELECTION_ZONE_LIMIT = 500" in SOURCE
+    assert "_initial_overlays_for_pair_selection_v2" in drawing_body
+    assert "_schedule_full_zone_tree_rebuild_v2(pair_id)" in drawing_body
+    assert "load_when_empty=False" in drawing_body
+    assert "_schedule_initial_zone_selection_v2(pair_id)" in drawing_body
+    assert "_select_zone_leaf_v2(leaf_items[0])" not in drawing_body
+    assert "build_lod_tiles: bool = True" in worker_body
+    assert "if self.build_lod_tiles:" in worker_body
+
+
 def test_workbench_keeps_qthread_wrappers_until_native_thread_stops() -> None:
     assert "_retired_qthreads_v2" in SOURCE
     assert "def _retire_qthread_v2" in SOURCE
     assert "worker.isRunning()" in SOURCE
     assert "worker.deleteLater()" in SOURCE
+
+
+def test_workbench_receives_review_ready_before_package_complete() -> None:
+    assert "review_ready = Signal(object)" in SOURCE
+    assert "first_review_ready_callback=self.review_ready.emit" in SOURCE
+    assert "self._worker.review_ready.connect(self._on_auto_review_ready_v2)" in SOURCE
+
+    review_start = SOURCE.index("    def _on_auto_review_ready_v2")
+    finished_start = SOURCE.index("    def _on_auto_finished_v2")
+    review_body = SOURCE[review_start:finished_start]
+
+    assert 'getattr(result, "package_complete", False)' in review_body
+    assert "검토 가능 - 최종 패키지 정리 중" in review_body
+    assert "_load_viewer_manifest_v2()" in review_body
+    assert "_refresh_drawing_list_v2()" in review_body
+    assert "self._retire_active_worker_v2()" not in review_body
+    assert "btn_open_package_v2.setEnabled(True)" not in review_body
+    assert "btn_export_confirmed_clouds_v2.setEnabled(True)" not in review_body
+
+
+def test_pair_preview_worker_forwards_pdf_page_pair_to_lazy_renderer() -> None:
+    worker_start = SOURCE.index("class PairPreviewRenderWorker")
+    worker_end = SOURCE.index("class ZoneCropRenderWorker", worker_start)
+    worker_body = SOURCE[worker_start:worker_end]
+
+    assert "page_a = _int_value(" in worker_body
+    assert "page_b = _int_value(" in worker_body
+    assert "page_a=page_a" in worker_body
+    assert "page_b=page_b" in worker_body
+
+
+def test_lightweight_preview_fidelity_is_side_specific() -> None:
+    pdf_start = SOURCE.index("    def _load_lightweight_pdf_v2")
+    pdf_end = SOURCE.index("    def _transform_world_bbox_v2", pdf_start)
+    pdf_body = SOURCE[pdf_start:pdf_end]
+    raster_start = SOURCE.index("    def _load_lightweight_raster_preview_v2")
+    raster_end = SOURCE.index("    def _apply_session_state_to_viewport_v2", raster_start)
+    raster_body = SOURCE[raster_start:raster_end]
+
+    assert '("before", self.preview_before_lightweight_v2, loaded_before)' in pdf_body
+    assert '("after", self.preview_after_lightweight_v2, loaded_after)' in pdf_body
+    assert '"exact_world_render" if loaded else "relative_only"' in pdf_body
+    assert "(self.preview_before_lightweight_v2, loaded_before)" in raster_body
+    assert "(self.preview_after_lightweight_v2, loaded_after)" in raster_body
+    assert '"exact_world_render" if loaded else "relative_only"' in raster_body
 
 
 def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:
@@ -139,6 +210,21 @@ def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:
     assert "selected zone, when present" in light_source
 
 
+def test_gui_compare_requests_at_least_one_static_preview() -> None:
+    request_start = SOURCE.index("request = FolderCompareRunRequest(")
+    request_end = SOURCE.index("        self._result = None", request_start)
+    request_body = SOURCE[request_start:request_end]
+
+    assert "max_preview_pairs=1" in request_body
+    assert "max_preview_pairs=0" not in request_body
+
+
+def test_workbench_backend_status_describes_native_dwg_scope_without_oda_requirement() -> None:
+    assert "DWG native import limited to" in SOURCE
+    assert "requires an approved adapter" in SOURCE
+    assert "ODA Converter not found; legacy DWG conversion is unavailable." not in SOURCE
+
+
 def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     menu_start = SOURCE.index("self.act_lightweight_viewer_v2 = QAction")
     menu_end = SOURCE.index("view_menu.addAction(self.act_lightweight_viewer_v2)", menu_start)
@@ -150,7 +236,7 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     drawing_end = SOURCE.index("    def _viewer_overlays_for_pair_v2", drawing_start)
     drawing_body = SOURCE[drawing_start:drawing_end]
 
-    assert "DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = True" in SOURCE
+    assert "DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = QT_QUICK_AVAILABLE" in SOURCE
     assert "def _is_lightweight_viewer_active_v2" in SOURCE
     assert "def _set_lightweight_viewer_visible_v2" in SOURCE
     assert "self._lightweight_raster_pairs: set[str] = set()" in SOURCE
@@ -163,11 +249,12 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     )
     assert "if not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:" in drawing_body
     assert "if self._is_lightweight_viewer_active_v2():" in drawing_body
-    assert "if _viewer_pair_is_pdf(viewer_pair):" in drawing_body
+    assert "if _viewer_pair_is_pdf(viewer_pair):" in SOURCE
     assert "def _load_lightweight_raster_preview_v2" in SOURCE
     assert "viewport.load_raster_image(" in SOURCE
     assert "def load_raster_image" in Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
-    assert "self._load_lightweight_raster_preview_v2(pair_id, viewer_pair)" in drawing_body
+    assert "self._schedule_lightweight_pair_load_v2(pair_id, viewer_pair)" in drawing_body
+    assert "self._load_lightweight_raster_preview_v2(pair_id, viewer_pair)" in SOURCE
     assert "pair_id in self._lightweight_raster_pairs" in SOURCE
 
     finished_start = SOURCE.index("    def _on_auto_finished_v2")
@@ -181,6 +268,51 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     error_body = SOURCE[error_start:error_end]
     assert "self._retire_active_worker_v2()" in error_body
     assert "self._worker = None" not in error_body
+
+
+def test_one_sided_zone_selection_explains_blank_counterpart_view() -> None:
+    light_source = Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
+    qml_source = Path("src/gui/assets/drawing_compare/LightweightDrawingViewport.qml").read_text(encoding="utf-8")
+    focus_start = SOURCE.index("    def _focus_lightweight_on_zone_v2")
+    focus_end = SOURCE.index("    def _set_lightweight_zone_side_messages_v2", focus_start)
+    focus_body = SOURCE[focus_start:focus_end]
+
+    assert "def _set_lightweight_zone_side_messages_v2" in SOURCE
+    assert "이전 도면에는 대응 요소가 없습니다" in SOURCE
+    assert "변경 도면에는 대응 요소가 없습니다" in SOURCE
+    assert "sideMessage" in qml_source
+    assert "def set_side_message" in light_source
+    assert "side == \"before\" and match_side == \"b_only\"" in light_source
+    assert "side == \"after\" and match_side == \"a_only\"" in light_source
+    assert 'match_side == "b_only"' in focus_body
+    assert 'match_side == "a_only"' in focus_body
+
+
+def test_workbench_exposes_detail_region_match_review() -> None:
+    dialog_source = Path("src/gui/region_match_dialog.py").read_text(encoding="utf-8")
+    drawing_start = SOURCE.index("    def _build_drawings_tab_v2")
+    drawing_end = SOURCE.index("    def _build_top_issues_tab_v2", drawing_start)
+    drawing_body = SOURCE[drawing_start:drawing_end]
+    finished_start = SOURCE.index("    def _on_auto_finished_v2")
+    finished_end = SOURCE.index("    def _collect_page_match_metadata_v2", finished_start)
+    finished_body = SOURCE[finished_start:finished_end]
+    path_start = SOURCE.index("    def _region_match_artifact_paths_v2")
+    path_end = SOURCE.index("    def _show_matching_detail_v2", path_start)
+    path_body = SOURCE[path_start:path_end]
+
+    assert "btn_detail_match_v2" in drawing_body
+    assert "Detail Region Matching" in drawing_body
+    assert "_show_region_match_dialog_v2" in drawing_body
+    assert "btn_detail_match_v2.setEnabled(False)" in drawing_body
+    assert "btn_detail_match_v2.setEnabled(True)" in finished_body
+    assert "act_region_match_results_v2" in SOURCE
+    assert "region_detection_summary_json" in path_body
+    assert "region_match_summary_json" in path_body
+    assert "manual_region_matches.json" in path_body
+    assert "whole_modelspace" in dialog_source
+    assert "class RegionMatchReviewDialog" in dialog_source
+    assert "load_region_match_overrides" in dialog_source
+    assert "write_region_match_overrides" in dialog_source
 
 
 def test_korean_light_stylesheet_uses_high_contrast_palette() -> None:

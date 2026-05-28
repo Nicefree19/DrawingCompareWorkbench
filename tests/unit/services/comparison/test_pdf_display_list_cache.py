@@ -135,6 +135,76 @@ def test_cache_size_respects_env_override(tmp_path: Path, monkeypatch: pytest.Mo
     assert stats["capacity"] == 2
 
 
+def test_cache_stats_track_hits_misses_and_page_rect_is_not_double_counted(tmp_path: Path) -> None:
+    """The combined entry API records one lookup, while ``get_page_rect``
+    can reuse that entry without inflating hit/miss counters.
+    """
+    pdf = _make_sample_pdf(tmp_path / "doc.pdf", page_count=1)
+
+    display_list, rect_w, rect_h, first_stats = pdf_display_list_cache.get_display_list_entry(pdf, 0)
+
+    assert display_list is not None
+    assert rect_w > 0
+    assert rect_h > 0
+    assert first_stats["lookup_cache_hit"] is False
+    assert first_stats["miss_count"] == 1
+    assert first_stats["hit_count"] == 0
+    assert first_stats["total_estimated_bytes"] >= first_stats["entry_estimated_bytes"] > 0
+
+    assert pdf_display_list_cache.get_page_rect(pdf, 0) == (rect_w, rect_h)
+    after_rect = pdf_display_list_cache.cache_stats()
+    assert after_rect["miss_count"] == 1
+    assert after_rect["hit_count"] == 0
+
+    assert pdf_display_list_cache.get_display_list(pdf, 0) is display_list
+    after_hit = pdf_display_list_cache.cache_stats()
+    assert after_hit["miss_count"] == 1
+    assert after_hit["hit_count"] == 1
+
+
+def test_cache_byte_limit_evicts_lru_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tiny byte budget must evict the oldest DisplayList before RSS can
+    grow with page navigation.
+    """
+    monkeypatch.setenv("DRAWING_COMPARE_DISPLAY_LIST_CACHE_MB", "1")
+    monkeypatch.setattr(
+        pdf_display_list_cache,
+        "_estimate_display_list_bytes",
+        lambda _w, _h, _size: 600_000,
+    )
+
+    pdf = _make_sample_pdf(tmp_path / "doc.pdf", page_count=3, page_size=(120, 120))
+    pdf_display_list_cache.get_display_list(pdf, 0)
+    pdf_display_list_cache.get_display_list(pdf, 1)
+
+    stats = pdf_display_list_cache.cache_stats()
+    assert stats["byte_limit"] == 1024 * 1024
+    assert stats["entries"] == 1
+    assert stats["total_estimated_bytes"] <= stats["byte_limit"]
+    assert stats["eviction_count"] == 1
+    assert stats["last_eviction_reason"] == "byte_capacity"
+
+
+def test_clear_cache_resets_byte_and_lookup_stats(tmp_path: Path) -> None:
+    pdf = _make_sample_pdf(tmp_path / "doc.pdf", page_count=1)
+    pdf_display_list_cache.get_display_list(pdf, 0)
+    pdf_display_list_cache.get_display_list(pdf, 0)
+    assert pdf_display_list_cache.cache_stats()["total_estimated_bytes"] > 0
+    assert pdf_display_list_cache.cache_stats()["hit_count"] == 1
+
+    pdf_display_list_cache._clear_cache()
+
+    stats = pdf_display_list_cache.cache_stats()
+    assert stats["entries"] == 0
+    assert stats["total_estimated_bytes"] == 0
+    assert stats["hit_count"] == 0
+    assert stats["miss_count"] == 0
+    assert stats["eviction_count"] == 0
+
+
 def test_get_display_list_raises_on_missing_file(tmp_path: Path) -> None:
     """Surfacing the missing-file error early lets callers fall back
     to the PIL path with a clear reason instead of producing an

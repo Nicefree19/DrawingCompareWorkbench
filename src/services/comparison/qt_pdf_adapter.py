@@ -49,6 +49,12 @@ logger = logging.getLogger(__name__)
 # Standard PDF DPI (72 dpi = 1 PostScript point per pixel).
 PDF_BASE_DPI: float = 72.0
 
+# Keep first-display PDF renders responsive on large sheets. A1 at 150 DPI is
+# roughly 17.4M pixels per side render pair and can visibly stall the GUI; this
+# cap lets callers downshift the initial render while preserving zoom re-render
+# support for users who need more detail.
+PDF_INITIAL_RENDER_MAX_PIXELS: int = 5_000_000
+
 
 class PdfPageRenderer:
     """Lazy-init wrapper around ``QPdfDocument``.
@@ -294,6 +300,53 @@ PDF_DPI_BUCKETS: tuple[int, ...] = (75, 100, 150, 225, 300, 450, 600, 900, 1200)
 PDF_RENDER_OVERSAMPLE: float = 1.5
 
 
+def select_initial_pdf_render_dpi(
+    page_size_points: Tuple[float, float],
+    *,
+    target_dpi: float = 150.0,
+    max_pixels: Optional[int] = PDF_INITIAL_RENDER_MAX_PIXELS,
+    min_dpi: float = 75.0,
+) -> float:
+    """Choose a first-display DPI that fits a page-level pixel budget.
+
+    This is intentionally conservative and pure-Python: the caller can inspect
+    PDF page dimensions before calling ``QPdfDocument.render()`` and avoid
+    blocking the GUI thread with an oversized initial bitmap. Returned values
+    are snapped to the existing DPI buckets so cache keys remain stable.
+    """
+
+    try:
+        width_pts = float(page_size_points[0])
+        height_pts = float(page_size_points[1])
+        requested = max(10.0, float(target_dpi))
+    except (TypeError, ValueError, IndexError):
+        return 150.0
+    if width_pts <= 0 or height_pts <= 0:
+        return requested
+    if max_pixels is None or int(max_pixels) <= 0:
+        return requested
+
+    page_area_in = (width_pts / PDF_BASE_DPI) * (height_pts / PDF_BASE_DPI)
+    if page_area_in <= 0:
+        return requested
+    requested_pixels = page_area_in * requested * requested
+    if requested_pixels <= float(max_pixels):
+        return requested
+
+    import math
+
+    budgeted_dpi = math.sqrt(float(max_pixels) / page_area_in)
+    budgeted_dpi = max(float(min_dpi), min(requested, budgeted_dpi))
+    candidates = [
+        float(bucket)
+        for bucket in PDF_DPI_BUCKETS
+        if float(bucket) <= requested and float(bucket) <= budgeted_dpi
+    ]
+    if candidates:
+        return max(candidates)
+    return min(requested, max(float(min_dpi), budgeted_dpi))
+
+
 def select_pdf_render_dpi(
     *,
     base_upp: float,
@@ -473,10 +526,12 @@ def is_qt_pdf_available() -> bool:
 __all__ = [
     "PDF_BASE_DPI",
     "PDF_DPI_BUCKETS",
+    "PDF_INITIAL_RENDER_MAX_PIXELS",
     "PDF_RENDER_OVERSAMPLE",
     "PdfPageRenderer",
     "render_pdf_page_once",
     "is_qt_pdf_available",
+    "select_initial_pdf_render_dpi",
     "select_pdf_render_dpi",
     "prune_pdf_cache",
 ]

@@ -116,6 +116,7 @@ def export_viewer_package_isolated(
     memory_cap_mb: Optional[float] = 4096.0,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
     python_executable: Optional[str] = None,
     allow_inprocess_fallback: bool = False,
     fault_log_dir: Optional[Path] = None,
@@ -172,6 +173,7 @@ def export_viewer_package_isolated(
     result_payload: Optional[dict[str, Any]] = None
     error_event: Optional[dict[str, Any]] = None
     timed_out = False
+    cancelled = False
 
     try:
         program, worker_args = worker_command_for_module(
@@ -205,12 +207,51 @@ def export_viewer_package_isolated(
 
     assert proc.stdout is not None
     deadline = started + max(1.0, float(timeout_s))
+    import queue as _queue
+    import threading as _threading
+
+    stdout_queue: _queue.Queue[Optional[str]] = _queue.Queue()
+
+    def _read_stdout() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                stdout_queue.put(line)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"stdout_reader_failed:{exc!r}")
+        finally:
+            stdout_queue.put(None)
+
+    stdout_thread = _threading.Thread(
+        target=_read_stdout,
+        name="viewer-package-stdout-reader",
+        daemon=True,
+    )
+    stdout_thread.start()
     try:
-        for raw_line in proc.stdout:
+        while True:
+            if cancel_callback is not None:
+                try:
+                    if cancel_callback():
+                        proc.kill()
+                        cancelled = True
+                        notes.append("cancel_killed")
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    notes.append(f"cancel_callback_failed:{exc!r}")
             if _time.perf_counter() > deadline:
                 proc.kill()
                 timed_out = True
                 notes.append("timeout_killed")
+                break
+            try:
+                raw_line = stdout_queue.get(timeout=0.2)
+            except _queue.Empty:
+                poll = getattr(proc, "poll", None)
+                if callable(poll) and poll() is not None and stdout_queue.empty():
+                    break
+                continue
+            if raw_line is None:
                 break
             line = raw_line.strip()
             if not line:
@@ -267,6 +308,10 @@ def export_viewer_package_isolated(
     if timed_out:
         report.error_type = "Timeout"
         report.error_message = f"subprocess exceeded timeout_s={timeout_s}"
+        return None, report
+    if cancelled:
+        report.error_type = "Cancelled"
+        report.error_message = "subprocess cancelled by caller"
         return None, report
     if error_event is not None:
         report.error_type = str(error_event.get("type") or "Unknown")

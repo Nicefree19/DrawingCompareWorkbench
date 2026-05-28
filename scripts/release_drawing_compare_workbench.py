@@ -23,6 +23,7 @@ from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / "tmp" / "drawing_compare_pilot_release"
+TILE_CACHE_MB_ENV_VAR = "DRAWING_COMPARE_TILE_CACHE_MB"
 CUSTOMER_EVIDENCE_REQUEST_KO_SOURCE = (
     ROOT / "docs" / "collab" / "DRAWING_COMPARE_CUSTOMER_EVIDENCE_REQUEST_KO.md"
 )
@@ -41,6 +42,11 @@ COMPILE_TARGETS = [
     "scripts/audit_drawing_compare_mvp_exit.py",
     "scripts/prepare_drawing_compare_customer_evidence.py",
     "scripts/inventory_drawing_compare_customer_evidence.py",
+    "scripts/closeout_drawing_compare_customer_evidence.py",
+    "scripts/audit_closeout_readiness.py",
+    "scripts/benchmark_real_corpus_replay.py",
+    "scripts/benchmark_actual_gui_soak.py",
+    "scripts/benchmark_workbench_gui_hotpath.py",
     "scripts/release_drawing_compare_workbench.py",
 ]
 CUSTOMER_PACKAGE_TEXT_SUFFIXES = {".csv", ".json", ".md", ".ps1", ".py", ".txt"}
@@ -87,6 +93,45 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--customer-evidence-manifest", type=Path)
     parser.add_argument("--exit-audit-results-dir", type=Path, action="append")
     parser.add_argument("--run-mvp-exit-audit", action="store_true")
+    parser.add_argument(
+        "--p5-g16-benchmark-json",
+        "--p5-g16-real-corpus-replay",
+        dest="p5_g16_benchmark_json",
+        type=Path,
+        action="append",
+        default=[],
+        help="P5-G16 real-corpus replay JSON to forward to the customer-grade MVP exit audit.",
+    )
+    parser.add_argument(
+        "--p5-g22-gui-soak-json",
+        "--p5-g22-actual-gui-soak",
+        dest="p5_g22_gui_soak_json",
+        type=Path,
+        action="append",
+        default=[],
+        help="P5-G22 actual GUI soak JSON to forward to the customer-grade MVP exit audit.",
+    )
+    parser.add_argument(
+        "--p5-g27-selected-zone-crop-json",
+        "--p5-g27-selected-zone-crop-soak",
+        dest="p5_g27_selected_zone_crop_json",
+        type=Path,
+        action="append",
+        default=[],
+        help="P5-G27 selected-zone crop-first JSON to forward to the customer-grade MVP exit audit.",
+    )
+    parser.add_argument(
+        "--p5-g28-cache-plateau-json",
+        "--p5-g28-cache-plateau-soak",
+        dest="p5_g28_cache_plateau_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Standalone P5-G28 cache plateau JSON to forward to the MVP exit "
+            "audit without making P5-G28 a default customer-grade gate."
+        ),
+    )
     parser.add_argument("--large-dwg-probe", type=Path)
     parser.add_argument("--require-large-dwg-probe", action="store_true")
     parser.add_argument("--min-total-pairs", type=int, default=20)
@@ -101,6 +146,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--selected-zone-evidence-per-pair", type=int, default=1)
     parser.add_argument("--skip-workbench-acceptance", action="store_true")
     parser.add_argument("--skip-marked-pdf", action="store_true")
+    parser.add_argument(
+        "--require-p5-g3-tile-eviction",
+        "--require-p5-g6-tile-eviction",
+        dest="require_p5_g3_tile_eviction",
+        action="store_true",
+        help=(
+            "Require observed tile-cache eviction in the P5-G3 realset gate. "
+            "Use for controlled low-byte-cap release-candidate probes."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g3-min-tile-evicted-pairs",
+        "--p5-g6-min-tile-evicted-pairs",
+        dest="p5_g3_min_tile_evicted_pairs",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--p5-g3-min-tile-evicted-bytes",
+        "--p5-g6-min-tile-evicted-bytes",
+        dest="p5_g3_min_tile_evicted_bytes",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--p5-g6-tile-cache-mb",
+        type=float,
+        default=None,
+        help=(
+            "Set DRAWING_COMPARE_TILE_CACHE_MB for realset validation and "
+            "workbench smoke so forced tile eviction is reproducible."
+        ),
+    )
     parser.add_argument("--cloud-selection-csv", type=Path)
     parser.add_argument("--max-cloud-regions-per-pair", type=int, default=150)
     parser.add_argument("--max-cloud-regions-total", type=int, default=3000)
@@ -115,6 +193,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--require-large-dwg-probe requires --large-dwg-probe")
     if args.run_mvp_exit_audit and args.large_dwg_probe and not args.large_dwg_probe.exists():
         parser.error(f"--large-dwg-probe does not exist: {args.large_dwg_probe}")
+    for path in args.p5_g16_benchmark_json:
+        if not path.exists():
+            parser.error(f"--p5-g16-benchmark-json does not exist: {path}")
+    for path in args.p5_g22_gui_soak_json:
+        if not path.exists():
+            parser.error(f"--p5-g22-gui-soak-json does not exist: {path}")
+    for path in args.p5_g27_selected_zone_crop_json:
+        if not path.exists():
+            parser.error(f"--p5-g27-selected-zone-crop-json does not exist: {path}")
+    for path in args.p5_g28_cache_plateau_json:
+        if not path.exists():
+            parser.error(f"--p5-g28-cache-plateau-json does not exist: {path}")
+    if args.require_p5_g3_tile_eviction and args.skip_selected_zone_evidence:
+        parser.error(
+            "--require-p5-g3-tile-eviction/--require-p5-g6-tile-eviction requires selected-zone/P5-G3 "
+            "evidence; remove --skip-selected-zone-evidence"
+        )
+    if args.p5_g6_tile_cache_mb is not None and args.p5_g6_tile_cache_mb <= 0:
+        parser.error("--p5-g6-tile-cache-mb must be greater than 0")
     if args.run_mvp_exit_audit:
         for result_dir in args.exit_audit_results_dir or []:
             if not result_dir.exists():
@@ -127,6 +224,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                     f"(missing validation_summary.json): {result_dir}"
                 )
         realset_will_run = not args.skip_realset and args.a is not None and args.b is not None
+        if realset_will_run and args.skip_selected_zone_evidence:
+            parser.error(
+                "--run-mvp-exit-audit cannot generate P5-G3 customer-grade "
+                "evidence with --skip-selected-zone-evidence"
+            )
         realset_validation_dir = args.out / "realset_validation"
         realset_reusable = _validation_summary_path(realset_validation_dir).exists()
         if realset_validation_dir.exists() and not realset_will_run and not realset_reusable:
@@ -195,6 +297,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest["artifacts"]["customer_evidence_inventory_tool"] = str(
         out_dir / "cli" / "inventory_drawing_compare_customer_evidence.py"
     )
+    manifest["artifacts"]["customer_evidence_closeout_tool"] = str(
+        out_dir / "cli" / "closeout_drawing_compare_customer_evidence.py"
+    )
+    manifest["artifacts"]["closeout_readiness_audit_tool"] = str(
+        out_dir / "cli" / "audit_closeout_readiness.py"
+    )
+    manifest["artifacts"]["p5_g16_real_corpus_replay_tool"] = str(
+        out_dir / "cli" / "benchmark_real_corpus_replay.py"
+    )
+    manifest["artifacts"]["p5_g22_actual_gui_soak_tool"] = str(
+        out_dir / "cli" / "benchmark_actual_gui_soak.py"
+    )
+    manifest["artifacts"]["p5_g26_selection_latency_tool"] = str(
+        out_dir / "cli" / "benchmark_workbench_gui_hotpath.py"
+    )
+    if args.p5_g16_benchmark_json:
+        p5_g16_paths = [str(path.resolve()) for path in args.p5_g16_benchmark_json]
+        manifest["artifacts"]["p5_g16_real_corpus_replay_json"] = p5_g16_paths[0]
+        manifest["artifacts"]["p5_g16_real_corpus_replay_jsons"] = p5_g16_paths
+    if args.p5_g22_gui_soak_json:
+        p5_g22_paths = [str(path.resolve()) for path in args.p5_g22_gui_soak_json]
+        manifest["artifacts"]["p5_g22_actual_gui_soak_json"] = p5_g22_paths[0]
+        manifest["artifacts"]["p5_g22_actual_gui_soak_jsons"] = p5_g22_paths
+    if args.p5_g27_selected_zone_crop_json:
+        p5_g27_paths = [
+            str(path.resolve()) for path in args.p5_g27_selected_zone_crop_json
+        ]
+        manifest["artifacts"]["p5_g27_selected_zone_crop_json"] = p5_g27_paths[0]
+        manifest["artifacts"]["p5_g27_selected_zone_crop_jsons"] = p5_g27_paths
+    if args.p5_g28_cache_plateau_json:
+        p5_g28_paths = [
+            str(path.resolve()) for path in args.p5_g28_cache_plateau_json
+        ]
+        manifest["artifacts"]["p5_g28_cache_plateau_json"] = p5_g28_paths[0]
+        manifest["artifacts"]["p5_g28_cache_plateau_jsons"] = p5_g28_paths
     manifest["preflight"]["oda_converter"] = _oda_preflight(args.python)
 
     failures = 0
@@ -223,11 +360,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.skip_realset:
         if args.a and args.b:
             validation_dir = out_dir / "realset_validation"
+            tile_cache_env_overrides = _tile_cache_env_overrides(args)
             failures += _run_step(
                 manifest,
                 "realset_validation",
                 _realset_command(args, validation_dir),
                 timeout=60 * 60,
+                env_overrides=tile_cache_env_overrides,
             )
             manifest["artifacts"]["realset_validation"] = str(validation_dir)
             if not args.skip_workbench_acceptance:
@@ -237,6 +376,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "workbench_acceptance_smoke",
                     _workbench_acceptance_command(args, validation_dir, screenshots_dir),
                     timeout=20 * 60,
+                    env_overrides=tile_cache_env_overrides,
                 )
                 manifest["artifacts"]["workbench_acceptance_screenshots"] = str(screenshots_dir)
         else:
@@ -348,20 +488,28 @@ def _run_step(
         timeout=timeout,
     )
     elapsed = round(time.perf_counter() - started, 3)
-    manifest["steps"].append(
-        {
-            "name": name,
-            "status": "passed" if result.returncode == 0 else "failed",
-            "returncode": result.returncode,
-            "elapsed_s": elapsed,
-            "command": list(map(str, command)),
-        }
-    )
+    step = {
+        "name": name,
+        "status": "passed" if result.returncode == 0 else "failed",
+        "returncode": result.returncode,
+        "elapsed_s": elapsed,
+        "command": list(map(str, command)),
+    }
+    if env_overrides:
+        step["env_overrides"] = dict(env_overrides)
+    manifest["steps"].append(step)
     return 0 if result.returncode == 0 else 1
 
 
 def _packaged_launch_command(exe_path: Path) -> list[str]:
     return [str(exe_path), "--smoke-exit-ms", "1000"]
+
+
+def _tile_cache_env_overrides(args: argparse.Namespace) -> dict[str, str] | None:
+    value = getattr(args, "p5_g6_tile_cache_mb", None)
+    if value is None:
+        return None
+    return {TILE_CACHE_MB_ENV_VAR: _format_number_arg(value)}
 
 
 def _oda_preflight(python: str) -> dict[str, Any]:
@@ -432,10 +580,21 @@ def _realset_command(args: argparse.Namespace, validation_dir: Path) -> list[str
     ]
     if not args.skip_selected_zone_evidence:
         command += [
+            "--p5-g3-realset-gate",
             "--render-selected-zone-evidence",
             "--selected-zone-evidence-per-pair",
             str(args.selected_zone_evidence_per_pair),
         ]
+    if args.require_p5_g3_tile_eviction:
+        command += [
+            "--p5-g3-require-tile-eviction",
+            "--p5-g3-min-tile-evicted-pairs",
+            str(args.p5_g3_min_tile_evicted_pairs),
+            "--p5-g3-min-tile-evicted-bytes",
+            str(args.p5_g3_min_tile_evicted_bytes),
+        ]
+    if args.p5_g6_tile_cache_mb is not None:
+        command += ["--p5-g6-tile-cache-mb", _format_number_arg(args.p5_g6_tile_cache_mb)]
     if not args.skip_marked_pdf:
         command += ["--export-marked-pdf", "--marked-pdf-mode", "selected"]
     if args.cloud_selection_csv:
@@ -508,11 +667,30 @@ def _mvp_exit_audit_command(
             str(args.customer_evidence_manifest.resolve()),
             "--evidence-level",
             "customer_grade",
+            "--require-p5-g3-realset-gate",
         ]
+    if args.require_p5_g3_tile_eviction:
+        command += [
+            "--require-p5-g3-tile-eviction",
+            "--p5-g3-min-tile-evicted-pairs",
+            str(args.p5_g3_min_tile_evicted_pairs),
+            "--p5-g3-min-tile-evicted-bytes",
+            str(args.p5_g3_min_tile_evicted_bytes),
+        ]
+    if args.p5_g6_tile_cache_mb is not None:
+        command += ["--p5-g6-tile-cache-mb", _format_number_arg(args.p5_g6_tile_cache_mb)]
     if args.large_dwg_probe:
         command += ["--large-dwg-probe", str(args.large_dwg_probe.resolve())]
     if args.require_large_dwg_probe:
         command += ["--require-large-dwg-probe"]
+    for benchmark_json in args.p5_g16_benchmark_json:
+        command += ["--p5-g16-benchmark-json", str(benchmark_json.resolve())]
+    for soak_json in args.p5_g22_gui_soak_json:
+        command += ["--p5-g22-gui-soak-json", str(soak_json.resolve())]
+    for crop_json in args.p5_g27_selected_zone_crop_json:
+        command += ["--p5-g27-selected-zone-crop-json", str(crop_json.resolve())]
+    for cache_json in args.p5_g28_cache_plateau_json:
+        command += ["--p5-g28-cache-plateau-json", str(cache_json.resolve())]
     return command
 
 
@@ -551,6 +729,26 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
         ROOT / "scripts" / "inventory_drawing_compare_customer_evidence.py",
         cli_dir / "inventory_drawing_compare_customer_evidence.py",
     )
+    shutil.copy2(
+        ROOT / "scripts" / "closeout_drawing_compare_customer_evidence.py",
+        cli_dir / "closeout_drawing_compare_customer_evidence.py",
+    )
+    shutil.copy2(
+        ROOT / "scripts" / "audit_closeout_readiness.py",
+        cli_dir / "audit_closeout_readiness.py",
+    )
+    shutil.copy2(
+        ROOT / "scripts" / "benchmark_real_corpus_replay.py",
+        cli_dir / "benchmark_real_corpus_replay.py",
+    )
+    shutil.copy2(
+        ROOT / "scripts" / "benchmark_actual_gui_soak.py",
+        cli_dir / "benchmark_actual_gui_soak.py",
+    )
+    shutil.copy2(
+        ROOT / "scripts" / "benchmark_workbench_gui_hotpath.py",
+        cli_dir / "benchmark_workbench_gui_hotpath.py",
+    )
 
     readme = out_dir / "README_INTERNAL_PILOT.md"
     readme.write_text(
@@ -567,14 +765,22 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
                 "Run the real-set validator from the source checkout in customer-shareable review-queue mode:",
                 "",
                 "```powershell",
-                "python scripts\\validate_drawing_compare_realset.py --a <A> --b <B> --out <out> --export-profile sharable --quality-gate --change-zone-report --executive-review --review-dashboard --export-viewer-package --viewer-render-policy top-issues --viewer-perf-log --render-selected-zone-evidence --selected-zone-evidence-per-pair 1 --export-marked-pdf --marked-pdf-mode selected",
+                "python scripts\\validate_drawing_compare_realset.py --a <A> --b <B> --out <out> --export-profile sharable --quality-gate --p5-g3-realset-gate --change-zone-report --executive-review --review-dashboard --export-viewer-package --viewer-render-policy top-issues --viewer-perf-log --render-selected-zone-evidence --selected-zone-evidence-per-pair 1 --export-marked-pdf --marked-pdf-mode selected",
                 "```",
                 "",
                 "For the CAD block attribute/text policy gate, include at least one CAD validation run with `--no-expand-blocks` on a set where block attribute/text changes such as `@100 -> @200` are expected; do not use `--no-block-text-detection` for that evidence run.",
                 "For the large-DWG performance/progress gate, include the S20 or equivalent large-DWG probe JSON with `--large-dwg-probe <large_dwg_probe.json> --require-large-dwg-probe` in the final audit command. The probe must show bounded elapsed time, streamed change-zone output, capped in-memory records, and forwarded DXF compare progress.",
+                "For the P5-G16 real-corpus replay gate, run `python cli\\benchmark_real_corpus_replay.py --validation-summary <validation>\\validation_summary.json --customer-evidence-manifest <customer_evidence_manifest.json> --output-json <validation>\\p5_g16_real_corpus_replay.json --require-customer-corpus` after the seed customer manifest exists and before the final audit. The closeout runner plans this automatically for replayable standard validation outputs and forwards `--p5-g16-benchmark-json` to final manifest preparation and the final audit.",
+                "For the P5-G22 actual GUI soak gate, run `python cli\\benchmark_actual_gui_soak.py --validation-summary <validation>\\validation_summary.json --customer-evidence-manifest <customer_evidence_manifest.json> --output-json <validation>\\p5_g22_actual_gui_soak.json --require-customer-corpus` after the seed customer manifest exists and before the final audit. The closeout runner plans this automatically for replayable standard validation outputs and forwards `--p5-g22-gui-soak-json` to final manifest preparation and the final audit.",
+                "For the P5-G26 selection-latency gate, run `python cli\\benchmark_workbench_gui_hotpath.py --include-p5-g26-contract --include-zone-selection-hotpath --output <validation>\\p5_g26_selection_latency_soak.json` and keep the JSON beside the audited `validation_summary.json`, or pass it explicitly to manifest preparation/final audit with `--p5-g26-selection-latency-json`. The final audit also discovers `<results-dir>\\p5_g26_selection_latency_soak.json` automatically.",
+                "For the P5-G27 crop-first gate, the closeout runner generates `p5_g27_selected_zone_crop_soak.json` after P5-G16 replay and passes `--p5-g27-real-renderer-bridge-json <p5_g16_real_corpus_replay.json>`. If a P5-G27 JSON is supplied externally, it must include `p5_g27_real_renderer_bridge` to a passed P5-G16 replay so crop-first lifecycle safety is tied to nonblank real selected-zone render artifacts.",
+                "For the standalone P5-G28 cache-plateau gate, either pass an existing `p5_g28_cache_plateau_soak.json` with `--p5-g28-cache-plateau-json`, or let closeout generate one from at least two validation summaries. For an isolated lifecycle source, add `--p5-g28-cache-plateau-validation-manifest <manifest> --p5-g28-cache-plateau-runs 2`; those lifecycle validation outputs feed the P5-G28 soak but stay out of the final audit `--results-dir` corpus. Tune repeated evidence with `--p5-g28-live-counter-min-sources` and `--p5-g28-live-counter-tail-slope-target-bytes`, or use `--skip-p5-g28-cache-plateau-soak` when valid P5-G28 evidence is supplied elsewhere. The closeout runner forwards planned P5-G28 JSON to final manifest preparation and final audit, and adds `--require-p5-g28-cache-plateau-soak` only when the plan carries P5-G28 evidence. P5-G28 remains outside the default customer-grade/P5-G30 blockers.",
+                "The P5-G30 composite customer visual-performance release gate is the final blocker in `mvp_exit_audit.json`: `p5_g30_customer_visual_performance_release_gate` must pass only after P5-G3, P5-G16, P5-G22, P5-G24, P5-G26, and P5-G27 audit checks are all present and passing.",
+                "For a controlled P5-G6 tile-eviction probe, run the validator/release orchestrator with a deliberately low tile-cache byte cap and pass `--p5-g6-tile-cache-mb 0.25 --require-p5-g6-tile-eviction --p5-g6-min-tile-evicted-pairs 1 --p5-g6-min-tile-evicted-bytes 1` (P5-G3 spellings such as `--require-p5-g3-tile-eviction` are kept as compatibility aliases). The command records the `DRAWING_COMPARE_TILE_CACHE_MB` override in release steps and validation evidence. This is optional for routine customer-grade evidence but required when claiming realset tile eviction, not only synthetic P5-G2 soak coverage.",
+                "When a release claim includes realset tile eviction, keep the forced P5-G7 proof separate from the 20-50 sheet customer corpus. Pass proof outputs only through `--p5-g7-tile-eviction-proof-dir` and never as final audit `--results-dir`; use `closeout_drawing_compare_customer_evidence.py` to enforce that routing.",
                 "",
                 "For structural-core recall validation, copy `review_ground_truth_template.csv` to a customer evidence filename such as `review_ground_truth.csv`, replace every example row with approved customer/customer-grade expected changes, and pass the copy as `--review-ground-truth <csv>`. Do not pass the template file itself or a copy that still contains example/sample/template markers; inventory, manifest preparation, and final audit reject template/handoff paths and copied example rows as customer evidence. The completed CSV must keep the required schema `drawing_label,category,summary_contains,source_format,detection_source,bbox_status`; pipe-separated values mean 'any of these accepted values'. Each expected structural change should have enough fields to match one Top review_queue item.",
-                "Customer-grade exit also requires 20-50 completed sheets/pairs, direct first-interactive evidence (`first_interactive_ready.review_dashboard_ready_s <= 600`, speed/fast profiles <= 300, `first_top_issue_ready_s <= 600`, `viewer_metadata_ready_s <= 900`), plus selected-zone render telemetry for every completed output (`cold p95 <= 10000ms`, `cache-hit p95 <= 2000ms`).",
+                "Customer-grade exit also requires 20-50 completed sheets/pairs, direct first-interactive evidence (`first_interactive_ready.review_dashboard_ready_s <= 600`, speed/fast profiles <= 300, `first_top_issue_ready_s <= 600`, `viewer_metadata_ready_s <= 900`), selected-zone render telemetry for every completed output (`cold p95 <= 10000ms`, `cache-hit p95 <= 2000ms`), and a passed P5-G3 realset gate covering runtime budget, viewer perf, selected-zone, nonblank, and tile-manifest evidence.",
                 "`timings.total_s <= 1800` remains an operational batch bound, but customer UX pass/fail is based on the direct first-interactive metrics above.",
                 "Precision and dataset representativeness are hard gates: provide `review_decision_truth.csv` via `--review-decision-truth` and `dataset_strata.csv` via `--dataset-strata`; inventory/prepare/audit reject templates, copied examples, low precision, high false-positive rate, and insufficient strata.",
                 "",
@@ -582,8 +788,22 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
                 "Copy `operator_dry_run_checklist_template.md` to a real operator notes filename such as `operator_dry_run_notes.md` and complete that copy during the dry run. Keep `reviewer_role: structural_review_lead` or replace it with another approved structural review lead/team lead role such as `구조검토책임자`, `구조검토팀장`, `구조도면검토책임자`, or `구조도면검토팀장`, check each workflow row as `[x]`, and write at least one concrete observation under `Operator notes:` covering the reviewed drawing/zone, synchronized Before/After review, decisions, confirmed-only export, and path audit result; the template file itself is rejected as evidence, and placeholder notes or copied checklist-only files are rejected too.",
                 "Use `mvp_exit_prompt_to_artifact_checklist.md` as the prompt-to-artifact audit map before declaring the MVP complete.",
                 "Use `customer_evidence_closeout_packet.md` as the handoff sheet for the remaining external artifacts, the required inventory status, manifest generation command, and final customer-grade audit command.",
+                "Use `cli\\closeout_drawing_compare_customer_evidence.py` as the preferred one-command closeout runner when chaining corpus validation, optional P5-G7 forced tile-eviction proof validation, seed manifest generation, P5-G16 real-corpus replay, bridge-bearing P5-G27 selected-zone crop-first generation, P5-G22 actual GUI soak, optional standalone P5-G28 cache plateau forwarding or generation, final manifest preparation, and the final audit.",
                 "Use `customer_evidence_request_ko.md` as the Korean request sheet for the structural review lead/team lead who must provide the approved ground truth and dry-run notes.",
-                "The manifest's `review_ground_truth_csv`, `review_decision_truth_csv`, `dataset_strata_csv`, `audit_json`, large-DWG probe, and operator dry-run artifact fields must point to real artifacts, not release templates, handoff docs, or quick references; the exit audit cross-checks dataset provenance, row counts, sheet counts, format coverage, precision, strata, first-interactive readiness, bbox fallback quality, operator workflow evidence, and path leakage against the validation outputs.",
+                "The manifest's `review_ground_truth_csv`, `review_decision_truth_csv`, `dataset_strata_csv`, `audit_json`, large-DWG probe, and operator dry-run artifact fields must point to real artifacts, not release templates, handoff docs, or quick references; the exit audit cross-checks dataset provenance, row counts, sheet counts, format coverage, precision, strata, first-interactive readiness, bbox fallback quality, operator workflow evidence, visual-performance gates, and path leakage against the validation outputs.",
+                "",
+                "Recommended one-command closeout from a release folder:",
+                "",
+                "```powershell",
+                "python cli\\closeout_drawing_compare_customer_evidence.py --source-checkout <source_checkout> --out <closeout_out> --standard-results-dir <dwg_validation> --standard-results-dir <pdf_validation> --standard-results-dir <cad_pdf_block_validation> --standard-results-dir <cad_block_text_no_expand_validation> --customer-evidence-manifest <customer_evidence_manifest.json> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --review-ground-truth <review_ground_truth.csv> --review-decision-truth <review_decision_truth.csv> --dataset-strata <dataset_strata.csv> --operator-notes-file <operator_dry_run_notes.md> --confirmed-export-artifact <artifacts\\confirmed_clouds\\pair_confirmed.png> --dataset-id <dataset_id> --dataset-source-description \"20-50 sheet customer-grade validation set approved for MVP exit\" --dataset-approver <approver> --ground-truth-owner <owner> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000",
+                "```",
+                "",
+                "Before running the closeout command for real, add `--dry-run --plan-json <closeout_plan.json> --readiness-json <closeout_readiness.json>` to validate source-checkout prerequisites, customer evidence inputs, existing validation output sentinels, seed manifest ordering, P5-G16 replay routing, P5-G27 bridge-bearing generation/routing, P5-G22 GUI soak routing, optional P5-G28 cache plateau forwarding/generation, lifecycle validation summary routing, and the proof/corpus routing plan without launching subprocesses. Then run `python cli\\audit_closeout_readiness.py --readiness-json <closeout_readiness.json> --plan-json <closeout_plan.json> --require-ready --out <closeout_readiness_audit.json>` and require `status=passed` before launching full closeout. Generated or supplied P5-G27 JSON must include `p5_g27_real_renderer_bridge` to the passed P5-G16 replay so final audit can bind crop-first lifecycle safety to real nonblank selected-zone render artifacts. The source checkout must include `scripts/benchmark_workbench_gui_hotpath.py` plus `src/services/comparison/manifest_provenance.py` so generated P5-G27/P5-G28 evidence and the generated manifest can pass provenance verification. The readiness report records `status=ready_for_closeout` or `status=preflight_failed`, `preflight.issue_count`, `preflight.issues`, `outputs.plan_json`, `outputs.readiness_json`, `outputs.failure_json`, `outputs.inventory_json`, `outputs.customer_evidence_manifest`, `outputs.audit_json`, `routing_expectations.require_p5_g7_tile_eviction_proof`, `routing_expectations.p5_g16_real_corpus_replay_generation_enabled`, `routing_expectations.p5_g22_actual_gui_soak_generation_enabled`, `routing_expectations.p5_g27_selected_zone_crop_generation_enabled`, `routing_expectations.generated_p5_g27_selected_zone_crop_count`, `routing_expectations.p5_g28_cache_plateau_generation_enabled`, `routing_expectations.p5_g28_cache_plateau_runs`, `routing_expectations.p5_g28_live_counter_min_sources`, `routing_expectations.p5_g28_live_counter_tail_slope_target_bytes`, `routing_expectations.generated_p5_g28_cache_plateau_count`, `routing_expectations.p5_g28_cache_plateau_lifecycle_result_count`, `routing_expectations.p5_g28_validation_summary_count`, `routing_expectations.p5_g28_cache_plateau_planned_json_count`, `plan.available=true`, `plan.step_count`, `plan.invariants.proof_dirs_excluded_from_final_audit_results_dir=true`, `plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan=true`, `plan.invariants.final_audit_p5_g22_gui_soak_jsons_equal_plan=true`, `plan.invariants.final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true`, `plan.invariants.final_audit_p5_g28_cache_plateau_jsons_equal_plan=true`, and `plan.invariants.final_audit_p5_g28_cache_plateau_require_matches_plan=true`.",
+                "Retain `closeout_readiness.json` with `closeout_plan.json` and `closeout_readiness_audit.json`, plus `inventory.json`, `customer_evidence_manifest.json`, `p5_g16_real_corpus_replay.json`, `p5_g22_actual_gui_soak.json`, `p5_g27_selected_zone_crop_soak.json`, optional/generated `p5_g28_cache_plateau_soak.json`, and `mvp_exit_audit.json` as the final closeout evidence packet. If P5-G28 lifecycle validation outputs were generated, retain them as support artifacts but do not add them to the final audit corpus. Do not run full closeout unless the readiness audit has `status=passed`, readiness `status=ready_for_closeout`, `preflight.status=passed`, `preflight.issue_count=0`, and the plan invariants are true. If `status=preflight_failed`, attach `closeout_readiness.json` as the preflight failure report and resolve `preflight.issues` before rerun.",
+                "",
+                "If any closeout subprocess returns non-zero, the closeout runner writes `<closeout_out>\\closeout_failure.json` by default, or the path supplied with `--failure-json <closeout_failure.json>`. Retain it with `closeout_plan.json` and the parent console log before rerunning. The report records `failure_kind=subprocess_nonzero_exit`, `failed_step.name`, `failed_step.returncode`, `failed_step.command_context`, `completed_steps`, `remaining_steps`, `plan_invariants`, `triage_hints`, and `stdout_stderr.capture_mode=inherited_console`.",
+                "",
+                "If the release includes a P5-G7 realset tile-eviction claim, add `--p5-g7-proof-validation-manifest <proof_manifest.json>` or `--p5-g7-tile-eviction-proof-dir <proof_validation>`, plus `--require-p5-g7-tile-eviction-proof --p5-g6-tile-cache-mb 0.25 --p5-g6-min-tile-evicted-pairs 1 --p5-g6-min-tile-evicted-bytes 1`. The closeout runner forwards the proof only to inventory/manifest proof fields and excludes it from the final audit corpus `--results-dir` list.",
                 "",
                 "Before manifest generation, inventory the evidence folder to see missing customer-grade blockers and suggested commands:",
                 "",
@@ -598,13 +818,13 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
                 "You can generate the manifest from completed validation outputs and operator artifacts:",
                 "",
                 "```powershell",
-                "python cli\\prepare_drawing_compare_customer_evidence.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --out <customer_evidence_manifest.json> --dataset-id <dataset_id> --dataset-source-kind customer_grade --dataset-source-description \"20-50 sheet customer-grade validation set approved for MVP exit\" --dataset-approval-status approved_for_mvp_exit --dataset-approver <approver> --ground-truth-owner <owner> --review-ground-truth <review_ground_truth.csv> --ground-truth-status approved --review-decision-truth <review_decision_truth.csv> --dataset-strata <dataset_strata.csv> --large-dwg-probe <large_dwg_probe.json> --operator-reviewer-role structural_review_lead --operator-notes-file <operator_notes.md> --confirmed-export-artifact <artifacts\\confirmed_clouds\\pair_confirmed.png> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000",
+                "python cli\\prepare_drawing_compare_customer_evidence.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --out <customer_evidence_manifest.json> --dataset-id <dataset_id> --dataset-source-kind customer_grade --dataset-source-description \"20-50 sheet customer-grade validation set approved for MVP exit\" --dataset-approval-status approved_for_mvp_exit --dataset-approver <approver> --ground-truth-owner <owner> --review-ground-truth <review_ground_truth.csv> --ground-truth-status approved --review-decision-truth <review_decision_truth.csv> --dataset-strata <dataset_strata.csv> --large-dwg-probe <large_dwg_probe.json> --p5-g16-benchmark-json <p5_g16_real_corpus_replay.json> --operator-reviewer-role structural_review_lead --operator-notes-file <operator_notes.md> --confirmed-export-artifact <artifacts\\confirmed_clouds\\pair_confirmed.png> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000",
                 "```",
                 "",
                 "After validation, run the MVP exit audit across the evidence folders:",
                 "",
                 "```powershell",
-                "python cli\\audit_drawing_compare_mvp_exit.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --require-large-dwg-probe --customer-evidence-manifest <customer_evidence_manifest.json> --evidence-level customer_grade --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000 --out <audit.json>",
+                "python cli\\audit_drawing_compare_mvp_exit.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --require-large-dwg-probe --customer-evidence-manifest <customer_evidence_manifest.json> --evidence-level customer_grade --require-p5-g3-realset-gate --p5-g16-benchmark-json <p5_g16_real_corpus_replay.json> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000 --out <audit.json>",
                 "```",
                 "",
                 "The release orchestrator can run the same gate with `--run-mvp-exit-audit --customer-evidence-manifest <customer_evidence_manifest.json> --exit-audit-results-dir <extra_validation_dir>`. Include the no-expand CAD block-text validation output as one of the final audit result sources. `--run-mvp-exit-audit` requires a customer evidence manifest and a validation result source with `validation_summary.json` (`--a/--b` creating `<out>\\realset_validation`, an existing `<out>\\realset_validation`, or `--exit-audit-results-dir`) so the release flow cannot silently run a synthetic final gate.",
@@ -638,6 +858,7 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
                 "review_dashboard": True,
                 "export_viewer_package": True,
                 "viewer_render_policy": args.viewer_render_policy,
+                "p5_g3_realset_gate": True,
                 "export_marked_pdf": not args.skip_marked_pdf,
                 "marked_pdf_mode": "selected",
                 "cloud_selection_csv": str(args.cloud_selection_csv) if args.cloud_selection_csv else None,
@@ -754,6 +975,17 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
             "progress_max_gap_s": 0.0,
             "cancel_probe": {},
         },
+        "p5_g7_forced_tile_eviction": {
+            "schema_version": 1,
+            "status": "not_provided",
+            "required": False,
+            "expected_tile_cache_mb": None,
+            "proof_count": 0,
+            "passed_proof_count": 0,
+            "proofs": [],
+            "release_manifests": [],
+            "issues": [],
+        },
         "operator_dry_run": {
             "status": "",
             "reviewer_role": "",
@@ -866,20 +1098,29 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
         "| Large-DWG resource and cancel recovery are proven | `large_dwg_probe.json`, manifest `large_dwg_resource_probe`, strict audit `large_dwg_resource_and_cancel_probe` | peak_rss_mb<=4096, progress_max_gap_s<=10, cancel status passed, cancel_to_idle_s<=10, partial outputs cleaned, worker_processes_left=0 |",
         "| First interactive screen is directly measured | `validation_summary.first_interactive_ready`, Workbench acceptance `runtime_metrics`, manifest `first_interactive_readiness` | Dashboard <=600s or speed <=300s; first top issue <=600s; viewer metadata <=900s; app open <=15000ms and first zone open <=5000ms where Workbench smoke is available |",
         "| Selected-zone performance meets MVP budgets | `viewer/viewer_perf.json`, `selected_zone_performance` in customer manifest | Telemetry covers every completed output; cold p95 <= 10000ms and cache-hit p95 <= 2000ms |",
+        "| P5-G3 realset performance gate passes | `validation_summary.p5_g3_realset_gate`, strict audit `p5_g3_realset_release_gate` | Runtime budget, viewer perf, selected-zone render, nonblank visual output, and tile-manifest payload consistency all pass for every completed validation output |",
+        "| P5-G16 real-corpus replay passes | `p5_g16_real_corpus_replay.json`, customer manifest `performance_benchmarks.p5_g16_real_corpus_replay`, strict audit `p5_g16_real_corpus_replay` | Replay JSON has `status=passed`, hashes match the audited validation summary and customer manifest, and final audit receives `--p5-g16-benchmark-json` or discovers the manifest reference |",
+        "| P5-G22 actual GUI soak passes | `p5_g22_actual_gui_soak.json`, customer manifest `performance_benchmarks.p5_g22_actual_gui_soak`, strict audit `p5_g22_actual_gui_soak` | GUI soak JSON has `status=passed`, hashes match the audited validation summary and customer manifest, final audit receives `--p5-g22-gui-soak-json`, and blank/stale/RSS/native-resource/worker cleanup gates pass |",
+        "| P5-G26 selection-latency soak passes | `p5_g26_selection_latency_soak.json`, strict audit `p5_g26_selection_latency_soak` | Selection-latency JSON has `status=passed`, declares all required P5-G26 gate names, final audit receives `--p5-g26-selection-latency-json` or discovers the result-dir sibling/manifest reference, GUI/PDF hot-path contracts pass, zone-selection p95 is within budget, and background-work/stale/CAD-to-PDF hot-path counts remain zero |",
+        "| P5-G27 selected-zone crop-first soak passes | `p5_g27_selected_zone_crop_soak.json`, customer manifest `performance_benchmarks.p5_g27_selected_zone_crop`, strict audit `p5_g27_selected_zone_crop_soak` | Crop-first JSON has `status=passed`, includes `p5_g27_real_renderer_bridge` to passed `p5_g16_real_corpus_replay.json`, final audit receives `--p5-g27-selected-zone-crop-json` or discovers the manifest/result-dir reference, crop is visible before vector focus, vector failure preserves background, real selected-zone render artifacts are nonblank/present, and blank/stale/cancel/timeout/fallback/orphan gates pass |",
+        "| Optional P5-G28 cache plateau evidence is routed only when planned or generated | `p5_g28_cache_plateau_soak.json`, customer manifest `performance_benchmarks.p5_g28_cache_plateau`, strict audit `p5_g28_cache_plateau_soak` | When supplied with `--p5-g28-cache-plateau-json` or generated from repeated validation summaries/lifecycle manifests, final manifest preparation and final audit receive the same JSON, the final audit command includes `--require-p5-g28-cache-plateau-soak` inside the closeout plan, lifecycle validation dirs stay out of final audit `--results-dir`, and readiness invariants `final_audit_p5_g28_cache_plateau_jsons_equal_plan=true` plus `final_audit_p5_g28_cache_plateau_require_matches_plan=true` pass. When not supplied/generated, P5-G28 is not a customer-grade/P5-G30 blocker |",
+        "| P5-G30 composite customer visual-performance release gate passes | `mvp_exit_audit.json`, strict audit `p5_g30_customer_visual_performance_release_gate` | Composite check passes and its evidence shows `p5_g3_realset_release_gate`, `p5_g16_real_corpus_replay`, `p5_g22_actual_gui_soak`, `p5_g24_visual_asset_policy`, `p5_g26_selection_latency_soak`, and `p5_g27_selected_zone_crop_soak` all passed |",
+        "| P5-G7 forced tile-eviction proof is preserved when claimed | `p5_g7_forced_tile_eviction` in customer manifest, optional proof validation output | If realset tile eviction is claimed, proof output is passed via `--p5-g7-tile-eviction-proof-dir`, not counted in the 20-50 sheet corpus and not included in final audit `--results-dir` |",
+        "| Closeout pre-execution readiness is captured and independently audited | `closeout_readiness.json` and `closeout_plan.json` from `cli\\closeout_drawing_compare_customer_evidence.py --dry-run --plan-json <closeout_plan.json> --readiness-json <closeout_readiness.json>`, then `closeout_readiness_audit.json` from `cli\\audit_closeout_readiness.py --readiness-json <closeout_readiness.json> --plan-json <closeout_plan.json> --require-ready` | readiness audit `status=passed`; readiness `status=ready_for_closeout`; `preflight.status=passed`; `preflight.issue_count=0`; output paths are set; `plan.available=true`; `plan.invariants.proof_dirs_excluded_from_final_audit_results_dir=true`; `plan.invariants.final_audit_results_dirs_equal_standard_result_dirs=true`; generated P5-G28 lifecycle validation outputs, if any, are excluded from final audit results; `plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan=true`; `plan.invariants.final_audit_p5_g22_gui_soak_jsons_equal_plan=true`; `plan.invariants.final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true`; `plan.invariants.final_audit_p5_g28_cache_plateau_jsons_equal_plan=true`; `plan.invariants.final_audit_p5_g28_cache_plateau_require_matches_plan=true`; tile-cache env is isolated to proof validation steps |",
         "| PDF selected-zone fallback quality is bounded | review queue and selected-zone evidence `bbox_status`, manifest `bbox_quality`, strict audit `pdf_selected_zone_bbox_quality` | Top-priority relative_only is forbidden; relative_only ratio<=0.10; page_fallback ratio<=0.30 |",
-        "| Operational preflight passed | `preflight_report.json`, strict audit `preflight_passed` | ODA, PyMuPDF, rtree, cache/state/output, disk/temp, long path, font, PDF support checks passed |",
+        "| Operational preflight passed | `preflight_report.json`, strict audit `preflight_passed` | Legacy ODA fallback not required for customer builds; PyMuPDF, rtree, cache/state/output, disk/temp, long path, font, PDF support checks passed |",
         "| Pre-final inventory has no stale customer manifest warnings | `inventory.json` from `inventory_drawing_compare_customer_evidence.py --large-dwg-probe <large_dwg_probe.json>` | `status=ready_for_manifest`, `diagnostics.large_dwg_probe_passed=true`, `customer_evidence_manifest_summaries` checked, and no entries in `diagnostics.customer_evidence_manifests_not_ready` or `diagnostics.customer_evidence_manifests_missing_approved_ground_truth` |",
         "| Customer/customer-grade evidence is declared and approved | `customer_evidence_manifest.json` generated by `prepare_drawing_compare_customer_evidence.py` | `dataset_provenance.source_kind` is `customer` or `customer_grade`, `approval_status=approved_for_mvp_exit`, approver set |",
         "| Structural-core recall is proven by approved ground truth | `review_ground_truth.csv`, validation `review_ground_truth` metrics, strict audit `structural_review_queue_recall` and `structural_core_coverage` | `ground_truth.status=approved`; required buckets are represented; `review_ground_truth.csv` keeps required columns `drawing_label,category,summary_contains,source_format,detection_source,bbox_status`; expected changes match Top review_queue items |",
         "| Review queue precision and false-positive burden are bounded | `review_decision_truth.csv`, manifest `review_decision_quality`, strict audit `review_queue_precision` | Labeled rows >=20, overall precision >=0.85, bucket precision >=0.75, false-positive rate <=0.15, bucket rows >=2 |",
         "| Dataset is risk-stratified, not count-only | `dataset_strata.csv`, manifest `dataset_strata`, strict audit `dataset_strata_coverage` | Rows equal sheet_count; CAD>=8, PDF-PDF>=8, raster/low-quality>=2, large-DWG>=2, block-text>=2, each sheet type>=2, negative/control>=2 |",
         "| Operator dry-run exercised the review-lead workflow | Completed `operator_dry_run_notes.md` copied from the checklist template, screenshots, manifest `operator_dry_run` | `reviewer_role` is an approved structural review lead/team lead role; required workflow ids are checked: input selection, auto compare, Top queue, sync zoom, Korean summary, decisions, confirmed-only export, path audit; substantive observed notes are present; template/handoff paths are rejected as evidence; checklist-only copies are rejected as evidence |",
-        "| Final release audit is customer-grade | `mvp_exit_audit.json` from `audit_drawing_compare_mvp_exit.py --evidence-level customer_grade` | Audit status is `passed`; no failed checks remain |",
+        "| Final release audit is customer-grade | `mvp_exit_audit.json` from `audit_drawing_compare_mvp_exit.py --evidence-level customer_grade` | Audit status is `passed`; no failed checks remain; `p5_g30_customer_visual_performance_release_gate` is present and passed |",
         "",
         "Minimum final command:",
         "",
         "```powershell",
-        "python cli\\audit_drawing_compare_mvp_exit.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --require-large-dwg-probe --customer-evidence-manifest <customer_evidence_manifest.json> --evidence-level customer_grade --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000 --out <mvp_exit_audit.json>",
+        "python cli\\audit_drawing_compare_mvp_exit.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --require-large-dwg-probe --customer-evidence-manifest <customer_evidence_manifest.json> --evidence-level customer_grade --require-p5-g3-realset-gate --p5-g16-benchmark-json <p5_g16_real_corpus_replay.json> --p5-g22-gui-soak-json <p5_g22_actual_gui_soak.json> --p5-g27-selected-zone-crop-json <p5_g27_selected_zone_crop_soak.json> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000 --out <mvp_exit_audit.json>",
         "```",
     ]
     (out_dir / "mvp_exit_prompt_to_artifact_checklist.md").write_text(
@@ -924,10 +1165,24 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
         "- `diagnostics.customer_evidence_manifests_not_ready=[]`.",
         "- `diagnostics.customer_evidence_manifests_missing_approved_ground_truth=[]`.",
         "",
+        "## One-Command Closeout Runner",
+        "",
+        "```powershell",
+        "python cli\\closeout_drawing_compare_customer_evidence.py --source-checkout <source_checkout> --out <closeout_out> --standard-results-dir <dwg_validation> --standard-results-dir <pdf_validation> --standard-results-dir <cad_pdf_block_validation> --standard-results-dir <cad_block_text_no_expand_validation> --customer-evidence-manifest <customer_evidence_manifest.json> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --review-ground-truth <review_ground_truth.csv> --review-decision-truth <review_decision_truth.csv> --dataset-strata <dataset_strata.csv> --operator-notes-file <operator_dry_run_notes.md> --confirmed-export-artifact <artifacts\\confirmed_clouds\\pair_confirmed.png> --dataset-id <dataset_id> --dataset-source-description \"20-50 sheet customer-grade validation set approved for MVP exit\" --dataset-approver <approver> --ground-truth-owner <owner> --min-total-pairs 20 --max-total-pairs 50",
+        "```",
+        "",
+        "Run the same command first with `--dry-run --plan-json <closeout_plan.json> --readiness-json <closeout_readiness.json>`. Then run `python cli\\audit_closeout_readiness.py --readiness-json <closeout_readiness.json> --plan-json <closeout_plan.json> --require-ready --out <closeout_readiness_audit.json>`. The dry run fails early when `--source-checkout` lacks `scripts/benchmark_workbench_gui_hotpath.py` or `src/services/comparison/manifest_provenance.py`, when required customer evidence files are missing, or when existing validation outputs do not contain both `validation_summary.json` and `_SUCCESS`. The readiness audit fails if the plan and readiness summary disagree, the seed manifest step is missing before generated benchmark steps, P5-G16 replay JSON, bridge-bearing P5-G27 crop-first JSON, P5-G22 GUI soak JSON, or planned/generated P5-G28 cache plateau JSON is not routed through final prepare/evidence/final-audit steps, P5-G28 lifecycle validation dirs enter final audit `--results-dir`, proof dirs enter final audit `--results-dir`, or `DRAWING_COMPARE_TILE_CACHE_MB` leaks outside P5-G7 proof validation steps. Keep `p5_g26_selection_latency_soak.json` beside the audited `validation_summary.json` or pass it explicitly to manifest preparation/final audit so customer-grade P5-G26 can be discovered. Generated or supplied P5-G27 JSON must include `p5_g27_real_renderer_bridge` to the passed P5-G16 replay so final audit can bind crop-first lifecycle safety to real nonblank selected-zone render artifacts. If optional P5-G28 is used, the closeout plan can carry supplied `--p5-g28-cache-plateau-json` or generate `p5_g28_cache_plateau_soak.json` from repeated validation summaries; for an isolated source use `--p5-g28-cache-plateau-validation-manifest <manifest> --p5-g28-cache-plateau-runs 2`, tune it with `--p5-g28-live-counter-min-sources` and `--p5-g28-live-counter-tail-slope-target-bytes`, or suppress generation with `--skip-p5-g28-cache-plateau-soak`, and require it only with `--require-p5-g28-cache-plateau-soak` inside that plan. The final audit must then pass `p5_g30_customer_visual_performance_release_gate`, proving P5-G3, P5-G16, P5-G22, P5-G24, P5-G26, and P5-G27 were all discovered and passed together. The readiness report records `status=ready_for_closeout` or `status=preflight_failed`, `preflight.issue_count`, `preflight.issues`, `outputs.plan_json`, `outputs.readiness_json`, `outputs.failure_json`, `outputs.inventory_json`, `outputs.customer_evidence_manifest`, `outputs.audit_json`, `routing_expectations.require_p5_g7_tile_eviction_proof`, `routing_expectations.p5_g16_real_corpus_replay_generation_enabled`, `routing_expectations.p5_g22_actual_gui_soak_generation_enabled`, `routing_expectations.p5_g27_selected_zone_crop_generation_enabled`, `routing_expectations.generated_p5_g27_selected_zone_crop_count`, `routing_expectations.p5_g28_cache_plateau_generation_enabled`, `routing_expectations.p5_g28_cache_plateau_runs`, `routing_expectations.p5_g28_live_counter_min_sources`, `routing_expectations.p5_g28_live_counter_tail_slope_target_bytes`, `routing_expectations.generated_p5_g28_cache_plateau_count`, `routing_expectations.p5_g28_cache_plateau_lifecycle_result_count`, `routing_expectations.p5_g28_validation_summary_count`, `routing_expectations.p5_g28_cache_plateau_planned_json_count`, `plan.available=true`, `plan.step_count`, `plan.invariants.proof_dirs_excluded_from_final_audit_results_dir=true`, `plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan=true`, `plan.invariants.final_audit_p5_g22_gui_soak_jsons_equal_plan=true`, `plan.invariants.final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true`, `plan.invariants.final_audit_p5_g28_cache_plateau_jsons_equal_plan=true`, and `plan.invariants.final_audit_p5_g28_cache_plateau_require_matches_plan=true`.",
+        "",
+        "Retain `closeout_readiness.json` with `closeout_plan.json` and `closeout_readiness_audit.json`, plus `inventory.json`, `customer_evidence_manifest.json`, `p5_g16_real_corpus_replay.json`, `p5_g22_actual_gui_soak.json`, `p5_g26_selection_latency_soak.json`, `p5_g27_selected_zone_crop_soak.json`, optional/generated `p5_g28_cache_plateau_soak.json`, and `mvp_exit_audit.json` as the final closeout evidence packet. Retain generated P5-G28 lifecycle validation folders as support artifacts only, not final audit corpus dirs. Do not run full closeout unless the readiness audit has `status=passed`, readiness `status=ready_for_closeout`, `preflight.status=passed`, `preflight.issue_count=0`, and the plan invariants are true. If `status=preflight_failed`, attach `closeout_readiness.json` as the preflight failure report and resolve `preflight.issues` before rerun.",
+        "",
+        "If any closeout subprocess returns non-zero, retain `<closeout_out>\\closeout_failure.json` or the file supplied with `--failure-json <closeout_failure.json>` together with `closeout_plan.json` and the parent console log before rerunning. The failure report includes `failure_kind=subprocess_nonzero_exit`, `failed_step.name`, `failed_step.returncode`, `failed_step.command_context`, `completed_steps`, `remaining_steps`, `plan_invariants`, `triage_hints`, and `stdout_stderr.capture_mode=inherited_console`.",
+        "",
+        "For a release that claims realset tile-cache eviction, append `--p5-g7-proof-validation-manifest <proof_manifest.json>` or `--p5-g7-tile-eviction-proof-dir <proof_validation>`, plus `--require-p5-g7-tile-eviction-proof --p5-g6-tile-cache-mb 0.25 --p5-g6-min-tile-evicted-pairs 1 --p5-g6-min-tile-evicted-bytes 1`. The closeout runner preserves proof evidence in `p5_g7_forced_tile_eviction` and keeps it out of the final audit `--results-dir` corpus.",
+        "",
         "## Generate Customer Evidence Manifest",
         "",
         "```powershell",
-        "python cli\\prepare_drawing_compare_customer_evidence.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --out <customer_evidence_manifest.json> --dataset-id <dataset_id> --dataset-source-kind customer_grade --dataset-source-description \"20-50 sheet customer-grade validation set approved for MVP exit\" --dataset-approval-status approved_for_mvp_exit --dataset-approver <approver> --ground-truth-owner <owner> --review-ground-truth <review_ground_truth.csv> --ground-truth-status approved --review-decision-truth <review_decision_truth.csv> --dataset-strata <dataset_strata.csv> --large-dwg-probe <large_dwg_probe.json> --operator-reviewer-role structural_review_lead --operator-notes-file <operator_dry_run_notes.md> --confirmed-export-artifact <artifacts\\confirmed_clouds\\pair_confirmed.png> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000",
+        "python cli\\prepare_drawing_compare_customer_evidence.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --out <customer_evidence_manifest.json> --dataset-id <dataset_id> --dataset-source-kind customer_grade --dataset-source-description \"20-50 sheet customer-grade validation set approved for MVP exit\" --dataset-approval-status approved_for_mvp_exit --dataset-approver <approver> --ground-truth-owner <owner> --review-ground-truth <review_ground_truth.csv> --ground-truth-status approved --review-decision-truth <review_decision_truth.csv> --dataset-strata <dataset_strata.csv> --large-dwg-probe <large_dwg_probe.json> --p5-g16-benchmark-json <p5_g16_real_corpus_replay.json> --p5-g22-gui-soak-json <p5_g22_actual_gui_soak.json> --p5-g27-selected-zone-crop-json <p5_g27_selected_zone_crop_soak.json> --operator-reviewer-role structural_review_lead --operator-notes-file <operator_dry_run_notes.md> --confirmed-export-artifact <artifacts\\confirmed_clouds\\pair_confirmed.png> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000",
         "```",
         "",
         "The generated manifest must have `readiness.status=ready`, `readiness.issue_count=0`, `ground_truth.status=approved`, `review_decision_quality.status=passed`, `dataset_strata.status=passed`, `first_interactive_readiness.status=passed`, `bbox_quality.status=passed`, `large_dwg_resource_probe.status=passed`, `dataset_provenance.approval_status=approved_for_mvp_exit`, and `cad_policy_evidence.block_text_detection_without_expansion=true`.",
@@ -935,10 +1190,10 @@ def _write_release_templates(out_dir: Path, args: argparse.Namespace) -> None:
         "## Final Customer-Grade Audit",
         "",
         "```powershell",
-        "python cli\\audit_drawing_compare_mvp_exit.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --require-large-dwg-probe --customer-evidence-manifest <customer_evidence_manifest.json> --evidence-level customer_grade --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000 --out <mvp_exit_audit.json>",
+        "python cli\\audit_drawing_compare_mvp_exit.py --results-dir <dwg_validation> --results-dir <pdf_validation> --results-dir <cad_pdf_block_validation> --results-dir <cad_block_text_no_expand_validation> --release-manifest <release_manifest.json> --large-dwg-probe <large_dwg_probe.json> --require-large-dwg-probe --customer-evidence-manifest <customer_evidence_manifest.json> --evidence-level customer_grade --require-p5-g3-realset-gate --p5-g16-benchmark-json <p5_g16_real_corpus_replay.json> --p5-g22-gui-soak-json <p5_g22_actual_gui_soak.json> --p5-g27-selected-zone-crop-json <p5_g27_selected_zone_crop_soak.json> --min-total-pairs 20 --max-total-pairs 50 --max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 --max-cache-hit-zone-render-ms 2000 --out <mvp_exit_audit.json>",
         "```",
         "",
-        "Completion can be declared only when `<mvp_exit_audit.json>` has `status=passed` and zero failed checks.",
+        "Completion can be declared only when `<mvp_exit_audit.json>` has `status=passed`, zero failed checks, and `p5_g30_customer_visual_performance_release_gate` passed.",
     ]
     (out_dir / "customer_evidence_closeout_packet.md").write_text(
         "\n".join(closeout_packet) + "\n",

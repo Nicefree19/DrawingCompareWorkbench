@@ -8,13 +8,22 @@ import math
 import pytest
 
 from src.services.comparison.transform import (
+    COORDINATE_CONTRACT_VERSION,
+    COORD_CAD_WCS_MM,
+    COORD_IMAGE_PIXELS_TL,
+    SOURCE_TRUTH_CAD_ENTITY,
     DEGENERATE_SCALE,
     AffineParams,
     SharedCamera,
     apply_affine,
+    convert_bbox_to_world_space,
+    coordinate_space_y_axis,
     expand_bbox,
     fit_world_to_pixels,
+    normalize_coordinate_space,
     pixel_to_world,
+    source_truth_for_coordinate_space,
+    transform_bbox,
     union_bboxes,
     world_to_pixel,
 )
@@ -91,11 +100,68 @@ def test_to_manifest_dict_has_required_fields() -> None:
         "world_to_pixel",
         "pixel_to_world",
         "transform_quality",
+        "coordinate_contract_version",
+        "bbox_coordinate_space",
+        "source_truth",
+        "y_axis",
     ):
         assert key in d
     assert d["transform_quality"] == "exact"
+    assert d["coordinate_contract_version"] == COORDINATE_CONTRACT_VERSION
+    assert d["bbox_coordinate_space"] == COORD_CAD_WCS_MM
+    assert d["source_truth"] == SOURCE_TRUTH_CAD_ENTITY
+    assert d["y_axis"] == "up"
     assert len(d["world_to_pixel"]) == 6
     assert len(d["pixel_to_world"]) == 6
+
+
+def test_coordinate_space_aliases_normalise_to_canonical_contract() -> None:
+    assert normalize_coordinate_space("cad_world") == COORD_CAD_WCS_MM
+    assert normalize_coordinate_space("world_xy_2d") == COORD_CAD_WCS_MM
+    assert normalize_coordinate_space("image_pixels") == COORD_IMAGE_PIXELS_TL
+    assert coordinate_space_y_axis("image_pixels") == "down"
+    assert source_truth_for_coordinate_space("image_pixels") == "pdf_visual"
+
+
+def test_fit_metadata_can_describe_pdf_image_pixels() -> None:
+    p = fit_world_to_pixels(
+        (0.0, 0.0, 400.0, 300.0),
+        (400, 300),
+        coordinate_space="image_pixels",
+    )
+
+    assert p.coordinate_space == COORD_IMAGE_PIXELS_TL
+    assert p.source_truth == "pdf_visual"
+    assert p.y_axis == "down"
+
+
+def test_convert_bbox_to_world_space_pdf_image_pixels_flips_y() -> None:
+    out = convert_bbox_to_world_space(
+        [200.0, 300.0, 500.0, 600.0],
+        coordinate_space="image_pixels",
+        pdf_dpi=200.0,
+        page_height_points=841.89,
+    )
+
+    assert out == pytest.approx((72.0, 625.89, 180.0, 733.89), abs=0.01)
+
+
+def test_transform_bbox_uses_all_four_corners() -> None:
+    matrix = (2.0, 1.0, 10.0, -0.5, 3.0, 20.0)
+    out = transform_bbox(matrix, (0.0, 0.0, 10.0, 5.0))
+
+    points = [
+        apply_affine(matrix, 0.0, 0.0),
+        apply_affine(matrix, 0.0, 5.0),
+        apply_affine(matrix, 10.0, 0.0),
+        apply_affine(matrix, 10.0, 5.0),
+    ]
+    assert out == (
+        min(p[0] for p in points),
+        min(p[1] for p in points),
+        max(p[0] for p in points),
+        max(p[1] for p in points),
+    )
 
 
 def test_expand_bbox_grows_uniformly() -> None:

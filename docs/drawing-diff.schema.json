@@ -1,0 +1,557 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://drawing-compare.local/schemas/drawing-diff.schema.json",
+  "title": "DrawingDiff",
+  "description": "Deterministic diff result for two normalized CanonicalDrawing documents.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_a",
+    "source_b",
+    "options",
+    "summary",
+    "changes",
+    "warnings",
+    "metadata"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "drawing-diff/v1"
+    },
+    "source_a": {
+      "$ref": "#/$defs/SourceRef"
+    },
+    "source_b": {
+      "$ref": "#/$defs/SourceRef"
+    },
+    "options": {
+      "$ref": "#/$defs/CompareOptions"
+    },
+    "summary": {
+      "$ref": "#/$defs/Summary"
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DiffChange"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "match_candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Match"
+      }
+    }
+  },
+  "$defs": {
+    "NullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "SourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "drawing_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "title": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "format": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "path": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "file_name": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "sha256": {
+          "$ref": "#/$defs/NullableString"
+        }
+      }
+    },
+    "CompareOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tolerance",
+        "search_radius_mm",
+        "match_threshold",
+        "spatial_cell_size_mm",
+        "max_spatial_cells_per_entity",
+        "include_unchanged",
+        "include_entity_snapshots",
+        "include_match_candidates"
+      ],
+      "properties": {
+        "tolerance": {
+          "$ref": "#/$defs/Tolerance"
+        },
+        "search_radius_mm": {
+          "type": "number",
+          "minimum": 0
+        },
+        "match_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "spatial_cell_size_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "max_spatial_cells_per_entity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "include_unchanged": {
+          "type": "boolean"
+        },
+        "include_entity_snapshots": {
+          "type": "boolean"
+        },
+        "include_match_candidates": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Tolerance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "position_tolerance_mm",
+        "bbox_tolerance_mm",
+        "numeric_tolerance",
+        "angle_tolerance_deg",
+        "text_case_sensitive"
+      ],
+      "properties": {
+        "position_tolerance_mm": {
+          "type": "number",
+          "minimum": 0
+        },
+        "bbox_tolerance_mm": {
+          "type": "number",
+          "minimum": 0
+        },
+        "numeric_tolerance": {
+          "type": "number",
+          "minimum": 0
+        },
+        "angle_tolerance_deg": {
+          "type": "number",
+          "minimum": 0
+        },
+        "text_case_sensitive": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "added",
+        "removed",
+        "modified",
+        "unchanged",
+        "total_changes",
+        "total_records"
+      ],
+      "properties": {
+        "added": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "removed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modified": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unchanged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_changes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_records": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Point2D": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "BBox2D": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_x",
+        "min_y",
+        "max_x",
+        "max_y"
+      ],
+      "properties": {
+        "min_x": {
+          "type": "number"
+        },
+        "min_y": {
+          "type": "number"
+        },
+        "max_x": {
+          "type": "number"
+        },
+        "max_y": {
+          "type": "number"
+        }
+      }
+    },
+    "DiffChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_id",
+        "change_type",
+        "entity_type",
+        "layer_id",
+        "layer_name",
+        "old_entity_id",
+        "new_entity_id",
+        "location",
+        "bbox",
+        "old_bbox",
+        "new_bbox",
+        "match",
+        "geometry_diff",
+        "attribute_diffs",
+        "old_entity",
+        "new_entity",
+        "visualization"
+      ],
+      "properties": {
+        "change_id": {
+          "type": "string"
+        },
+        "change_type": {
+          "type": "string",
+          "enum": [
+            "added",
+            "removed",
+            "modified",
+            "unchanged"
+          ]
+        },
+        "entity_type": {
+          "type": "string"
+        },
+        "layer_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "layer_name": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "old_entity_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "new_entity_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "location": {
+          "$ref": "#/$defs/Point2D"
+        },
+        "bbox": {
+          "$ref": "#/$defs/BBox2D"
+        },
+        "old_bbox": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BBox2D"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_bbox": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BBox2D"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "match": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Match"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "geometry_diff": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/GeometryDiff"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attribute_diffs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FieldDiff"
+          }
+        },
+        "old_entity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/EntitySnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_entity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/EntitySnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visualization": {
+          "$ref": "#/$defs/Visualization"
+        }
+      }
+    },
+    "FieldDiff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "old",
+        "new"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "old": true,
+        "new": true,
+        "delta": {
+          "type": "number"
+        },
+        "tolerance": {
+          "type": "number"
+        }
+      }
+    },
+    "GeometryDiff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_type",
+        "changed",
+        "categories",
+        "fields",
+        "metrics"
+      ],
+      "properties": {
+        "entity_type": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FieldDiff"
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "Match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "old_entity_id",
+        "new_entity_id",
+        "score",
+        "components",
+        "centroid_distance_mm",
+        "bbox_iou"
+      ],
+      "properties": {
+        "old_entity_id": {
+          "type": "string"
+        },
+        "new_entity_id": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "components": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "centroid_distance_mm": {
+          "type": "number",
+          "minimum": 0
+        },
+        "bbox_iou": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "EntitySnapshot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "type",
+        "layer_id",
+        "bbox",
+        "centroid",
+        "hashes",
+        "source"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "type": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "layer_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "bbox": {
+          "$ref": "#/$defs/BBox2D"
+        },
+        "centroid": {
+          "$ref": "#/$defs/Point2D"
+        },
+        "hashes": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "Visualization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "side",
+        "color",
+        "bbox",
+        "old_bbox",
+        "new_bbox"
+      ],
+      "properties": {
+        "side": {
+          "type": "string",
+          "enum": [
+            "a_only",
+            "b_only",
+            "matched"
+          ]
+        },
+        "color": {
+          "type": "string"
+        },
+        "bbox": {
+          "$ref": "#/$defs/BBox2D"
+        },
+        "old_bbox": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BBox2D"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new_bbox": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BBox2D"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

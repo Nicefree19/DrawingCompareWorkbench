@@ -197,3 +197,24 @@ def test_pdf_bbox_scales_to_render_background_dpi() -> None:
         overlay,
         viewer_pair,
     ) == pytest.approx((2608, 2534, 2828, 2884))
+
+
+def test_pdf_bbox_scaling_prefers_effective_render_dpi() -> None:
+    overlay = {
+        "bbox_coordinate_space": "image_pixels",
+        "pdf_dpi": 200,
+    }
+    viewer_pair = {
+        "coordinate_source": "image_pixels",
+        "after_transform": {
+            "coordinate_space": "image_pixels",
+            "dpi": 400,
+            "effective_dpi": 150,
+        },
+    }
+
+    assert scale_pdf_bbox_to_render_pixels(
+        [100, 200, 300, 400],
+        overlay,
+        viewer_pair,
+    ) == pytest.approx((75, 150, 225, 300))

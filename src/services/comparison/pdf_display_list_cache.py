@@ -42,8 +42,11 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Tuple
+
+from .cache_budget import process_rss_mb, resolve_cache_byte_limit
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +55,36 @@ logger = logging.getLogger(__name__)
 # Cache state — module-level, single-threaded by contract.
 # ---------------------------------------------------------------------------
 
-# Cache key: (resolved_path_str, mtime_ns, size, page_index). Value: a
-# (display_list, page_rect_width, page_rect_height) tuple. The page
-# rect is captured at build time so the clip-mapping math does not need
-# to re-open the document.
-_DISPLAY_LIST_CACHE: dict[Tuple[str, int, int, int], Tuple[Any, float, float]] = {}
-_DISPLAY_LIST_CACHE_ORDER: list[Tuple[str, int, int, int]] = []
+_CacheKey = Tuple[str, int, int, int]
+
+
+@dataclass
+class _DisplayListCacheEntry:
+    display_list: Any
+    rect_w: float
+    rect_h: float
+    estimated_bytes: int
+    created_seq: int
+    last_access_seq: int
+
+
+# Cache key: (resolved_path_str, mtime_ns, size, page_index). Value:
+# cached DisplayList plus the page rect and a conservative memory
+# estimate. The page rect is captured at build time so the clip-mapping
+# math does not need to re-open the document.
+_DISPLAY_LIST_CACHE: dict[_CacheKey, _DisplayListCacheEntry] = {}
+_DISPLAY_LIST_CACHE_ORDER: list[_CacheKey] = []
+_DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES = 0
+_DISPLAY_LIST_HIT_COUNT = 0
+_DISPLAY_LIST_MISS_COUNT = 0
+_DISPLAY_LIST_EVICTION_COUNT = 0
+_DISPLAY_LIST_EVICTED_ESTIMATED_BYTES = 0
+_DISPLAY_LIST_LAST_EVICTION_REASON = ""
+_DISPLAY_LIST_ACCESS_SEQ = 0
+
+_DISPLAY_LIST_CACHE_MB_ENV_VAR = "DRAWING_COMPARE_DISPLAY_LIST_CACHE_MB"
+_DEFAULT_DISPLAY_LIST_CACHE_MB = 256
+_MIN_DISPLAY_LIST_ENTRY_BYTES = 64 * 1024
 
 
 def _assert_main_thread() -> None:
@@ -93,6 +120,21 @@ def _resolve_cache_capacity() -> int:
         return 4
 
 
+def _resolve_cache_byte_limit() -> int:
+    """Return the DisplayList cache byte budget.
+
+    ``DRAWING_COMPARE_DISPLAY_LIST_CACHE_MB`` is the specific knob for
+    this cache. ``DRAWING_COMPARE_RENDER_CACHE_MB`` is accepted as a
+    broader future-proof budget for render caches. If neither is set,
+    default to a bounded but generous 256 MiB so existing installations
+    keep their previous behaviour while gaining eviction telemetry.
+    """
+    return resolve_cache_byte_limit(
+        specific_env_var=_DISPLAY_LIST_CACHE_MB_ENV_VAR,
+        default_mb=_DEFAULT_DISPLAY_LIST_CACHE_MB,
+    )
+
+
 def _pdf_open_error_types(fitz_module: Any) -> Tuple[type[BaseException], ...]:
     """Return PyMuPDF document-open failures that should trigger fallback."""
 
@@ -110,19 +152,96 @@ def _pdf_open_error_types(fitz_module: Any) -> Tuple[type[BaseException], ...]:
     return tuple(dict.fromkeys(errors))
 
 
-def _evict_to_capacity(capacity: int) -> None:
-    """LRU eviction — drop oldest entries until at most ``capacity`` remain.
+def _next_access_seq() -> int:
+    global _DISPLAY_LIST_ACCESS_SEQ
+    _DISPLAY_LIST_ACCESS_SEQ += 1
+    return _DISPLAY_LIST_ACCESS_SEQ
 
-    The DisplayList cache uses pure LRU (no cost-weighted retention)
-    because every DisplayList is cheap-to-rebuild relative to a full
-    DXF parse; the policy mismatch from the DrawingRenderIndex cache
-    is intentional. If profiling shows DisplayList rebuilds are
-    actually expensive, switch to ``_evict_to_capacity`` from
-    ``zone_render_service``.
+
+def _estimate_display_list_bytes(rect_w: float, rect_h: float, source_size: int) -> int:
+    """Return a conservative RSS proxy for one cached DisplayList.
+
+    PyMuPDF does not expose the native DisplayList allocation size, so
+    use the larger of page-area bytes and source-file bytes. This is
+    intentionally conservative; the budget's job is to prevent runaway
+    retention, not to perform exact accounting.
     """
+    try:
+        area_bytes = int(max(0.0, float(rect_w)) * max(0.0, float(rect_h)) * 4.0)
+    except (TypeError, ValueError, OverflowError):
+        area_bytes = 0
+    try:
+        file_bytes = max(0, int(source_size))
+    except (TypeError, ValueError, OverflowError):
+        file_bytes = 0
+    file_bytes = min(file_bytes, 64 * 1024 * 1024)
+    return max(_MIN_DISPLAY_LIST_ENTRY_BYTES, area_bytes, file_bytes)
+
+
+def _process_rss_mb() -> float:
+    return process_rss_mb()
+
+
+def _snapshot_cache_stats(
+    *,
+    entry: _DisplayListCacheEntry | None = None,
+    lookup_cache_hit: bool | None = None,
+) -> dict[str, Any]:
+    capacity = max(1, int(_resolve_cache_capacity()))
+    byte_limit = max(1, int(_resolve_cache_byte_limit()))
+    stats: dict[str, Any] = {
+        "entries": len(_DISPLAY_LIST_CACHE),
+        "capacity": capacity,
+        "capacity_entries": capacity,
+        "byte_limit": byte_limit,
+        "total_estimated_bytes": int(_DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES),
+        "hit_count": int(_DISPLAY_LIST_HIT_COUNT),
+        "miss_count": int(_DISPLAY_LIST_MISS_COUNT),
+        "eviction_count": int(_DISPLAY_LIST_EVICTION_COUNT),
+        "evicted_estimated_bytes": int(_DISPLAY_LIST_EVICTED_ESTIMATED_BYTES),
+        "last_eviction_reason": _DISPLAY_LIST_LAST_EVICTION_REASON,
+    }
+    if entry is not None:
+        stats["entry_estimated_bytes"] = int(entry.estimated_bytes)
+    if lookup_cache_hit is not None:
+        stats["lookup_cache_hit"] = bool(lookup_cache_hit)
+    rss_mb = _process_rss_mb()
+    if rss_mb > 0:
+        stats["process_rss_mb"] = rss_mb
+    return stats
+
+
+def _evict_key(key: _CacheKey, *, reason: str) -> None:
+    global _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES
+    global _DISPLAY_LIST_EVICTION_COUNT
+    global _DISPLAY_LIST_EVICTED_ESTIMATED_BYTES
+    global _DISPLAY_LIST_LAST_EVICTION_REASON
+
+    entry = _DISPLAY_LIST_CACHE.pop(key, None)
+    if entry is None:
+        return
+    _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES = max(
+        0,
+        _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES - int(entry.estimated_bytes),
+    )
+    _DISPLAY_LIST_EVICTION_COUNT += 1
+    _DISPLAY_LIST_EVICTED_ESTIMATED_BYTES += int(entry.estimated_bytes)
+    _DISPLAY_LIST_LAST_EVICTION_REASON = str(reason or "unknown")
+
+
+def _evict_to_capacity(capacity: int, byte_limit: int | None = None) -> None:
+    """LRU eviction by entry count and estimated bytes."""
+    capacity = max(1, int(capacity))
+    byte_limit = max(1, int(byte_limit or _resolve_cache_byte_limit()))
     while len(_DISPLAY_LIST_CACHE_ORDER) > capacity:
         oldest = _DISPLAY_LIST_CACHE_ORDER.pop(0)
-        _DISPLAY_LIST_CACHE.pop(oldest, None)
+        _evict_key(oldest, reason="entry_capacity")
+    while (
+        len(_DISPLAY_LIST_CACHE_ORDER) > 1
+        and _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES > byte_limit
+    ):
+        oldest = _DISPLAY_LIST_CACHE_ORDER.pop(0)
+        _evict_key(oldest, reason="byte_capacity")
 
 
 def _file_signature(path: Path) -> Tuple[str, int, int]:
@@ -141,8 +260,13 @@ def _file_signature(path: Path) -> Tuple[str, int, int]:
         return (str(resolved), 0, 0)
 
 
-def get_display_list(pdf_path: Path, page_index: int) -> Any:
-    """Return a cached ``fitz.DisplayList`` for ``(pdf_path, page_index)``.
+def _lookup_display_list_entry(
+    pdf_path: Path,
+    page_index: int,
+    *,
+    count_lookup: bool,
+) -> tuple[_DisplayListCacheEntry, dict[str, Any]]:
+    """Build or fetch a cached ``fitz.DisplayList`` entry.
 
     Parameters
     ----------
@@ -175,6 +299,10 @@ def get_display_list(pdf_path: Path, page_index: int) -> Any:
     RuntimeError
         Called from a non-main thread.
     """
+    global _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES
+    global _DISPLAY_LIST_HIT_COUNT
+    global _DISPLAY_LIST_MISS_COUNT
+
     _assert_main_thread()
     try:
         import fitz  # type: ignore[import-not-found]
@@ -194,11 +322,17 @@ def get_display_list(pdf_path: Path, page_index: int) -> Any:
 
     cached = _DISPLAY_LIST_CACHE.get(cache_key)
     if cached is not None:
+        cached.last_access_seq = _next_access_seq()
         # Move to MRU end.
         if cache_key in _DISPLAY_LIST_CACHE_ORDER:
             _DISPLAY_LIST_CACHE_ORDER.remove(cache_key)
         _DISPLAY_LIST_CACHE_ORDER.append(cache_key)
-        return cached[0]
+        if count_lookup:
+            _DISPLAY_LIST_HIT_COUNT += 1
+        return cached, _snapshot_cache_stats(entry=cached, lookup_cache_hit=True)
+
+    if count_lookup:
+        _DISPLAY_LIST_MISS_COUNT += 1
 
     # Cache miss — open the document, fetch the page, build the
     # DisplayList. Per PyMuPDF docs (1.18+), the DisplayList keeps a
@@ -235,10 +369,47 @@ def get_display_list(pdf_path: Path, page_index: int) -> Any:
             pass
         raise
 
-    _DISPLAY_LIST_CACHE[cache_key] = (display_list, rect_w, rect_h)
+    seq = _next_access_seq()
+    entry = _DisplayListCacheEntry(
+        display_list=display_list,
+        rect_w=rect_w,
+        rect_h=rect_h,
+        estimated_bytes=_estimate_display_list_bytes(rect_w, rect_h, sig_size),
+        created_seq=seq,
+        last_access_seq=seq,
+    )
+    _DISPLAY_LIST_CACHE[cache_key] = entry
     _DISPLAY_LIST_CACHE_ORDER.append(cache_key)
-    _evict_to_capacity(_resolve_cache_capacity())
-    return display_list
+    _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES += int(entry.estimated_bytes)
+    _evict_to_capacity(_resolve_cache_capacity(), _resolve_cache_byte_limit())
+    current_entry = _DISPLAY_LIST_CACHE.get(cache_key, entry)
+    return current_entry, _snapshot_cache_stats(
+        entry=current_entry,
+        lookup_cache_hit=False,
+    )
+
+
+def get_display_list(pdf_path: Path, page_index: int) -> Any:
+    """Return a cached ``fitz.DisplayList`` for ``(pdf_path, page_index)``."""
+    entry, _stats = _lookup_display_list_entry(
+        pdf_path,
+        page_index,
+        count_lookup=True,
+    )
+    return entry.display_list
+
+
+def get_display_list_entry(
+    pdf_path: Path,
+    page_index: int,
+) -> tuple[Any, float, float, dict[str, Any]]:
+    """Return DisplayList, page rect and lookup telemetry in one call."""
+    entry, stats = _lookup_display_list_entry(
+        pdf_path,
+        page_index,
+        count_lookup=True,
+    )
+    return entry.display_list, entry.rect_w, entry.rect_h, stats
 
 
 def get_page_rect(pdf_path: Path, page_index: int) -> Tuple[float, float]:
@@ -249,25 +420,12 @@ def get_page_rect(pdf_path: Path, page_index: int) -> Tuple[float, float]:
     open-document cost. The corresponding DisplayList stays in cache.
     """
     _assert_main_thread()
-    # Force-populate by calling get_display_list, then read the rect
-    # from the cache. The lookup is O(1).
-    get_display_list(pdf_path, page_index)
-    sig_path, sig_mtime, sig_size = _file_signature(pdf_path)
-    cache_key = (sig_path, sig_mtime, sig_size, int(page_index))
-    entry = _DISPLAY_LIST_CACHE.get(cache_key)
-    if entry is None:
-        # Race-free in single-threaded use; this branch indicates the
-        # cache was evicted by a parallel call (shouldn't happen by
-        # contract). Fall back to a fresh open.
-        import fitz  # type: ignore[import-not-found]
-
-        doc = fitz.open(str(Path(pdf_path).resolve()))
-        try:
-            page = doc[int(page_index)]
-            return float(page.rect.width), float(page.rect.height)
-        finally:
-            doc.close()
-    return entry[1], entry[2]
+    entry, _stats = _lookup_display_list_entry(
+        pdf_path,
+        page_index,
+        count_lookup=False,
+    )
+    return entry.rect_w, entry.rect_h
 
 
 def render_clip_to_png(
@@ -344,12 +502,9 @@ def render_clip_to_png(
     }
 
 
-def cache_stats() -> dict[str, int]:
+def cache_stats() -> dict[str, Any]:
     """Return diagnostic counts for the in-process cache."""
-    return {
-        "entries": len(_DISPLAY_LIST_CACHE),
-        "capacity": _resolve_cache_capacity(),
-    }
+    return _snapshot_cache_stats()
 
 
 def _clear_cache() -> None:
@@ -359,12 +514,28 @@ def _clear_cache() -> None:
     need this because the file-signature cache key invalidates entries
     automatically on source mtime change.
     """
+    global _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES
+    global _DISPLAY_LIST_HIT_COUNT
+    global _DISPLAY_LIST_MISS_COUNT
+    global _DISPLAY_LIST_EVICTION_COUNT
+    global _DISPLAY_LIST_EVICTED_ESTIMATED_BYTES
+    global _DISPLAY_LIST_LAST_EVICTION_REASON
+    global _DISPLAY_LIST_ACCESS_SEQ
+
     _DISPLAY_LIST_CACHE.clear()
     _DISPLAY_LIST_CACHE_ORDER.clear()
+    _DISPLAY_LIST_CACHE_TOTAL_ESTIMATED_BYTES = 0
+    _DISPLAY_LIST_HIT_COUNT = 0
+    _DISPLAY_LIST_MISS_COUNT = 0
+    _DISPLAY_LIST_EVICTION_COUNT = 0
+    _DISPLAY_LIST_EVICTED_ESTIMATED_BYTES = 0
+    _DISPLAY_LIST_LAST_EVICTION_REASON = ""
+    _DISPLAY_LIST_ACCESS_SEQ = 0
 
 
 __all__ = [
     "get_display_list",
+    "get_display_list_entry",
     "get_page_rect",
     "render_clip_to_png",
     "cache_stats",

@@ -152,6 +152,48 @@ def test_pdf_visual_change_uses_top_left_bbox() -> None:
     assert float(zones[0].metadata["pdf_dpi"]) == 200
 
 
+def test_pdf_page_match_metadata_survives_zone_and_csv_export(tmp_path: Path) -> None:
+    change = ChangeRecord(
+        key="page_a2_b5_region_1",
+        change_type=ChangeType.MODIFIED,
+        metadata={
+            "source_format": "pdf",
+            "entity_type": "PDF_REGION",
+            "layer": "PDF_PAGE_MATCH",
+            "page": 2,
+            "page_a": 2,
+            "page_b": 5,
+            "page_match_status": "auto_confirmed",
+            "page_match_score": 0.94,
+            "bbox": [10, 20, 50, 60],
+            "bbox_coordinate_space": "image_pixels",
+            "pdf_dpi": 200,
+        },
+    )
+    result = _result([change])
+
+    zones = build_change_zones(
+        result,
+        pair_id="pdf-pair",
+        drawing_number="PDF-001",
+        options=ChangeZoneOptions(cluster_distance=10, bbox_margin=0, min_marker_size=1),
+    )
+
+    assert zones[0].metadata["page_a"] == "2"
+    assert zones[0].metadata["page_b"] == "5"
+    assert zones[0].metadata["page_match_status"] == "auto_confirmed"
+
+    summary = _summary_for_result(tmp_path, result)
+    package = export_change_artifacts(summary, tmp_path / "artifacts", export_cloud_marks=False)
+    with open(package.output_paths["change_zones_csv"], encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert rows[0]["page_a"] == "2"
+    assert rows[0]["page_b"] == "5"
+    assert rows[0]["page_match_status"] == "auto_confirmed"
+    assert rows[0]["page_match_score"] == "0.94"
+
+
 def test_distant_raw_changes_remain_separate_zones() -> None:
     changes = [
         _line_change("a", ChangeType.ADDED, (0, 0), (100, 0)),

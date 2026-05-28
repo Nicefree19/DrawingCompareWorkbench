@@ -4,13 +4,12 @@ Sprint 9 Phase 1.4: DwgDiffer
 DWG/DXF 파일을 비교하고 변경 사항을 감지합니다.
 
 기능:
-    - DWG → DXF 자동 변환 (ODA Converter)
-    - 엔티티 추출 및 정규화 (ezdxf)
-    - 해시 기반 비교
+    - CanonicalDrawing import/normalize/compare 기본 경로
+    - Legacy DWG → DXF 자동 변환 (ODA Converter)은 명시적 fallback 전용
+    - Legacy ezdxf 추출/비교는 config={"use_canonical_pipeline": False} 전용
     - ComparisonResult 통합
 """
 
-import hashlib
 import logging
 import os
 import shutil
@@ -19,11 +18,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from .base import ChangeRecord, ChangeType, ComparisonResult
+from .cad_stability import CadStabilityLimits
 from .comparison_config import ComparisonConfig, get_default_config
+from .drawing_compare_engine import CompareTolerance, DrawingCompareOptions
 from .dxf_comparator import DxfChangeType, DxfComparator, DxfComparisonResult
 from .dxf_entity_extractor import DxfEntityExtractor
+from .dxf_read import read_dxf_document
 from .dwg_converter import DwgConverter, ODAConverterNotFoundError
+from .import_pipeline import (
+    ComparePipeline,
+    ComparePipelineOptions,
+    ImportPipelineOptions,
+)
 from .progress_tracker import create_tracker
+from .source_signature import source_cache_filename, source_cache_stem
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +80,16 @@ class DwgDiffer:
         """
         self._block_text_detection = bool(block_text_detection)
         self.config = config or {}
+        if "use_canonical_pipeline" in self.config:
+            self._use_canonical_pipeline = bool(self.config["use_canonical_pipeline"])
+        elif self.config.get("use_legacy_ezdxf_pipeline", False):
+            self._use_canonical_pipeline = False
+        else:
+            self._use_canonical_pipeline = True
+        self._allow_oda_fallback = bool(
+            self.config.get("allow_oda_fallback", False)
+            or self.config.get("enable_oda_fallback", False)
+        )
         cache_dir = dxf_cache_dir or self.config.get("dxf_cache_dir") or os.environ.get(
             "DRAWING_COMPARE_DXF_CACHE_DIR"
         )
@@ -80,6 +98,7 @@ class DwgDiffer:
             Path(change_zone_stream_path).resolve() if change_zone_stream_path else None
         )
         self._change_zone_stream_pair_id = change_zone_stream_pair_id
+        self._dxf_cache_resolution_notes: List[str] = []
 
         # Phase 3 P3-3: ComparisonConfig 통합
         self._comparison_config = comparison_config or get_default_config()
@@ -115,6 +134,9 @@ class DwgDiffer:
     @property
     def converter(self) -> Optional[DwgConverter]:
         """DWG 변환기 (Lazy init)"""
+        if not self._allow_oda_fallback and self._converter is None:
+            logger.warning("Legacy ODA fallback is disabled.")
+            return None
         if self._converter is None:
             try:
                 self._converter = DwgConverter(self.config.get("oda_converter_path"))
@@ -198,6 +220,16 @@ class DwgDiffer:
         if exclude_layers:
             logger.info(f"  제외 레이어: {exclude_layers}")
 
+        if self._use_canonical_pipeline:
+            return self._compare_canonical_pipeline(
+                source_a,
+                source_b,
+                include_layers=include_layers,
+                exclude_layers=exclude_layers,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+            )
+
         result = ComparisonResult(
             source_a=str(source_a),
             source_b=str(source_b),
@@ -228,11 +260,11 @@ class DwgDiffer:
             if not tracker.report_simple(10, "Old 파일 로드 중..."):
                 return result
             t0 = time.perf_counter()
-            doc_a = ezdxf.readfile(str(dxf_a))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
 
             if not tracker.report_simple(15, "New 파일 로드 중..."):
                 return result
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
             timing["load"] = time.perf_counter() - t0
 
             # Phase 3 P3-3: expand_blocks 설정 적용
@@ -389,6 +421,7 @@ class DwgDiffer:
                 "time_to_first_stream_record_ms": comparison.stats.get(
                     "time_to_first_stream_record_ms"
                 ),
+                "dxf_cache_resolution_notes": list(self._dxf_cache_resolution_notes),
             }
             self._copy_change_zone_stream_metadata(comparison, result)
             if result.metadata.get("truncated_changes"):
@@ -420,6 +453,123 @@ class DwgDiffer:
             self._cleanup_temp()
 
         return result
+
+    def _compare_canonical_pipeline(
+        self,
+        source_a: Path,
+        source_b: Path,
+        *,
+        include_layers: Optional[List[str]] = None,
+        exclude_layers: Optional[List[str]] = None,
+        progress_callback: Optional[callable] = None,
+        is_cancelled: Optional[callable] = None,
+    ) -> ComparisonResult:
+        """Run the ODA-free CanonicalDrawing comparison path."""
+
+        result = ComparisonResult(source_a=str(source_a), source_b=str(source_b))
+        tracker = create_tracker(progress_callback, is_cancelled)
+        started = time.perf_counter()
+        try:
+            if not tracker.report_simple(0, "CAD importer 선택 중..."):
+                return result
+
+            if tracker.is_cancelled():
+                return result
+
+            if not tracker.report_simple(10, "CanonicalDrawing 가져오는 중..."):
+                return result
+
+            pipeline = ComparePipeline(
+                self._canonical_pipeline_options(
+                    is_cancelled,
+                    include_layers=include_layers,
+                    exclude_layers=exclude_layers,
+                )
+            )
+            pipeline_result = pipeline.compare(source_a, source_b)
+
+            if tracker.is_cancelled():
+                return result
+
+            if not tracker.report_simple(90, "CanonicalDrawing 비교 결과 변환 중..."):
+                return result
+
+            result = pipeline_result.to_comparison_result()
+            importer_a = getattr(pipeline_result.imports.get("a"), "importer", "")
+            importer_b = getattr(pipeline_result.imports.get("b"), "importer", "")
+            result.metadata.update(
+                {
+                    "comparison_type": "CAD_CANONICAL",
+                    "canonical_pipeline": True,
+                    "legacy_oda_converter_used": bool(
+                        str(importer_a).endswith("oda-fallback")
+                        or str(importer_b).endswith("oda-fallback")
+                    ),
+                    "elapsed_seconds": time.perf_counter() - started,
+                }
+            )
+            if pipeline_result.is_failed:
+                result.warnings.append(
+                    f"{pipeline_result.error_code}: {pipeline_result.message}"
+                )
+            elif pipeline_result.is_partial:
+                result.warnings.append(
+                    "부분 가져오기 - 일부 객체가 비교에서 제외되었습니다."
+                )
+            self._result = result
+            return result
+        except Exception as exc:
+            logger.error("Canonical CAD 비교 실패: %s", exc)
+            result.warnings.append(f"비교 중 오류: {exc}")
+            raise
+        finally:
+            self._cleanup_temp()
+
+    def _canonical_pipeline_options(
+        self,
+        is_cancelled: Optional[callable] = None,
+        *,
+        include_layers: Optional[List[str]] = None,
+        exclude_layers: Optional[List[str]] = None,
+    ) -> ComparePipelineOptions:
+        sensitivity = self._comparison_config.sensitivity
+        configured_limits = self.config.get("stability_limits")
+        if isinstance(configured_limits, CadStabilityLimits):
+            stability_limits = configured_limits
+        elif isinstance(configured_limits, dict):
+            stability_limits = CadStabilityLimits(**configured_limits)
+        else:
+            stability_limits = CadStabilityLimits(
+                import_timeout_seconds=self.config.get("import_timeout_seconds", 30.0),
+                max_entities=int(self._comparison_config.max_entities or 100_000),
+                max_dxf_tokens=int(self.config.get("max_dxf_tokens", 2_500_000)),
+                max_block_depth=int(self.config.get("max_block_depth", 4)),
+            )
+        tolerance = CompareTolerance(
+            position_tolerance_mm=float(sensitivity.position_threshold),
+            bbox_tolerance_mm=float(sensitivity.position_threshold),
+            numeric_tolerance=float(sensitivity.dimension_abs_threshold),
+            angle_tolerance_deg=float(sensitivity.rotation_threshold),
+        )
+        return ComparePipelineOptions(
+            import_options=ImportPipelineOptions(
+                expand_blocks=bool(self._comparison_config.expand_blocks),
+                allow_oda_fallback=self._allow_oda_fallback,
+                oda_converter_path=self.config.get("oda_converter_path"),
+                stability_limits=stability_limits,
+                cancel_callback=is_cancelled,
+            ),
+            compare_options=DrawingCompareOptions(
+                tolerance=tolerance,
+                search_radius_mm=float(sensitivity.near_match_radius),
+                max_spatial_cells_per_entity=stability_limits.max_spatial_cells_per_entity,
+                include_unchanged=True,
+                include_entity_snapshots=True,
+                include_match_candidates=False,
+            ),
+            include_layers=include_layers,
+            exclude_layers=exclude_layers,
+        )
 
     def compare_and_mark(
         self,
@@ -472,8 +622,8 @@ class DwgDiffer:
             if not tracker.report_simple(10, "파일 로드 중..."):
                 return (None, empty_result)
 
-            doc_a = ezdxf.readfile(str(dxf_a))
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
 
             if tracker.is_cancelled():
                 return (None, empty_result)
@@ -571,8 +721,8 @@ class DwgDiffer:
             dxf_a = self._ensure_dxf(source_a)
             dxf_b = self._ensure_dxf(source_b)
 
-            doc_a = ezdxf.readfile(str(dxf_a))
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
 
             # 레이아웃 목록 (합집합)
             layouts_a = set(self.extractor.get_layouts(doc_a))
@@ -655,8 +805,8 @@ class DwgDiffer:
             dxf_a = self._ensure_dxf(source_a)
             dxf_b = self._ensure_dxf(source_b)
 
-            doc_a = ezdxf.readfile(str(dxf_a))
-            doc_b = ezdxf.readfile(str(dxf_b))
+            doc_a = read_dxf_document(dxf_a, ezdxf_module=ezdxf)
+            doc_b = read_dxf_document(dxf_b, ezdxf_module=ezdxf)
 
             # Phase 3 P3-3: expand_blocks 설정 적용
             expand_blocks = self._comparison_config.expand_blocks
@@ -691,8 +841,9 @@ class DwgDiffer:
 
         if self.converter is None:
             raise ODAConverterNotFoundError(
-                "DWG comparison requires ODA File Converter.\n"
-                "Download: https://www.opendesign.com/guestfiles/oda_file_converter"
+                "Legacy DWG-to-DXF fallback is disabled or not configured. "
+                "Use the supported native DWG import path, compare DXF files, "
+                "or convert DWG to DXF outside the customer build."
             )
 
         logger.info("DWG -> DXF converting: %s", path.name)
@@ -707,10 +858,24 @@ class DwgDiffer:
         if cache_path.exists() and cache_path.stat().st_size > 0:
             logger.info("DWG DXF cache hit: %s -> %s", path.name, cache_path)
             return cache_path
+        compatible_cache_path = self._compatible_dxf_cache_path(
+            path,
+            exact_path=cache_path,
+        )
+        if compatible_cache_path is not None:
+            note = (
+                "DWG DXF cache exact key missed; using compatible same-stem cache "
+                f"for {path.name}: {compatible_cache_path.name}"
+            )
+            logger.warning(note)
+            self._dxf_cache_resolution_notes.append(note)
+            return compatible_cache_path
 
         if self.converter is None:
             raise ODAConverterNotFoundError(
-                "DWG comparison requires ODA File Converter."
+                "Legacy DWG-to-DXF fallback is disabled or not configured. "
+                "Use the supported native DWG import path, compare DXF files, "
+                "or convert DWG to DXF outside the customer build."
             )
 
         logger.info("DWG DXF cache miss: %s -> %s", path.name, cache_path)
@@ -729,19 +894,67 @@ class DwgDiffer:
                 shutil.rmtree(converted_path.parent, ignore_errors=True)
 
     def _dxf_cache_path(self, path: Path) -> Path:
-        path = Path(path).resolve()
-        stat = path.stat()
-        digest = hashlib.sha1()
-        for value in (
-            str(path).lower(),
-            str(stat.st_size),
-            str(stat.st_mtime_ns),
-            "ACAD2018",
+        filename = source_cache_filename(
+            path,
+            namespace="compare_dxf",
+            extension=".dxf",
+            importer_version="ACAD2018",
+            config_fingerprint="dwg_differ:v1",
+            digest_length=16,
+        )
+        return self._dxf_cache_dir / filename
+
+    def _compatible_dxf_cache_path(
+        self,
+        path: Path,
+        *,
+        exact_path: Optional[Path] = None,
+    ) -> Optional[Path]:
+        """Find a same-stem cached DXF when the strict path/mtime key changed.
+
+        The strict cache key includes absolute path, size, and mtime to avoid
+        stale reuse. In the Workbench, however, users often reopen the same DWG
+        from a copied folder while the already-generated DXF cache remains the
+        only practical fallback for large ACAD files that exceed the canonical
+        token budget. This fallback is intentionally limited to the sanitized
+        exact filename stem and non-empty ``*.dxf`` files in the configured cache
+        directory.
+        """
+
+        if self._dxf_cache_dir is None:
+            return None
+        cache_dir = self._dxf_cache_dir
+        if not cache_dir.exists():
+            return None
+        if (
+            exact_path is not None
+            and exact_path.exists()
+            and exact_path.stat().st_size > 0
         ):
-            digest.update(value.encode("utf-8", errors="ignore"))
-            digest.update(b"\0")
-        safe_stem = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in path.stem)
-        return self._dxf_cache_dir / f"{safe_stem}.{digest.hexdigest()[:16]}.dxf"
+            return exact_path
+        safe_stem = "".join(
+            ch if ch.isalnum() or ch in "._-" else "_" for ch in Path(path).stem
+        )
+        stems = [safe_stem, source_cache_stem(path)]
+        candidates = []
+        for stem in dict.fromkeys(stem for stem in stems if stem):
+            candidates.extend(
+                candidate
+                for candidate in cache_dir.glob(f"{stem}.*.dxf")
+                if candidate.is_file() and candidate.stat().st_size > 0
+            )
+        if exact_path is not None:
+            candidates = [candidate for candidate in candidates if candidate != exact_path]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.stat().st_mtime_ns,
+                candidate.stat().st_size,
+            ),
+            reverse=True,
+        )
+        return candidates[0]
 
     def _map_change_type(self, dxf_change: DxfChangeType) -> ChangeType:
         """DxfChangeType → ChangeType 변환"""
@@ -875,6 +1088,7 @@ class DwgDiffer:
             "time_to_first_stream_record_ms": comparison.stats.get(
                 "time_to_first_stream_record_ms"
             ),
+            "dxf_cache_resolution_notes": list(self._dxf_cache_resolution_notes),
         }
         self._copy_change_zone_stream_metadata(comparison, result)
         if result.metadata.get("truncated_changes"):
@@ -916,7 +1130,7 @@ class DwgDiffer:
     @classmethod
     def is_available(cls) -> bool:
         """DWG/DXF 비교 사용 가능 여부"""
-        return EZDXF_AVAILABLE
+        return True
 
     @classmethod
     def get_status(cls) -> Dict[str, Any]:
@@ -924,20 +1138,37 @@ class DwgDiffer:
 
         Returns:
             {
+                "canonical_pipeline": bool,
                 "ezdxf": bool,
                 "oda_converter": bool,
                 "dwg_support": bool,
                 "dxf_support": bool,
             }
         """
-        oda_status = DwgConverter.check_installation()
-
         return {
+            "canonical_pipeline": True,
             "ezdxf": EZDXF_AVAILABLE,
-            "oda_converter": oda_status["installed"],
-            "oda_path": oda_status.get("path"),
-            "dwg_support": EZDXF_AVAILABLE and oda_status["installed"],
-            "dxf_support": EZDXF_AVAILABLE,
+            "oda_converter": False,
+            "oda_path": None,
+            "oda_required": False,
+            "dwg_support": True,
+            "dwg_support_scope": "limited-read-only-adapter",
+            "dwg_supported_versions": ["AC1015"],
+            "dwg_detectable_versions": [
+                "AC1009",
+                "AC1012",
+                "AC1014",
+                "AC1015",
+                "AC1018",
+                "AC1021",
+                "AC1024",
+                "AC1027",
+                "AC1032",
+            ],
+            "dwg_planned_versions": ["AC1018", "AC1021", "AC1024", "AC1027", "AC1032"],
+            "dxf_support": True,
+            "legacy_oda_required": False,
+            "legacy_oda_fallback": "disabled_by_default",
         }
 
     def get_layers(self, source: Union[str, Path]) -> List[str]:
@@ -951,5 +1182,5 @@ class DwgDiffer:
         """
         source = Path(source)
         dxf_path = self._ensure_dxf(source)
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = read_dxf_document(dxf_path, ezdxf_module=ezdxf)
         return self.extractor.get_entity_layers(doc)

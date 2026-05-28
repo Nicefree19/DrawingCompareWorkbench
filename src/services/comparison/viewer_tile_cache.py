@@ -11,10 +11,15 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import threading
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
+
+from .cache_budget import resolve_cache_byte_limit
+from .source_signature import build_source_signature
 
 # Plan §19 A-2 (Agent A finding A1) — per-process lock guarding the
 # tile-manifest JSONL writer. On POSIX ``O_APPEND`` writes up to
@@ -26,7 +31,12 @@ from pathlib import Path
 # Python workers on a shared SMB share) still requires portalocker
 # — flagged as Plan §18 Phase B-1.
 _TILES_MANIFEST_WRITE_LOCK = threading.Lock()
+_VIEWER_PERF_WRITE_LOCK = threading.Lock()
+_TILE_CACHE_RETENTION_LOCK = threading.Lock()
 from typing import Any, Iterable, Iterator, Optional, Sequence
+
+_TILE_CACHE_MB_ENV_VAR = "DRAWING_COMPARE_TILE_CACHE_MB"
+_TILE_EVICTED_PAIRS_REPORT_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -48,13 +58,14 @@ class ViewerTileCacheOptions:
 
 
 def file_signature(path: Optional[Path]) -> dict[str, Any]:
-    if not path:
-        return {"path": "", "size": 0, "mtime_ns": 0}
-    try:
-        stat = Path(path).stat()
-        return {"path": str(Path(path).resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-    except OSError:
-        return {"path": str(path), "size": 0, "mtime_ns": 0}
+    signature = build_source_signature(path)
+    return {
+        "path": signature["source_path"],
+        "size": signature["file_size"],
+        "mtime_ns": signature["mtime_ns"],
+        "source_hash": signature["source_hash"],
+        "schema_version": signature["schema_version"],
+    }
 
 
 def viewer_cache_key(
@@ -64,6 +75,8 @@ def viewer_cache_key(
     source_b: Optional[Path],
     options: ViewerTileCacheOptions,
     transform_version: str = "viewer-v2",
+    visual_asset_cache_key: str = "",
+    rendered_background_signature: str = "",
 ) -> str:
     payload = {
         "pair_uuid": pair_uuid,
@@ -71,6 +84,8 @@ def viewer_cache_key(
         "source_b": file_signature(source_b),
         "options": options.normalized().__dict__,
         "transform_version": transform_version,
+        "visual_asset_cache_key": str(visual_asset_cache_key or ""),
+        "rendered_background_signature": str(rendered_background_signature or ""),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:24]
@@ -205,10 +220,11 @@ def visible_tile_model(
         cols=cols,
         rows=rows,
         prefetch_radius=prefetch_radius,
-    )
+        )
 
     pair_uuid = _safe_name(pair_manifest.get("pair_uuid") or "")
     tiles: list[dict[str, Any]] = []
+    missing_tile_count = 0
     tile_root = _tile_root_from_manifest(pair_manifest, viewer_root, "tile_root", "tiles")
     base = tile_root / pair_uuid / side / str(level)
     level_width = float(selected.get("width") or 0)
@@ -217,6 +233,7 @@ def visible_tile_model(
         for tile_x in range(left, right + 1):
             path = base / f"{tile_x}_{tile_y}.png"
             if not path.exists():
+                missing_tile_count += 1
                 continue
             level_x = tile_x * tile_size
             level_y = tile_y * tile_size
@@ -234,7 +251,13 @@ def visible_tile_model(
                     "level": level,
                 }
             )
-    return {"tiles": tiles, "level": level, "status": "tile_ready" if tiles else "tile_pending"}
+    return {
+        "tiles": tiles,
+        "level": level,
+        "tile_window": [left, top, right, bottom],
+        "missing_tile_count": missing_tile_count,
+        "status": "tile_ready" if missing_tile_count == 0 and tiles else "tile_pending",
+    }
 
 
 def visible_overlay_tile_items(
@@ -318,31 +341,43 @@ def visible_or_clustered_overlays(
 
 
 def append_viewer_perf_event(viewer_root: Path, event: str, **metrics: Any) -> Path:
-    """Append a compact performance event to viewer/viewer_perf.json."""
+    """Append a compact performance event to viewer/viewer_perf.jsonl.
 
-    path = Path(viewer_root) / "viewer_perf.json"
-    payload = _read_json(path)
-    events = payload.get("events", [])
-    if not isinstance(events, list):
-        events = []
-    events.append(
-        {
-            "timestamp": datetime.now().isoformat(),
-            "event": event,
-            **metrics,
-        }
-    )
-    if len(events) > 1000:
-        events = events[-1000:]
-    payload.update(
-        {
-            "schema_version": 1,
-            "event_count": len(events),
-            "events": events,
-        }
-    )
-    _write_json(path, payload)
-    return path
+    R6-B keeps the hot path append-only. A tiny ``viewer_perf.json`` pointer is
+    still refreshed for older tooling, but the growing event list lives in
+    JSONL so pan/zoom/zone events do not rewrite the full history.
+    """
+
+    viewer_root = Path(viewer_root)
+    viewer_root.mkdir(parents=True, exist_ok=True)
+    event_record = {
+        "timestamp": datetime.now().isoformat(),
+        "event": event,
+        **metrics,
+    }
+    jsonl_path = viewer_root / "viewer_perf.jsonl"
+    payload = (json.dumps(event_record, ensure_ascii=False) + "\n").encode("utf-8")
+    with _VIEWER_PERF_WRITE_LOCK:
+        fd = os.open(
+            str(jsonl_path),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o644,
+        )
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        _write_json(
+            viewer_root / "viewer_perf.json",
+            {
+                "schema_version": 2,
+                "storage": "jsonl",
+                "jsonl_path": "viewer_perf.jsonl",
+                "last_event": event,
+                "last_timestamp": event_record["timestamp"],
+            },
+        )
+    return jsonl_path
 
 
 def write_pair_tile_cache(
@@ -359,22 +394,36 @@ def write_pair_tile_cache(
     opts = options.normalized()
     tile_root.mkdir(parents=True, exist_ok=True)
     overlay_tile_root.mkdir(parents=True, exist_ok=True)
-    pair_dir = tile_root / _safe_name(pair_uuid)
+    pair_dir = pair_tile_manifest_path(tile_root, pair_uuid).parent
     pair_dir.mkdir(parents=True, exist_ok=True)
     overlay_dir = overlay_tile_root / _safe_name(pair_uuid)
     overlay_dir.mkdir(parents=True, exist_ok=True)
 
     sides: dict[str, Any] = {}
     total_tiles = 0
+    cache_started = perf_counter()
+    tile_pyramid_ms = 0.0
     for side, image_path in (("before", before_image), ("after", after_image)):
         if not image_path or not Path(image_path).exists():
             sides[side] = {"image": image_path or "", "levels": [], "tile_count": 0, "status": "missing_image"}
             continue
+        side_started = perf_counter()
         side_manifest = _write_image_pyramid(Path(image_path), pair_dir / side, opts)
+        side_tile_ms = round((perf_counter() - side_started) * 1000.0, 3)
+        tile_pyramid_ms += side_tile_ms
+        side_manifest["tile_pyramid_ms"] = side_tile_ms
         sides[side] = side_manifest
         total_tiles += int(side_manifest.get("tile_count", 0))
 
-    overlay_tile_count = _write_overlay_tiles(overlays, overlay_dir, opts)
+    overlay_started = perf_counter()
+    overlay_tile_summary = _write_overlay_tiles(overlays, overlay_dir, opts)
+    overlay_tile_count = int(overlay_tile_summary.get("tile_count", 0))
+    overlay_tile_ms = round((perf_counter() - overlay_started) * 1000.0, 3)
+    tile_cache_write_ms = round((perf_counter() - cache_started) * 1000.0, 3)
+    tile_payload_bytes = _sum_payload_bytes(pair_dir, suffixes=(".png",))
+    overlay_tile_payload_bytes = _sum_payload_bytes(overlay_dir, suffixes=(".json",))
+    cache_total_estimated_bytes = tile_payload_bytes + overlay_tile_payload_bytes
+    cache_byte_limit = _resolve_tile_cache_byte_limit(opts)
     manifest = {
         "schema_version": 1,
         "pair_uuid": pair_uuid,
@@ -384,15 +433,169 @@ def write_pair_tile_cache(
         "tile_size": opts.tile_size,
         "max_visible_overlays": opts.max_visible_overlays,
         "viewer_memory_budget_mb": opts.viewer_memory_budget_mb,
-        "tile_root": str(tile_root),
-        "overlay_tile_root": str(overlay_tile_root),
         "sides": sides,
         "tile_count": total_tiles,
         "overlay_tile_count": overlay_tile_count,
-        "overlay_count": len([item for item in overlays if isinstance(item, dict)]),
+        "tile_pyramid_ms": round(tile_pyramid_ms, 3),
+        "overlay_tile_ms": overlay_tile_ms,
+        "tile_cache_write_ms": tile_cache_write_ms,
+        "tile_payload_bytes": tile_payload_bytes,
+        "overlay_tile_payload_bytes": overlay_tile_payload_bytes,
+        "cache_total_estimated_bytes": cache_total_estimated_bytes,
+        "cache_byte_limit": cache_byte_limit,
+        "eviction_count": 0,
+        "overlay_count": int(overlay_tile_summary.get("input_overlay_count", 0)),
+        "materialized_overlay_count": int(overlay_tile_summary.get("materialized_overlay_count", 0)),
+        "overlay_omitted_count": int(overlay_tile_summary.get("omitted_overlay_count", 0)),
         "status": "tile_ready" if total_tiles else "relative_only",
     }
-    _write_json(pair_dir / "tile_manifest.json", manifest)
+    _write_json(pair_tile_manifest_path(tile_root, pair_uuid), manifest)
+    manifest.update(
+        _enforce_tile_cache_retention(
+            tile_root=tile_root,
+            overlay_tile_root=overlay_tile_root,
+            keep_pair_uuid=pair_uuid,
+            byte_limit=cache_byte_limit,
+        )
+    )
+    _write_json(pair_tile_manifest_path(tile_root, pair_uuid), manifest)
+    return manifest
+
+
+def write_pair_visible_tile_cache(
+    *,
+    pair_uuid: str,
+    before_image: str,
+    after_image: str,
+    overlays: Sequence[dict[str, Any]],
+    tile_root: Path,
+    overlay_tile_root: Path,
+    options: ViewerTileCacheOptions,
+    viewport_rect: dict[str, float],
+    zoom: float = 1.0,
+    prefetch_radius: int = 1,
+    cache_key: str = "",
+) -> dict[str, Any]:
+    """Materialize only the tile window needed for an initial viewport.
+
+    This is the P4-B visible-first counterpart to ``write_pair_tile_cache``.
+    It preserves the v1 manifest shape but marks the pyramid as incomplete so
+    package and GUI code can distinguish bounded first-review tiles from a full
+    LOD export. Existing visible-tile readers already tolerate sparse tile
+    directories by returning only files that exist.
+    """
+
+    opts = options.normalized()
+    tile_root.mkdir(parents=True, exist_ok=True)
+    overlay_tile_root.mkdir(parents=True, exist_ok=True)
+    pair_manifest_path = pair_tile_manifest_path(tile_root, pair_uuid)
+    pair_dir = pair_manifest_path.parent
+    overlay_dir = overlay_tile_root / _safe_name(pair_uuid)
+
+    existing_manifest = _read_json(pair_manifest_path)
+    same_cache = bool(existing_manifest) and str(existing_manifest.get("cache_key") or "") == str(cache_key or "")
+    if existing_manifest and not same_cache:
+        shutil.rmtree(pair_dir, ignore_errors=True)
+        shutil.rmtree(overlay_dir, ignore_errors=True)
+        existing_manifest = {}
+
+    pair_dir.mkdir(parents=True, exist_ok=True)
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+
+    sides: dict[str, Any] = {}
+    total_materialized_tiles = 0
+    total_planned_tiles = 0
+    tile_windows = _existing_visible_tile_windows(existing_manifest) if same_cache else []
+    cache_started = perf_counter()
+    tile_pyramid_ms = 0.0
+    safe_prefetch = max(0, int(prefetch_radius))
+    for side, image_path in (("before", before_image), ("after", after_image)):
+        if not image_path or not Path(image_path).exists():
+            sides[side] = {"image": image_path or "", "levels": [], "tile_count": 0, "status": "missing_image"}
+            continue
+        side_started = perf_counter()
+        side_manifest, window = _write_visible_image_tiles(
+            Path(image_path),
+            pair_dir / side,
+            opts,
+            viewport_rect=viewport_rect,
+            zoom=zoom,
+            prefetch_radius=safe_prefetch,
+        )
+        side_tile_ms = round((perf_counter() - side_started) * 1000.0, 3)
+        tile_pyramid_ms += side_tile_ms
+        side_manifest["tile_pyramid_ms"] = side_tile_ms
+        sides[side] = side_manifest
+        total_materialized_tiles += int(side_manifest.get("tile_count", 0))
+        total_planned_tiles += int(side_manifest.get("planned_tile_count", 0))
+        if window:
+            window = dict(window)
+            window["side"] = side
+            tile_windows.append(window)
+
+    tile_windows = _dedupe_visible_tile_windows(tile_windows)
+    overlay_started = perf_counter()
+    overlay_tile_summary = _write_overlay_tiles(
+        overlays,
+        overlay_dir,
+        opts,
+        viewport_rect=viewport_rect,
+        prefetch_radius=safe_prefetch,
+    )
+    overlay_file_summary = _overlay_tile_file_summary(overlay_dir)
+    overlay_tile_count = int(overlay_file_summary.get("tile_count", 0))
+    materialized_overlay_count = int(overlay_file_summary.get("materialized_overlay_count", 0))
+    input_overlay_count = int(overlay_tile_summary.get("input_overlay_count", 0))
+    overlay_tile_ms = round((perf_counter() - overlay_started) * 1000.0, 3)
+    tile_cache_write_ms = round((perf_counter() - cache_started) * 1000.0, 3)
+    pyramid_complete = bool(total_planned_tiles) and total_materialized_tiles >= total_planned_tiles
+    tile_payload_bytes = _sum_payload_bytes(pair_dir, suffixes=(".png",))
+    overlay_tile_payload_bytes = _sum_payload_bytes(overlay_dir, suffixes=(".json",))
+    cache_total_estimated_bytes = tile_payload_bytes + overlay_tile_payload_bytes
+    cache_byte_limit = _resolve_tile_cache_byte_limit(opts)
+    manifest = {
+        "schema_version": 1,
+        "pair_uuid": pair_uuid,
+        "cache_key": cache_key,
+        "tile_root": str(Path(tile_root).resolve()),
+        "overlay_tile_root": str(Path(overlay_tile_root).resolve()),
+        "tile_size": opts.tile_size,
+        "max_visible_overlays": opts.max_visible_overlays,
+        "viewer_memory_budget_mb": opts.viewer_memory_budget_mb,
+        "generation_mode": "visible_first",
+        "pyramid_complete": pyramid_complete,
+        "deferred_lod_tiles": not pyramid_complete,
+        "sides": sides,
+        "visible_tile_windows": tile_windows,
+        "tile_count": total_materialized_tiles,
+        "materialized_tile_count": total_materialized_tiles,
+        "planned_tile_count": total_planned_tiles,
+        "omitted_tile_count": max(0, total_planned_tiles - total_materialized_tiles),
+        "overlay_tile_count": overlay_tile_count,
+        "tile_pyramid_ms": round(tile_pyramid_ms, 3),
+        "overlay_tile_ms": overlay_tile_ms,
+        "tile_cache_write_ms": tile_cache_write_ms,
+        "tile_payload_bytes": tile_payload_bytes,
+        "overlay_tile_payload_bytes": overlay_tile_payload_bytes,
+        "cache_total_estimated_bytes": cache_total_estimated_bytes,
+        "cache_byte_limit": cache_byte_limit,
+        "eviction_count": 0,
+        "overlay_count": input_overlay_count,
+        "materialized_overlay_count": materialized_overlay_count,
+        "overlay_omitted_count": max(0, input_overlay_count - materialized_overlay_count),
+        "outside_viewport_overlay_count": int(overlay_tile_summary.get("outside_viewport_overlay_count", 0)),
+        "status": "tile_ready" if total_materialized_tiles else "relative_only",
+    }
+    _write_json(pair_manifest_path, manifest)
+    manifest.update(
+        _enforce_tile_cache_retention(
+            tile_root=tile_root,
+            overlay_tile_root=overlay_tile_root,
+            keep_pair_uuid=pair_uuid,
+            byte_limit=cache_byte_limit,
+        )
+    )
+    _write_json(pair_manifest_path, manifest)
     return manifest
 
 
@@ -402,6 +605,11 @@ def merge_tiles_manifest(viewer_root: Path, pair_manifest: dict[str, Any]) -> Pa
     pairs = payload.get("pairs", {})
     if not isinstance(pairs, dict):
         pairs = {}
+    pairs = {
+        str(pair_id): item
+        for pair_id, item in pairs.items()
+        if isinstance(item, dict) and _pair_manifest_payload_exists(item)
+    }
     pair_uuid = str(pair_manifest.get("pair_uuid") or "")
     if pair_uuid:
         pairs[pair_uuid] = pair_manifest
@@ -421,10 +629,25 @@ def merge_tiles_manifest(viewer_root: Path, pair_manifest: dict[str, Any]) -> Pa
     return path
 
 
-def tiles_manifest_is_current(path: Path, pair_uuid: str, cache_key: str) -> bool:
+def tiles_manifest_is_current(
+    path: Path,
+    pair_uuid: str,
+    cache_key: str,
+    *,
+    require_complete: bool = False,
+    update_access: bool = True,
+) -> bool:
     payload = _read_json(path)
     pair = (payload.get("pairs") or {}).get(pair_uuid) if isinstance(payload.get("pairs"), dict) else None
-    return isinstance(pair, dict) and str(pair.get("cache_key") or "") == cache_key
+    if not isinstance(pair, dict) or str(pair.get("cache_key") or "") != cache_key:
+        return False
+    if not _pair_manifest_payload_exists(pair):
+        return False
+    if require_complete and pair.get("pyramid_complete") is False:
+        return False
+    if update_access:
+        _touch_pair_manifest(pair)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +669,12 @@ def tiles_manifest_is_current(path: Path, pair_uuid: str, cache_key: str) -> boo
 
 TILES_MANIFEST_JSONL = "tiles_manifest.jsonl"
 TILES_MANIFEST_JSON = "tiles_manifest.json"
+
+
+def pair_tile_manifest_path(tile_root: Path, pair_uuid: str) -> Path:
+    """Return the per-pair tile manifest written beside that pair's tiles."""
+
+    return Path(tile_root) / _safe_name(pair_uuid) / "tile_manifest.json"
 
 
 def append_pair_to_tiles_manifest_jsonl(
@@ -538,6 +767,8 @@ def materialise_tiles_manifest_from_jsonl(
         pair_uuid = str(pair_record.get("pair_uuid") or "")
         if not pair_uuid:
             continue
+        if not _pair_manifest_payload_exists(pair_record):
+            continue
         pairs[pair_uuid] = pair_record
         if "tile_size" in pair_record:
             try:
@@ -568,6 +799,387 @@ def materialise_tiles_manifest_from_jsonl(
         except OSError:
             pass
     return json_path
+
+
+def _enforce_tile_cache_retention(
+    *,
+    tile_root: Path,
+    overlay_tile_root: Path,
+    keep_pair_uuid: str,
+    byte_limit: int,
+) -> dict[str, Any]:
+    """Delete oldest pair tile payloads until the shared tile cache is bounded."""
+
+    with _TILE_CACHE_RETENTION_LOCK:
+        safe_limit = max(1, int(byte_limit or 0))
+        entries = _collect_tile_cache_entries(tile_root, overlay_tile_root)
+        total_before = sum(int(entry.get("estimated_bytes") or 0) for entry in entries)
+        current_pair_name = _safe_name(keep_pair_uuid)
+        total_after = total_before
+        evicted_pairs: list[str] = []
+        evicted_bytes = 0
+
+        if total_after > safe_limit:
+            candidates = [
+                entry
+                for entry in entries
+                if str(entry.get("pair_name") or "") != current_pair_name
+            ]
+            candidates.sort(key=lambda item: (int(item.get("mtime_ns") or 0), str(item.get("pair_name") or "")))
+            for entry in candidates:
+                if total_after <= safe_limit:
+                    break
+                pair_name = str(entry.get("pair_name") or "")
+                estimated = max(0, int(entry.get("estimated_bytes") or 0))
+                deleted = False
+                tile_dir = entry.get("tile_dir")
+                overlay_dir = entry.get("overlay_dir")
+                if isinstance(tile_dir, Path):
+                    deleted = _safe_rmtree(tile_dir, Path(tile_root)) or deleted
+                if isinstance(overlay_dir, Path):
+                    deleted = _safe_rmtree(overlay_dir, Path(overlay_tile_root)) or deleted
+                if deleted:
+                    evicted_pairs.append(pair_name)
+                    evicted_bytes += estimated
+                    total_after = max(0, total_after - estimated)
+
+        if evicted_pairs:
+            reason = "byte_limit"
+        elif total_before > safe_limit:
+            reason = "current_entry_exceeds_limit"
+        else:
+            reason = "within_limit"
+        return {
+            "cache_estimated_bytes_before_eviction": total_before,
+            "cache_retained_estimated_bytes": total_after,
+            "eviction_count": len(evicted_pairs),
+            "evicted_pair_count": len(evicted_pairs),
+            "evicted_estimated_bytes": evicted_bytes,
+            "evicted_pairs": evicted_pairs[:_TILE_EVICTED_PAIRS_REPORT_LIMIT],
+            "eviction_reason": reason,
+        }
+
+
+def _collect_tile_cache_entries(tile_root: Path, overlay_tile_root: Path) -> list[dict[str, Any]]:
+    tile_root = Path(tile_root)
+    overlay_tile_root = Path(overlay_tile_root)
+    entries: dict[str, dict[str, Any]] = {}
+    if tile_root.exists():
+        try:
+            tile_dirs = [path for path in tile_root.iterdir() if path.is_dir()]
+        except OSError:
+            tile_dirs = []
+        for tile_dir in tile_dirs:
+            manifest_path = tile_dir / "tile_manifest.json"
+            manifest = _read_json(manifest_path)
+            pair_uuid = str(manifest.get("pair_uuid") or tile_dir.name)
+            pair_name = _safe_name(pair_uuid) or tile_dir.name
+            manifest_estimated_bytes = _manifest_estimated_bytes(manifest)
+            entries[pair_name] = {
+                "pair_name": pair_name,
+                "pair_uuid": pair_uuid,
+                "tile_dir": tile_dir,
+                "overlay_dir": overlay_tile_root / pair_name,
+                "estimated_bytes": (
+                    manifest_estimated_bytes
+                    if manifest_estimated_bytes > 0
+                    else _sum_payload_bytes(tile_dir, suffixes=(".png",))
+                ),
+                "bytes_from_manifest": manifest_estimated_bytes > 0,
+                "mtime_ns": _path_mtime_ns(manifest_path if manifest_path.exists() else tile_dir),
+            }
+    if overlay_tile_root.exists():
+        try:
+            overlay_dirs = [path for path in overlay_tile_root.iterdir() if path.is_dir()]
+        except OSError:
+            overlay_dirs = []
+        for overlay_dir in overlay_dirs:
+            pair_name = overlay_dir.name
+            entry = entries.setdefault(
+                pair_name,
+                {
+                    "pair_name": pair_name,
+                    "pair_uuid": pair_name,
+                    "tile_dir": tile_root / pair_name,
+                    "overlay_dir": overlay_dir,
+                    "estimated_bytes": 0,
+                    "bytes_from_manifest": False,
+                    "mtime_ns": _path_mtime_ns(overlay_dir),
+                },
+            )
+            if not bool(entry.get("bytes_from_manifest")):
+                entry["estimated_bytes"] = int(entry.get("estimated_bytes") or 0) + _sum_payload_bytes(
+                    overlay_dir,
+                    suffixes=(".json",),
+                )
+                entry["mtime_ns"] = min(int(entry.get("mtime_ns") or 0), _path_mtime_ns(overlay_dir))
+    return list(entries.values())
+
+
+def _pair_manifest_payload_exists(pair_manifest: dict[str, Any]) -> bool:
+    """Return False for manifest records whose on-disk pair payload was evicted."""
+
+    if not isinstance(pair_manifest, dict):
+        return False
+    tile_root = pair_manifest.get("tile_root")
+    pair_uuid = pair_manifest.get("pair_uuid")
+    if not tile_root or not pair_uuid:
+        return True
+    return pair_tile_manifest_path(Path(str(tile_root)), str(pair_uuid)).exists()
+
+
+def _touch_pair_manifest(pair_manifest: dict[str, Any]) -> None:
+    tile_root = pair_manifest.get("tile_root")
+    pair_uuid = pair_manifest.get("pair_uuid")
+    if not tile_root or not pair_uuid:
+        return
+    path = pair_tile_manifest_path(Path(str(tile_root)), str(pair_uuid))
+    try:
+        if path.exists():
+            os.utime(path, None)
+    except OSError:
+        pass
+
+
+def _manifest_estimated_bytes(manifest: dict[str, Any]) -> int:
+    total = 0
+    if isinstance(manifest, dict):
+        total = int(_safe_number(manifest.get("cache_total_estimated_bytes")))
+        if total <= 0:
+            total = int(_safe_number(manifest.get("tile_payload_bytes"))) + int(
+                _safe_number(manifest.get("overlay_tile_payload_bytes"))
+            )
+    return max(0, total)
+
+
+def _safe_number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _safe_rmtree(path: Path, root: Path) -> bool:
+    try:
+        root_resolved = Path(root).resolve()
+        path_resolved = Path(path).resolve()
+        path_resolved.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return False
+    if path_resolved == root_resolved or not path_resolved.exists():
+        return False
+    try:
+        shutil.rmtree(path_resolved)
+        return True
+    except OSError:
+        return False
+
+
+def _path_mtime_ns(path: Path) -> int:
+    try:
+        return int(Path(path).stat().st_mtime_ns)
+    except OSError:
+        return 0
+
+
+def _planned_image_pyramid_levels(image_path: Path, options: ViewerTileCacheOptions) -> list[dict[str, Any]]:
+    from PIL import Image
+
+    levels: list[dict[str, Any]] = []
+    with Image.open(image_path) as original:
+        width, height = original.size
+    level = 0
+    scale = 1.0
+    while level < options.max_levels:
+        cols = math.ceil(width / options.tile_size)
+        rows = math.ceil(height / options.tile_size)
+        levels.append(
+            {
+                "level": level,
+                "scale": scale,
+                "width": width,
+                "height": height,
+                "cols": cols,
+                "rows": rows,
+                "planned_tile_count": cols * rows,
+            }
+        )
+        if max(width, height) <= options.tile_size or level + 1 >= options.max_levels:
+            break
+        width = max(1, width // 2)
+        height = max(1, height // 2)
+        scale *= 0.5
+        level += 1
+    return levels
+
+
+def _write_visible_image_tiles(
+    image_path: Path,
+    output_dir: Path,
+    options: ViewerTileCacheOptions,
+    *,
+    viewport_rect: dict[str, float],
+    zoom: float,
+    prefetch_radius: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from PIL import Image
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    planned_levels = _planned_image_pyramid_levels(image_path, options)
+    if not planned_levels:
+        return {"image": str(image_path), "levels": [], "tile_count": 0, "status": "missing_tiles"}, {}
+
+    selected = _select_level(planned_levels, zoom)
+    selected_level = int(selected.get("level") or 0)
+    selected_scale = float(selected.get("scale") or 1.0)
+    selected_cols = int(selected.get("cols") or 0)
+    selected_rows = int(selected.get("rows") or 0)
+    left, top, right, bottom = _tile_range(
+        viewport_rect,
+        tile_size=options.tile_size,
+        scale=selected_scale,
+        cols=selected_cols,
+        rows=selected_rows,
+        prefetch_radius=prefetch_radius,
+    )
+    with Image.open(image_path) as original:
+        image = original.convert("RGB")
+        for level_meta in planned_levels:
+            level = int(level_meta.get("level") or 0)
+            if level == selected_level:
+                break
+            next_meta = planned_levels[level + 1]
+            image = image.resize(
+                (int(next_meta.get("width") or 1), int(next_meta.get("height") or 1)),
+                Image.Resampling.LANCZOS,
+            )
+
+        width, height = image.size
+        level_dir = output_dir / str(selected_level)
+        level_dir.mkdir(parents=True, exist_ok=True)
+        for tile_y in range(top, bottom + 1):
+            for tile_x in range(left, right + 1):
+                x = tile_x * options.tile_size
+                y = tile_y * options.tile_size
+                if x >= width or y >= height:
+                    continue
+                tile = image.crop((x, y, min(x + options.tile_size, width), min(y + options.tile_size, height)))
+                tile.save(level_dir / f"{tile_x}_{tile_y}.png")
+
+    levels: list[dict[str, Any]] = []
+    total_materialized = 0
+    total_planned = 0
+    for level_meta in planned_levels:
+        item = dict(level_meta)
+        level = int(item.get("level") or 0)
+        planned_count = int(item.get("planned_tile_count") or 0)
+        materialized_count = _count_materialized_image_tiles(output_dir / str(level))
+        item["tile_count"] = materialized_count
+        item["materialized_tile_count"] = materialized_count
+        item["omitted_tile_count"] = max(0, planned_count - materialized_count)
+        item["pyramid_complete"] = materialized_count >= planned_count
+        levels.append(item)
+        total_materialized += materialized_count
+        total_planned += planned_count
+
+    window = {
+        "level": selected_level,
+        "tile_window": [left, top, right, bottom],
+        "viewport_rect": {
+            "x": float(viewport_rect.get("x", 0.0)),
+            "y": float(viewport_rect.get("y", 0.0)),
+            "width": max(1.0, float(viewport_rect.get("width", 1.0))),
+            "height": max(1.0, float(viewport_rect.get("height", 1.0))),
+        },
+        "zoom": float(zoom or 1.0),
+        "prefetch_radius": int(prefetch_radius),
+    }
+    return (
+        {
+            "image": str(image_path),
+            "levels": levels,
+            "tile_count": total_materialized,
+            "materialized_tile_count": total_materialized,
+            "planned_tile_count": total_planned,
+            "omitted_tile_count": max(0, total_planned - total_materialized),
+            "pyramid_complete": total_materialized >= total_planned,
+            "status": "tile_ready" if total_materialized else "tile_pending",
+        },
+        window,
+    )
+
+
+def _count_materialized_image_tiles(level_dir: Path) -> int:
+    if not level_dir.exists():
+        return 0
+    return sum(1 for path in level_dir.glob("*.png") if path.is_file())
+
+
+def _existing_visible_tile_windows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    values = manifest.get("visible_tile_windows", []) if isinstance(manifest, dict) else []
+    return [dict(item) for item in values if isinstance(item, dict)]
+
+
+def _dedupe_visible_tile_windows(windows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, int, tuple[int, int, int, int]]] = set()
+    result: list[dict[str, Any]] = []
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        raw = window.get("tile_window")
+        if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+            continue
+        tile_window = tuple(int(value) for value in raw[:4])
+        key = (str(window.get("side") or ""), int(window.get("level") or 0), tile_window)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(window)
+        item["tile_window"] = list(tile_window)
+        result.append(item)
+    return result
+
+
+def _overlay_tile_file_summary(output_dir: Path) -> dict[str, int]:
+    count = 0
+    materialized = 0
+    level_dir = output_dir / "0"
+    if not level_dir.exists():
+        return {"tile_count": 0, "materialized_overlay_count": 0}
+    for path in level_dir.glob("*.json"):
+        if not path.is_file():
+            continue
+        payload = _read_json(path)
+        overlays = payload.get("overlays", []) if isinstance(payload, dict) else []
+        count += 1
+        materialized += len([item for item in overlays if isinstance(item, dict)])
+    return {"tile_count": count, "materialized_overlay_count": materialized}
+
+
+def _sum_payload_bytes(root: Path, *, suffixes: tuple[str, ...]) -> int:
+    root = Path(root)
+    if not root.exists():
+        return 0
+    suffix_set = {str(suffix).lower() for suffix in suffixes}
+    total = 0
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if suffix_set and path.suffix.lower() not in suffix_set:
+            continue
+        try:
+            total += int(path.stat().st_size)
+        except OSError:
+            continue
+    return total
+
+
+def _resolve_tile_cache_byte_limit(options: ViewerTileCacheOptions) -> int:
+    default_mb = max(1, int(options.viewer_memory_budget_mb))
+    return resolve_cache_byte_limit(
+        specific_env_var=_TILE_CACHE_MB_ENV_VAR,
+        default_mb=default_mb,
+    )
 
 
 def _write_image_pyramid(image_path: Path, output_dir: Path, options: ViewerTileCacheOptions) -> dict[str, Any]:
@@ -610,20 +1222,57 @@ def _write_image_pyramid(image_path: Path, output_dir: Path, options: ViewerTile
     return {"image": str(image_path), "levels": levels, "tile_count": sum(int(level["tile_count"]) for level in levels)}
 
 
-def _write_overlay_tiles(overlays: Sequence[dict[str, Any]], output_dir: Path, options: ViewerTileCacheOptions) -> int:
+def _write_overlay_tiles(
+    overlays: Sequence[dict[str, Any]],
+    output_dir: Path,
+    options: ViewerTileCacheOptions,
+    *,
+    viewport_rect: Optional[dict[str, float]] = None,
+    prefetch_radius: int = 0,
+) -> dict[str, int]:
     buckets: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    input_count = 0
+    materialized_count = 0
+    omitted_count = 0
+    outside_viewport_count = 0
+    max_per_tile = max(1, int(options.max_visible_overlays))
+    visible_range = None
+    if viewport_rect:
+        visible_range = _tile_range(
+            viewport_rect,
+            tile_size=options.tile_size,
+            prefetch_radius=max(0, int(prefetch_radius)),
+        )
     for overlay in overlays:
         if not isinstance(overlay, dict):
             continue
         rect = rect_from_overlay(overlay)
         if not rect:
             continue
+        input_count += 1
         key = tile_coord_for_rect(rect, tile_size=options.tile_size)
-        buckets.setdefault(key, []).append(overlay)
+        if visible_range:
+            left, top, right, bottom = visible_range
+            if key[0] < left or key[0] > right or key[1] < top or key[1] > bottom:
+                omitted_count += 1
+                outside_viewport_count += 1
+                continue
+        bucket = buckets.setdefault(key, [])
+        if len(bucket) < max_per_tile:
+            bucket.append(overlay)
+            materialized_count += 1
+        else:
+            omitted_count += 1
     for (tile_x, tile_y), items in buckets.items():
-        items = list(visible_or_clustered_overlays(items, max_visible=options.max_visible_overlays)["items"])
+        items = list(visible_or_clustered_overlays(items, max_visible=max_per_tile)["items"])
         _write_json(output_dir / "0" / f"{tile_x}_{tile_y}.json", {"tile": [tile_x, tile_y], "overlays": items})
-    return len(buckets)
+    return {
+        "tile_count": len(buckets),
+        "input_overlay_count": input_count,
+        "materialized_overlay_count": materialized_count,
+        "omitted_overlay_count": omitted_count,
+        "outside_viewport_overlay_count": outside_viewport_count,
+    }
 
 
 def _cluster_overlays(overlays: Sequence[dict[str, Any]], *, max_visible: int) -> list[dict[str, Any]]:

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 from scripts import prepare_drawing_compare_customer_evidence as prepare
+from src.services.comparison.visual_asset import build_visual_asset_cache_key
 
 
 def _write_validation_summary(
@@ -30,6 +32,10 @@ def _write_validation_summary(
     workbench_item9b: bool = True,
     workbench_item9c: bool = True,
     cad_block_text_no_expand: bool = True,
+    forced_tile_eviction: bool = False,
+    tile_cache_mb: float = 0.25,
+    include_visual_asset_manifest: bool = True,
+    visual_asset_nonblank_status: str = "passed",
 ) -> None:
     if source_extensions is None:
         source_extensions = ("dwg", "dxf") if kind == "cad" else (kind, kind)
@@ -137,7 +143,38 @@ def _write_validation_summary(
                 }
             ],
         }
+    if forced_tile_eviction:
+        byte_limit = int(tile_cache_mb * 1024 * 1024)
+        summary["p5_g3_realset_gate"] = {
+            "requested": True,
+            "status": "passed",
+            "failures": [],
+            "evidence": {
+                "tile_manifest": {
+                    "status": "passed",
+                    "require_eviction": True,
+                    "evicted_pair_count": 2,
+                    "min_evicted_pair_count": 1,
+                    "evicted_estimated_bytes": 4096,
+                    "min_evicted_estimated_bytes": 1,
+                    "configured_tile_cache_mb": tile_cache_mb,
+                    "tile_cache_env_mb": str(tile_cache_mb),
+                    "byte_limit": byte_limit,
+                    "retained_estimated_bytes": max(1, byte_limit // 2),
+                    "stale_manifest_count": 0,
+                    "missing_pair_payload_count": 0,
+                    "orphan_payload_bytes": 0,
+                    "max_orphan_payload_bytes": 0,
+                }
+            },
+        }
     (path / "validation_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    if completed_pairs > 0:
+        _write_visual_asset_manifest_fixture(
+            path,
+            include_manifest=include_visual_asset_manifest,
+            nonblank_status=visual_asset_nonblank_status,
+        )
     if cad_pdf_blocked_pairs:
         (path / "blocked_pairs.csv").write_text(
             "a_path,b_path,a_kind,b_kind,reason\n"
@@ -150,6 +187,123 @@ def _write_validation_summary(
             item9b=workbench_item9b,
             item9c=workbench_item9c,
         )
+
+
+def _write_visual_asset_manifest_fixture(
+    path: Path,
+    *,
+    include_manifest: bool = True,
+    nonblank_status: str = "passed",
+) -> None:
+    viewer_dir = path / "viewer"
+    viewer_dir.mkdir(parents=True, exist_ok=True)
+    if not include_manifest:
+        (viewer_dir / "viewer_manifest.json").write_text(
+            json.dumps({"schema_version": 2, "visual_asset_manifest_paths": [], "pairs": []}),
+            encoding="utf-8",
+        )
+        return
+
+    manifest_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/visual_asset_manifest.json")
+    manifest_ref = str(manifest_rel).replace("\\", "/")
+    probe_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/nonblank_probe.json")
+    probe_ref = str(probe_rel).replace("\\", "/")
+    target_rel = Path("viewer/images/S21-0001_after.png")
+    target_ref = str(target_rel).replace("\\", "/")
+    target_path = path / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(b"stable nonblank visual target")
+    target_hash = hashlib.sha256(target_path.read_bytes()).hexdigest()
+    source_hash = "test-source-hash"
+    source_signature = {"schema_version": 1, "source_hash": source_hash}
+    plot_profile_hash = "test-plot-profile"
+    cache_key_hash = build_visual_asset_cache_key(
+        source_hash=source_hash,
+        source_signature=source_signature,
+        backend_id="source_pdf",
+        backend_version="1",
+        license_id="customer_provided",
+        plot_profile_hash=plot_profile_hash,
+        page_index=0,
+        dpi=80,
+        page_size_pt=[612.0, 792.0],
+        pixel_size=[680, 880],
+        transform_quality="estimated",
+    )
+    probe_payload = {
+        "schema_version": 2,
+        "status": nonblank_status,
+        "method": "pixel_nonblank_probe",
+        "asset_path": "viewer/pages/S21-0001_after.pdf",
+        "asset_hash": "test-asset-hash",
+        "asset_size": 10,
+        "probe_target_path": target_ref,
+        "probe_target_hash": target_hash,
+        "probe_target_size": target_path.stat().st_size,
+        "source_hash": source_hash,
+        "cache_key_hash": cache_key_hash,
+        "page_index": 0,
+        "dpi": 80,
+        "pixel_width": 10,
+        "pixel_height": 10,
+        "mean": 200.0 if nonblank_status == "passed" else 255.0,
+        "channel_ranges": [10, 10, 10] if nonblank_status == "passed" else [0, 0, 0],
+        "extrema": [[0, 10], [0, 10], [0, 10]] if nonblank_status == "passed" else [[255, 255], [255, 255], [255, 255]],
+        "nonblank": nonblank_status == "passed",
+    }
+    probe_payload["probe_hash"] = hashlib.sha256(
+        json.dumps(probe_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    probe_path = path / probe_rel
+    probe_path.parent.mkdir(parents=True, exist_ok=True)
+    probe_path.write_text(json.dumps(probe_payload), encoding="utf-8")
+    manifest_path = path / manifest_rel
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "visual_asset_id": "S21-0001:after:source_pdf",
+                "source_path": "new.pdf",
+                "asset_path": "viewer/pages/S21-0001_after.pdf",
+                "asset_kind": "source_pdf",
+                "status": "ready",
+                "source_hash": source_hash,
+                "source_signature": source_signature,
+                "cache_key_hash": cache_key_hash,
+                "plot_profile_hash": plot_profile_hash,
+                "page_index": 0,
+                "dpi": 80,
+                "page_size_pt": [612.0, 792.0],
+                "pixel_size": [680, 880],
+                "visual_backend_id": "source_pdf",
+                "visual_backend_version": "1",
+                "visual_backend_license_id": "customer_provided",
+                "visual_fidelity": "pdf_visual_background",
+                "render_lifecycle": "ready",
+                "transform_quality": "estimated",
+                "nonblank_probe_status": nonblank_status,
+                "metadata": {
+                    "nonblank_probe": probe_ref,
+                    "nonblank_probe_hash": probe_payload["probe_hash"],
+                    "probe_target_path": target_ref,
+                    "probe_target_hash": target_hash,
+                    "probe_method": "pixel_nonblank_probe",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (viewer_dir / "viewer_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "visual_asset_manifest_count": 1,
+                "visual_asset_manifest_paths": [manifest_ref],
+                "pairs": [{"pair_id": "S21-0001", "visual_asset_manifest_paths": [manifest_ref]}],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _ai_policy() -> dict:
@@ -256,12 +410,233 @@ def _write_large_dwg_probe(path: Path) -> None:
     )
 
 
+def _write_p5_g16_replay(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_id": "p5_g16_real_corpus_replay",
+                "profile": "real_corpus_artifact_replay",
+                "status": "passed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_p5_g22_gui_soak(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_id": "p5_g22_actual_gui_soak",
+                "profile": "actual_gui_customer_corpus_soak",
+                "status": "passed",
+                "summary": {
+                    "native_resource_summary": {"measurement_available": True},
+                    "worker_tree_summary": {"cleanup_ok": True, "orphan_worker_count": 0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_p5_g26_selection_latency(path: Path, *, failed_gate: str | None = None) -> None:
+    gate_names = sorted(prepare.P5_G26_REQUIRED_GATES)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g26_selection_latency_soak",
+                "profile": "selection_latency_hard_gate",
+                "status": "passed",
+                "p5_g26_required_gate_names": gate_names,
+                "p5_g26_contract": {
+                    "wp_a_passed": failed_gate is None,
+                    "wp_b_passed": failed_gate is None,
+                    "has_zone_selection_evidence": True,
+                    "zone_selection_background_work_count": 0,
+                    "cad_to_pdf_hot_path_count": 0,
+                },
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": name != failed_gate,
+                        "required": True,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_p5_g27_selected_zone_crop(path: Path, *, failed_gate: str | None = None) -> None:
+    gate_names = sorted(prepare.P5_G27_REQUIRED_GATES)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g27_selected_zone_crop_soak",
+                "profile": "selected_zone_crop_first_lifecycle",
+                "status": "passed",
+                "p5_g27_required_gate_names": gate_names,
+                "p5_g27_contract": {
+                    "crop_first_result_visible": failed_gate is None,
+                    "crop_visible_before_vector_focus": failed_gate is None,
+                    "vector_failure_does_not_clear_background": failed_gate is None,
+                    "has_selected_zone_crop_first_evidence": True,
+                    "worker_cleanup_ok": True,
+                    "blank_selected_zone_count": 0,
+                    "stale_result_visible_count": 0,
+                    "cancel_without_visible_regression_count": 0,
+                    "timeout_count": 0,
+                    "fallback_missing_reason_count": 0,
+                    "orphan_worker_count": 0,
+                },
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": name != failed_gate,
+                        "required": True,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_p5_g28_cache_plateau(
+    path: Path,
+    *,
+    failed_gate: str | None = None,
+    include_reason: bool = True,
+    required_false_gate: str | None = None,
+) -> None:
+    gate_names = sorted(prepare.P5_G28_REQUIRED_GATES)
+    reason_counts = {"byte_limit": 2} if include_reason else {}
+    category_breakdown = {
+        name: {
+            "retained_bytes": 900,
+            "byte_limit": 1000,
+            "retained_entry_count": 3,
+            "evicted_entry_count": 2,
+            "evicted_estimated_bytes": 500,
+            "orphan_bytes": 0,
+            "orphan_entry_count": 0,
+            "stale_entry_count": 0,
+            "tail_slope_bytes_per_run": 0,
+            "tail_slope_target_bytes_per_run": 0,
+            "plateau_ok": True,
+        }
+        for name in ("display_list", "dxf_index", "visual_asset", "overlay", "spool")
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g28_cache_plateau_soak",
+                "profile": "tile_cache_plateau_lifecycle_seed",
+                "status": "passed",
+                "p5_g28_required_gate_names": gate_names,
+                "p5_g28_contract": {
+                    "passed": failed_gate is None and include_reason,
+                    "tile_retention_completed": True,
+                    "tile_retained_bytes": 900,
+                    "tile_byte_limit": 1000,
+                    "tile_byte_plateau_ok": True,
+                    "tile_eviction_count": 2,
+                    "tile_evicted_estimated_bytes": 500,
+                    "tile_eviction_observed": True,
+                    "tile_byte_limit_eviction_reason_present": include_reason,
+                    "tile_orphan_bytes": 0,
+                    "tile_orphan_pair_count": 0,
+                    "tile_orphan_payloads_zero": True,
+                    "tile_stale_manifest_count": 0,
+                    "tile_stale_manifest_zero": True,
+                    "tile_hot_pair_retained": True,
+                    "tile_evicted_pair_cache_miss": True,
+                    "single_entry_over_cap_count": 0,
+                    "single_entry_over_cap_zero": True,
+                    "prune_p95_ms": 20.0,
+                    "prune_p95_target_ms": 500.0,
+                    "event_loop_gap_p95_ms": 10.0,
+                    "event_loop_gap_p95_target_ms": 150.0,
+                    "event_loop_over_500ms_count": 0,
+                    "event_loop_over_500ms_zero": True,
+                    "eviction_reason_counts": reason_counts,
+                    "cache_category_names": [
+                        "display_list",
+                        "dxf_index",
+                        "visual_asset",
+                        "overlay",
+                        "spool",
+                    ],
+                    "cache_category_breakdown": category_breakdown,
+                    "cache_category_breakdown_present": True,
+                    "display_list_cache_plateau": True,
+                    "dxf_index_cache_plateau": True,
+                    "visual_asset_cache_plateau": True,
+                    "overlay_cache_plateau": True,
+                    "spool_namespace_plateau": True,
+                    "cache_category_orphans_zero": True,
+                    "cache_category_stale_entries_zero": True,
+                    "cache_plateau_tail_slope_ok": True,
+                    "cache_category_retained_bytes_total": 4500,
+                    "cache_category_byte_limit_total": 5000,
+                    "cache_category_evicted_entry_count": 10,
+                    "cache_category_orphan_bytes_total": 0,
+                    "cache_category_stale_entry_count": 0,
+                    "cache_category_tail_slope_max_bytes_per_run": 0,
+                },
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": name != failed_gate
+                        and (
+                            include_reason
+                            or name != "p5_g28_tile_cache_eviction_reason_present"
+                        ),
+                        "required": name != required_false_gate,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _run_prepare_ready_fixture(
     tmp_path: Path,
     *,
     review_decision_truth: Path | None = None,
     dataset_strata: Path | None = None,
     large_dwg_probe: Path | None = None,
+    p5_g7_tile_eviction_proof_dirs: list[Path] | None = None,
+    p5_g7_tile_eviction_release_manifests: list[Path] | None = None,
+    require_p5_g7_tile_eviction_proof: bool = False,
+    p5_g6_tile_cache_mb: float | None = None,
+    p5_g16_benchmark_json: list[Path] | None = None,
+    p5_g22_gui_soak_json: list[Path] | None = None,
+    p5_g26_selection_latency_json: list[Path] | None = None,
+    p5_g27_selected_zone_crop_json: list[Path] | None = None,
+    p5_g28_cache_plateau_json: list[Path] | None = None,
+    include_visual_asset_manifest: bool = True,
+    visual_asset_nonblank_status: str = "passed",
 ) -> dict:
     cad_dir = tmp_path / "cad"
     pdf_dir = tmp_path / "pdf"
@@ -275,6 +650,8 @@ def _run_prepare_ready_fixture(
         kind="cad",
         completed_pairs=1,
         queue_summary="member beam moved structural text",
+        include_visual_asset_manifest=include_visual_asset_manifest,
+        visual_asset_nonblank_status=visual_asset_nonblank_status,
     )
     _write_validation_summary(
         pdf_dir,
@@ -282,6 +659,8 @@ def _run_prepare_ready_fixture(
         completed_pairs=20,
         queue_summary="section dimension D13@100 D13@200 SHD13@100 SHD13@200 grid",
         review_truth_rows=6,
+        include_visual_asset_manifest=include_visual_asset_manifest,
+        visual_asset_nonblank_status=visual_asset_nonblank_status,
     )
     _write_validation_summary(blocked_dir, kind="cad", completed_pairs=0, cad_pdf_blocked_pairs=1)
     _write_truth_csv(truth_csv)
@@ -307,6 +686,15 @@ def _run_prepare_ready_fixture(
         review_decision_truth=review_decision_truth,
         dataset_strata=dataset_strata,
         large_dwg_probe=large_dwg_probe,
+        p5_g7_tile_eviction_proof_dirs=p5_g7_tile_eviction_proof_dirs,
+        p5_g7_tile_eviction_release_manifests=p5_g7_tile_eviction_release_manifests,
+        require_p5_g7_tile_eviction_proof=require_p5_g7_tile_eviction_proof,
+        p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
+        p5_g16_benchmark_json=p5_g16_benchmark_json,
+        p5_g22_gui_soak_json=p5_g22_gui_soak_json,
+        p5_g26_selection_latency_json=p5_g26_selection_latency_json,
+        p5_g27_selected_zone_crop_json=p5_g27_selected_zone_crop_json,
+        p5_g28_cache_plateau_json=p5_g28_cache_plateau_json,
     )
 
 
@@ -434,11 +822,545 @@ def test_prepare_customer_evidence_manifest_ready(tmp_path: Path) -> None:
     assert manifest["selected_zone_performance"]["status"] == "passed"
     assert manifest["selected_zone_performance"]["completed_outputs"] == 2
     assert manifest["selected_zone_performance"]["telemetry_outputs"] == 2
+    p5_g24 = manifest["p5_g24_visual_asset_policy"]
+    assert p5_g24["status"] == "passed"
+    assert p5_g24["completed_output_count"] == 2
+    assert p5_g24["outputs_with_manifests"] == 2
+    assert p5_g24["manifest_count"] == 2
     assert manifest["readiness"]["status"] == "ready"
     assert manifest["readiness"]["issue_count"] == 0
     assert manifest["readiness"]["issues"] == []
     assert result["summary"]["cad_policy_evidence"]["block_text_detection_without_expansion"] is True
+    assert result["summary"]["p5_g24_visual_asset_policy"]["status"] == "passed"
     assert (tmp_path / "sharable_path_audit_summary.json").exists()
+
+
+def test_prepare_customer_grade_requires_visual_asset_manifest_refs(tmp_path: Path) -> None:
+    result = _run_prepare_ready_fixture(tmp_path, include_visual_asset_manifest=False)
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    assert result["status"] == "incomplete"
+    assert manifest["p5_g24_visual_asset_policy"]["status"] == "failed"
+    assert "p5_g24_visual_asset_policy.status must be passed for customer-grade visual asset evidence" in result["issues"]
+    assert any("no visual asset manifest references" in issue for issue in result["issues"])
+    assert manifest["readiness"]["status"] == "incomplete"
+
+
+def test_prepare_customer_grade_rejects_failed_visual_asset_nonblank_probe(tmp_path: Path) -> None:
+    result = _run_prepare_ready_fixture(tmp_path, visual_asset_nonblank_status="failed")
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    assert result["status"] == "incomplete"
+    assert manifest["p5_g24_visual_asset_policy"]["status"] == "failed"
+    assert "p5_g24_visual_asset_policy.status must be passed for customer-grade visual asset evidence" in result["issues"]
+    assert any("nonblank_probe_status must be passed" in issue for issue in result["issues"])
+
+
+def test_prepare_preserves_p5_g7_forced_tile_eviction_proof_without_counting_as_customer_corpus(
+    tmp_path: Path,
+) -> None:
+    proof_dir = tmp_path / "p5_g7_tile_eviction_proof"
+    release_manifest = tmp_path / "p5_g7_release_manifest.json"
+    _write_validation_summary(
+        proof_dir,
+        kind="pdf",
+        completed_pairs=3,
+        queue_summary="forced tile eviction proof",
+        forced_tile_eviction=True,
+        tile_cache_mb=0.25,
+    )
+    release_manifest.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "name": "realset_validation",
+                        "env_overrides": {"DRAWING_COMPARE_TILE_CACHE_MB": "0.25"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g7_tile_eviction_proof_dirs=[proof_dir],
+        p5_g7_tile_eviction_release_manifests=[release_manifest],
+        require_p5_g7_tile_eviction_proof=True,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g7 = manifest["p5_g7_forced_tile_eviction"]
+    assert result["status"] == "ready"
+    assert result["summary"]["completed_pairs"] == 21
+    assert result["summary"]["sheet_count"] == 21
+    assert p5_g7["status"] == "passed"
+    assert p5_g7["required"] is True
+    assert p5_g7["proof_count"] == 1
+    assert p5_g7["proofs"][0]["configured_tile_cache_mb"] == 0.25
+    assert p5_g7["proofs"][0]["evicted_pair_count"] == 2
+    assert p5_g7["release_manifests"][0]["tile_cache_env_mb_values"] == [0.25]
+    assert "p5_g7_tile_eviction_proof" in p5_g7["proofs"][0]["result_dir"]
+
+
+def test_prepare_records_p5_g16_replay_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    replay_json = tmp_path / "pdf" / "p5_g16_real_corpus_replay.json"
+    replay_json.parent.mkdir(parents=True)
+    _write_p5_g16_replay(replay_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g16_benchmark_json=[replay_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g16_real_corpus_replay.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g16_real_corpus_replay_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g16_real_corpus_replay_jsons"] == [expected_ref]
+    p5_g16 = manifest["performance_benchmarks"]["p5_g16_real_corpus_replay"]
+    assert p5_g16["status"] == "passed"
+    assert p5_g16["benchmark_json"] == expected_ref
+    assert result["summary"]["p5_g16_real_corpus_replay"]["passed_count"] == 1
+
+
+def test_prepare_records_p5_g22_gui_soak_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g22_actual_gui_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g22_gui_soak(soak_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g22_gui_soak_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g22_actual_gui_soak.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g22_actual_gui_soak_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g22_actual_gui_soak_jsons"] == [expected_ref]
+    p5_g22 = manifest["performance_benchmarks"]["p5_g22_actual_gui_soak"]
+    assert p5_g22["status"] == "passed"
+    assert p5_g22["benchmark_json"] == expected_ref
+    assert p5_g22["native_resource_summary"]["measurement_available"] is True
+    assert p5_g22["worker_tree_summary"]["cleanup_ok"] is True
+    assert p5_g22["shared_summary_count"] == 1
+    assert result["summary"]["p5_g22_actual_gui_soak"]["passed_count"] == 1
+
+
+def test_prepare_records_p5_g26_selection_latency_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g26_selection_latency_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g26_selection_latency(soak_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g26_selection_latency_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g26_selection_latency_soak.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g26_selection_latency_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g26_selection_latency_jsons"] == [expected_ref]
+    p5_g26 = manifest["performance_benchmarks"]["p5_g26_selection_latency"]
+    assert p5_g26["status"] == "passed"
+    assert p5_g26["benchmark_json"] == expected_ref
+    assert p5_g26["required_gate_count"] == len(prepare.P5_G26_REQUIRED_GATES)
+    assert result["summary"]["p5_g26_selection_latency"]["passed_count"] == 1
+
+
+def test_prepare_rejects_failed_p5_g26_selection_latency_gate(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g26_selection_latency_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g26_selection_latency(
+        soak_json,
+        failed_gate="p5_g26_zone_selection_p95_ms",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g26_selection_latency_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g26 = manifest["performance_benchmarks"]["p5_g26_selection_latency"]
+    assert result["status"] == "incomplete"
+    assert p5_g26["status"] == "failed"
+    assert "p5_g26_selection_latency.status must be passed when provided" in result["issues"]
+    assert any(
+        "required gates failed: p5_g26_zone_selection_p95_ms" in issue
+        for issue in result["issues"]
+    )
+
+
+def test_prepare_records_p5_g27_selected_zone_crop_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g27_selected_zone_crop_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g27_selected_zone_crop(soak_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g27_selected_zone_crop_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g27_selected_zone_crop_soak.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g27_selected_zone_crop_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g27_selected_zone_crop_jsons"] == [expected_ref]
+    p5_g27 = manifest["performance_benchmarks"]["p5_g27_selected_zone_crop"]
+    assert p5_g27["status"] == "passed"
+    assert p5_g27["benchmark_json"] == expected_ref
+    assert p5_g27["required_gate_count"] == len(prepare.P5_G27_REQUIRED_GATES)
+    assert result["summary"]["p5_g27_selected_zone_crop"]["passed_count"] == 1
+
+
+def test_prepare_rejects_failed_p5_g27_selected_zone_crop_gate(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g27_selected_zone_crop_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g27_selected_zone_crop(
+        soak_json,
+        failed_gate="p5_g27_crop_visible_before_vector_focus",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g27_selected_zone_crop_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g27 = manifest["performance_benchmarks"]["p5_g27_selected_zone_crop"]
+    assert result["status"] == "incomplete"
+    assert p5_g27["status"] == "failed"
+    assert "p5_g27_selected_zone_crop.status must be passed when provided" in result["issues"]
+    assert any(
+        "required gates failed: p5_g27_crop_visible_before_vector_focus" in issue
+        for issue in result["issues"]
+    )
+
+
+def test_prepare_records_p5_g28_cache_plateau_artifact_for_standalone_audit_discovery(
+    tmp_path: Path,
+) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g28_cache_plateau_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g28_cache_plateau(soak_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g28_cache_plateau_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g28_cache_plateau_soak.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g28_cache_plateau_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g28_cache_plateau_jsons"] == [expected_ref]
+    p5_g28 = manifest["performance_benchmarks"]["p5_g28_cache_plateau"]
+    assert p5_g28["status"] == "passed"
+    assert p5_g28["required_for_customer_grade"] is False
+    assert p5_g28["benchmark_json"] == expected_ref
+    assert p5_g28["required_gate_count"] == len(prepare.P5_G28_REQUIRED_GATES)
+    assert p5_g28["artifacts"][0]["tile_byte_limit_eviction_reason_count"] == 2
+    assert result["summary"]["p5_g28_cache_plateau"]["passed_count"] == 1
+    assert "p5_g28_cache_plateau_1" in manifest["provenance"]["input_file_hashes"]
+
+
+def test_prepare_rejects_p5_g28_cache_plateau_without_eviction_reason(
+    tmp_path: Path,
+) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g28_cache_plateau_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g28_cache_plateau(soak_json, include_reason=False)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g28_cache_plateau_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g28 = manifest["performance_benchmarks"]["p5_g28_cache_plateau"]
+    assert result["status"] == "incomplete"
+    assert p5_g28["status"] == "failed"
+    assert "p5_g28_cache_plateau.status must be passed when provided" in result["issues"]
+    assert any(
+        "p5_g28_contract.eviction_reason_counts.byte_limit must be > 0" in issue
+        for issue in result["issues"]
+    )
+    assert any(
+        "required gates failed: p5_g28_tile_cache_eviction_reason_present" in issue
+        for issue in result["issues"]
+    )
+
+
+def test_prepare_rejects_p5_g28_without_cache_category_breakdown(
+    tmp_path: Path,
+) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g28_cache_plateau_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g28_cache_plateau(soak_json)
+    payload = json.loads(soak_json.read_text(encoding="utf-8"))
+    contract = payload["p5_g28_contract"]
+    contract.pop("cache_category_breakdown")
+    contract["cache_category_breakdown_present"] = False
+    contract["passed"] = False
+    payload["status"] = "failed"
+    for gate in payload["gates"]:
+        if gate["name"] == "p5_g28_cache_category_breakdown_present":
+            gate["passed"] = False
+    soak_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g28_cache_plateau_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g28 = manifest["performance_benchmarks"]["p5_g28_cache_plateau"]
+    assert result["status"] == "incomplete"
+    assert p5_g28["status"] == "failed"
+    assert any(
+        "p5_g28_contract.cache_category_breakdown missing" in issue
+        for issue in p5_g28["artifacts"][0]["issues"]
+    )
+
+
+def test_prepare_rejects_p5_g28_invalid_live_cache_counters(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g28_cache_plateau_soak.json"
+    soak_json.parent.mkdir(parents=True, exist_ok=True)
+    _write_p5_g28_cache_plateau(soak_json)
+    payload = json.loads(soak_json.read_text(encoding="utf-8"))
+    payload["p5_g28_contract"]["live_cache_counters"] = {
+        "supplied": True,
+        "source_count": 1,
+        "observed_category_count": 1,
+        "passed": False,
+        "within_limits": False,
+        "invalid_counter_count": 1,
+        "tail_slope_ok": False,
+        "tail_slope_max_bytes_per_run": 100,
+        "tail_slope_target_bytes_per_run": 0,
+        "tail_slope_invalid_category_count": 1,
+        "issues": ["display_list: retained_bytes must be <= byte_limit"],
+        "categories": {
+            "display_list": {
+                "observed": True,
+                "sample_count": 2,
+                "retained_bytes": 2000,
+                "byte_limit": 1000,
+                "eviction_count": 0,
+                "evicted_estimated_bytes": 0,
+                "tail_slope_ok": False,
+                "tail_slope_bytes_per_run": 100,
+                "tail_slope_target_bytes_per_run": 0,
+                "within_limit": False,
+            }
+        },
+    }
+    payload["p5_g28_contract"]["live_cache_counters_supplied"] = True
+    payload["p5_g28_contract"]["live_cache_counters_source_count"] = 1
+    payload["p5_g28_contract"]["live_cache_counters_observed_category_count"] = 1
+    payload["p5_g28_contract"]["live_cache_counters_within_limits"] = False
+    payload["p5_g28_contract"]["live_cache_counters_invalid_counter_count"] = 1
+    soak_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g28_cache_plateau_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g28 = manifest["performance_benchmarks"]["p5_g28_cache_plateau"]
+    assert p5_g28["status"] == "failed"
+    assert p5_g28["artifacts"][0]["live_cache_counters_supplied"] is True
+    assert p5_g28["artifacts"][0]["live_cache_counters_tail_slope_ok"] is False
+    assert p5_g28["artifacts"][0]["live_cache_counters_tail_slope_max_bytes_per_run"] == 100
+    assert any(
+        "p5_g28_contract.live_cache_counters.passed must be true when supplied" in issue
+        for issue in p5_g28["artifacts"][0]["issues"]
+    )
+    assert any(
+        "p5_g28_contract.live_cache_counters.tail_slope_ok must be true when supplied"
+        in issue
+        for issue in p5_g28["artifacts"][0]["issues"]
+    )
+
+
+def test_prepare_rejects_mixed_p5_g28_cache_plateau_artifacts(
+    tmp_path: Path,
+) -> None:
+    passing_json = tmp_path / "pdf" / "p5_g28_cache_plateau_soak.json"
+    failing_json = tmp_path / "pdf" / "bad" / "p5_g28_cache_plateau_soak.json"
+    passing_json.parent.mkdir(parents=True)
+    failing_json.parent.mkdir(parents=True)
+    _write_p5_g28_cache_plateau(passing_json)
+    _write_p5_g28_cache_plateau(failing_json, include_reason=False)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g28_cache_plateau_json=[passing_json, failing_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g28 = manifest["performance_benchmarks"]["p5_g28_cache_plateau"]
+    assert result["status"] == "incomplete"
+    assert p5_g28["status"] == "failed"
+    assert p5_g28["passed_count"] == 1
+    assert p5_g28["artifact_count"] == 2
+    assert "p5_g28_cache_plateau.status must be passed when provided" in result["issues"]
+
+
+def test_prepare_rejects_p5_g28_required_gate_marked_not_required_but_failed(
+    tmp_path: Path,
+) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g28_cache_plateau_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g28_cache_plateau(
+        soak_json,
+        failed_gate="p5_g28_prune_p95_ms",
+        required_false_gate="p5_g28_prune_p95_ms",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g28_cache_plateau_json=[soak_json],
+    )
+
+    assert result["status"] == "incomplete"
+    assert any(
+        "required gates failed: p5_g28_prune_p95_ms" in issue
+        for issue in result["issues"]
+    )
+
+
+def test_prepare_rejects_p5_g22_gui_soak_without_shared_summaries(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g22_actual_gui_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    soak_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_id": "p5_g22_actual_gui_soak",
+                "profile": "actual_gui_customer_corpus_soak",
+                "status": "passed",
+                "summary": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g22_gui_soak_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g22 = manifest["performance_benchmarks"]["p5_g22_actual_gui_soak"]
+    assert result["status"] == "incomplete"
+    assert p5_g22["status"] == "failed"
+    assert p5_g22["shared_summary_count"] == 0
+    assert (
+        "p5_g22_actual_gui_soak shared native/worker summaries are required for all provided artifacts"
+        in result["issues"]
+    )
+
+
+def test_prepare_requires_p5_g7_forced_tile_eviction_when_requested(tmp_path: Path) -> None:
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        require_p5_g7_tile_eviction_proof=True,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    assert result["status"] == "incomplete"
+    assert manifest["p5_g7_forced_tile_eviction"]["status"] == "failed"
+    assert "p5_g7_forced_tile_eviction.status must be passed when required" in result["issues"]
+
+
+def test_prepare_rejects_p5_g7_tile_cache_cap_mismatch(tmp_path: Path) -> None:
+    proof_dir = tmp_path / "p5_g7_tile_eviction_proof"
+    _write_validation_summary(
+        proof_dir,
+        kind="pdf",
+        completed_pairs=3,
+        queue_summary="forced tile eviction proof",
+        forced_tile_eviction=True,
+        tile_cache_mb=0.5,
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g7_tile_eviction_proof_dirs=[proof_dir],
+        require_p5_g7_tile_eviction_proof=True,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    p5_g7 = result["summary"]["p5_g7_forced_tile_eviction"]
+    assert result["status"] == "incomplete"
+    assert p5_g7["status"] == "failed"
+    assert "configured_tile_cache_mb=0.5 != 0.25" in "\n".join(p5_g7["issues"])
+    assert "p5_g7_forced_tile_eviction.status must be passed when required" in result["issues"]
+
+
+def test_prepare_rejects_p5_g7_proof_in_results_dir(tmp_path: Path) -> None:
+    proof_dir = tmp_path / "p5_g7_tile_eviction_proof"
+    _write_validation_summary(
+        proof_dir,
+        kind="pdf",
+        completed_pairs=5,
+        queue_summary="forced tile eviction proof",
+        forced_tile_eviction=True,
+        tile_cache_mb=0.25,
+    )
+
+    cad_dir = tmp_path / "cad"
+    pdf_dir = tmp_path / "pdf"
+    blocked_dir = tmp_path / "blocked"
+    manifest_path = tmp_path / "customer_evidence_manifest.json"
+    truth_csv = tmp_path / "review_ground_truth.csv"
+    notes = tmp_path / "operator_notes.md"
+    confirmed = pdf_dir / "artifacts" / "confirmed_clouds" / "pair_confirmed.png"
+    _write_validation_summary(cad_dir, kind="cad", completed_pairs=1, queue_summary="member structural text")
+    _write_validation_summary(
+        pdf_dir,
+        kind="pdf",
+        completed_pairs=20,
+        queue_summary="section dimension D13@100 D13@200 SHD13@100 SHD13@200 grid",
+        review_truth_rows=6,
+    )
+    _write_validation_summary(blocked_dir, kind="cad", completed_pairs=0, cad_pdf_blocked_pairs=1)
+    _write_truth_csv(truth_csv)
+    _write_operator_notes(notes)
+    confirmed.parent.mkdir(parents=True)
+    confirmed.write_bytes(b"png")
+
+    result = prepare.prepare_manifest(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir, proof_dir],
+        out_path=manifest_path,
+        dataset_id="customer-grade-fixture",
+        dataset_source_kind="customer_grade",
+        dataset_source_description="Approved customer-grade fixture for MVP exit.",
+        dataset_approval_status="approved_for_mvp_exit",
+        dataset_approver="structural-review-lead",
+        validation_date="2026-05-11",
+        ground_truth_owner="structural-review-lead",
+        review_ground_truth=truth_csv,
+        ground_truth_status="approved",
+        operator_reviewer_role="structural_review_lead",
+        operator_notes_file=notes,
+        operator_screenshots_dir=None,
+        confirmed_export_artifact=confirmed,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    assert result["status"] == "incomplete"
+    assert result["summary"]["completed_pairs"] == 26
+    assert result["summary"]["p5_g7_forced_tile_eviction_results_dir_rejections"]
+    assert any("must be passed via --p5-g7-tile-eviction-proof-dir" in issue for issue in result["issues"])
 
 
 def test_prepare_customer_evidence_rejects_invalid_review_decision_truth_enum(tmp_path: Path) -> None:

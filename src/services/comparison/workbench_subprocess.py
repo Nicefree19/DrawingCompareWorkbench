@@ -18,17 +18,20 @@ ZONE_RENDER_PROCESS_MODULE = "src.services.comparison.zone_render_process"
 ZONE_VECTOR_WORKER_MODULE = "src.services.comparison.zone_vector_worker"
 VIEWER_RENDER_WORKER_MODULE = "src.services.comparison.viewer_render_worker"
 VIEWER_PACKAGE_WORKER_MODULE = "scripts.render_viewer_package_subprocess"
+CAD_VISUAL_CONVERSION_WORKER_MODULE = "src.services.comparison.cad_visual_conversion_worker"
 
 ZONE_RENDER_PROCESS_FLAG = "--drawing-compare-zone-render-process"
 ZONE_VECTOR_WORKER_FLAG = "--drawing-compare-zone-vector-worker"
 VIEWER_RENDER_WORKER_FLAG = "--drawing-compare-viewer-render-worker"
 VIEWER_PACKAGE_WORKER_FLAG = "--drawing-compare-viewer-package-worker"
+CAD_VISUAL_CONVERSION_WORKER_FLAG = "--drawing-compare-cad-visual-conversion-worker"
 
 WORKBENCH_WORKER_FLAGS: dict[str, str] = {
     ZONE_RENDER_PROCESS_MODULE: ZONE_RENDER_PROCESS_FLAG,
     ZONE_VECTOR_WORKER_MODULE: ZONE_VECTOR_WORKER_FLAG,
     VIEWER_RENDER_WORKER_MODULE: VIEWER_RENDER_WORKER_FLAG,
     VIEWER_PACKAGE_WORKER_MODULE: VIEWER_PACKAGE_WORKER_FLAG,
+    CAD_VISUAL_CONVERSION_WORKER_MODULE: CAD_VISUAL_CONVERSION_WORKER_FLAG,
 }
 
 _WORKER_MODULE_BY_FLAG = {flag: module for module, flag in WORKBENCH_WORKER_FLAGS.items()}
@@ -97,4 +100,8 @@ def dispatch_packaged_worker(argv: Sequence[str] | None = None) -> Optional[int]
         from scripts.render_viewer_package_subprocess import main as viewer_package_main
 
         return int(viewer_package_main())
+    if module_name == CAD_VISUAL_CONVERSION_WORKER_MODULE:
+        from .cad_visual_conversion_worker import main as cad_visual_conversion_main
+
+        return int(cad_visual_conversion_main())
     return None

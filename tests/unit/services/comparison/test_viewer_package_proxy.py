@@ -39,12 +39,37 @@ class _FakePopen:
         self.kill_called = False
 
     def wait(self, timeout: Optional[float] = None) -> int:
+        if self.kill_called:
+            self.returncode = -9
+            return -9
         self.returncode = self._exit_code
         return self._exit_code
 
     def kill(self) -> None:
         self.kill_called = True
         self.returncode = -9
+
+
+class _BlockingStdout:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        import time
+
+        time.sleep(60.0)
+        raise StopIteration
+
+
+class _BlockingPopen(_FakePopen):
+    """Fake process whose stdout never yields unless the parent cancels it."""
+
+    def __init__(self) -> None:
+        super().__init__([], exit_code=0)
+        self.stdout = _BlockingStdout()
+
+    def poll(self) -> Optional[int]:
+        return self.returncode
 
 
 def _result_jsonl(viewer_package: dict[str, Any]) -> list[str]:
@@ -244,6 +269,28 @@ class TestGenericError:
             )
         assert result == {"viewer_dir": "/tmp/inproc", "pair_count": 0}
         assert report.fallback_used is True
+
+
+class TestCancellation:
+    def test_cancel_callback_kills_subprocess_without_waiting_for_stdout(
+        self, fake_artifact_dir
+    ):
+        fake = _BlockingPopen()
+        with patch(
+            "src.services.comparison.viewer_package_proxy.subprocess.Popen",
+            return_value=fake,
+        ):
+            result, report = export_viewer_package_isolated(
+                fake_artifact_dir,
+                options={},
+                cancel_callback=lambda: True,
+            )
+
+        assert result is None
+        assert fake.kill_called is True
+        assert report.exit_code == -9
+        assert report.error_type == "Cancelled"
+        assert "cancel_killed" in report.notes
 
 
 class TestSubprocessLaunchFailure:

@@ -275,8 +275,42 @@ def test_repeated_render_is_deterministic(sample_pdf: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# select_pdf_render_dpi — pure helper, no Qt needed but lives in same module
+# select_initial_pdf_render_dpi / select_pdf_render_dpi — pure helpers, no Qt
+# needed but live in same module
 # ---------------------------------------------------------------------------
+
+
+def test_select_initial_pdf_render_dpi_keeps_a4_at_requested_dpi() -> None:
+    from src.services.comparison.qt_pdf_adapter import select_initial_pdf_render_dpi
+
+    assert select_initial_pdf_render_dpi((612.0, 792.0), target_dpi=150) == 150.0
+
+
+def test_select_initial_pdf_render_dpi_caps_a1_to_pixel_budget_bucket() -> None:
+    from src.services.comparison.qt_pdf_adapter import select_initial_pdf_render_dpi
+
+    assert select_initial_pdf_render_dpi((1684.0, 2384.0), target_dpi=150) == 75.0
+    assert (
+        select_initial_pdf_render_dpi(
+            (1684.0, 2384.0),
+            target_dpi=150,
+            max_pixels=8_000_000,
+        )
+        == 100.0
+    )
+
+
+def test_select_initial_pdf_render_dpi_can_be_disabled_for_zoom_rerenders() -> None:
+    from src.services.comparison.qt_pdf_adapter import select_initial_pdf_render_dpi
+
+    assert (
+        select_initial_pdf_render_dpi(
+            (1684.0, 2384.0),
+            target_dpi=300,
+            max_pixels=None,
+        )
+        == 300.0
+    )
 
 
 def test_select_dpi_no_change_at_zoom_1() -> None:

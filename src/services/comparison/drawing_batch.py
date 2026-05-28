@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 
 from .base import ChangeRecord, ChangeType, ComparisonResult
 from .comparison_config import ComparisonConfig
+from .dxf_read import read_dxf_document
 from .pair_identity import candidate_display_label, candidate_pair_uuid
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ from .drawing_id_pattern import (
     PROJECT_DRAWING_NUMBER_PATTERN,
 )  # noqa: E402,F401  (re-export for back-compat)
 LARGE_CAD_FILE_BYTES = 50 * 1024 * 1024
+LARGE_DXF_LEGACY_FALLBACK_BYTES = 25 * 1024 * 1024
 DESCRIPTOR_CACHE_VERSION = 3  # Phase O Commit 3 — INSERT/ATTRIB hash 변경으로 인한 cache invalidation
 MANUAL_MATCH_CSV_COLUMNS = ("a_path", "b_path", "status")
 MANUAL_MATCH_STATUSES = {
@@ -292,6 +294,12 @@ class BatchCompareOptions:
     # (default), "high". Unknown values fall back to medium inside
     # DrawingDiffer (see drawing_differ._resolve_noise_profile).
     pdf_noise_filter_strength: str = "medium"
+    # CanonicalDrawing is the default CAD path. The legacy ezdxf/ODA path is
+    # retained only for explicitly approved internal fallback runs.
+    cad_compare_engine: Literal["canonical", "legacy_ezdxf"] = "canonical"
+    # If the ODA-free canonical CAD importer cannot read a pair but a DXF is
+    # already available (source DXF or persistent cache), retry with ezdxf.
+    cad_legacy_fallback_on_failure: bool = True
     # OCR is intentionally opt-in for PDF comparison. Some OCR stacks import
     # torch/paddle native DLLs and can terminate the GUI process on Windows.
     use_ocr_fallback: bool = False
@@ -1668,7 +1676,12 @@ def _run_candidate_item(
             is_cancelled,
             progress_callback=progress_callback,
         )
-        item.status = "completed"
+        result_error = _comparison_result_failure_message(item.result)
+        if result_error:
+            item.status = "failed"
+            item.error = result_error
+        else:
+            item.status = "completed"
     except Exception as exc:
         logger.exception("Batch comparison failed for %s", label)
         item.status = "failed"
@@ -1796,6 +1809,27 @@ def compare_candidate(
     if candidate.source_a.kind == DrawingKind.CAD:
         from .dwg_differ import DwgDiffer
 
+        cad_config = _cad_compare_config(options)
+        legacy_preselect_reason = ""
+        if (
+            options.cad_compare_engine == "canonical"
+            and options.cad_legacy_fallback_on_failure
+        ):
+            legacy_preselect_reason = _large_cached_dxf_legacy_preselect_reason(
+                path_a,
+                path_b,
+                options.dxf_cache_dir,
+            )
+            if legacy_preselect_reason:
+                logger.warning(
+                    "Using cached ezdxf directly for %s: %s",
+                    _candidate_label(candidate),
+                    legacy_preselect_reason,
+                )
+                cad_config = {
+                    "use_canonical_pipeline": False,
+                    "use_legacy_ezdxf_pipeline": True,
+                }
         stream_path = None
         stream_pair_id = ""
         if options.compare_state_dir:
@@ -1805,7 +1839,8 @@ def compare_candidate(
                 / "streams"
                 / f"{stream_pair_id}.jsonl"
             )
-        return DwgDiffer(
+        result = DwgDiffer(
+            config=cad_config,
             comparison_config=options.comparison_config,
             dxf_cache_dir=options.dxf_cache_dir,
             change_zone_stream_path=stream_path,
@@ -1817,6 +1852,59 @@ def compare_candidate(
             progress_callback=progress_callback,
             is_cancelled=is_cancelled,
         )
+        if legacy_preselect_reason:
+            result.metadata.update(
+                {
+                    "legacy_ezdxf_preselected": True,
+                    "legacy_ezdxf_preselected_reason": legacy_preselect_reason,
+                }
+            )
+            result.warnings.append(
+                f"Used cached ezdxf directly for large CAD input: {legacy_preselect_reason}"
+            )
+            return result
+        failure_message = _comparison_result_failure_message(result)
+        if (
+            failure_message
+            and options.cad_compare_engine == "canonical"
+            and options.cad_legacy_fallback_on_failure
+            and _legacy_ezdxf_fallback_available(path_a, path_b, options.dxf_cache_dir)
+            and not (is_cancelled and is_cancelled())
+        ):
+            logger.warning(
+                "Canonical CAD compare failed for %s; retrying with cached ezdxf fallback: %s",
+                _candidate_label(candidate),
+                failure_message,
+            )
+            fallback_result = DwgDiffer(
+                config={
+                    "use_canonical_pipeline": False,
+                    "use_legacy_ezdxf_pipeline": True,
+                },
+                comparison_config=options.comparison_config,
+                dxf_cache_dir=options.dxf_cache_dir,
+                change_zone_stream_path=stream_path,
+                change_zone_stream_pair_id=stream_pair_id,
+                block_text_detection=options.block_text_detection,
+            ).compare(
+                path_a,
+                path_b,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+            )
+            fallback_result.metadata.update(
+                {
+                    "canonical_fallback_used": True,
+                    "canonical_fallback_reason": failure_message,
+                    "canonical_error_code": result.metadata.get("error_code"),
+                    "canonical_pipeline_status": result.metadata.get("pipeline_status"),
+                }
+            )
+            fallback_result.warnings.append(
+                f"Canonical CAD compare failed; used cached ezdxf fallback: {failure_message}"
+            )
+            return fallback_result
+        return result
 
     # Phase H4 — pull per-pair manual page overrides via the lookup
     # callback (populated by the GUI / pipeline layer). Failure to
@@ -1840,6 +1928,147 @@ def compare_candidate(
         is_cancelled=is_cancelled,
         manual_page_overrides=pair_overrides,
     )
+
+
+def _cad_compare_config(options: BatchCompareOptions) -> Dict[str, Any]:
+    engine = (options.cad_compare_engine or "canonical").strip().lower()
+    if engine == "legacy_ezdxf":
+        return {
+            "use_canonical_pipeline": False,
+            "use_legacy_ezdxf_pipeline": True,
+        }
+    if engine != "canonical":
+        logger.warning(
+            "Unknown CAD compare engine %r; falling back to canonical",
+            options.cad_compare_engine,
+        )
+    return {
+        "use_canonical_pipeline": True,
+        "use_legacy_ezdxf_pipeline": False,
+    }
+
+
+def _comparison_result_failure_message(result: Optional[ComparisonResult]) -> str:
+    if result is None:
+        return "comparison returned no result"
+    metadata = result.metadata or {}
+    status = metadata.get("pipeline_status")
+    error_code = metadata.get("error_code")
+    if status == "failed" or error_code:
+        message = str(metadata.get("message") or "CAD comparison failed")
+        return f"{error_code}: {message}" if error_code else message
+    return ""
+
+
+def _legacy_ezdxf_fallback_available(
+    path_a: Path,
+    path_b: Path,
+    dxf_cache_dir: Optional[Union[str, Path]],
+) -> bool:
+    paths = (Path(path_a), Path(path_b))
+    if all(path.suffix.lower() == ".dxf" for path in paths):
+        return True
+    if not dxf_cache_dir:
+        return False
+    try:
+        from .dwg_differ import DwgDiffer
+
+        differ = DwgDiffer(
+            config={
+                "use_canonical_pipeline": False,
+                "use_legacy_ezdxf_pipeline": True,
+            },
+            dxf_cache_dir=dxf_cache_dir,
+        )
+        for path in paths:
+            suffix = path.suffix.lower()
+            if suffix == ".dxf":
+                continue
+            if suffix != ".dwg":
+                return False
+            cache_path = differ._dxf_cache_path(path)
+            compatible_cache_path = differ._compatible_dxf_cache_path(
+                path,
+                exact_path=cache_path,
+            )
+            if compatible_cache_path is None:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _large_cached_dxf_legacy_preselect_reason(
+    path_a: Path,
+    path_b: Path,
+    dxf_cache_dir: Optional[Union[str, Path]],
+) -> str:
+    """Skip canonical import for large DXF inputs that would fallback anyway."""
+
+    threshold = _large_dxf_legacy_fallback_bytes()
+    if threshold <= 0:
+        return ""
+    try:
+        resolved_paths = _resolve_legacy_dxf_paths(path_a, path_b, dxf_cache_dir)
+        if not resolved_paths:
+            return ""
+        largest = max(path.stat().st_size for path in resolved_paths)
+    except OSError:
+        return ""
+    if largest < threshold:
+        return ""
+    threshold_mb = threshold / (1024 * 1024)
+    largest_mb = largest / (1024 * 1024)
+    return (
+        f"largest cached/input DXF is {largest_mb:.1f} MB "
+        f"(threshold {threshold_mb:.1f} MB); skipped canonical import"
+    )
+
+
+def _resolve_legacy_dxf_paths(
+    path_a: Path,
+    path_b: Path,
+    dxf_cache_dir: Optional[Union[str, Path]],
+) -> list[Path]:
+    paths = (Path(path_a), Path(path_b))
+    resolved: list[Path] = []
+    differ = None
+    for path in paths:
+        suffix = path.suffix.lower()
+        if suffix == ".dxf":
+            if not path.exists() or path.stat().st_size <= 0:
+                return []
+            resolved.append(path)
+            continue
+        if suffix != ".dwg" or not dxf_cache_dir:
+            return []
+        if differ is None:
+            from .dwg_differ import DwgDiffer
+
+            differ = DwgDiffer(
+                config={
+                    "use_canonical_pipeline": False,
+                    "use_legacy_ezdxf_pipeline": True,
+                },
+                dxf_cache_dir=dxf_cache_dir,
+            )
+        exact_path = differ._dxf_cache_path(path)
+        cache_path = differ._compatible_dxf_cache_path(path, exact_path=exact_path)
+        if cache_path is None:
+            return []
+        resolved.append(cache_path)
+    return resolved
+
+
+def _large_dxf_legacy_fallback_bytes() -> int:
+    raw_value = os.environ.get("DRAWING_COMPARE_LEGACY_DXF_DIRECT_MB", "25")
+    try:
+        value_mb = float(raw_value)
+    except (TypeError, ValueError):
+        return LARGE_DXF_LEGACY_FALLBACK_BYTES
+    if value_mb <= 0:
+        return 0
+    return int(value_mb * 1024 * 1024)
 
 
 def compare_pdf_documents(
@@ -2268,7 +2497,7 @@ def _fill_cad_descriptor(
         dxf_path = temp_differ._ensure_dxf(source_path)
 
     try:
-        doc = ezdxf.readfile(str(dxf_path))
+        doc = read_dxf_document(dxf_path, ezdxf_module=ezdxf)
         descriptor.layers = tuple(sorted(layer.dxf.name for layer in doc.layers))
         descriptor.layouts = tuple(sorted(layout.name for layout in doc.layouts))
 

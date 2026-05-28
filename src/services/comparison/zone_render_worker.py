@@ -115,8 +115,8 @@ def render_zone_focus(
     """Render a zone-bounded primitive pack to ``output_dir / zone_focus.json``.
 
     Args:
-        source_path: A DXF or DWG file. DWG is auto-converted via Phase F's
-            ``resolve_dxf_path`` helper (DwgConverter cache).
+        source_path: A DXF or DWG file. DWG is resolved through
+            ``resolve_dxf_path`` as a canonical debug DXF export.
         zone_world_bbox: ``(min_x, min_y, max_x, max_y)`` in CAD world coords.
             Typically the bbox of one change zone.
         output_dir: Directory that will receive ``zone_focus.json``.
@@ -151,6 +151,7 @@ def render_zone_focus(
             warnings=[],
         )
 
+    from src.services.comparison.dxf_read import read_dxf_document_result
     from src.services.comparison.zone_vector_renderer import resolve_dxf_path
 
     output_dir = Path(output_dir)
@@ -172,7 +173,11 @@ def render_zone_focus(
 
     # 2. Open the doc.
     try:
-        doc = ezdxf.readfile(str(dxf_path))
+        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        doc = read_result.doc
+        read_warning = read_result.diagnostics.warning()
+        if read_warning:
+            warnings.append(read_warning)
     except Exception as exc:
         return ZoneFocusResult(
             output_path="",

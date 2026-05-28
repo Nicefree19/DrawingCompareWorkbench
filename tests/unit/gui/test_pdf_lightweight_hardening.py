@@ -18,6 +18,7 @@ These tests pin the contracts so the protections cannot regress.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -25,6 +26,39 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.services.comparison.safe_unicode import safe_unicode
+
+
+def test_lightweight_pdf_background_image_loads_asynchronously() -> None:
+    qml_source = Path(
+        "src/gui/assets/drawing_compare/LightweightDrawingViewport.qml"
+    ).read_text(encoding="utf-8")
+    image_start = qml_source.index("Image {\n        id: pdfBackground")
+    image_end = qml_source.index("    // ---- VECTOR LAYER", image_start)
+    image_body = qml_source[image_start:image_end]
+
+    assert "property string backgroundImageStatusName" in qml_source
+    assert "asynchronous: true" in image_body
+
+
+class TestReadablePdfNotice:
+    """PDF fallback notices must stay readable even when old literals are mojibake."""
+
+    def test_preserves_readable_notice(self):
+        from src.gui.lightweight_viewport import _readable_pdf_notice
+
+        assert _readable_pdf_notice("PDF page is ready") == "PDF page is ready"
+
+    def test_sanitizes_qt_pdf_mojibake_notice(self):
+        from src.gui.lightweight_viewport import _readable_pdf_notice
+
+        assert _readable_pdf_notice("Qt PDF \u4e2d\u6587 \ufffd") == (
+            "Qt PDF module is unavailable; lightweight PDF preview cannot be shown."
+        )
+
+    def test_sanitizes_generic_pdf_mojibake_notice(self):
+        from src.gui.lightweight_viewport import _readable_pdf_notice
+
+        assert _readable_pdf_notice("PDF \u4e2d\u6587 \ufffd") == "PDF preview unavailable."
 
 
 class TestA1SafeUnicodeOnSourcePaths:
@@ -111,13 +145,20 @@ class TestA4PdfPathRaceGuard:
         viewport = MagicMock(spec=LightweightDrawingViewport)
         viewport._world_bbox = None
         viewport._side = "before"
+        viewport._pdf_render_state = {"pdf_path": "stale.pdf"}
+        viewport._pdf_rerender_timer = MagicMock()
         viewport._quick = MagicMock()
-        viewport._quick.rootObject.return_value = MagicMock()
+        root = MagicMock()
+        viewport._quick.rootObject.return_value = root
 
         result = LightweightDrawingViewport.load_pdf_page(
             viewport, None, page_index=0
         )
         assert result is False
+        assert viewport._pdf_render_state is None
+        viewport._pdf_rerender_timer.stop.assert_called_once()
+        root.setProperty.assert_any_call("backgroundImageSource", "")
+        root.setProperty.assert_any_call("backgroundImageWorldBbox", [])
 
     def test_load_pdf_page_clears_source_before_setting_cache_url(self, tmp_path):
         from src.gui.lightweight_viewport import LightweightDrawingViewport
@@ -171,6 +212,289 @@ class TestA4PdfPathRaceGuard:
         assert source_calls[-2] == ""
         assert source_calls[-1].startswith("file:")
 
+    def test_load_pdf_page_reuses_cached_png_without_rerender(self, tmp_path):
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        source_pdf = tmp_path / "source.pdf"
+        source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._world_bbox = None
+        viewport._side = "before"
+        viewport._pdf_render_state = None
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+
+        fake_image = MagicMock()
+        fake_image.isNull.return_value = False
+        fake_image.width.return_value = 300
+        fake_image.height.return_value = 400
+
+        def save_png(path, _fmt):
+            Path(path).write_bytes(b"png")
+            return True
+
+        fake_image.save.side_effect = save_png
+
+        fake_renderer = MagicMock()
+        fake_renderer.is_loaded = True
+        fake_renderer.page_count.return_value = 1
+        fake_renderer.page_size_points.return_value = (144.0, 192.0)
+        fake_renderer.render_page.return_value = fake_image
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            assert LightweightDrawingViewport.load_pdf_page(
+                viewport,
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                cache_dir=tmp_path / "cache",
+            ) is True
+            assert LightweightDrawingViewport.load_pdf_page(
+                viewport,
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                cache_dir=tmp_path / "cache",
+            ) is True
+
+        assert fake_renderer.render_page.call_count == 1
+        assert viewport._pdf_render_state["cache_hit"] is True
+
+    def test_load_pdf_page_caps_large_initial_render_dpi(self, tmp_path):
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        source_pdf = tmp_path / "large.pdf"
+        source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._world_bbox = None
+        viewport._side = "before"
+        viewport._pdf_render_state = None
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+
+        fake_image = MagicMock()
+        fake_image.isNull.return_value = False
+        fake_image.width.return_value = 1754
+        fake_image.height.return_value = 2483
+
+        def save_png(path, _fmt):
+            Path(path).write_bytes(b"png")
+            return True
+
+        fake_image.save.side_effect = save_png
+
+        fake_renderer = MagicMock()
+        fake_renderer.is_loaded = True
+        fake_renderer.page_count.return_value = 1
+        fake_renderer.page_size_points.return_value = (1684.0, 2384.0)
+        fake_renderer.render_page.return_value = fake_image
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            result = LightweightDrawingViewport.load_pdf_page(
+                viewport,
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                max_render_pixels=8_000_000,
+                cache_dir=tmp_path / "cache",
+            )
+
+        assert result is True
+        fake_renderer.render_page.assert_called_once_with(0, target_dpi=100.0)
+        assert viewport._pdf_render_state["requested_dpi"] == 150.0
+        assert viewport._pdf_render_state["effective_dpi"] == 100.0
+        assert viewport._pdf_render_state["dpi_capped"] is True
+        assert list((tmp_path / "cache").glob("qtpdf_*_dpi100.png"))
+
+    def test_prewarm_metadata_fast_path_skips_qtpdf_document_load(self, tmp_path):
+        from src.gui.lightweight_viewport import (
+            LightweightDrawingViewport,
+            prewarm_pdf_page_cache,
+        )
+
+        source_pdf = tmp_path / "large.pdf"
+        source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+        cache_dir = tmp_path / "cache"
+
+        fake_image = MagicMock()
+        fake_image.isNull.return_value = False
+        fake_image.width.return_value = 1754
+        fake_image.height.return_value = 2483
+
+        def save_png(path, _fmt):
+            Path(path).write_bytes(b"png")
+            return True
+
+        fake_image.save.side_effect = save_png
+
+        fake_renderer = MagicMock()
+        fake_renderer.is_loaded = True
+        fake_renderer.page_count.return_value = 1
+        fake_renderer.page_size_points.return_value = (1684.0, 2384.0)
+        fake_renderer.render_page.return_value = fake_image
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            prewarm = prewarm_pdf_page_cache(
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                max_render_pixels=8_000_000,
+                cache_dir=cache_dir,
+            )
+
+        assert prewarm["ok"] is True
+        assert prewarm["cache_hit"] is False
+        assert prewarm["effective_dpi"] == 100.0
+        assert list(cache_dir.glob("qtpdf_*_dpi100.png"))
+        assert list(cache_dir.glob("qtpdf_*_meta.json"))
+        assert not list(cache_dir.glob("*.tmp"))
+
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._world_bbox = None
+        viewport._side = "before"
+        viewport._pdf_render_state = None
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer") as renderer_cls,
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            result = LightweightDrawingViewport.load_pdf_page(
+                viewport,
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                max_render_pixels=8_000_000,
+                cache_dir=cache_dir,
+            )
+
+        assert result is True
+        renderer_cls.assert_not_called()
+        assert viewport._pdf_render_state["cache_hit"] is True
+        assert viewport._pdf_render_state["metadata_hit"] is True
+        assert viewport._pdf_render_state["effective_dpi"] == 100.0
+
+    def test_prewarm_pdf_page_cache_does_not_touch_viewport_state(self, tmp_path):
+        from src.gui.lightweight_viewport import prewarm_pdf_page_cache
+
+        source_pdf = tmp_path / "source.pdf"
+        source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+        fake_image = MagicMock()
+        fake_image.isNull.return_value = False
+        fake_image.width.return_value = 300
+        fake_image.height.return_value = 400
+
+        def save_png(path, _fmt):
+            Path(path).write_bytes(b"png")
+            return True
+
+        fake_image.save.side_effect = save_png
+        fake_renderer = MagicMock()
+        fake_renderer.is_loaded = True
+        fake_renderer.page_count.return_value = 1
+        fake_renderer.page_size_points.return_value = (144.0, 192.0)
+        fake_renderer.render_page.return_value = fake_image
+
+        viewport = MagicMock()
+        viewport._pdf_render_state = {"pdf_path": "visible.pdf"}
+        viewport._quick = MagicMock()
+
+        with (
+            patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
+            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
+        ):
+            result = prewarm_pdf_page_cache(
+                source_pdf,
+                page_index=0,
+                target_dpi=150.0,
+                cache_dir=tmp_path / "cache",
+            )
+
+        assert result["ok"] is True
+        assert viewport._pdf_render_state == {"pdf_path": "visible.pdf"}
+        viewport._quick.rootObject.assert_not_called()
+
+    def test_load_scene_pack_none_clears_stale_pdf_background(self):
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+        viewport._pdf_render_state = {"pdf_path": "stale.pdf", "pending_dpi": 300}
+        viewport._pdf_rerender_timer = MagicMock()
+        viewport._loaded_pack_path = "old_pack.json"
+        viewport._primitive_count = 99
+
+        result = LightweightDrawingViewport.load_scene_pack(viewport, None)
+
+        assert result == 0
+        assert viewport._pdf_render_state is None
+        viewport._pdf_rerender_timer.stop.assert_called_once()
+        assert viewport._loaded_pack_path is None
+        assert viewport._primitive_count == 0
+        root.setProperty.assert_any_call("backgroundImageSource", "")
+        root.setProperty.assert_any_call("backgroundImageWorldBbox", [])
+        root.setProperty.assert_any_call("primitives", [])
+
+    def test_load_scene_pack_success_clears_stale_pdf_background(self, tmp_path):
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+        from src.services.comparison.viewer_manifest_v3 import ScenePackRef
+
+        overview = tmp_path / "overview_lod0.json"
+        overview.write_text(
+            json.dumps(
+                {
+                    "world_bbox": [10.0, 20.0, 110.0, 220.0],
+                    "primitives": [
+                        {
+                            "type": "line",
+                            "points": [10.0, 20.0, 30.0, 40.0],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._side = "before"
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+        viewport._pdf_render_state = {"pdf_path": "stale.pdf", "pending_dpi": 300}
+        viewport._pdf_rerender_timer = MagicMock()
+        viewport._loaded_pack_path = None
+        viewport._primitive_count = 0
+
+        result = LightweightDrawingViewport.load_scene_pack(
+            viewport,
+            ScenePackRef(overview_lod0_path=str(overview)),
+        )
+
+        assert result == 1
+        assert viewport._pdf_render_state is None
+        viewport._pdf_rerender_timer.stop.assert_called_once()
+        root.setProperty.assert_any_call("backgroundImageSource", "")
+        root.setProperty.assert_any_call("backgroundImageWorldBbox", [])
+        root.setProperty.assert_any_call("worldBbox", [10.0, 20.0, 110.0, 220.0])
+
 
 class TestA5ThreadAffinityWarning:
     """``render_page()`` warns when called off the GUI thread."""
@@ -188,3 +512,74 @@ class TestA5ThreadAffinityWarning:
         result = renderer.render_page(0)
         # The contract is "return empty / None on error", not raise.
         assert result is None or (hasattr(result, "isNull") and result.isNull())
+
+
+class TestLightweightQmlFallback:
+    """The packaged lightweight viewer must load without optional QSG."""
+
+    def test_qml_root_loads_and_pdf_preview_renders_without_qsg(
+        self, tmp_path, monkeypatch
+    ):
+        pytest.importorskip("PySide6.QtPdf")
+        fitz = pytest.importorskip("fitz")
+
+        monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+        monkeypatch.delenv("WORKBENCH_QSG", raising=False)
+
+        source_pdf = tmp_path / "preview_source.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=144, height=192)
+        page.insert_text((20, 48), "Preview smoke")
+        doc.save(str(source_pdf))
+        doc.close()
+
+        from PySide6.QtQuickWidgets import QQuickWidget
+        from PySide6.QtWidgets import QApplication
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        app = QApplication.instance() or QApplication([])
+        viewport = LightweightDrawingViewport(side="before")
+        try:
+            root = viewport._quick.rootObject()
+            errors = [err.toString() for err in viewport._quick.errors()]
+
+            assert viewport._quick.status() != QQuickWidget.Status.Error
+            assert root is not None
+            assert not any("TeklaQSG" in error for error in errors)
+
+            result = viewport.load_pdf_page(
+                source_pdf,
+                page_index=0,
+                target_dpi=72.0,
+                cache_dir=tmp_path / "cache",
+            )
+
+            assert result is True
+            assert root.property("backgroundImageSource").startswith("file:")
+            assert root.property("emptyNotice") == ""
+            assert list((tmp_path / "cache").glob("qtpdf_*_dpi72.png"))
+        finally:
+            viewport.deleteLater()
+            app.processEvents()
+
+    def test_forced_qsg_env_still_uses_canvas_fallback(self, monkeypatch):
+        pytest.importorskip("PySide6.QtPdf")
+
+        monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+        monkeypatch.setenv("WORKBENCH_QSG", "qsg")
+
+        from PySide6.QtQuickWidgets import QQuickWidget
+        from PySide6.QtWidgets import QApplication
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        app = QApplication.instance() or QApplication([])
+        viewport = LightweightDrawingViewport(side="after")
+        try:
+            root = viewport._quick.rootObject()
+
+            assert viewport._quick.status() != QQuickWidget.Status.Error
+            assert root is not None
+            assert root.property("skeletonRenderer") == "canvas"
+        finally:
+            viewport.deleteLater()
+            app.processEvents()

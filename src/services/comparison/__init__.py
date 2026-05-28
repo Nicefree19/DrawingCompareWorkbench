@@ -9,6 +9,25 @@ Author: TEKLA_MCP Team
 Date: 2025-12-14
 """
 
+import platform
+import sys
+
+
+def _disable_windows_wmi_platform_probe() -> None:
+    if sys.platform != "win32" or not hasattr(platform, "_wmi_query"):
+        return
+
+    def _raise_wmi_unavailable(*_args, **_kwargs):
+        raise OSError("WMI platform probe disabled for CAD import stability")
+
+    platform._wmi_query = _raise_wmi_unavailable
+
+
+# ezdxf font initialization calls platform.system(), which can block inside
+# Python's WMI probe on unhealthy Windows hosts. The stdlib fallback path uses
+# sys.getwindowsversion()/ver and is sufficient for CAD rendering decisions.
+_disable_windows_wmi_platform_probe()
+
 from .base import BaseComparator, ComparisonResult, ChangeRecord, ChangeType
 from .excel_differ import ExcelDiffer
 from .drawing_differ import DrawingDiffer
@@ -20,6 +39,67 @@ from .dxf_comparator import (
     LayerStatistics,
     DxfComparisonResult,
     DxfComparator,
+)
+from .dxf_importer import (
+    DxfEntityMapper,
+    DxfImportLimitError,
+    DxfImporter,
+    DxfParseError,
+    DxfToken,
+    DxfTokenizer,
+)
+from .cad_stability import CadLimitCode, CadStabilityLimits
+from .dxf_writer import DxfExportOptions, DxfWriter
+from .dwg_importer import (
+    DwgAdapterBlock,
+    DwgAdapterDrawing,
+    DwgAdapterEntity,
+    DwgFailureCode,
+    DwgImportError,
+    DwgImporter,
+    DwgImporterAdapter,
+    DwgJsonFixtureAdapter,
+    DwgVersionDetector,
+    DwgVersionInfo,
+)
+from .dwg_binary_reader import DwgBinaryReadError, DwgBinaryReader, DwgHandleRef
+from .dwg_native_reader import DwgNativeAc1015Adapter
+from .dwg_object_decoder import DwgMvpObjectType, DwgObjectDecodeError, DwgObjectDecoder
+from .dwg_section_reader import (
+    DwgFileHeader,
+    DwgObjectMapEntry,
+    DwgSectionLocator,
+    DwgSectionReadError,
+    DwgSectionReader,
+    DwgVersionedSectionMapDiagnostic,
+    DwgVersionedSectionMapReader,
+)
+from .drawing_normalizer import (
+    DrawingNormalizer,
+    NormalizationChange,
+    NormalizationOptions,
+    NormalizationReport,
+)
+from .drawing_compare_engine import (
+    CompareTolerance,
+    DrawingCompareEngine,
+    DrawingCompareOptions,
+    DrawingDiffChange,
+    DrawingDiffResult,
+    EntityMatcher,
+    GeometryDiff,
+    MatchCandidate,
+    result_fingerprint,
+)
+from .import_pipeline import (
+    CadPipelineErrorCode,
+    CadPipelineStatus,
+    ComparePipeline,
+    ComparePipelineOptions,
+    ComparePipelineResult,
+    ImportPipeline,
+    ImportPipelineOptions,
+    ImportPipelineResult,
 )
 
 # Phase 3+ Priority Scoring System
@@ -160,6 +240,27 @@ from .viewer_package import (
     ViewerPackageOptions,
     export_viewer_package,
 )
+from .cad_visual_backend import (
+    CadVisualBackend,
+    CadVisualBackendCapabilities,
+    CadVisualConversionRequest,
+    CadVisualConversionResult,
+    DisabledCadVisualBackend,
+)
+from .render_backend_registry import (
+    RenderBackendRegistry,
+    get_default_render_backend_registry,
+)
+from .cad_visual_conversion_worker import (
+    convert_cad_visual_in_subprocess,
+    run_conversion_request,
+)
+from .visual_asset import (
+    VisualAssetManifest,
+    VisualAssetManifestValidationError,
+    read_visual_asset_manifest,
+    write_visual_asset_manifest,
+)
 from .folder_compare_pipeline import (
     FolderComparePipeline,
     FolderCompareRunRequest,
@@ -180,6 +281,61 @@ __all__ = [
     "LayerStatistics",
     "DxfComparisonResult",
     "DxfComparator",
+    "DxfEntityMapper",
+    "DxfImportLimitError",
+    "DxfImporter",
+    "DxfParseError",
+    "DxfToken",
+    "DxfTokenizer",
+    "DxfExportOptions",
+    "DxfWriter",
+    "DwgAdapterBlock",
+    "DwgAdapterDrawing",
+    "DwgAdapterEntity",
+    "DwgFailureCode",
+    "DwgImportError",
+    "DwgImporter",
+    "DwgImporterAdapter",
+    "DwgJsonFixtureAdapter",
+    "DwgBinaryReadError",
+    "DwgBinaryReader",
+    "DwgHandleRef",
+    "DwgFileHeader",
+    "DwgObjectMapEntry",
+    "DwgSectionLocator",
+    "DwgSectionReadError",
+    "DwgSectionReader",
+    "DwgVersionedSectionMapDiagnostic",
+    "DwgVersionedSectionMapReader",
+    "DwgMvpObjectType",
+    "DwgObjectDecodeError",
+    "DwgObjectDecoder",
+    "DwgNativeAc1015Adapter",
+    "DwgVersionDetector",
+    "DwgVersionInfo",
+    "DrawingNormalizer",
+    "NormalizationChange",
+    "NormalizationOptions",
+    "NormalizationReport",
+    "CompareTolerance",
+    "DrawingCompareEngine",
+    "DrawingCompareOptions",
+    "DrawingDiffChange",
+    "DrawingDiffResult",
+    "EntityMatcher",
+    "GeometryDiff",
+    "MatchCandidate",
+    "result_fingerprint",
+    "CadLimitCode",
+    "CadStabilityLimits",
+    "CadPipelineErrorCode",
+    "CadPipelineStatus",
+    "ImportPipeline",
+    "ImportPipelineOptions",
+    "ImportPipelineResult",
+    "ComparePipeline",
+    "ComparePipelineOptions",
+    "ComparePipelineResult",
     # Priority Scoring System
     "PriorityLevel",
     "ReviewReason",
@@ -288,6 +444,19 @@ __all__ = [
     "ViewerPackage",
     "ViewerPackageOptions",
     "export_viewer_package",
+    "CadVisualBackend",
+    "CadVisualBackendCapabilities",
+    "CadVisualConversionRequest",
+    "CadVisualConversionResult",
+    "DisabledCadVisualBackend",
+    "RenderBackendRegistry",
+    "get_default_render_backend_registry",
+    "convert_cad_visual_in_subprocess",
+    "run_conversion_request",
+    "VisualAssetManifest",
+    "VisualAssetManifestValidationError",
+    "read_visual_asset_manifest",
+    "write_visual_asset_manifest",
     "FolderComparePipeline",
     "FolderCompareRunRequest",
     "FolderCompareRunResult",

@@ -58,6 +58,8 @@ def _oda_status() -> dict[str, Any]:
         status = DwgDiffer.get_status()
         return {
             "available": bool(status.get("oda_converter")),
+            "required": False,
+            "policy": "legacy fallback only; forbidden in customer builds unless separately approved",
             "path": status.get("oda_path"),
             "dwg_support": bool(status.get("dwg_support")),
             "details": status,
@@ -71,7 +73,6 @@ def collect_environment_report() -> dict[str, Any]:
     output_root = PROJECT_ROOT / "release" / ".environment_probe"
     runtime_modules = {
         "PySide6": _import_status("PySide6"),
-        "fitz": _import_status("fitz"),
         "ezdxf": _import_status("ezdxf"),
         "cv2": _import_status("cv2"),
         "numpy": _import_status("numpy"),
@@ -79,6 +80,13 @@ def collect_environment_report() -> dict[str, Any]:
         "scipy": _import_status("scipy"),
         "skimage": _import_status("skimage"),
         "openpyxl": _import_status("openpyxl"),
+    }
+    optional_or_licensed_modules = {
+        "fitz": {
+            **_import_status("fitz"),
+            "required": False,
+            "policy": "optional PyMuPDF/MuPDF integration; disabled unless separately licensed",
+        }
     }
     return {
         "project_root": str(PROJECT_ROOT),
@@ -97,6 +105,7 @@ def collect_environment_report() -> dict[str, Any]:
         },
         "vc_runtime": _check_vc_runtime(),
         "runtime_modules": runtime_modules,
+        "optional_or_licensed_modules": optional_or_licensed_modules,
         "oda_converter": _oda_status(),
         "path_tools": {
             "pyinstaller": shutil.which("pyinstaller") or shutil.which("pyinstaller.exe"),
@@ -110,6 +119,10 @@ def _console_summary(report: dict[str, Any]) -> str:
         f"{name}={'OK' if info.get('available') else 'FAIL'}"
         for name, info in report.get("runtime_modules", {}).items()
     )
+    optional_summary = ", ".join(
+        f"{name}={'available' if info.get('available') else 'not installed'} (required=no)"
+        for name, info in report.get("optional_or_licensed_modules", {}).items()
+    )
     write_access = report.get("write_access", {})
     oda = report.get("oda_converter", {})
     return "\n".join(
@@ -122,7 +135,10 @@ def _console_summary(report: dict[str, Any]) -> str:
             f"Release write access: {'OK' if write_access.get('release_output', {}).get('writable') else 'FAIL'} -> {write_access.get('release_output', {}).get('path')}",
             f"VC runtime: {'OK' if report['vc_runtime']['available'] else 'MISSING'}",
             f"Modules: {module_summary}",
-            f"ODA Converter: {'OK' if oda.get('available') else 'MISSING'} -> {oda.get('path') or oda.get('error') or 'not found'}",
+            f"Optional/licensed modules: {optional_summary or 'none'}",
+            "Legacy ODA fallback: "
+            f"{'DETECTED' if oda.get('available') else 'not configured'} "
+            f"(required=no) -> {oda.get('path') or oda.get('error') or 'not found'}",
             f"PyInstaller on PATH: {report['path_tools']['pyinstaller'] or 'not found'}",
         ]
     )

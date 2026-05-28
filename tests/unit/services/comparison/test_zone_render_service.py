@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from src.services.comparison.perf_events import summarize_perf_events
 from src.services.comparison.zone_render_service import (
     RenderJob,
     WorldWindow,
     bbox_to_pixel_rect,
     canonical_window_from_bbox,
     clear_render_index_cache,
+    file_signature,
     get_drawing_render_index,
     render_cache_key,
     render_environment_signature,
@@ -91,10 +93,16 @@ def test_cad_render_reuses_viewer_background_crop(tmp_path: Path) -> None:
         after_background_image=str(after_bg),
         before_background_transform=background_transform,
         after_background_transform=background_transform,
+        perf_event_root=tmp_path,
+        perf_run_id="run-zone",
     )
 
     result = render_zone_pair(job)
+    cached_result = render_zone_pair(job)
 
+    assert result.cache_hit is False
+    assert cached_result.cache_hit is True
+    assert cached_result.cache_key == result.cache_key
     assert result.renderer_backend == "cad-background-image-crop"
     assert result.visual_fidelity == "cad_render"
     assert result.render_lifecycle == "ready"
@@ -102,6 +110,63 @@ def test_cad_render_reuses_viewer_background_crop(tmp_path: Path) -> None:
     assert Path(result.after_image).exists()
     assert result.before_transform["renderer_backend"] == "cad-background-image-crop"
     assert "cad_background_crop:source=viewer_background" in result.warnings
+    assert not any(w.startswith("dxf_prefilter:") for w in result.warnings)
+    perf_summary = summarize_perf_events(tmp_path)
+    assert perf_summary["stage_counts"]["zone_render"] == 2
+    assert perf_summary["cache_hit_count"] == 1
+    assert perf_summary["cache_miss_count"] == 1
+    assert perf_summary["cache_hit_reasons"]["existing_render_result"] == 1
+    assert perf_summary["cache_miss_reasons"]["artifact_missing"] == 1
+
+
+def test_cad_background_crop_outside_image_returns_blank_without_source_fallback(
+    tmp_path: Path,
+) -> None:
+    image_mod = pytest.importorskip("PIL.Image")
+
+    before_source = tmp_path / "before.dxf"
+    after_source = tmp_path / "after.dxf"
+    before_source.write_text("not a real dxf", encoding="utf-8")
+    after_source.write_text("not a real dxf", encoding="utf-8")
+
+    before_bg = tmp_path / "before.png"
+    after_bg = tmp_path / "after.png"
+    image_mod.new("RGB", (100, 100), "white").save(before_bg)
+    image_mod.new("RGB", (100, 100), "white").save(after_bg)
+
+    background_transform = {
+        "min_x": 0.0,
+        "min_y": 0.0,
+        "max_x": 100.0,
+        "max_y": 100.0,
+        "img_width": 100,
+        "img_height": 100,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+    }
+    job = RenderJob(
+        pair_uuid="pair-bg",
+        zone_id="Z-outside",
+        source_before=before_source,
+        source_after=after_source,
+        world_window=WorldWindow(500.0, 500.0, 700.0, 700.0),
+        cache_root=tmp_path / "cache",
+        dxf_cache_dir=tmp_path / "dxf_cache",
+        output_width=120,
+        output_height=80,
+        before_background_image=str(before_bg),
+        after_background_image=str(after_bg),
+        before_background_transform=background_transform,
+        after_background_transform=background_transform,
+    )
+
+    result = render_zone_pair(job)
+
+    assert result.renderer_backend == "cad-background-image-crop"
+    assert result.reason_code == "outside_background_bounds"
+    assert Path(result.before_image).exists()
+    assert Path(result.after_image).exists()
+    assert "cad_background_crop:outside_background_bounds" in result.warnings
     assert not any(w.startswith("dxf_prefilter:") for w in result.warnings)
 
 
@@ -137,6 +202,17 @@ def test_render_cache_key_changes_when_source_signature_changes(tmp_path: Path) 
         os.utime(after, None)
 
     assert render_cache_key(job) != first
+
+
+def test_zone_file_signature_uses_shared_source_hash(tmp_path: Path) -> None:
+    source = tmp_path / "zone-source.dxf"
+    source.write_text("0\nEOF\n", encoding="utf-8")
+
+    signature = file_signature(source)
+
+    assert signature["source_hash"]
+    assert signature["schema_version"] == 1
+    assert signature["size"] == source.stat().st_size
 
 
 def test_render_cache_key_changes_when_render_environment_changes(tmp_path: Path) -> None:
@@ -190,7 +266,13 @@ def test_drawing_render_index_reuses_parsed_source(tmp_path: Path) -> None:
     second = get_drawing_render_index(dxf_path, "env-a")
 
     assert first is second
-    assert render_index_cache_stats()["entries"] == 1
+    stats = render_index_cache_stats()
+    assert stats["entries"] == 1
+    assert stats["lookup_count"] == 2
+    assert stats["miss_count"] == 1
+    assert stats["hit_count"] == 1
+    assert stats["hit_rate"] == pytest.approx(0.5)
+    assert stats["total_estimated_bytes"] > 0
 
 
 def test_visible_handles_use_precomputed_envelopes(tmp_path: Path) -> None:
@@ -228,9 +310,52 @@ def test_pdf_without_page_bbox_skips_exact_crop(tmp_path: Path) -> None:
 
     assert result.render_lifecycle == "skipped_missing_page_bbox"
     assert result.visual_fidelity == "relative_overlay"
-    assert result.before_image == ""
-    assert result.after_image == ""
+    assert result.reason_code == "missing_page_bbox"
+    assert Path(result.before_image).exists()
+    assert Path(result.after_image).exists()
+    assert result.before_transform["renderer_backend"] == "relative-overlay-fallback"
     assert result.warnings
+    cached = render_zone_pair(
+        RenderJob(
+            pair_uuid="pair-pdf",
+            zone_id="C-001",
+            source_before=before,
+            source_after=after,
+            world_window=canonical_window_from_bbox([0, 0, 100, 100]),
+            cache_root=tmp_path / "cache",
+            dxf_cache_dir=tmp_path / "dxf",
+        )
+    )
+    assert cached.cache_hit is True
+    assert cached.render_lifecycle == "skipped_missing_page_bbox"
+    assert cached.reason_code == "missing_page_bbox"
+
+
+def test_source_render_failure_returns_visible_relative_fallback(tmp_path: Path) -> None:
+    pytest.importorskip("PIL.Image")
+    before = tmp_path / "bad-before.dxf"
+    after = tmp_path / "bad-after.dxf"
+    before.write_text("not a dxf", encoding="utf-8")
+    after.write_text("not a dxf", encoding="utf-8")
+
+    result = render_zone_pair(
+        RenderJob(
+            pair_uuid="pair-bad",
+            zone_id="C-bad",
+            source_before=before,
+            source_after=after,
+            world_window=canonical_window_from_bbox([0, 0, 100, 100]),
+            cache_root=tmp_path / "cache",
+            dxf_cache_dir=tmp_path / "dxf",
+        )
+    )
+
+    assert result.visual_fidelity == "relative_overlay"
+    assert result.render_lifecycle == "fallback_visible"
+    assert result.reason_code == "source_render_failed"
+    assert Path(result.before_image).exists()
+    assert Path(result.after_image).exists()
+    assert result.renderer_backend == "relative-overlay-fallback"
 
 
 def test_pdf_with_rendered_background_crops_from_image_pixels(tmp_path: Path) -> None:
@@ -312,7 +437,20 @@ def test_cache_hit_keeps_current_request_id(tmp_path: Path) -> None:
     before_image.write_text("", encoding="utf-8")
     after_image.write_text("", encoding="utf-8")
     (pair_dir / "render_result.json").write_text(
-        '{"request_id":"old-request","before_transform":{},"after_transform":{},"warnings":[]}',
+        json.dumps(
+            {
+                "request_id": "old-request",
+                "before_transform": {},
+                "after_transform": {},
+                "warnings": [],
+                "dxf_index_cache": {
+                    "lookup_count": 2,
+                    "hit_count": 1,
+                    "miss_count": 1,
+                    "total_estimated_bytes": 1234,
+                },
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -320,6 +458,8 @@ def test_cache_hit_keeps_current_request_id(tmp_path: Path) -> None:
 
     assert result.cache_hit is True
     assert result.request_id == "new-request"
+    assert result.dxf_index_cache["lookup_count"] == 2
+    assert result.dxf_index_cache["hit_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -391,10 +531,23 @@ def test_render_result_to_dict_includes_elapsed_ms() -> None:
         warnings=[],
         request_id="r",
         elapsed_ms=42.5,
+        dxf_index_cache={
+            "entries": 1,
+            "lookup_count": 2,
+            "hit_count": 1,
+            "miss_count": 1,
+            "hit_rate": 0.5,
+            "total_estimated_bytes": 1234,
+            "byte_limit": 9999,
+        },
     )
     payload = result.to_dict()
     assert "elapsed_ms" in payload
     assert payload["elapsed_ms"] == 42.5
+    assert payload["fallback_reason_code"] == ""
+    assert payload["dxf_index_cache_lookup_count"] == 2
+    assert payload["dxf_index_cache_hit_count"] == 1
+    assert payload["dxf_index_cache_total_estimated_bytes"] == 1234
 
 
 # ---------------------------------------------------------------------------
@@ -497,8 +650,27 @@ def test_dxf_prefilter_skipped_for_small_modelspace(tmp_path: Path) -> None:
         world_window=canonical_window_from_bbox([0, 0, 10, 10]),
         cache_root=tmp_path / "cache",
         dxf_cache_dir=tmp_path / "dxf_cache",
+        perf_event_root=tmp_path / "perf",
+        perf_run_id="run-dxf-cache",
     )
     result = render_zone_pair(job)
+
+    assert result.dxf_index_cache["lookup_count"] == 2
+    assert result.dxf_index_cache["miss_count"] == 1
+    assert result.dxf_index_cache["hit_count"] == 1
+    assert result.dxf_index_cache["total_estimated_bytes"] > 0
+    payload = result.to_dict()
+    assert payload["dxf_index_cache_lookup_count"] == 2
+    assert payload["dxf_index_cache_hit_count"] == 1
+    perf_lines = [
+        line
+        for line in (tmp_path / "perf" / "perf_events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    perf_event = json.loads(perf_lines[-1])
+    assert perf_event["dxf_index_cache_lookup_count"] == 2
+    assert perf_event["dxf_index_cache_miss_count"] == 1
+    assert perf_event["dxf_index_cache_total_estimated_bytes"] > 0
 
     # The skip warning must appear at least once (once per side).
     skip_warnings = [w for w in result.warnings if w.startswith("dxf_prefilter:skipped")]
@@ -636,6 +808,14 @@ def test_pdf_crop_uses_display_list_when_source_available(tmp_path: Path) -> Non
     # And the legacy slow-path marker must NOT appear when source PDFs
     # are usable. Otherwise we're paying both costs.
     assert "renderer:pdf-pil-fallback" not in result.warnings
+    assert result.pdf_display_list_cache["render_count"] == 2
+    assert result.pdf_display_list_cache["cache_lookup_count"] == 2
+    assert result.pdf_display_list_cache["cache_miss_count"] == 2
+    assert result.pdf_display_list_cache["cache_total_estimated_bytes"] > 0
+    payload = result.to_dict()
+    assert payload["pdf_display_list_render_count"] == 2
+    assert payload["pdf_display_list_cache_miss_count"] == 2
+    assert payload["pdf_pil_fallback_count"] == 0
 
 
 def test_pdf_crop_falls_back_to_pil_when_source_missing(tmp_path: Path) -> None:
@@ -697,3 +877,7 @@ def test_pdf_crop_falls_back_to_pil_when_source_missing(tmp_path: Path) -> None:
         f"expected PIL fallback marker; warnings={result.warnings}"
     )
     assert "renderer:pdf-display-list-clip" not in result.warnings
+    assert result.reason_code == "pdf_pil_fallback"
+    assert result.pdf_display_list_cache["render_count"] == 0
+    assert result.pdf_display_list_cache["pil_fallback_count"] == 2
+    assert result.to_dict()["pdf_pil_fallback_count"] == 2

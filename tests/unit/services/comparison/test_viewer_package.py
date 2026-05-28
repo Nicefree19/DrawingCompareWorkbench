@@ -10,8 +10,26 @@ from pathlib import Path
 
 import pytest
 
+from src.services.comparison import viewer_package as viewer_package_module
+from src.services.comparison.cad_visual_backend import (
+    CAD_VISUAL_BACKEND_DISABLED,
+    CadVisualBackend,
+    CadVisualBackendCapabilities,
+)
 from src.services.comparison.export_profiles import apply_export_profile_to_json
-from src.services.comparison.viewer_package import _render_pair_backgrounds_with_timeout, export_viewer_package
+from src.services.comparison.render_backend_registry import (
+    CAD_VISUAL_BACKEND_ENV,
+    RenderBackendRegistry,
+)
+from src.services.comparison.viewer_package import (
+    CAD_VISUAL_CONVERSION_DEFERRED,
+    ViewerPackageOptions,
+    _build_v2_manifest_from_v1,
+    _build_v3_manifest_from_v1,
+    _render_pair_backgrounds_with_timeout,
+    export_viewer_package,
+)
+from src.services.comparison.visual_asset import validate_visual_asset_policy
 
 
 def _write_base_artifacts(base: Path, *, source_a: str = "old.dxf", source_b: str = "new.dxf") -> Path:
@@ -88,6 +106,33 @@ def _write_base_artifacts(base: Path, *, source_a: str = "old.dxf", source_b: st
     return artifact_dir
 
 
+def test_v3_manifest_uses_lightweight_source_hash_without_mislabeling_file_hash(tmp_path: Path) -> None:
+    before = tmp_path / "before.dxf"
+    after = tmp_path / "after.dxf"
+    before.write_text("0\nEOF\n", encoding="utf-8")
+    after.write_text("0\nEOF\n", encoding="utf-8")
+    manifest = _build_v3_manifest_from_v1(
+        v1_manifest={
+            "schema_version": 2,
+            "pairs": [
+                {
+                    "pair_uuid": "pair-1",
+                    "source_a": str(before),
+                    "source_b": str(after),
+                    "coordinate_source": "cad_world",
+                }
+            ],
+        },
+        options=ViewerPackageOptions(),
+        viewer_root=tmp_path / "viewer",
+    )
+
+    assert manifest.before_source_signature.source_hash
+    assert manifest.after_source_signature.source_hash
+    assert manifest.before_source_signature.file_hash == ""
+    assert manifest.before_source_signature.file_size == before.stat().st_size
+
+
 def test_viewer_package_writes_overlay_json_without_rendering(tmp_path: Path) -> None:
     artifact_dir = _write_base_artifacts(tmp_path)
 
@@ -121,6 +166,413 @@ def test_viewer_package_writes_overlay_json_without_rendering(tmp_path: Path) ->
     assert manifest["viewer_schema_version"] == 2
     assert manifest["viewer_overlay_count"] == 2
     assert manifest["transform_complete"] is False
+
+    viewer_manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair_entry = viewer_manifest["pairs"][0]
+    page_manifest_path = Path(pair_entry["overlay_pages_manifest"])
+    assert page_manifest_path.exists()
+    page_manifest = json.loads(page_manifest_path.read_text(encoding="utf-8"))
+    assert page_manifest["overlay_count"] == 2
+    assert page_manifest["page_count"] == 1
+    assert viewer_manifest["directories"]["overlay_pages"].endswith("overlay_pages")
+
+
+def test_viewer_package_records_disabled_cad_visual_provenance_without_conversion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_dir = _write_base_artifacts(tmp_path)
+
+    def fail_conversion(*_args, **_kwargs):
+        raise AssertionError("default viewer export must not invoke CAD visual conversion")
+
+    monkeypatch.setattr(RenderBackendRegistry, "convert_cad_visual", fail_conversion)
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair_conversion = manifest["pairs"][0]["cad_visual_conversion"]
+    assert manifest["cad_visual_backend"]["backend_id"] == "disabled"
+    assert pair_conversion["before"]["status"] == "skipped"
+    assert pair_conversion["before"]["reason_code"] == CAD_VISUAL_BACKEND_DISABLED
+    assert pair_conversion["before"]["backend_id"] == "disabled"
+    assert pair_conversion["before"]["license_id"] == "none"
+    assert pair_conversion["after"]["reason_code"] == CAD_VISUAL_BACKEND_DISABLED
+    cad_manifest_path = (
+        tmp_path
+        / "viewer"
+        / "visual_assets"
+        / "S21-0001"
+        / "before"
+        / "cad_visual_provenance"
+        / "visual_asset_manifest.json"
+    )
+    assert cad_manifest_path.exists()
+    cad_manifest = json.loads(cad_manifest_path.read_text(encoding="utf-8"))
+    assert cad_manifest["asset_kind"] == "relative_only"
+    assert cad_manifest["status"] == "skipped"
+    assert cad_manifest["reason_code"] == CAD_VISUAL_BACKEND_DISABLED
+    assert cad_manifest["visual_backend_id"] == "disabled"
+    assert manifest["pairs"][0]["visual_assets"]["before"]["cad_visual_provenance"]["manifest_path"] == str(cad_manifest_path)
+
+
+def test_viewer_package_writes_source_pdf_visual_asset_manifests_for_pdf_pair(tmp_path: Path) -> None:
+    before = tmp_path / "before.pdf"
+    after = tmp_path / "after.pdf"
+    before.write_bytes(b"%PDF-1.4\n% before\n%%EOF\n")
+    after.write_bytes(b"%PDF-1.4\n% after\n%%EOF\n")
+    artifact_dir = _write_base_artifacts(tmp_path, source_a=str(before), source_b=str(after))
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair = manifest["pairs"][0]
+    assert manifest["visual_asset_manifest_count"] == 2
+    assert len(manifest["visual_asset_manifest_paths"]) == 2
+    before_entry = pair["visual_assets"]["before"]["source_pdf"]
+    after_entry = pair["visual_assets"]["after"]["source_pdf"]
+    before_manifest = json.loads(Path(before_entry["manifest_path"]).read_text(encoding="utf-8"))
+    after_manifest = json.loads(Path(after_entry["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert before_manifest["asset_kind"] == "source_pdf"
+    assert before_manifest["asset_path"].endswith("S21-0001_before.pdf")
+    assert before_manifest["source_hash"]
+    assert before_manifest["cache_key_hash"]
+    assert before_manifest["nonblank_probe_status"] == "not_probed"
+    assert after_manifest["asset_kind"] == "source_pdf"
+    assert after_manifest["asset_path"].endswith("S21-0001_after.pdf")
+
+
+def test_viewer_package_tile_cache_key_tracks_visual_asset_target_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = tmp_path / "before.pdf"
+    after = tmp_path / "after.pdf"
+    before.write_bytes(b"%PDF-1.4\n% before\n%%EOF\n")
+    after.write_bytes(b"%PDF-1.4\n% after\n%%EOF\n")
+    artifact_dir = _write_base_artifacts(tmp_path, source_a=str(before), source_b=str(after))
+
+    def _fake_probe_first(**_kwargs: object) -> dict:
+        return {
+            "status": "not_probed",
+            "method": "pixel_nonblank_probe_unavailable",
+            "probe_hash": "probe-hash-v1",
+            "asset_hash": "asset-hash",
+            "probe_target_hash": "target-hash-v1",
+            "probe_target_path": "",
+        }
+
+    monkeypatch.setattr(viewer_package_module, "probe_visual_asset_nonblank", _fake_probe_first)
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer_1",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+    manifest_1 = json.loads((tmp_path / "viewer_1" / "viewer_manifest.json").read_text(encoding="utf-8"))
+
+    def _fake_probe_second(**_kwargs: object) -> dict:
+        payload = _fake_probe_first()
+        payload["probe_hash"] = "probe-hash-v2"
+        payload["probe_target_hash"] = "target-hash-v2"
+        return payload
+
+    monkeypatch.setattr(viewer_package_module, "probe_visual_asset_nonblank", _fake_probe_second)
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer_2",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+    manifest_2 = json.loads((tmp_path / "viewer_2" / "viewer_manifest.json").read_text(encoding="utf-8"))
+
+    pair_1 = manifest_1["pairs"][0]
+    pair_2 = manifest_2["pairs"][0]
+    assert pair_1["visual_asset_identity_hash"] != pair_2["visual_asset_identity_hash"]
+    assert pair_1["tile_cache_key"] != pair_2["tile_cache_key"]
+
+
+def test_viewer_package_writes_sidecar_pdf_visual_asset_manifests_for_cad_pair(tmp_path: Path) -> None:
+    artifact_dir = _write_base_artifacts(tmp_path, source_a="before.dwg", source_b="after.dxf")
+    before_sidecar = artifact_dir / "before_visual.pdf"
+    after_sidecar = artifact_dir / "after_visual.pdf"
+    before_sidecar.write_bytes(b"%PDF-1.4\n% before sidecar\n%%EOF\n")
+    after_sidecar.write_bytes(b"%PDF-1.4\n% after sidecar\n%%EOF\n")
+    manifest_path = artifact_dir / "artifact_manifest.json"
+    artifact_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_manifest["items"][0]["before_sidecar_pdf"] = before_sidecar.name
+    artifact_manifest["items"][0]["after_sidecar_pdf"] = after_sidecar.name
+    manifest_path.write_text(json.dumps(artifact_manifest, ensure_ascii=False), encoding="utf-8")
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair = manifest["pairs"][0]
+    before_entry = pair["visual_assets"]["before"]["sidecar_pdf"]
+    after_entry = pair["visual_assets"]["after"]["sidecar_pdf"]
+    before_manifest = json.loads(Path(before_entry["manifest_path"]).read_text(encoding="utf-8"))
+    after_manifest = json.loads(Path(after_entry["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert manifest["visual_asset_manifest_count"] == 4
+    assert pair["before_sidecar_pdf"].endswith("S21-0001_before_sidecar.pdf")
+    assert pair["after_sidecar_pdf"].endswith("S21-0001_after_sidecar.pdf")
+    assert before_manifest["asset_kind"] == "sidecar_pdf"
+    assert before_manifest["status"] == "source_only"
+    assert before_manifest["asset_path"].endswith("S21-0001_before_sidecar.pdf")
+    assert before_manifest["source_hash"]
+    assert before_manifest["cache_key_hash"]
+    assert before_manifest["nonblank_probe_status"] == "not_probed"
+    assert validate_visual_asset_policy(before_manifest, customer_grade=True) == []
+    assert after_manifest["asset_kind"] == "sidecar_pdf"
+    assert "source_pdf" not in pair["visual_assets"]["before"]
+
+
+def test_viewer_package_ignores_env_cad_visual_backend_for_metadata_only_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_dir = _write_base_artifacts(tmp_path)
+    monkeypatch.setenv(CAD_VISUAL_BACKEND_ENV, "qcad_professional_cli")
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["cad_visual_backend"]["backend_id"] == "disabled"
+    assert manifest["pairs"][0]["cad_visual_conversion"]["before"]["backend_id"] == "disabled"
+
+
+def test_viewer_package_defers_opted_in_cad_visual_backend_without_conversion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_dir = _write_base_artifacts(tmp_path)
+
+    class FakePdfBackend(CadVisualBackend):
+        @property
+        def capabilities(self) -> CadVisualBackendCapabilities:
+            return CadVisualBackendCapabilities(
+                backend_id="fake_pdf",
+                backend_version="1.2.3",
+                license_id="test_license",
+                can_convert_to_pdf=True,
+                enabled_by_default=True,
+            )
+
+        def convert(self, _request):  # pragma: no cover - must not be called
+            raise AssertionError("R5.5 only records provenance; it must not convert")
+
+        def probe(self):  # pragma: no cover - must not be called
+            raise AssertionError("R5.5 metadata-only export must not probe external tools")
+
+    registry = RenderBackendRegistry()
+    registry.register(FakePdfBackend())
+    monkeypatch.setattr(
+        "src.services.comparison.viewer_package.get_default_render_backend_registry",
+        lambda: registry,
+    )
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+        cad_visual_backend="fake_pdf",
+        cad_visual_conversion_timeout_seconds=42,
+    )
+
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    before = manifest["pairs"][0]["cad_visual_conversion"]["before"]
+    assert manifest["cad_visual_backend"]["backend_id"] == "fake_pdf"
+    assert manifest["cad_visual_backend"]["backend_version"] == "1.2.3"
+    assert manifest["cad_visual_backend"]["license_id"] == "test_license"
+    assert before["status"] == "skipped"
+    assert before["reason_code"] == CAD_VISUAL_CONVERSION_DEFERRED
+    assert before["backend_id"] == "fake_pdf"
+    assert before["backend_version"] == "1.2.3"
+    assert before["license_id"] == "test_license"
+    assert before["metadata"]["timeout_s"] == 42.0
+    assert before["metadata"]["provenance_only"] is True
+
+
+def test_v2_and_v3_manifests_preserve_cad_visual_backend_capabilities(tmp_path: Path) -> None:
+    cad_backend = {
+        "backend_id": "fake_pdf",
+        "backend_version": "1.2.3",
+        "license_id": "test_license",
+        "can_convert_to_pdf": True,
+    }
+    v1 = {
+        "schema_version": 2,
+        "cad_visual_backend": cad_backend,
+        "pairs": [
+            {
+                "pair_id": "S21-0001",
+                "source_a": "old.dxf",
+                "source_b": "new.dxf",
+                "coordinate_source": "cad_world",
+            }
+        ],
+    }
+
+    v2 = _build_v2_manifest_from_v1(v1_manifest=v1, options=ViewerPackageOptions())
+    v3 = _build_v3_manifest_from_v1(
+        v1_manifest=v1,
+        options=ViewerPackageOptions(),
+        viewer_root=tmp_path / "viewer",
+    )
+
+    assert v2.renderer_capabilities["cad_visual_backend"]["backend_id"] == "fake_pdf"
+    assert v2.renderer_capabilities["cad_visual_backend"]["license_id"] == "test_license"
+    assert v3.renderer_capabilities["cad_visual_backend"]["backend_version"] == "1.2.3"
+    assert "cad_visual:fake_pdf:1.2.3:test_license" in v3.before_source_signature.backend_sig
+
+
+def test_viewer_package_limits_overlay_rows_before_materialisation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_dir = _write_base_artifacts(tmp_path)
+    rows = []
+    for index in range(100):
+        zone_id = f"C-{index:03d}"
+        rows.append(
+            {
+                "pair_id": "S21-0001",
+                "zone_id": zone_id,
+                "drawing_number": "S21-0001",
+                "change_type": "modified",
+                "severity": "medium",
+                "raw_change_count": str(100 - index),
+                "bbox": f"{index},{index},{index + 10},{index + 10}",
+                "old_bbox": f"{index},{index},{index + 10},{index + 10}",
+                "layer": "BEAM",
+                "entity_type": "LINE",
+                "source_a": "old.dxf",
+                "source_b": "new.dxf",
+            }
+        )
+    with (artifact_dir / "change_zones.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    dashboard = {
+        "top_issues": [
+            {
+                "rank": 1,
+                "priority_score": 100,
+                "pair_id": "S21-0001",
+                "zone_id": "C-099",
+                "priority_reason": "selected late row",
+            }
+        ]
+    }
+    (artifact_dir / "review_dashboard.json").write_text(
+        json.dumps(dashboard, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    original_overlay = viewer_package_module._overlay_from_zone_row
+    call_count = {"value": 0}
+
+    def counted_overlay(*args, **kwargs):
+        call_count["value"] += 1
+        return original_overlay(*args, **kwargs)
+
+    monkeypatch.setattr(viewer_package_module, "_overlay_from_zone_row", counted_overlay)
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+        max_overlay_records_per_pair=5,
+    )
+
+    overlay = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+
+    assert call_count["value"] == 5
+    assert overlay["overlay_count"] == 5
+    assert overlay["zone_count"] == 100
+    assert overlay["overlay_total_count"] == 100
+    assert overlay["overlay_deferred_count"] == 95
+    assert overlay["overlay_deferred"] is True
+    assert "C-099" in {item["zone_id"] for item in overlay["overlays"]}
+    assert manifest["pairs"][0]["overlay_deferred_count"] == 95
+    assert manifest["overlay_count"] == 5
+    source_rows = list(csv.DictReader((artifact_dir / "change_zones.csv").open("r", encoding="utf-8-sig")))
+    assert len(source_rows) == 100
+
+
+def test_viewer_package_truncates_large_legacy_overlay_json_after_paging(tmp_path: Path) -> None:
+    artifact_dir = _write_base_artifacts(tmp_path)
+    rows = []
+    for index in range(30):
+        rows.append(
+            {
+                "pair_id": "S21-0001",
+                "zone_id": f"C-{index:03d}",
+                "drawing_number": "S21-0001",
+                "change_type": "modified",
+                "severity": "medium",
+                "raw_change_count": str(index + 1),
+                "bbox": f"{index},{index},{index + 10},{index + 10}",
+                "old_bbox": f"{index},{index},{index + 10},{index + 10}",
+                "layer": "BEAM",
+                "entity_type": "LINE",
+                "source_a": "old.dxf",
+                "source_b": "new.dxf",
+            }
+        )
+    with (artifact_dir / "change_zones.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    package = export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+        max_visible_overlays=25,
+    )
+
+    overlay = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair_entry = manifest["pairs"][0]
+    page_manifest_path = Path(pair_entry["overlay_pages_manifest"])
+    page_manifest = json.loads(page_manifest_path.read_text(encoding="utf-8"))
+
+    assert package.overlay_count == 30
+    assert overlay["overlay_count"] == 30
+    assert overlay["overlay_legacy_count"] == 25
+    assert overlay["overlay_legacy_truncated"] is True
+    assert len(overlay["overlays"]) == 25
+    assert page_manifest["overlay_count"] == 30
+    assert page_manifest["page_count"] == 1
+    assert pair_entry["overlay_legacy_count"] == 25
+    assert pair_entry["overlay_legacy_truncated"] is True
 
 
 def test_viewer_package_reads_change_zone_csv_bbox_columns(tmp_path: Path) -> None:
@@ -244,6 +696,21 @@ def test_viewer_package_renders_pdf_pair_background(tmp_path: Path) -> None:
     assert pair["render_lifecycle"] == "ready"
     assert pair["pdf_page"] == 0
     assert Path(pair["after_image"]).exists()
+    assert manifest["visual_asset_manifest_count"] == 4
+    before_source_entry = pair["visual_assets"]["before"]["source_pdf"]
+    before_raster_entry = pair["visual_assets"]["before"]["raster_fallback"]
+    before_source_manifest = json.loads(Path(before_source_entry["manifest_path"]).read_text(encoding="utf-8"))
+    before_raster_manifest = json.loads(Path(before_raster_entry["manifest_path"]).read_text(encoding="utf-8"))
+    source_probe = json.loads(Path(before_source_manifest["metadata"]["nonblank_probe"]).read_text(encoding="utf-8"))
+    raster_probe = json.loads(Path(before_raster_manifest["metadata"]["nonblank_probe"]).read_text(encoding="utf-8"))
+    assert before_source_manifest["nonblank_probe_status"] == "passed"
+    assert before_raster_manifest["nonblank_probe_status"] == "passed"
+    assert source_probe["method"] == "pixel_nonblank_probe"
+    assert source_probe["asset_path"].endswith("S21-0001_before.pdf")
+    assert source_probe["probe_target_path"].endswith("S21-0001_before.png")
+    assert raster_probe["asset_path"].endswith("S21-0001_before.png")
+    assert validate_visual_asset_policy(before_source_manifest, customer_grade=True) == []
+    assert validate_visual_asset_policy(before_raster_manifest, customer_grade=True) == []
     overlay = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
     assert overlay["coordinate_source"] == "image_pixels"
     assert overlay["visual_fidelity"] == "pdf_render"
@@ -509,14 +976,18 @@ def test_viewer_package_can_skip_lod_tiles_for_fast_lightweight_mode(
     )
 
     manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
-    perf_path = tmp_path / "viewer" / "viewer_perf.json"
+    perf_path = tmp_path / "viewer" / "viewer_perf.jsonl"
     assert package.tile_count == 0
     assert manifest["build_lod_tiles"] is False
     assert manifest["pairs"][0]["lod_tile_count"] == 0
     assert manifest["pairs"][0]["overlay_tile_count"] == 0
-    if perf_path.exists():
-        perf = json.loads(perf_path.read_text(encoding="utf-8"))
-        assert perf["event_count"] == 0
+    events = [
+        json.loads(line)
+        for line in perf_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(event["event"] == "package_background_render" for event in events)
+    assert not any(event["event"] == "package_tile_write" for event in events)
 
 
 def test_viewer_render_timeout_keeps_overlay_only_result(tmp_path: Path, monkeypatch) -> None:
@@ -542,6 +1013,7 @@ def test_viewer_render_timeout_keeps_overlay_only_result(tmp_path: Path, monkeyp
 
     assert result["render_status"] == "render_timeout"
     assert result["before_image"] == ""
+    assert result["worker_spawned"] is True
     assert "timed out" in result["warnings"][0]
 
 

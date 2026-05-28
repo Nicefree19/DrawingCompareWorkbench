@@ -40,6 +40,9 @@ try:  # Running as ``python scripts/prepare_...``.
         summarize_large_dwg_resource_probe,
         summarize_review_decision_truth_csv,
         summarize_viewer_perf,
+        _resolve_viewer_manifest_ref,
+        _visual_asset_manifest_refs,
+        _visual_asset_policy_issues,
     )
 except ImportError:  # Imported as ``scripts.prepare_...`` in tests.
     from scripts.audit_drawing_compare_mvp_exit import (
@@ -63,12 +66,82 @@ except ImportError:  # Imported as ``scripts.prepare_...`` in tests.
         summarize_large_dwg_resource_probe,
         summarize_review_decision_truth_csv,
         summarize_viewer_perf,
+        _resolve_viewer_manifest_ref,
+        _visual_asset_manifest_refs,
+        _visual_asset_policy_issues,
     )
 
 # Plan §17 F6 (GPT Pro deep-research review) — manifest provenance helpers.
 # Add the repo root to sys.path so ``src.services.comparison.manifest_provenance``
 # resolves whether the script is invoked from the worktree or imported as
 # ``scripts.prepare_drawing_compare_customer_evidence`` from a test runner.
+P5_G26_BENCHMARK_ID = "p5_g26_selection_latency_soak"
+P5_G26_PROFILE = "selection_latency_hard_gate"
+P5_G26_REQUIRED_GATES = {
+    "p5_g26_wp_a_gui_hot_path_contract",
+    "p5_g26_wp_b_pdf_first_responsiveness_contract",
+    "p5_g26_event_loop_gap_max_ms",
+    "p5_g26_click_hot_path_full_work_count",
+    "p5_g26_cached_page_navigation_render_call_count",
+    "p5_g26_repeat_cache_hit_rate",
+    "p5_g26_blank_viewer_count",
+    "p5_g26_cad_to_pdf_hot_path_count",
+    "p5_g26_zone_selection_count",
+    "p5_g26_zone_selection_telemetry_count",
+    "p5_g26_zone_selection_p95_ms",
+    "p5_g26_zone_selection_worker_spawn_count",
+    "p5_g26_zone_selection_background_work_count",
+    "p5_g26_zone_selection_stale_visible_count",
+}
+P5_G27_BENCHMARK_ID = "p5_g27_selected_zone_crop_soak"
+P5_G27_PROFILE = "selected_zone_crop_first_lifecycle"
+P5_G27_REQUIRED_GATES = {
+    "p5_g27_crop_first_result_visible",
+    "p5_g27_crop_visible_before_vector_focus",
+    "p5_g27_crop_visible_p95_ms",
+    "p5_g27_vector_failure_does_not_clear_background",
+    "p5_g27_blank_selected_zone_count",
+    "p5_g27_stale_result_visible_count",
+    "p5_g27_cancel_without_visible_regression_count",
+    "p5_g27_timeout_count",
+    "p5_g27_fallback_missing_reason_count",
+    "p5_g27_event_loop_gap_max_ms",
+    "p5_g27_worker_cleanup_ok",
+    "p5_g27_orphan_worker_count",
+}
+P5_G28_BENCHMARK_ID = "p5_g28_cache_plateau_soak"
+P5_G28_PROFILE = "tile_cache_plateau_lifecycle_seed"
+P5_G28_CACHE_CATEGORY_NAMES = {
+    "display_list",
+    "dxf_index",
+    "visual_asset",
+    "overlay",
+    "spool",
+}
+P5_G28_REQUIRED_GATES = {
+    "p5_g28_tile_retention_completed",
+    "p5_g28_tile_cache_byte_plateau",
+    "p5_g28_tile_cache_eviction_observed",
+    "p5_g28_tile_cache_eviction_reason_present",
+    "p5_g28_tile_cache_orphan_payloads_zero",
+    "p5_g28_tile_cache_stale_manifest_zero",
+    "p5_g28_hot_pair_retained",
+    "p5_g28_evicted_pair_cache_miss",
+    "p5_g28_single_entry_over_cap_count",
+    "p5_g28_prune_p95_ms",
+    "p5_g28_event_loop_gap_p95_ms",
+    "p5_g28_event_loop_over_500ms_count",
+    "p5_g28_cache_category_breakdown_present",
+    "p5_g28_display_list_cache_plateau",
+    "p5_g28_dxf_index_cache_plateau",
+    "p5_g28_visual_asset_cache_plateau",
+    "p5_g28_overlay_cache_plateau",
+    "p5_g28_spool_namespace_plateau",
+    "p5_g28_cache_category_orphans_zero",
+    "p5_g28_cache_category_stale_entries_zero",
+    "p5_g28_cache_plateau_tail_slope",
+}
+
 _PREPARE_REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_PREPARE_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_PREPARE_REPO_ROOT))
@@ -141,6 +214,7 @@ DISALLOWED_EVIDENCE_PATH_MARKERS = (
     "customer_evidence_request",
 )
 CAD_STRUCTURAL_TEXT_ENTITY_TYPES = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "INSERT"}
+TILE_CACHE_MB_ENV_VAR = "DRAWING_COMPARE_TILE_CACHE_MB"
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -226,6 +300,99 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--p5-g7-tile-eviction-proof-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Validation output folder from a forced tile-cache eviction proof run. "
+            "Repeat as needed. These runs are preserved as supporting evidence and "
+            "are not counted as customer corpus sheets."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g7-tile-eviction-release-manifest",
+        type=Path,
+        action="append",
+        default=[],
+        help="Release manifest from the forced tile-eviction proof run.",
+    )
+    parser.add_argument(
+        "--require-p5-g7-tile-eviction-proof",
+        action="store_true",
+        help="Require a passing P5-G7 forced tile-eviction proof before manifest readiness can pass.",
+    )
+    parser.add_argument(
+        "--p5-g6-tile-cache-mb",
+        type=float,
+        help="Expected DRAWING_COMPARE_TILE_CACHE_MB cap used by the P5-G7 forced tile-eviction proof.",
+    )
+    parser.add_argument(
+        "--p5-g16-benchmark-json",
+        "--p5-g16-real-corpus-replay",
+        dest="p5_g16_benchmark_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G16 real-corpus replay JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover replay evidence without a separate manual path handoff."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g22-gui-soak-json",
+        "--p5-g22-actual-gui-soak",
+        dest="p5_g22_gui_soak_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G22 actual GUI soak JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover live Qt/QML navigation evidence without a manual handoff."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g26-selection-latency-json",
+        "--p5-g26-selection-latency-soak",
+        dest="p5_g26_selection_latency_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G26 selection latency JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover GUI/PDF hot-path contract evidence without a manual handoff."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g27-selected-zone-crop-json",
+        "--p5-g27-selected-zone-crop-soak",
+        dest="p5_g27_selected_zone_crop_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G27 selected-zone crop-first JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover crop-first lifecycle evidence without a manual handoff."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g28-cache-plateau-json",
+        "--p5-g28-cache-plateau-soak",
+        dest="p5_g28_cache_plateau_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G28 cache plateau JSON. Repeat as needed. The path is recorded "
+            "in the customer evidence manifest for standalone plateau audit "
+            "discovery without making P5-G28 a default customer-grade gate."
+        ),
+    )
+    parser.add_argument(
         "--required-structural-coverage",
         action="append",
         choices=tuple(STRUCTURAL_COVERAGE_TERMS),
@@ -297,6 +464,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_cold_zone_render_ms=resolved_max_cold_zone_render_ms,
         max_cache_hit_zone_render_ms=resolved_max_cache_hit_zone_render_ms,
         required_structural_coverage=args.required_structural_coverage,
+        p5_g7_tile_eviction_proof_dirs=[
+            path.resolve() for path in args.p5_g7_tile_eviction_proof_dir
+        ],
+        p5_g7_tile_eviction_release_manifests=[
+            path.resolve() for path in args.p5_g7_tile_eviction_release_manifest
+        ],
+        require_p5_g7_tile_eviction_proof=args.require_p5_g7_tile_eviction_proof,
+        p5_g6_tile_cache_mb=args.p5_g6_tile_cache_mb,
+        p5_g16_benchmark_json=[path.resolve() for path in args.p5_g16_benchmark_json],
+        p5_g22_gui_soak_json=[path.resolve() for path in args.p5_g22_gui_soak_json],
+        p5_g26_selection_latency_json=[
+            path.resolve() for path in args.p5_g26_selection_latency_json
+        ],
+        p5_g27_selected_zone_crop_json=[
+            path.resolve() for path in args.p5_g27_selected_zone_crop_json
+        ],
+        p5_g28_cache_plateau_json=[
+            path.resolve() for path in args.p5_g28_cache_plateau_json
+        ],
     )
     print(json.dumps(result, ensure_ascii=True, indent=2))
     return 0 if result["status"] == "ready" else 1
@@ -330,6 +516,15 @@ def prepare_manifest(
     max_cold_zone_render_ms: float = 10_000.0,
     max_cache_hit_zone_render_ms: float = 2_000.0,
     required_structural_coverage: Sequence[str] | None = None,
+    p5_g7_tile_eviction_proof_dirs: Sequence[Path] | None = None,
+    p5_g7_tile_eviction_release_manifests: Sequence[Path] | None = None,
+    require_p5_g7_tile_eviction_proof: bool = False,
+    p5_g6_tile_cache_mb: float | None = None,
+    p5_g16_benchmark_json: Sequence[Path] | None = None,
+    p5_g22_gui_soak_json: Sequence[Path] | None = None,
+    p5_g26_selection_latency_json: Sequence[Path] | None = None,
+    p5_g27_selected_zone_crop_json: Sequence[Path] | None = None,
+    p5_g28_cache_plateau_json: Sequence[Path] | None = None,
 ) -> dict[str, Any]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     audit_json = audit_json or out_path.with_name("sharable_path_audit_summary.json")
@@ -338,6 +533,15 @@ def prepare_manifest(
     large_dwg_probe = large_dwg_probe or review_ground_truth.with_name("large_dwg_probe.json")
     required = list(required_structural_coverage or STRUCTURAL_COVERAGE_TERMS.keys())
     loaded = [_load_result_dir(path) for path in result_dirs]
+    result_dir_forced_tile_eviction_proofs = [
+        summarize_p5_g7_forced_tile_eviction_proof(
+            item["summary"] if isinstance(item.get("summary"), dict) else {},
+            result_dir=item["path"],
+            summary_path=Path(item["path"]) / "validation_summary.json",
+            expected_tile_cache_mb=p5_g6_tile_cache_mb,
+        )
+        for item in loaded
+    ]
     summaries = [item["summary"] for item in loaded if isinstance(item.get("summary"), dict)]
     queue_items = [item for summary in summaries for item in _queue_items(summary)]
 
@@ -368,6 +572,66 @@ def prepare_manifest(
     first_interactive_readiness = summarize_first_interactive_readiness(summaries)
     bbox_quality = summarize_bbox_quality(summaries)
     large_dwg_resource_probe = summarize_large_dwg_resource_probe(_load_json(large_dwg_probe))
+    p5_g7_forced_tile_eviction = summarize_p5_g7_forced_tile_eviction(
+        p5_g7_tile_eviction_proof_dirs or [],
+        expected_tile_cache_mb=p5_g6_tile_cache_mb,
+        release_manifests=p5_g7_tile_eviction_release_manifests or [],
+        reference_base=out_path.parent,
+        required=require_p5_g7_tile_eviction_proof,
+    )
+    p5_g16_real_corpus_replay = summarize_p5_g16_real_corpus_replay(
+        p5_g16_benchmark_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g16_refs = [
+        item["benchmark_json"]
+        for item in p5_g16_real_corpus_replay["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    p5_g22_actual_gui_soak = summarize_p5_g22_actual_gui_soak(
+        p5_g22_gui_soak_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g22_refs = [
+        item["benchmark_json"]
+        for item in p5_g22_actual_gui_soak["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    p5_g26_selection_latency = summarize_p5_g26_selection_latency(
+        p5_g26_selection_latency_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g26_refs = [
+        item["benchmark_json"]
+        for item in p5_g26_selection_latency["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    p5_g27_selected_zone_crop = summarize_p5_g27_selected_zone_crop(
+        p5_g27_selected_zone_crop_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g27_refs = [
+        item["benchmark_json"]
+        for item in p5_g27_selected_zone_crop["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    p5_g28_cache_plateau = summarize_p5_g28_cache_plateau(
+        p5_g28_cache_plateau_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g28_refs = [
+        item["benchmark_json"]
+        for item in p5_g28_cache_plateau["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    evidence_level = (
+        "customer_grade" if dataset_source_kind in CUSTOMER_GRADE_SOURCE_KINDS else "synthetic"
+    )
+    p5_g24_visual_asset_policy = summarize_p5_g24_visual_asset_policy(
+        loaded,
+        evidence_level=evidence_level,
+        reference_base=out_path.parent,
+    )
 
     path_audit = {
         "schema_version": 1,
@@ -388,9 +652,7 @@ def prepare_manifest(
 
     manifest = {
         "schema_version": 1,
-        "evidence_level": (
-            "customer_grade" if dataset_source_kind in CUSTOMER_GRADE_SOURCE_KINDS else "synthetic"
-        ),
+        "evidence_level": evidence_level,
         "dataset_id": dataset_id,
         "dataset_provenance": {
             "source_kind": dataset_source_kind,
@@ -449,8 +711,29 @@ def prepare_manifest(
             "leak_count": leak_count,
             "audit_json": _manifest_ref(out_path.parent, audit_json),
         },
+        "artifacts": {
+            "p5_g16_real_corpus_replay_json": p5_g16_refs[0] if p5_g16_refs else "",
+            "p5_g16_real_corpus_replay_jsons": p5_g16_refs,
+            "p5_g22_actual_gui_soak_json": p5_g22_refs[0] if p5_g22_refs else "",
+            "p5_g22_actual_gui_soak_jsons": p5_g22_refs,
+            "p5_g26_selection_latency_json": p5_g26_refs[0] if p5_g26_refs else "",
+            "p5_g26_selection_latency_jsons": p5_g26_refs,
+            "p5_g27_selected_zone_crop_json": p5_g27_refs[0] if p5_g27_refs else "",
+            "p5_g27_selected_zone_crop_jsons": p5_g27_refs,
+            "p5_g28_cache_plateau_json": p5_g28_refs[0] if p5_g28_refs else "",
+            "p5_g28_cache_plateau_jsons": p5_g28_refs,
+        },
+        "performance_benchmarks": {
+            "p5_g16_real_corpus_replay": p5_g16_real_corpus_replay,
+            "p5_g22_actual_gui_soak": p5_g22_actual_gui_soak,
+            "p5_g26_selection_latency": p5_g26_selection_latency,
+            "p5_g27_selected_zone_crop": p5_g27_selected_zone_crop,
+            "p5_g28_cache_plateau": p5_g28_cache_plateau,
+        },
         "cad_policy_evidence": cad_policy_evidence,
         "selected_zone_performance": selected_zone_performance,
+        "p5_g7_forced_tile_eviction": p5_g7_forced_tile_eviction,
+        "p5_g24_visual_asset_policy": p5_g24_visual_asset_policy,
         "workbench_acceptance": workbench_acceptance,
         "ai_policy": ai_policy,
     }
@@ -478,6 +761,15 @@ def prepare_manifest(
         max_cold_zone_render_ms=max_cold_zone_render_ms,
         max_cache_hit_zone_render_ms=max_cache_hit_zone_render_ms,
     )
+    forbidden_result_dir_proofs = [
+        proof for proof in result_dir_forced_tile_eviction_proofs if proof.get("candidate") is True
+    ]
+    for proof in forbidden_result_dir_proofs:
+        label = proof.get("result_dir") or proof.get("validation_summary") or "<results-dir>"
+        issues.append(
+            f"{label}: P5-G7 forced tile-eviction proof must be passed via "
+            "--p5-g7-tile-eviction-proof-dir, not --results-dir"
+        )
     status = "ready" if not issues else "incomplete"
     manifest["readiness"] = {
         "status": status,
@@ -537,6 +829,66 @@ def prepare_manifest(
                 )
         except Exception:
             pass
+        for index, proof_dir in enumerate(p5_g7_tile_eviction_proof_dirs or [], start=1):
+            try:
+                proof_summary = Path(proof_dir) / "validation_summary.json"
+                if proof_summary.exists():
+                    input_file_hashes[f"p5_g7_tile_eviction_proof_{index}"] = compute_file_sha256(
+                        proof_summary
+                    )
+            except Exception:
+                pass
+        for index, release_manifest in enumerate(
+            p5_g7_tile_eviction_release_manifests or [],
+            start=1,
+        ):
+            try:
+                if release_manifest.exists():
+                    input_file_hashes[f"p5_g7_tile_eviction_release_manifest_{index}"] = compute_file_sha256(
+                        Path(release_manifest)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g16_benchmark_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g16_real_corpus_replay_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g22_gui_soak_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g22_actual_gui_soak_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g26_selection_latency_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g26_selection_latency_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g27_selected_zone_crop_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g27_selected_zone_crop_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g28_cache_plateau_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g28_cache_plateau_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
         manifest["provenance"] = build_provenance(
             manifest,
             input_file_hashes=input_file_hashes,
@@ -565,6 +917,14 @@ def prepare_manifest(
                 max_first_review_ready_s=max_first_review_ready_s,
             ),
             "selected_zone_performance": selected_zone_performance,
+            "p5_g16_real_corpus_replay": p5_g16_real_corpus_replay,
+            "p5_g22_actual_gui_soak": p5_g22_actual_gui_soak,
+            "p5_g26_selection_latency": p5_g26_selection_latency,
+            "p5_g27_selected_zone_crop": p5_g27_selected_zone_crop,
+            "p5_g28_cache_plateau": p5_g28_cache_plateau,
+            "p5_g24_visual_asset_policy": p5_g24_visual_asset_policy,
+            "p5_g7_forced_tile_eviction": p5_g7_forced_tile_eviction,
+            "p5_g7_forced_tile_eviction_results_dir_rejections": forbidden_result_dir_proofs,
             "workbench_acceptance": workbench_acceptance,
             "review_decision_quality": review_decision_quality,
             "dataset_strata": dataset_strata_summary,
@@ -577,6 +937,1136 @@ def prepare_manifest(
                 "max": max_total_pairs,
             },
         },
+    }
+
+
+def summarize_p5_g7_forced_tile_eviction(
+    proof_dirs: Sequence[Path],
+    *,
+    expected_tile_cache_mb: float | None = None,
+    release_manifests: Sequence[Path] | None = None,
+    reference_base: Path | None = None,
+    required: bool = False,
+) -> dict[str, Any]:
+    """Summarize P5-G7 forced tile-cache eviction proof runs without corpus mixing."""
+    proofs: list[dict[str, Any]] = []
+    for proof_dir in proof_dirs:
+        summary_path = proof_dir / "validation_summary.json"
+        summary = _load_json(summary_path)
+        proof = summarize_p5_g7_forced_tile_eviction_proof(
+            summary if isinstance(summary, dict) else {},
+            result_dir=proof_dir,
+            summary_path=summary_path,
+            expected_tile_cache_mb=expected_tile_cache_mb,
+            reference_base=reference_base,
+        )
+        if proof["status"] == "not_provided":
+            proof["status"] = "failed"
+            proof["issues"] = [
+                "validation_summary.json does not contain forced tile-eviction proof evidence"
+            ]
+        if not summary_path.exists():
+            proof["issues"].append("validation_summary.json does not exist")
+            proof["status"] = "failed"
+        proofs.append(proof)
+
+    release_summaries = [
+        _summarize_p5_g7_release_manifest(
+            path,
+            expected_tile_cache_mb=expected_tile_cache_mb,
+            reference_base=reference_base,
+        )
+        for path in release_manifests or []
+    ]
+    issues: list[str] = []
+    for proof in proofs:
+        if proof["status"] != "passed":
+            label = proof.get("result_dir") or proof.get("validation_summary") or "<p5_g7_proof>"
+            issues.append(f"{label}: " + "; ".join(proof.get("issues") or ["proof failed"]))
+    for release in release_summaries:
+        if release["status"] != "passed":
+            label = release.get("path") or "<release_manifest>"
+            issues.append(f"{label}: " + "; ".join(release.get("issues") or ["release manifest failed"]))
+    passed = [proof for proof in proofs if proof["status"] == "passed"]
+    if required and not passed:
+        issues.append("required P5-G7 forced tile-eviction proof is missing or failed")
+    if proofs:
+        status = "passed" if passed and not issues else "failed"
+    else:
+        status = "failed" if required else "not_provided"
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required": required,
+        "expected_tile_cache_mb": expected_tile_cache_mb,
+        "proof_count": len(proofs),
+        "passed_proof_count": len(passed),
+        "proofs": proofs,
+        "release_manifests": release_summaries,
+        "issues": issues,
+    }
+
+
+def summarize_p5_g16_real_corpus_replay(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        summary = payload_dict.get("summary") if isinstance(payload_dict.get("summary"), dict) else {}
+        native_summary = (
+            summary.get("native_resource_summary")
+            if isinstance(summary.get("native_resource_summary"), dict)
+            else {}
+        )
+        worker_summary = (
+            summary.get("worker_tree_summary")
+            if isinstance(summary.get("worker_tree_summary"), dict)
+            else {}
+        )
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "native_resource_summary": native_summary,
+                "worker_tree_summary": worker_summary,
+                "shared_summaries_present": bool(native_summary and worker_summary),
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == "p5_g16_real_corpus_replay"
+        and item["profile"] == "real_corpus_artifact_replay"
+    ]
+    status = "passed" if passed else ("planned" if artifacts else "missing")
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "native_resource_summary": (
+            artifacts[0]["native_resource_summary"] if artifacts else {}
+        ),
+        "worker_tree_summary": (
+            artifacts[0]["worker_tree_summary"] if artifacts else {}
+        ),
+        "shared_summary_count": len(
+            [item for item in artifacts if item.get("shared_summaries_present")]
+        ),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g22_actual_gui_soak(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        summary = payload_dict.get("summary") if isinstance(payload_dict.get("summary"), dict) else {}
+        native_summary = (
+            summary.get("native_resource_summary")
+            if isinstance(summary.get("native_resource_summary"), dict)
+            else {}
+        )
+        worker_summary = (
+            summary.get("worker_tree_summary")
+            if isinstance(summary.get("worker_tree_summary"), dict)
+            else {}
+        )
+        issues: list[str] = []
+        if path.exists() and payload_dict.get("status") == "passed":
+            if not native_summary:
+                issues.append("summary.native_resource_summary missing")
+            elif native_summary.get("measurement_available") is not True:
+                issues.append("summary.native_resource_summary.measurement_available must be true")
+            if not worker_summary:
+                issues.append("summary.worker_tree_summary missing")
+            elif worker_summary.get("cleanup_ok") is not True or _int(worker_summary.get("orphan_worker_count")) != 0:
+                issues.append("summary.worker_tree_summary cleanup/orphan check failed")
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "native_resource_summary": native_summary,
+                "worker_tree_summary": worker_summary,
+                "shared_summaries_present": bool(native_summary and worker_summary),
+                "issues": issues,
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == "p5_g22_actual_gui_soak"
+        and item["profile"] == "actual_gui_customer_corpus_soak"
+        and item["shared_summaries_present"]
+        and not item["issues"]
+    ]
+    status = "passed" if passed else ("failed" if any(item["exists"] for item in artifacts) else ("planned" if artifacts else "missing"))
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "native_resource_summary": (
+            artifacts[0]["native_resource_summary"] if artifacts else {}
+        ),
+        "worker_tree_summary": (
+            artifacts[0]["worker_tree_summary"] if artifacts else {}
+        ),
+        "shared_summary_count": len(
+            [item for item in artifacts if item.get("shared_summaries_present")]
+        ),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g26_selection_latency(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        contract = payload_dict.get("p5_g26_contract")
+        if not isinstance(contract, dict):
+            contract = payload_dict.get("p5_g26_evidence")
+        if not isinstance(contract, dict):
+            contract = {}
+        gates = payload_dict.get("gates")
+        gate_by_name = (
+            {
+                str(gate.get("name") or ""): gate
+                for gate in gates
+                if isinstance(gate, dict) and str(gate.get("name") or "")
+            }
+            if isinstance(gates, list)
+            else {}
+        )
+        declared_required = payload_dict.get("p5_g26_required_gate_names")
+        declared_required_set = {
+            str(item)
+            for item in declared_required
+            if str(item or "")
+        } if isinstance(declared_required, list) else set()
+        issues: list[str] = []
+        if not path.exists() or not isinstance(payload, dict):
+            issues.append("p5_g26_selection_latency JSON is missing or unreadable")
+        else:
+            if payload_dict.get("benchmark_id") != P5_G26_BENCHMARK_ID:
+                issues.append(f"benchmark_id must be {P5_G26_BENCHMARK_ID}")
+            if payload_dict.get("profile") != P5_G26_PROFILE:
+                issues.append(f"profile must be {P5_G26_PROFILE}")
+            if payload_dict.get("status") != "passed":
+                issues.append(f"status={payload_dict.get('status') or '<missing>'}")
+            if not contract:
+                issues.append("p5_g26_contract missing")
+            else:
+                if contract.get("wp_a_passed") is not True:
+                    issues.append("p5_g26_contract.wp_a_passed must be true")
+                if contract.get("wp_b_passed") is not True:
+                    issues.append("p5_g26_contract.wp_b_passed must be true")
+                if contract.get("has_zone_selection_evidence") is not True:
+                    issues.append("p5_g26_contract.has_zone_selection_evidence must be true")
+            if declared_required_set and not P5_G26_REQUIRED_GATES <= declared_required_set:
+                missing_declared = sorted(P5_G26_REQUIRED_GATES - declared_required_set)
+                issues.append("p5_g26_required_gate_names missing: " + ", ".join(missing_declared))
+            missing_gates = sorted(P5_G26_REQUIRED_GATES - set(gate_by_name))
+            if missing_gates:
+                issues.append("required gates missing: " + ", ".join(missing_gates))
+            failed_gates = sorted(
+                gate_name
+                for gate_name, gate in gate_by_name.items()
+                if gate_name in P5_G26_REQUIRED_GATES
+                and gate.get("required") is not False
+                and gate.get("passed") is not True
+            )
+            if failed_gates:
+                issues.append("required gates failed: " + ", ".join(failed_gates))
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "wp_a_passed": contract.get("wp_a_passed") is True,
+                "wp_b_passed": contract.get("wp_b_passed") is True,
+                "has_zone_selection_evidence": contract.get("has_zone_selection_evidence") is True,
+                "required_gate_count": len(P5_G26_REQUIRED_GATES),
+                "passed_required_gate_count": len(
+                    [
+                        gate
+                        for name, gate in gate_by_name.items()
+                        if name in P5_G26_REQUIRED_GATES
+                        and gate.get("required") is not False
+                        and gate.get("passed") is True
+                    ]
+                ),
+                "issues": issues,
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == P5_G26_BENCHMARK_ID
+        and item["profile"] == P5_G26_PROFILE
+        and item["wp_a_passed"]
+        and item["wp_b_passed"]
+        and item["has_zone_selection_evidence"]
+        and item["passed_required_gate_count"] == item["required_gate_count"]
+        and not item["issues"]
+    ]
+    status = "passed" if passed else ("failed" if any(item["exists"] for item in artifacts) else ("planned" if artifacts else "missing"))
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "required_gate_count": len(P5_G26_REQUIRED_GATES),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g27_selected_zone_crop(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        contract = payload_dict.get("p5_g27_contract")
+        if not isinstance(contract, dict):
+            contract = payload_dict.get("p5_g27_evidence")
+        if not isinstance(contract, dict):
+            contract = {}
+        gates = payload_dict.get("gates")
+        gate_by_name = (
+            {
+                str(gate.get("name") or ""): gate
+                for gate in gates
+                if isinstance(gate, dict) and str(gate.get("name") or "")
+            }
+            if isinstance(gates, list)
+            else {}
+        )
+        declared_required = payload_dict.get("p5_g27_required_gate_names")
+        declared_required_set = {
+            str(item)
+            for item in declared_required
+            if str(item or "")
+        } if isinstance(declared_required, list) else set()
+        issues: list[str] = []
+        if not path.exists() or not isinstance(payload, dict):
+            issues.append("p5_g27_selected_zone_crop JSON is missing or unreadable")
+        else:
+            if payload_dict.get("benchmark_id") != P5_G27_BENCHMARK_ID:
+                issues.append(f"benchmark_id must be {P5_G27_BENCHMARK_ID}")
+            if payload_dict.get("profile") != P5_G27_PROFILE:
+                issues.append(f"profile must be {P5_G27_PROFILE}")
+            if payload_dict.get("status") != "passed":
+                issues.append(f"status={payload_dict.get('status') or '<missing>'}")
+            if not contract:
+                issues.append("p5_g27_contract missing")
+            else:
+                if contract.get("crop_first_result_visible") is not True:
+                    issues.append("p5_g27_contract.crop_first_result_visible must be true")
+                if contract.get("crop_visible_before_vector_focus") is not True:
+                    issues.append("p5_g27_contract.crop_visible_before_vector_focus must be true")
+                if contract.get("vector_failure_does_not_clear_background") is not True:
+                    issues.append(
+                        "p5_g27_contract.vector_failure_does_not_clear_background must be true"
+                    )
+                if contract.get("has_selected_zone_crop_first_evidence") is not True:
+                    issues.append(
+                        "p5_g27_contract.has_selected_zone_crop_first_evidence must be true"
+                    )
+                if contract.get("worker_cleanup_ok") is not True:
+                    issues.append("p5_g27_contract.worker_cleanup_ok must be true")
+                for key in (
+                    "blank_selected_zone_count",
+                    "stale_result_visible_count",
+                    "cancel_without_visible_regression_count",
+                    "timeout_count",
+                    "fallback_missing_reason_count",
+                    "orphan_worker_count",
+                ):
+                    if _int(contract.get(key)) != 0:
+                        issues.append(f"p5_g27_contract.{key} must be 0")
+            if declared_required_set and not P5_G27_REQUIRED_GATES <= declared_required_set:
+                missing_declared = sorted(P5_G27_REQUIRED_GATES - declared_required_set)
+                issues.append("p5_g27_required_gate_names missing: " + ", ".join(missing_declared))
+            missing_gates = sorted(P5_G27_REQUIRED_GATES - set(gate_by_name))
+            if missing_gates:
+                issues.append("required gates missing: " + ", ".join(missing_gates))
+            failed_gates = sorted(
+                gate_name
+                for gate_name, gate in gate_by_name.items()
+                if gate_name in P5_G27_REQUIRED_GATES
+                and gate.get("required") is not False
+                and gate.get("passed") is not True
+            )
+            if failed_gates:
+                issues.append("required gates failed: " + ", ".join(failed_gates))
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "crop_first_result_visible": contract.get("crop_first_result_visible") is True,
+                "crop_visible_before_vector_focus": (
+                    contract.get("crop_visible_before_vector_focus") is True
+                ),
+                "vector_failure_does_not_clear_background": (
+                    contract.get("vector_failure_does_not_clear_background") is True
+                ),
+                "has_selected_zone_crop_first_evidence": (
+                    contract.get("has_selected_zone_crop_first_evidence") is True
+                ),
+                "worker_cleanup_ok": contract.get("worker_cleanup_ok") is True,
+                "required_gate_count": len(P5_G27_REQUIRED_GATES),
+                "passed_required_gate_count": len(
+                    [
+                        gate
+                        for name, gate in gate_by_name.items()
+                        if name in P5_G27_REQUIRED_GATES
+                        and gate.get("required") is not False
+                        and gate.get("passed") is True
+                    ]
+                ),
+                "issues": issues,
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == P5_G27_BENCHMARK_ID
+        and item["profile"] == P5_G27_PROFILE
+        and item["crop_first_result_visible"]
+        and item["crop_visible_before_vector_focus"]
+        and item["vector_failure_does_not_clear_background"]
+        and item["has_selected_zone_crop_first_evidence"]
+        and item["worker_cleanup_ok"]
+        and item["passed_required_gate_count"] == item["required_gate_count"]
+        and not item["issues"]
+    ]
+    status = "passed" if passed else ("failed" if any(item["exists"] for item in artifacts) else ("planned" if artifacts else "missing"))
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "required_gate_count": len(P5_G27_REQUIRED_GATES),
+        "artifacts": artifacts,
+    }
+
+
+def _p5_g28_live_cache_counter_issues(contract: dict[str, Any]) -> list[str]:
+    live = contract.get("live_cache_counters")
+    if not isinstance(live, dict) or live.get("supplied") is not True:
+        return []
+    issues: list[str] = []
+    prefix = "p5_g28_contract.live_cache_counters"
+    if _int(live.get("source_count")) <= 0:
+        issues.append(f"{prefix}.source_count must be > 0 when supplied")
+    if _int(live.get("observed_category_count")) <= 0:
+        issues.append(f"{prefix}.observed_category_count must be > 0 when supplied")
+    if live.get("passed") is not True:
+        issues.append(f"{prefix}.passed must be true when supplied")
+    if live.get("within_limits") is not True:
+        issues.append(f"{prefix}.within_limits must be true when supplied")
+    if _int(live.get("invalid_counter_count")) != 0:
+        issues.append(f"{prefix}.invalid_counter_count must be 0 when supplied")
+    min_source_count = max(1, _int(live.get("min_source_count")) or 1)
+    if _int(live.get("source_count")) < min_source_count:
+        issues.append(f"{prefix}.source_count must be >= min_source_count when supplied")
+    if "tail_slope_ok" in live and live.get("tail_slope_ok") is not True:
+        issues.append(f"{prefix}.tail_slope_ok must be true when supplied")
+    if _int(live.get("tail_slope_invalid_category_count")) != 0:
+        issues.append(f"{prefix}.tail_slope_invalid_category_count must be 0 when supplied")
+    for issue in live.get("issues") or []:
+        if str(issue or "").strip():
+            issues.append(f"{prefix}.issues: {issue}")
+    categories = live.get("categories")
+    if not isinstance(categories, dict):
+        issues.append(f"{prefix}.categories missing")
+        return issues
+    for category in sorted(P5_G28_CACHE_CATEGORY_NAMES):
+        item = categories.get(category)
+        if not isinstance(item, dict) or item.get("observed") is not True:
+            continue
+        category_prefix = f"{prefix}.categories.{category}"
+        retained = _int(item.get("retained_bytes"))
+        limit = _int(item.get("byte_limit"))
+        eviction_count = _int(item.get("eviction_count"))
+        evicted_bytes = _int(item.get("evicted_estimated_bytes"))
+        if retained < 0 or limit < 0 or eviction_count < 0 or evicted_bytes < 0:
+            issues.append(f"{category_prefix} counters must not be negative")
+        if limit > 0 and retained > limit:
+            issues.append(f"{category_prefix}.retained_bytes must be <= byte_limit")
+        if item.get("within_limit") is not True:
+            issues.append(f"{category_prefix}.within_limit must be true")
+        if _int(item.get("sample_count")) >= 2:
+            if item.get("tail_slope_ok") is not True:
+                issues.append(f"{category_prefix}.tail_slope_ok must be true")
+            if _int(item.get("tail_slope_bytes_per_run")) > _int(
+                item.get("tail_slope_target_bytes_per_run")
+            ):
+                issues.append(
+                    f"{category_prefix}.tail_slope_bytes_per_run must be <= "
+                    "tail_slope_target_bytes_per_run"
+                )
+    return issues
+
+
+def summarize_p5_g28_cache_plateau(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        contract = payload_dict.get("p5_g28_contract")
+        if not isinstance(contract, dict):
+            contract = payload_dict.get("p5_g28_evidence")
+        if not isinstance(contract, dict):
+            contract = {}
+        gates = payload_dict.get("gates")
+        gate_by_name = (
+            {
+                str(gate.get("name") or ""): gate
+                for gate in gates
+                if isinstance(gate, dict) and str(gate.get("name") or "")
+            }
+            if isinstance(gates, list)
+            else {}
+        )
+        declared_required = payload_dict.get("p5_g28_required_gate_names")
+        declared_required_set = {
+            str(item)
+            for item in declared_required
+            if str(item or "")
+        } if isinstance(declared_required, list) else set()
+        reasons = contract.get("eviction_reason_counts")
+        reasons = reasons if isinstance(reasons, dict) else {}
+        issues: list[str] = []
+
+        if not path.exists() or not isinstance(payload, dict):
+            issues.append("p5_g28_cache_plateau JSON is missing or unreadable")
+        else:
+            if payload_dict.get("schema_version") != "workbench-gui-hotpath-benchmark/v1":
+                issues.append("schema_version must be workbench-gui-hotpath-benchmark/v1")
+            if payload_dict.get("benchmark_id") != P5_G28_BENCHMARK_ID:
+                issues.append(f"benchmark_id must be {P5_G28_BENCHMARK_ID}")
+            if payload_dict.get("profile") != P5_G28_PROFILE:
+                issues.append(f"profile must be {P5_G28_PROFILE}")
+            if payload_dict.get("status") != "passed":
+                issues.append(f"status={payload_dict.get('status') or '<missing>'}")
+            if not contract:
+                issues.append("p5_g28_contract missing")
+            else:
+                if contract.get("passed") is not True:
+                    issues.append("p5_g28_contract.passed must be true")
+                for key in (
+                    "tile_retention_completed",
+                    "tile_byte_plateau_ok",
+                    "tile_eviction_observed",
+                    "tile_byte_limit_eviction_reason_present",
+                    "tile_orphan_payloads_zero",
+                    "tile_stale_manifest_zero",
+                    "tile_hot_pair_retained",
+                    "tile_evicted_pair_cache_miss",
+                    "single_entry_over_cap_zero",
+                    "event_loop_over_500ms_zero",
+                    "cache_category_breakdown_present",
+                    "display_list_cache_plateau",
+                    "dxf_index_cache_plateau",
+                    "visual_asset_cache_plateau",
+                    "overlay_cache_plateau",
+                    "spool_namespace_plateau",
+                    "cache_category_orphans_zero",
+                    "cache_category_stale_entries_zero",
+                    "cache_plateau_tail_slope_ok",
+                ):
+                    if contract.get(key) is not True:
+                        issues.append(f"p5_g28_contract.{key} must be true")
+                if _int(reasons.get("byte_limit")) <= 0:
+                    issues.append("p5_g28_contract.eviction_reason_counts.byte_limit must be > 0")
+                if _int(contract.get("tile_retained_bytes")) > _int(contract.get("tile_byte_limit")):
+                    issues.append("p5_g28_contract.tile_retained_bytes must be <= tile_byte_limit")
+                if _int(contract.get("tile_eviction_count")) <= 0:
+                    issues.append("p5_g28_contract.tile_eviction_count must be > 0")
+                if _int(contract.get("tile_evicted_estimated_bytes")) <= 0:
+                    issues.append("p5_g28_contract.tile_evicted_estimated_bytes must be > 0")
+                for key in (
+                    "tile_orphan_bytes",
+                    "tile_orphan_pair_count",
+                    "tile_stale_manifest_count",
+                    "single_entry_over_cap_count",
+                    "event_loop_over_500ms_count",
+                ):
+                    if _int(contract.get(key)) != 0:
+                        issues.append(f"p5_g28_contract.{key} must be 0")
+                if _float(contract.get("prune_p95_ms")) > _float(contract.get("prune_p95_target_ms")):
+                    issues.append("p5_g28_contract.prune_p95_ms must be <= prune_p95_target_ms")
+                if _float(contract.get("event_loop_gap_p95_ms")) > _float(
+                    contract.get("event_loop_gap_p95_target_ms")
+                ):
+                    issues.append(
+                        "p5_g28_contract.event_loop_gap_p95_ms must be <= "
+                        "event_loop_gap_p95_target_ms"
+                    )
+                breakdown = contract.get("cache_category_breakdown")
+                if not isinstance(breakdown, dict):
+                    issues.append("p5_g28_contract.cache_category_breakdown missing")
+                    breakdown = {}
+                missing_categories = sorted(P5_G28_CACHE_CATEGORY_NAMES - set(breakdown))
+                if missing_categories:
+                    issues.append(
+                        "p5_g28_contract.cache_category_breakdown missing: "
+                        + ", ".join(missing_categories)
+                    )
+                for category in sorted(P5_G28_CACHE_CATEGORY_NAMES):
+                    item = breakdown.get(category)
+                    if not isinstance(item, dict):
+                        continue
+                    prefix = f"p5_g28_contract.cache_category_breakdown.{category}"
+                    if _int(item.get("retained_bytes")) > _int(item.get("byte_limit")):
+                        issues.append(f"{prefix}.retained_bytes must be <= byte_limit")
+                    if _int(item.get("evicted_entry_count")) <= 0:
+                        issues.append(f"{prefix}.evicted_entry_count must be > 0")
+                    if _int(item.get("orphan_bytes")) != 0:
+                        issues.append(f"{prefix}.orphan_bytes must be 0")
+                    if _int(item.get("orphan_entry_count")) != 0:
+                        issues.append(f"{prefix}.orphan_entry_count must be 0")
+                    if _int(item.get("stale_entry_count")) != 0:
+                        issues.append(f"{prefix}.stale_entry_count must be 0")
+                    if _int(item.get("tail_slope_bytes_per_run")) > _int(
+                        item.get("tail_slope_target_bytes_per_run")
+                    ):
+                        issues.append(
+                            f"{prefix}.tail_slope_bytes_per_run must be <= "
+                            "tail_slope_target_bytes_per_run"
+                        )
+                issues.extend(_p5_g28_live_cache_counter_issues(contract))
+            if not declared_required_set:
+                issues.append("p5_g28_required_gate_names missing")
+            elif not P5_G28_REQUIRED_GATES <= declared_required_set:
+                missing_declared = sorted(P5_G28_REQUIRED_GATES - declared_required_set)
+                issues.append("p5_g28_required_gate_names missing: " + ", ".join(missing_declared))
+            if not isinstance(gates, list):
+                issues.append("gates[] missing")
+            else:
+                missing_gates = sorted(P5_G28_REQUIRED_GATES - set(gate_by_name))
+                if missing_gates:
+                    issues.append("required gates missing: " + ", ".join(missing_gates))
+                failed_gates = sorted(
+                    gate_name
+                    for gate_name, gate in gate_by_name.items()
+                    if gate_name in P5_G28_REQUIRED_GATES
+                    and gate.get("passed") is not True
+                )
+                if failed_gates:
+                    issues.append("required gates failed: " + ", ".join(failed_gates))
+
+        live_counters = (
+            contract.get("live_cache_counters")
+            if isinstance(contract.get("live_cache_counters"), dict)
+            else {}
+        )
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "contract_passed": contract.get("passed") is True,
+                "tile_retention_completed": contract.get("tile_retention_completed") is True,
+                "tile_byte_plateau_ok": contract.get("tile_byte_plateau_ok") is True,
+                "tile_eviction_observed": contract.get("tile_eviction_observed") is True,
+                "tile_byte_limit_eviction_reason_present": (
+                    contract.get("tile_byte_limit_eviction_reason_present") is True
+                ),
+                "tile_orphan_payloads_zero": contract.get("tile_orphan_payloads_zero") is True,
+                "tile_stale_manifest_zero": contract.get("tile_stale_manifest_zero") is True,
+                "tile_hot_pair_retained": contract.get("tile_hot_pair_retained") is True,
+                "tile_evicted_pair_cache_miss": contract.get("tile_evicted_pair_cache_miss") is True,
+                "single_entry_over_cap_zero": contract.get("single_entry_over_cap_zero") is True,
+                "event_loop_over_500ms_zero": contract.get("event_loop_over_500ms_zero") is True,
+                "cache_category_breakdown_present": (
+                    contract.get("cache_category_breakdown_present") is True
+                ),
+                "cache_category_names": list(contract.get("cache_category_names") or []),
+                "cache_category_retained_bytes_total": _int(
+                    contract.get("cache_category_retained_bytes_total")
+                ),
+                "cache_category_byte_limit_total": _int(
+                    contract.get("cache_category_byte_limit_total")
+                ),
+                "cache_category_evicted_entry_count": _int(
+                    contract.get("cache_category_evicted_entry_count")
+                ),
+                "cache_category_orphan_bytes_total": _int(
+                    contract.get("cache_category_orphan_bytes_total")
+                ),
+                "cache_category_stale_entry_count": _int(
+                    contract.get("cache_category_stale_entry_count")
+                ),
+                "cache_category_tail_slope_max_bytes_per_run": _int(
+                    contract.get("cache_category_tail_slope_max_bytes_per_run")
+                ),
+                "live_cache_counters_supplied": (
+                    contract.get("live_cache_counters_supplied") is True
+                    or live_counters.get("supplied") is True
+                ),
+                "live_cache_counters_source_count": _int(
+                    contract.get("live_cache_counters_source_count")
+                    if contract.get("live_cache_counters_source_count") is not None
+                    else live_counters.get("source_count")
+                ),
+                "live_cache_counters_observed_category_count": _int(
+                    contract.get("live_cache_counters_observed_category_count")
+                    if contract.get("live_cache_counters_observed_category_count") is not None
+                    else live_counters.get("observed_category_count")
+                ),
+                "live_cache_counters_within_limits": (
+                    contract.get("live_cache_counters_within_limits") is True
+                    or live_counters.get("within_limits") is True
+                ),
+                "live_cache_counters_invalid_counter_count": _int(
+                    contract.get("live_cache_counters_invalid_counter_count")
+                    if contract.get("live_cache_counters_invalid_counter_count") is not None
+                    else live_counters.get("invalid_counter_count")
+                ),
+                "live_cache_counters_tail_slope_ok": (
+                    contract.get("live_cache_counters_tail_slope_ok") is True
+                    or live_counters.get("tail_slope_ok") is True
+                ),
+                "live_cache_counters_tail_slope_max_bytes_per_run": _int(
+                    contract.get("live_cache_counters_tail_slope_max_bytes_per_run")
+                    if contract.get("live_cache_counters_tail_slope_max_bytes_per_run") is not None
+                    else live_counters.get("tail_slope_max_bytes_per_run")
+                ),
+                "live_cache_counters_tail_slope_target_bytes_per_run": _int(
+                    contract.get("live_cache_counters_tail_slope_target_bytes_per_run")
+                    if contract.get("live_cache_counters_tail_slope_target_bytes_per_run") is not None
+                    else live_counters.get("tail_slope_target_bytes_per_run")
+                ),
+                "live_cache_counters_tail_slope_invalid_category_count": _int(
+                    contract.get("live_cache_counters_tail_slope_invalid_category_count")
+                    if contract.get("live_cache_counters_tail_slope_invalid_category_count") is not None
+                    else live_counters.get("tail_slope_invalid_category_count")
+                ),
+                "tile_retained_bytes": _int(contract.get("tile_retained_bytes")),
+                "tile_byte_limit": _int(contract.get("tile_byte_limit")),
+                "tile_eviction_count": _int(contract.get("tile_eviction_count")),
+                "tile_evicted_estimated_bytes": _int(contract.get("tile_evicted_estimated_bytes")),
+                "tile_byte_limit_eviction_reason_count": _int(reasons.get("byte_limit")),
+                "tile_orphan_bytes": _int(contract.get("tile_orphan_bytes")),
+                "tile_orphan_pair_count": _int(contract.get("tile_orphan_pair_count")),
+                "tile_stale_manifest_count": _int(contract.get("tile_stale_manifest_count")),
+                "single_entry_over_cap_count": _int(contract.get("single_entry_over_cap_count")),
+                "event_loop_over_500ms_count": _int(contract.get("event_loop_over_500ms_count")),
+                "prune_p95_ms": _float(contract.get("prune_p95_ms")),
+                "prune_p95_target_ms": _float(contract.get("prune_p95_target_ms")),
+                "event_loop_gap_p95_ms": _float(contract.get("event_loop_gap_p95_ms")),
+                "event_loop_gap_p95_target_ms": _float(
+                    contract.get("event_loop_gap_p95_target_ms")
+                ),
+                "required_gate_count": len(P5_G28_REQUIRED_GATES),
+                "passed_required_gate_count": len(
+                    [
+                        gate
+                        for name, gate in gate_by_name.items()
+                        if name in P5_G28_REQUIRED_GATES
+                        and gate.get("passed") is True
+                    ]
+                ),
+                "issues": issues,
+            }
+        )
+
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == P5_G28_BENCHMARK_ID
+        and item["profile"] == P5_G28_PROFILE
+        and item["contract_passed"]
+        and item["passed_required_gate_count"] == item["required_gate_count"]
+        and not item["issues"]
+    ]
+    if not artifacts:
+        status = "missing"
+    elif not any(item["exists"] for item in artifacts):
+        status = "planned"
+    elif len(passed) == len(artifacts):
+        status = "passed"
+    else:
+        status = "failed"
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": False,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "required_gate_count": len(P5_G28_REQUIRED_GATES),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g24_visual_asset_policy(
+    loaded: Sequence[dict[str, Any]],
+    *,
+    evidence_level: str,
+    reference_base: Path | None = None,
+) -> dict[str, Any]:
+    completed_output_count = 0
+    outputs_with_manifests = 0
+    manifest_count = 0
+    issues: list[str] = []
+    evidence: list[str] = []
+
+    for item in loaded:
+        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        completed_pairs = _int(_nested(summary, "comparison", "completed_pairs"))
+        if completed_pairs <= 0:
+            continue
+        completed_output_count += 1
+        result_root = item.get("path")
+        label = (
+            _manifest_ref(reference_base, result_root)
+            if reference_base and isinstance(result_root, Path)
+            else str(result_root or "<validation_output>")
+        )
+        viewer_manifest_path = _p5_g24_viewer_manifest_path_for_loaded_item(item)
+        if viewer_manifest_path is None:
+            issues.append(f"{label}: viewer_manifest_json missing or unreadable")
+            evidence.append(f"{label}: visual_asset_manifests=missing_viewer_manifest")
+            continue
+        viewer_manifest = _load_json(viewer_manifest_path)
+        if not isinstance(viewer_manifest, dict):
+            issues.append(f"{viewer_manifest_path}: viewer manifest JSON missing or unreadable")
+            evidence.append(f"{label}: visual_asset_manifests=missing_viewer_manifest")
+            continue
+        manifest_refs = _visual_asset_manifest_refs(viewer_manifest)
+        if not manifest_refs:
+            issues.append(f"{viewer_manifest_path}: no visual asset manifest references")
+            evidence.append(f"{label}: visual_asset_manifests=0")
+            continue
+        outputs_with_manifests += 1
+        evidence.append(
+            f"{label}: visual_asset_manifests={len(manifest_refs)}, "
+            f"viewer_manifest={_manifest_ref(reference_base, viewer_manifest_path) if reference_base else str(viewer_manifest_path)}"
+        )
+        for ref in manifest_refs:
+            manifest_path = _resolve_viewer_manifest_ref(
+                ref,
+                result_root=result_root,
+                viewer_root=viewer_manifest_path.parent,
+            )
+            manifest_count += 1
+            if manifest_path is None:
+                issues.append(f"{viewer_manifest_path}: visual asset manifest not found: {ref}")
+                continue
+            payload = _load_json(manifest_path)
+            if not isinstance(payload, dict):
+                issues.append(f"{manifest_path}: visual asset manifest JSON missing or unreadable")
+                continue
+            policy_issues = _visual_asset_policy_issues(
+                payload,
+                customer_grade=(evidence_level == "customer_grade"),
+                manifest_path=manifest_path,
+            )
+            if policy_issues:
+                manifest_label = (
+                    _manifest_ref(reference_base, manifest_path)
+                    if reference_base
+                    else str(manifest_path)
+                )
+                issues.append(f"{manifest_label}: " + "; ".join(policy_issues))
+
+    if evidence_level == "customer_grade":
+        if completed_output_count <= 0:
+            issues.append("customer_grade visual asset policy requires completed validation outputs")
+        if outputs_with_manifests < completed_output_count:
+            issues.append("customer_grade visual asset manifests must be present for every completed validation output")
+
+    status = "passed" if completed_output_count > 0 and manifest_count > 0 and not issues else "failed"
+    if evidence_level != "customer_grade" and completed_output_count <= 0:
+        status = "advisory"
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": evidence_level == "customer_grade",
+        "completed_output_count": completed_output_count,
+        "outputs_with_manifests": outputs_with_manifests,
+        "manifest_count": manifest_count,
+        "issues": issues,
+        "evidence": evidence[:20],
+    }
+
+
+def _p5_g24_viewer_manifest_path_for_loaded_item(item: dict[str, Any]) -> Path | None:
+    summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+    root = item.get("path")
+    for value in (
+        _nested(summary, "outputs", "viewer_manifest_json"),
+        _nested(summary, "viewer_package", "viewer_manifest"),
+    ):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        path = Path(text)
+        candidates = [path] if path.is_absolute() else ([root / path] if isinstance(root, Path) else [])
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def summarize_p5_g7_forced_tile_eviction_proof(
+    summary: dict[str, Any],
+    *,
+    result_dir: Path | None = None,
+    summary_path: Path | None = None,
+    expected_tile_cache_mb: float | None = None,
+    reference_base: Path | None = None,
+    strict_candidate: bool = True,
+) -> dict[str, Any]:
+    gate = summary.get("p5_g3_realset_gate") if isinstance(summary, dict) else None
+    gate = gate if isinstance(gate, dict) else {}
+    gate_evidence = gate.get("evidence") if isinstance(gate.get("evidence"), dict) else {}
+    tile = gate_evidence.get("tile_manifest") if isinstance(gate_evidence, dict) else None
+    tile = tile if isinstance(tile, dict) else {}
+
+    configured_mb = _optional_float(tile.get("configured_tile_cache_mb"))
+    env_mb = _optional_float(tile.get("tile_cache_env_mb"))
+    byte_limit = _int(tile.get("byte_limit"))
+    evicted_pair_count = _int(tile.get("evicted_pair_count"))
+    evicted_estimated_bytes = _int(tile.get("evicted_estimated_bytes"))
+    min_evicted_pairs = max(1, _int(tile.get("min_evicted_pair_count")) or 1)
+    min_evicted_bytes = max(1, _int(tile.get("min_evicted_estimated_bytes")) or 1)
+    require_eviction = tile.get("require_eviction") is True
+    requested = gate.get("requested") is True
+    forced_markers = requested and (
+        require_eviction
+        if strict_candidate
+        else (
+            require_eviction
+            or configured_mb is not None
+            or env_mb is not None
+            or evicted_pair_count > 0
+            or evicted_estimated_bytes > 0
+        )
+    )
+    if not forced_markers:
+        return {
+            "status": "not_provided",
+            "candidate": False,
+            "result_dir": _manifest_ref(reference_base, result_dir) if reference_base else str(result_dir or ""),
+            "validation_summary": (
+                _manifest_ref(reference_base, summary_path)
+                if reference_base
+                else str(summary_path or "")
+            ),
+            "issues": [],
+        }
+
+    issues: list[str] = []
+    gate_status = str(gate.get("status") or "")
+    tile_status = str(tile.get("status") or "")
+    if not requested:
+        issues.append("p5_g3_realset_gate.requested is not true")
+    if gate_status != "passed":
+        issues.append(f"p5_g3_realset_gate.status={gate_status or '<missing>'}")
+    if tile_status and tile_status != "passed":
+        issues.append(f"p5_g3_realset_gate.tile_manifest.status={tile_status}")
+    if not require_eviction:
+        issues.append("p5_g3_realset_gate.tile_manifest.require_eviction is not true")
+    if evicted_pair_count < min_evicted_pairs:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.evicted_pair_count="
+            f"{evicted_pair_count} < {min_evicted_pairs}"
+        )
+    if evicted_estimated_bytes < min_evicted_bytes:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.evicted_estimated_bytes="
+            f"{evicted_estimated_bytes} < {min_evicted_bytes}"
+        )
+    if configured_mb is None or configured_mb <= 0:
+        issues.append("p5_g3_realset_gate.tile_manifest.configured_tile_cache_mb missing")
+    if env_mb is None or env_mb <= 0:
+        issues.append("p5_g3_realset_gate.tile_manifest.tile_cache_env_mb missing")
+    if configured_mb is not None and env_mb is not None and not _float_close(env_mb, configured_mb):
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.tile_cache_env_mb="
+            f"{env_mb} != configured_tile_cache_mb={configured_mb}"
+        )
+    if byte_limit <= 0:
+        issues.append("p5_g3_realset_gate.tile_manifest.byte_limit missing")
+    elif configured_mb is not None:
+        configured_bytes = int(configured_mb * 1024 * 1024)
+        if abs(byte_limit - configured_bytes) > 1:
+            issues.append(
+                f"p5_g3_realset_gate.tile_manifest.byte_limit={byte_limit} != {configured_bytes}"
+            )
+    if expected_tile_cache_mb is not None:
+        expected_bytes = int(float(expected_tile_cache_mb) * 1024 * 1024)
+        if not _float_close(configured_mb, expected_tile_cache_mb):
+            issues.append(
+                "p5_g3_realset_gate.tile_manifest.configured_tile_cache_mb="
+                f"{configured_mb} != {expected_tile_cache_mb}"
+            )
+        if not _float_close(env_mb, expected_tile_cache_mb):
+            issues.append(
+                "p5_g3_realset_gate.tile_manifest.tile_cache_env_mb="
+                f"{env_mb} != {expected_tile_cache_mb}"
+            )
+        if byte_limit <= 0:
+            issues.append(
+                "p5_g3_realset_gate.tile_manifest.byte_limit missing for "
+                f"expected tile cache cap {expected_tile_cache_mb} MB"
+            )
+        elif abs(byte_limit - expected_bytes) > 1:
+            issues.append(
+                f"p5_g3_realset_gate.tile_manifest.byte_limit={byte_limit} != {expected_bytes}"
+            )
+
+    stale_manifest_count = _int(tile.get("stale_manifest_count"))
+    missing_pair_payload_count = _int(tile.get("missing_pair_payload_count"))
+    retained_estimated_bytes = _int(tile.get("retained_estimated_bytes"))
+    orphan_payload_bytes = _int(tile.get("orphan_payload_bytes"))
+    max_orphan_payload_bytes = _int(tile.get("max_orphan_payload_bytes"))
+    if stale_manifest_count:
+        issues.append(f"p5_g3_realset_gate.tile_manifest.stale_manifest_count={stale_manifest_count}")
+    if missing_pair_payload_count:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.missing_pair_payload_count="
+            f"{missing_pair_payload_count}"
+        )
+    if byte_limit > 0 and retained_estimated_bytes > byte_limit:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.retained_estimated_bytes="
+            f"{retained_estimated_bytes} > byte_limit={byte_limit}"
+        )
+    if orphan_payload_bytes > max_orphan_payload_bytes:
+        issues.append(
+            "p5_g3_realset_gate.tile_manifest.orphan_payload_bytes="
+            f"{orphan_payload_bytes} > {max_orphan_payload_bytes}"
+        )
+
+    return {
+        "status": "passed" if not issues else "failed",
+        "candidate": True,
+        "result_dir": _manifest_ref(reference_base, result_dir) if reference_base else str(result_dir or ""),
+        "validation_summary": (
+            _manifest_ref(reference_base, summary_path)
+            if reference_base
+            else str(summary_path or "")
+        ),
+        "p5_g3_realset_gate_status": gate_status,
+        "requested": requested,
+        "tile_manifest_status": tile_status,
+        "require_eviction": require_eviction,
+        "configured_tile_cache_mb": configured_mb,
+        "tile_cache_env_mb": env_mb,
+        "byte_limit": byte_limit,
+        "evicted_pair_count": evicted_pair_count,
+        "min_evicted_pair_count": min_evicted_pairs,
+        "evicted_estimated_bytes": evicted_estimated_bytes,
+        "min_evicted_estimated_bytes": min_evicted_bytes,
+        "retained_estimated_bytes": retained_estimated_bytes,
+        "stale_manifest_count": stale_manifest_count,
+        "missing_pair_payload_count": missing_pair_payload_count,
+        "orphan_payload_bytes": orphan_payload_bytes,
+        "max_orphan_payload_bytes": max_orphan_payload_bytes,
+        "issues": issues,
+    }
+
+
+def _summarize_p5_g7_release_manifest(
+    path: Path,
+    *,
+    expected_tile_cache_mb: float | None,
+    reference_base: Path | None,
+) -> dict[str, Any]:
+    payload = _load_json(path)
+    issues: list[str] = []
+    env_values: list[float] = []
+    if not path.exists():
+        issues.append("release_manifest.json does not exist")
+    if not isinstance(payload, dict):
+        issues.append("release_manifest.json is missing or unreadable")
+        payload = {}
+    for step in payload.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        env_overrides = step.get("env_overrides")
+        if not isinstance(env_overrides, dict):
+            continue
+        value = _optional_float(env_overrides.get(TILE_CACHE_MB_ENV_VAR))
+        if value is not None:
+            env_values.append(value)
+    if expected_tile_cache_mb is not None:
+        if not env_values:
+            issues.append(f"release manifest missing {TILE_CACHE_MB_ENV_VAR} env override")
+        for value in env_values:
+            if not _float_close(value, expected_tile_cache_mb):
+                issues.append(
+                    f"release manifest {TILE_CACHE_MB_ENV_VAR}={value} != {expected_tile_cache_mb}"
+                )
+    return {
+        "status": "passed" if not issues else "failed",
+        "path": _manifest_ref(reference_base, path) if reference_base else str(path),
+        "tile_cache_env_var": TILE_CACHE_MB_ENV_VAR,
+        "tile_cache_env_mb_values": env_values,
+        "issues": issues,
     }
 
 
@@ -691,6 +2181,54 @@ def _readiness_issues(
         issues.append("large_dwg_probe JSON must exist")
     if _nested(manifest, "large_dwg_resource_probe", "status") != "passed":
         issues.append("large_dwg_resource_probe.status must be passed")
+    p5_g7_tile_eviction = manifest.get("p5_g7_forced_tile_eviction")
+    if (
+        isinstance(p5_g7_tile_eviction, dict)
+        and p5_g7_tile_eviction.get("required") is True
+        and p5_g7_tile_eviction.get("status") != "passed"
+    ):
+        issues.append("p5_g7_forced_tile_eviction.status must be passed when required")
+    p5_g24 = manifest.get("p5_g24_visual_asset_policy")
+    if manifest.get("evidence_level") == "customer_grade":
+        if not isinstance(p5_g24, dict) or p5_g24.get("status") != "passed":
+            issues.append("p5_g24_visual_asset_policy.status must be passed for customer-grade visual asset evidence")
+            if isinstance(p5_g24, dict):
+                issues.extend(str(issue) for issue in p5_g24.get("issues", []) if str(issue))
+    p5_g22 = _nested(manifest, "performance_benchmarks", "p5_g22_actual_gui_soak")
+    if isinstance(p5_g22, dict) and _int(p5_g22.get("artifact_count")) > 0:
+        if p5_g22.get("status") != "passed":
+            issues.append("p5_g22_actual_gui_soak.status must be passed when provided")
+        if _int(p5_g22.get("shared_summary_count")) < _int(p5_g22.get("artifact_count")):
+            issues.append(
+                "p5_g22_actual_gui_soak shared native/worker summaries are required for all provided artifacts"
+            )
+        native_summary = p5_g22.get("native_resource_summary") if isinstance(p5_g22.get("native_resource_summary"), dict) else {}
+        worker_summary = p5_g22.get("worker_tree_summary") if isinstance(p5_g22.get("worker_tree_summary"), dict) else {}
+        if native_summary.get("measurement_available") is not True:
+            issues.append("p5_g22_actual_gui_soak.native_resource_summary.measurement_available must be true")
+        if worker_summary.get("cleanup_ok") is not True or _int(worker_summary.get("orphan_worker_count")) != 0:
+            issues.append("p5_g22_actual_gui_soak.worker_tree_summary cleanup/orphan check must pass")
+    p5_g26 = _nested(manifest, "performance_benchmarks", "p5_g26_selection_latency")
+    if isinstance(p5_g26, dict) and _int(p5_g26.get("artifact_count")) > 0:
+        if p5_g26.get("status") != "passed":
+            issues.append("p5_g26_selection_latency.status must be passed when provided")
+            for item in p5_g26.get("artifacts", []):
+                if isinstance(item, dict):
+                    issues.extend(str(issue) for issue in item.get("issues", []) if str(issue))
+    p5_g27 = _nested(manifest, "performance_benchmarks", "p5_g27_selected_zone_crop")
+    if isinstance(p5_g27, dict) and _int(p5_g27.get("artifact_count")) > 0:
+        if p5_g27.get("status") != "passed":
+            issues.append("p5_g27_selected_zone_crop.status must be passed when provided")
+            for item in p5_g27.get("artifacts", []):
+                if isinstance(item, dict):
+                    issues.extend(str(issue) for issue in item.get("issues", []) if str(issue))
+    p5_g28 = _nested(manifest, "performance_benchmarks", "p5_g28_cache_plateau")
+    if isinstance(p5_g28, dict) and _int(p5_g28.get("artifact_count")) > 0:
+        if p5_g28.get("status") != "passed":
+            issues.append("p5_g28_cache_plateau.status must be passed when provided")
+            for item in p5_g28.get("artifacts", []):
+                if isinstance(item, dict):
+                    issues.extend(str(issue) for issue in item.get("issues", []) if str(issue))
     if not operator_notes_file:
         issues.append("operator notes_file with workflow checklist is required")
     if not operator_notes_file and not operator_screenshots_dir:
@@ -1354,6 +2892,23 @@ def _float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_close(actual: float | None, expected: float | None) -> bool:
+    if actual is None or expected is None:
+        return False
+    return abs(float(actual) - float(expected)) <= 1e-6
 
 
 def _string_list(value: Any) -> list[str]:

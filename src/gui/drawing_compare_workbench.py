@@ -47,7 +47,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+QT_QUICK_DISABLED = _env_flag("DRAWING_COMPARE_DISABLE_QT_QUICK")
 try:
+    if QT_QUICK_DISABLED:
+        raise ImportError("Qt Quick disabled by DRAWING_COMPARE_DISABLE_QT_QUICK")
     from PySide6.QtQuickWidgets import QQuickWidget
 
     QT_QUICK_AVAILABLE = True
@@ -57,6 +65,7 @@ except Exception:
 
 from src.gui.theme import NanoColors, get_stylesheet
 from src.services.comparison import ComparisonConfig
+from src.services.comparison.cache_budget import resolve_cache_byte_limit
 from src.services.comparison.drawing_batch import (
     BatchCompareJob,
     BatchCompareOptions,
@@ -128,6 +137,10 @@ from src.services.comparison.viewer_perf_summary import (
     format_viewer_perf_summary_korean,
     summarize_viewer_perf,
 )
+from src.services.comparison.viewer_overlay_pages import (
+    OverlayPageStore,
+    iter_overlay_page_store,
+)
 from src.services.comparison.workbench_subprocess import (
     ZONE_RENDER_PROCESS_MODULE,
     ZONE_VECTOR_WORKER_MODULE,
@@ -142,7 +155,9 @@ from src.services.comparison.suppression_audit import (
 from src.services.comparison.viewer_tile_cache import (
     ViewerTileCacheOptions,
     append_viewer_perf_event,
-    merge_tiles_manifest,
+    append_pair_to_tiles_manifest_jsonl,
+    materialise_tiles_manifest_from_jsonl,
+    pair_tile_manifest_path,
     tiles_manifest_is_current,
     viewer_cache_key,
     visible_overlay_tile_items,
@@ -150,6 +165,7 @@ from src.services.comparison.viewer_tile_cache import (
     visible_or_clustered_overlays,
     viewport_rect_from_transform,
     write_pair_tile_cache,
+    write_pair_visible_tile_cache,
 )
 from src.services.comparison.zone_render_service import (
     RenderJob,
@@ -188,7 +204,24 @@ GPU_VIEWER_MAX_VISIBLE_OVERLAYS = 120
 GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD = 300
 GPU_VIEWER_MEMORY_BUDGET_MB = 512
 GPU_VIEWER_RENDER_TIMEOUT_SECONDS = 30
-DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = True
+DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = QT_QUICK_AVAILABLE
+GUI_FIRST_SELECTION_ZONE_LIMIT = 500
+GUI_FULL_ZONE_TREE_IDLE_DELAY_MS = 120
+GUI_INITIAL_ZONE_SELECT_DELAY_MS = 75
+GUI_INITIAL_ZONE_HEAVY_RENDER_DELAY_MS = 250
+GUI_LIGHTWEIGHT_PAIR_LOAD_DELAY_MS = 25
+GUI_PDF_INITIAL_RENDER_MAX_PIXELS = 5_000_000
+GUI_PDF_ADJACENT_PREWARM_DELAY_MS = 350
+GUI_OVERLAY_CACHE_PAIR_LIMIT = 8
+GUI_OVERLAY_CACHE_BYTE_LIMIT = resolve_cache_byte_limit(
+    specific_env_var="DRAWING_COMPARE_GUI_OVERLAY_CACHE_MB",
+    default_mb=8,
+)
+GUI_UNKNOWN_OVERLAY_JSON_DEFER_BYTES = 1 * 1024 * 1024
+GUI_FULL_ZONE_TREE_CHUNK_ZONE_THRESHOLD = 500
+GUI_FULL_ZONE_TREE_CHUNK_ITEM_LIMIT = 80
+GUI_FULL_ZONE_TREE_CHUNK_TIME_BUDGET_MS = 8.0
+GUI_FULL_ZONE_TREE_CHUNK_DELAY_MS = 0
 
 # B3 — preview render quality presets exposed to the user.
 # Each entry: (label_ko, dpi, max_edge_px). Default key drives the GUI request
@@ -650,7 +683,12 @@ def scale_pdf_bbox_to_render_pixels(
     except (TypeError, ValueError):
         bbox_dpi = 0.0
     try:
-        image_dpi = float(transform.get("dpi") or transform.get("pdf_dpi") or 0.0)
+        image_dpi = float(
+            transform.get("effective_dpi")
+            or transform.get("dpi")
+            or transform.get("pdf_dpi")
+            or 0.0
+        )
     except (TypeError, ValueError):
         image_dpi = 0.0
     if bbox_dpi <= 0 or image_dpi <= 0 or bbox_dpi == image_dpi:
@@ -754,6 +792,64 @@ def _cad_bbox_to_pixel_rect(bbox: object, transform: object) -> Optional[dict[st
         }
     except Exception:
         return None
+
+
+def _world_bbox_to_pixel_rect(world_bbox: object, transform: object) -> Optional[dict[str, float]]:
+    box = union_bboxes(world_bbox)
+    if not box or not isinstance(transform, dict):
+        return None
+    try:
+        img_w = float(transform.get("img_width") or transform.get("width") or 0.0)
+        img_h = float(transform.get("img_height") or transform.get("height") or 0.0)
+        min_x = float(transform.get("min_x", 0.0))
+        max_x = float(transform.get("max_x", 0.0))
+        min_y = float(transform.get("min_y", 0.0))
+        max_y = float(transform.get("max_y", 0.0))
+    except (TypeError, ValueError):
+        return None
+    world_w = max_x - min_x
+    world_h = max_y - min_y
+    if img_w <= 0 or img_h <= 0 or world_w == 0 or world_h == 0:
+        return None
+    wx0, wy0, wx1, wy1 = box
+    px0 = (wx0 - min_x) / world_w * img_w
+    px1 = (wx1 - min_x) / world_w * img_w
+    py0 = (max_y - wy1) / world_h * img_h
+    py1 = (max_y - wy0) / world_h * img_h
+    left = max(0.0, min(img_w, min(px0, px1)))
+    right = max(0.0, min(img_w, max(px0, px1)))
+    top = max(0.0, min(img_h, min(py0, py1)))
+    bottom = max(0.0, min(img_h, max(py0, py1)))
+    if right <= left or bottom <= top:
+        return None
+    return {
+        "x": round(left, 2),
+        "y": round(top, 2),
+        "width": max(1.0, round(right - left, 2)),
+        "height": max(1.0, round(bottom - top, 2)),
+    }
+
+
+def _lightweight_tile_zoom_from_transform(transform: object, units_per_pixel: float) -> float:
+    if not isinstance(transform, dict):
+        return 1.0
+    try:
+        img_w = float(transform.get("img_width") or transform.get("width") or 0.0)
+        img_h = float(transform.get("img_height") or transform.get("height") or 0.0)
+        world_w = float(transform.get("max_x", 0.0)) - float(transform.get("min_x", 0.0))
+        world_h = float(transform.get("max_y", 0.0)) - float(transform.get("min_y", 0.0))
+        upp = max(0.0001, float(units_per_pixel or 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    scales = []
+    if img_w > 0 and world_w != 0:
+        scales.append(abs(img_w / world_w))
+    if img_h > 0 and world_h != 0:
+        scales.append(abs(img_h / world_h))
+    if not scales:
+        return 1.0
+    image_px_per_screen_px = upp * (sum(scales) / len(scales))
+    return max(0.0001, 1.0 / max(0.0001, image_px_per_screen_px))
 
 
 def _viewer_pair_is_pdf(viewer_pair: dict) -> bool:
@@ -974,9 +1070,23 @@ class CompareWorker(QThread):
             self.error.emit(str(exc))
 
 
+def _runtime_budget_spool_dirs_for_folder_request(
+    request: FolderCompareRunRequest,
+) -> Optional[list[Path]]:
+    if not request.output_dir:
+        return None
+    output_dir = Path(request.output_dir)
+    dirs = [output_dir / "artifacts", output_dir / "viewer"]
+    viewer_cache_dir = getattr(request, "viewer_cache_dir", None)
+    if viewer_cache_dir:
+        dirs.append(Path(viewer_cache_dir))
+    return dirs
+
+
 class AutoFolderCompareWorker(QThread):
     """Background worker for the simplified Korean folder comparison flow."""
 
+    review_ready = Signal(object)
     finished = Signal(object)
     error = Signal(str)
     progress = Signal(int, str)
@@ -1013,7 +1123,7 @@ class AutoFolderCompareWorker(QThread):
         )
 
         sampler = RuntimeBudgetSampler(
-            spool_dirs=[Path(self.request.output_dir)] if self.request.output_dir else None,
+            spool_dirs=_runtime_budget_spool_dirs_for_folder_request(self.request),
         )
         sampler.start_sampling()
         try:
@@ -1027,6 +1137,7 @@ class AutoFolderCompareWorker(QThread):
                 is_cancelled=lambda: self._cancelled,
                 runtime_sampler=sampler,
                 viewer_memory_cap_mb=self.viewer_memory_cap_mb,
+                first_review_ready_callback=self.review_ready.emit,
             )
             self.finished.emit(result)
         except MemoryBudgetExceeded as exc:
@@ -1051,6 +1162,48 @@ class AutoFolderCompareWorker(QThread):
                 pass
 
 
+def _initial_tile_viewport_from_overlays(overlays: Sequence[dict[str, Any]]) -> Optional[dict[str, float]]:
+    """Return a bounded first-review tile window around the top visible issue."""
+
+    selected = [item for item in overlays if isinstance(item, dict) and item.get("selected_for_review")]
+    selected_ids = {id(item) for item in selected}
+    candidates = selected + [item for item in overlays if isinstance(item, dict) and id(item) not in selected_ids]
+    for overlay in candidates:
+        value = overlay.get("after_bbox_px") or overlay.get("before_bbox_px")
+        rect: Optional[dict[str, float]] = None
+        if isinstance(value, dict):
+            try:
+                rect = {
+                    "x": float(value.get("x", 0.0)),
+                    "y": float(value.get("y", 0.0)),
+                    "width": max(1.0, float(value.get("width", 1.0))),
+                    "height": max(1.0, float(value.get("height", 1.0))),
+                }
+            except (TypeError, ValueError):
+                rect = None
+        elif isinstance(value, (list, tuple)) and len(value) >= 4:
+            try:
+                left = float(value[0])
+                top = float(value[1])
+                right = float(value[2])
+                bottom = float(value[3])
+                rect = {"x": left, "y": top, "width": max(1.0, right - left), "height": max(1.0, bottom - top)}
+            except (TypeError, ValueError):
+                rect = None
+        if not rect:
+            continue
+        window = float(GPU_VIEWER_TILE_SIZE)
+        center_x = float(rect["x"]) + float(rect["width"]) / 2.0
+        center_y = float(rect["y"]) + float(rect["height"]) / 2.0
+        return {
+            "x": max(0.0, center_x - window / 2.0),
+            "y": max(0.0, center_y - window / 2.0),
+            "width": window,
+            "height": window,
+        }
+    return None
+
+
 class PairPreviewRenderWorker(QThread):
     """Render one selected drawing pair and enrich overlay bbox metadata."""
 
@@ -1065,6 +1218,7 @@ class PairPreviewRenderWorker(QThread):
         dxf_cache_dir: Path,
         viewer_root: Path,
         viewer_cache_root: Optional[Path] = None,
+        build_lod_tiles: bool = True,
     ):
         super().__init__()
         self.pair_id = pair_id
@@ -1072,6 +1226,7 @@ class PairPreviewRenderWorker(QThread):
         self.dxf_cache_dir = Path(dxf_cache_dir)
         self.viewer_root = Path(viewer_root)
         self.viewer_cache_root = Path(viewer_cache_root) if viewer_cache_root else self.viewer_root
+        self.build_lod_tiles = bool(build_lod_tiles)
 
     def run(self) -> None:
         try:
@@ -1079,6 +1234,14 @@ class PairPreviewRenderWorker(QThread):
             source_a = self.viewer_pair.get("source_a")
             source_b = self.viewer_pair.get("source_b")
             image_dir = self.viewer_root / "images"
+            page_a = _int_value(
+                self.viewer_pair.get("page_a", self.viewer_pair.get("page", 0)),
+                0,
+            )
+            page_b = _int_value(
+                self.viewer_pair.get("page_b", self.viewer_pair.get("page", 0)),
+                0,
+            )
             rendered = _render_pair_backgrounds_with_timeout(
                 pair_id=self.pair_id,
                 source_a=Path(source_a) if source_a else None,
@@ -1088,6 +1251,8 @@ class PairPreviewRenderWorker(QThread):
                 dpi=80,
                 max_edge_px=2400,
                 timeout_seconds=GPU_VIEWER_RENDER_TIMEOUT_SECONDS,
+                page_a=page_a,
+                page_b=page_b,
             )
             render_ms = round((perf_counter() - started) * 1000.0, 3)
             render_status = str(rendered.get("render_status") or "render_failed")
@@ -1105,14 +1270,33 @@ class PairPreviewRenderWorker(QThread):
                     "render_warning": "\n".join(render_warnings),
                 }
             )
+            pages_manifest_path = _resolve_viewer_artifact_path(
+                updated_pair.get("overlay_pages_manifest"),
+                self.viewer_root,
+            )
+            use_paged_overlay_store = (
+                pages_manifest_path is not None
+                and pages_manifest_path.exists()
+                and _viewer_pair_is_pdf(updated_pair)
+            )
             overlay_value = str(updated_pair.get("overlay_json") or "")
             overlay_path = Path(overlay_value) if overlay_value else None
-            payload = _read_json_file(overlay_path) if overlay_path and overlay_path.exists() else {}
-            overlays = payload.get("overlays", []) if isinstance(payload, dict) else []
-            if not isinstance(overlays, list):
-                overlays = []
+            payload: dict = {}
+            if use_paged_overlay_store:
+                store = OverlayPageStore(pages_manifest_path)
+                overlays = list(store.iter_visible_pdf_pages(page_a, page_b))
+                updated_pair["_overlay_materialization_scope"] = "visible_pdf_page"
+                updated_pair["_overlay_page_files_read"] = int(store.last_page_files_read)
+                updated_pair["_overlay_page_files_skipped"] = int(store.last_page_files_skipped)
+                updated_pair["_overlay_declared_count"] = int(store.overlay_count)
+            else:
+                payload = _read_json_file(overlay_path) if overlay_path and overlay_path.exists() else {}
+                overlays = payload.get("overlays", []) if isinstance(payload, dict) else []
+                if not isinstance(overlays, list):
+                    overlays = []
             cache_hit = False
             tile_ms = 0.0
+            tile_manifest: dict = {}
             if render_status == "rendered":
                 for overlay in overlays:
                     if not isinstance(overlay, dict):
@@ -1123,7 +1307,7 @@ class PairPreviewRenderWorker(QThread):
                         overlay["before_bbox_px"] = before_px
                     if after_px:
                         overlay["after_bbox_px"] = after_px
-                if overlay_path:
+                if overlay_path and not use_paged_overlay_store:
                     payload.update(
                         {
                             "viewer_coordinate_space": "pixel",
@@ -1135,39 +1319,62 @@ class PairPreviewRenderWorker(QThread):
                         }
                     )
                     _write_json_file(overlay_path, payload)
-                tile_options = ViewerTileCacheOptions(
-                    tile_size=GPU_VIEWER_TILE_SIZE,
-                    max_visible_overlays=GPU_VIEWER_MAX_VISIBLE_OVERLAYS,
-                    viewer_memory_budget_mb=GPU_VIEWER_MEMORY_BUDGET_MB,
-                )
-                cache_key = viewer_cache_key(
-                    pair_uuid=self.pair_id,
-                    source_a=Path(source_a) if source_a else None,
-                    source_b=Path(source_b) if source_b else None,
-                    options=tile_options,
-                )
-                tile_started = perf_counter()
-                cache_tiles_manifest = self.viewer_cache_root / "tiles_manifest.json"
-                cache_hit = tiles_manifest_is_current(cache_tiles_manifest, self.pair_id, cache_key)
-                if cache_hit:
-                    tile_manifest = _read_json_file(cache_tiles_manifest).get("pairs", {}).get(self.pair_id, {})
-                else:
-                    tile_manifest = write_pair_tile_cache(
-                        pair_uuid=self.pair_id,
-                        before_image=str(updated_pair.get("before_image") or ""),
-                        after_image=str(updated_pair.get("after_image") or ""),
-                        overlays=overlays,
-                        tile_root=self.viewer_cache_root / "tiles",
-                        overlay_tile_root=self.viewer_cache_root / "overlay_tiles",
-                        options=tile_options,
-                        cache_key=cache_key,
+                if self.build_lod_tiles:
+                    tile_options = ViewerTileCacheOptions(
+                        tile_size=GPU_VIEWER_TILE_SIZE,
+                        max_visible_overlays=GPU_VIEWER_MAX_VISIBLE_OVERLAYS,
+                        viewer_memory_budget_mb=GPU_VIEWER_MEMORY_BUDGET_MB,
                     )
-                    merge_tiles_manifest(self.viewer_cache_root, tile_manifest)
-                updated_pair["tile_manifest"] = str(merge_tiles_manifest(self.viewer_root, tile_manifest))
-                tile_ms = round((perf_counter() - tile_started) * 1000.0, 3)
-                updated_pair["tile_cache_key"] = cache_key
-                updated_pair["lod_tile_count"] = int(tile_manifest.get("tile_count", 0))
-                updated_pair["overlay_tile_count"] = int(tile_manifest.get("overlay_tile_count", 0))
+                    cache_key = viewer_cache_key(
+                        pair_uuid=self.pair_id,
+                        source_a=Path(source_a) if source_a else None,
+                        source_b=Path(source_b) if source_b else None,
+                        options=tile_options,
+                    )
+                    tile_started = perf_counter()
+                    cache_tiles_manifest = self.viewer_cache_root / "tiles_manifest.json"
+                    cache_hit = tiles_manifest_is_current(cache_tiles_manifest, self.pair_id, cache_key)
+                    if cache_hit:
+                        tile_manifest = _read_json_file(cache_tiles_manifest).get("pairs", {}).get(self.pair_id, {})
+                    else:
+                        initial_viewport = _initial_tile_viewport_from_overlays(overlays)
+                        if initial_viewport:
+                            tile_manifest = write_pair_visible_tile_cache(
+                                pair_uuid=self.pair_id,
+                                before_image=str(updated_pair.get("before_image") or ""),
+                                after_image=str(updated_pair.get("after_image") or ""),
+                                overlays=overlays,
+                                tile_root=self.viewer_cache_root / "tiles",
+                                overlay_tile_root=self.viewer_cache_root / "overlay_tiles",
+                                options=tile_options,
+                                viewport_rect=initial_viewport,
+                                zoom=1.0,
+                                prefetch_radius=1,
+                                cache_key=cache_key,
+                            )
+                        else:
+                            tile_manifest = write_pair_tile_cache(
+                                pair_uuid=self.pair_id,
+                                before_image=str(updated_pair.get("before_image") or ""),
+                                after_image=str(updated_pair.get("after_image") or ""),
+                                overlays=overlays,
+                                tile_root=self.viewer_cache_root / "tiles",
+                                overlay_tile_root=self.viewer_cache_root / "overlay_tiles",
+                                options=tile_options,
+                                cache_key=cache_key,
+                            )
+                        append_pair_to_tiles_manifest_jsonl(self.viewer_cache_root, tile_manifest)
+                        materialise_tiles_manifest_from_jsonl(self.viewer_cache_root, keep_jsonl=False)
+                    updated_pair["tile_manifest"] = str(pair_tile_manifest_path(self.viewer_cache_root / "tiles", self.pair_id))
+                    tile_ms = round((perf_counter() - tile_started) * 1000.0, 3)
+                    updated_pair["tile_cache_key"] = cache_key
+                    updated_pair["lod_tile_count"] = int(tile_manifest.get("tile_count", 0))
+                    updated_pair["overlay_tile_count"] = int(tile_manifest.get("overlay_tile_count", 0))
+                else:
+                    updated_pair["tile_manifest"] = ""
+                    updated_pair["tile_cache_key"] = ""
+                    updated_pair["lod_tile_count"] = 0
+                    updated_pair["overlay_tile_count"] = 0
             else:
                 updated_pair["tile_cache_key"] = ""
                 updated_pair["lod_tile_count"] = 0
@@ -1178,9 +1385,36 @@ class PairPreviewRenderWorker(QThread):
                 pair_uuid=self.pair_id,
                 render_ms=render_ms,
                 tile_ms=tile_ms,
+                tile_cache_attempted=bool(self.build_lod_tiles and render_status == "rendered"),
                 tile_cache_hit=cache_hit,
                 tile_count=updated_pair["lod_tile_count"],
                 overlay_tile_count=updated_pair["overlay_tile_count"],
+                tile_pyramid_ms=float((tile_manifest or {}).get("tile_pyramid_ms") or 0.0),
+                overlay_tile_ms=float((tile_manifest or {}).get("overlay_tile_ms") or 0.0),
+                tile_cache_write_ms=float((tile_manifest or {}).get("tile_cache_write_ms") or 0.0),
+                tile_payload_bytes=int((tile_manifest or {}).get("tile_payload_bytes") or 0),
+                overlay_tile_payload_bytes=int((tile_manifest or {}).get("overlay_tile_payload_bytes") or 0),
+                cache_total_estimated_bytes=int((tile_manifest or {}).get("cache_total_estimated_bytes") or 0),
+                cache_byte_limit=int((tile_manifest or {}).get("cache_byte_limit") or 0),
+                eviction_count=int((tile_manifest or {}).get("eviction_count") or 0),
+                evicted_pair_count=int((tile_manifest or {}).get("evicted_pair_count") or 0),
+                evicted_estimated_bytes=int((tile_manifest or {}).get("evicted_estimated_bytes") or 0),
+                cache_retained_estimated_bytes=int((tile_manifest or {}).get("cache_retained_estimated_bytes") or 0),
+                cache_estimated_bytes_before_eviction=int(
+                    (tile_manifest or {}).get("cache_estimated_bytes_before_eviction") or 0
+                ),
+                eviction_reason=str((tile_manifest or {}).get("eviction_reason") or ""),
+                overlay_count=int((tile_manifest or {}).get("overlay_count") or len(overlays)),
+                materialized_overlay_count=int((tile_manifest or {}).get("materialized_overlay_count") or 0),
+                overlay_omitted_count=int((tile_manifest or {}).get("overlay_omitted_count") or 0),
+                overlay_load_strategy="paged_overlay_store" if use_paged_overlay_store else "overlay_json",
+                overlay_page_files_read=int(updated_pair.get("_overlay_page_files_read") or 0),
+                overlay_page_files_skipped=int(updated_pair.get("_overlay_page_files_skipped") or 0),
+                declared_overlay_count=int(updated_pair.get("_overlay_declared_count") or len(overlays)),
+                generation_mode=str((tile_manifest or {}).get("generation_mode") or "full_pyramid"),
+                pyramid_complete=bool((tile_manifest or {}).get("pyramid_complete", True)),
+                materialized_tile_count=int((tile_manifest or {}).get("materialized_tile_count") or updated_pair["lod_tile_count"]),
+                planned_tile_count=int((tile_manifest or {}).get("planned_tile_count") or updated_pair["lod_tile_count"]),
             )
             self.finished.emit(self.pair_id, updated_pair, overlays)
         except Exception as exc:
@@ -1188,11 +1422,281 @@ class PairPreviewRenderWorker(QThread):
             self.error.emit(self.pair_id, str(exc))
 
 
+class VisibleTileWindowWorker(QThread):
+    """Materialize one newly visible tile window without blocking the GUI."""
+
+    finished = Signal(str, int, object)  # pair_id, generation, manifest
+    error = Signal(str, int, str)
+
+    def __init__(
+        self,
+        *,
+        pair_id: str,
+        generation: int,
+        viewer_pair: dict,
+        overlays: Sequence[dict[str, Any]],
+        viewer_root: Path,
+        viewer_cache_root: Path,
+        viewport_rect: dict[str, float],
+        zoom: float,
+        cache_key: str,
+    ) -> None:
+        super().__init__()
+        self.pair_id = str(pair_id)
+        self.generation = int(generation)
+        self.viewer_pair = dict(viewer_pair or {})
+        self.overlays = [item for item in overlays if isinstance(item, dict)]
+        self.viewer_root = Path(viewer_root)
+        self.viewer_cache_root = Path(viewer_cache_root)
+        self.viewport_rect = dict(viewport_rect or {})
+        self.zoom = float(zoom or 1.0)
+        self.cache_key = str(cache_key or "")
+
+    def run(self) -> None:
+        try:
+            started = perf_counter()
+            tile_options = ViewerTileCacheOptions(
+                tile_size=GPU_VIEWER_TILE_SIZE,
+                max_visible_overlays=GPU_VIEWER_MAX_VISIBLE_OVERLAYS,
+                viewer_memory_budget_mb=GPU_VIEWER_MEMORY_BUDGET_MB,
+            )
+            before_image = _resolve_viewer_artifact_path(
+                self.viewer_pair.get("before_image"), self.viewer_root,
+            )
+            after_image = _resolve_viewer_artifact_path(
+                self.viewer_pair.get("after_image"), self.viewer_root,
+            )
+            if not before_image or not after_image or not before_image.exists() or not after_image.exists():
+                raise RuntimeError("visible tile source images are missing")
+
+            cache_key = self.cache_key
+            if not cache_key:
+                source_a = str(self.viewer_pair.get("source_a") or "")
+                source_b = str(self.viewer_pair.get("source_b") or "")
+                cache_key = viewer_cache_key(
+                    pair_uuid=self.pair_id,
+                    source_a=Path(source_a) if source_a else before_image,
+                    source_b=Path(source_b) if source_b else after_image,
+                    options=tile_options,
+                )
+
+            manifest = write_pair_visible_tile_cache(
+                pair_uuid=self.pair_id,
+                before_image=str(before_image),
+                after_image=str(after_image),
+                overlays=self.overlays,
+                tile_root=self.viewer_cache_root / "tiles",
+                overlay_tile_root=self.viewer_cache_root / "overlay_tiles",
+                options=tile_options,
+                viewport_rect=self.viewport_rect,
+                zoom=self.zoom,
+                prefetch_radius=1,
+                cache_key=cache_key,
+            )
+            append_pair_to_tiles_manifest_jsonl(self.viewer_cache_root, manifest)
+            materialise_tiles_manifest_from_jsonl(self.viewer_cache_root, keep_jsonl=False)
+            append_viewer_perf_event(
+                self.viewer_root,
+                "visible_tile_window_materialise",
+                pair_uuid=self.pair_id,
+                generation=self.generation,
+                tile_count=int(manifest.get("tile_count") or 0),
+                materialized_tile_count=int(manifest.get("materialized_tile_count") or 0),
+                planned_tile_count=int(manifest.get("planned_tile_count") or 0),
+                omitted_tile_count=int(manifest.get("omitted_tile_count") or 0),
+                overlay_tile_count=int(manifest.get("overlay_tile_count") or 0),
+                tile_payload_bytes=int(manifest.get("tile_payload_bytes") or 0),
+                overlay_tile_payload_bytes=int(manifest.get("overlay_tile_payload_bytes") or 0),
+                cache_total_estimated_bytes=int(manifest.get("cache_total_estimated_bytes") or 0),
+                cache_byte_limit=int(manifest.get("cache_byte_limit") or 0),
+                eviction_count=int(manifest.get("eviction_count") or 0),
+                evicted_pair_count=int(manifest.get("evicted_pair_count") or 0),
+                evicted_estimated_bytes=int(manifest.get("evicted_estimated_bytes") or 0),
+                cache_retained_estimated_bytes=int(manifest.get("cache_retained_estimated_bytes") or 0),
+                cache_estimated_bytes_before_eviction=int(
+                    manifest.get("cache_estimated_bytes_before_eviction") or 0
+                ),
+                eviction_reason=str(manifest.get("eviction_reason") or ""),
+                overlay_count=int(manifest.get("overlay_count") or 0),
+                materialized_overlay_count=int(manifest.get("materialized_overlay_count") or 0),
+                outside_viewport_overlay_count=int(manifest.get("outside_viewport_overlay_count") or 0),
+                zoom=self.zoom,
+                tile_window_ms=round((perf_counter() - started) * 1000.0, 3),
+            )
+            self.finished.emit(self.pair_id, self.generation, manifest)
+        except Exception as exc:
+            logger.exception("Visible tile window materialization failed")
+            self.error.emit(self.pair_id, self.generation, str(exc))
+
+
+class FullZoneTreeOverlayLoadWorker(QThread):
+    """Load overlay records off the GUI thread for large tree rebuilds."""
+
+    loaded = Signal(str, int, object)  # pair_id, generation, payload
+    failed = Signal(str, int, str)
+
+    def __init__(
+        self,
+        *,
+        pair_id: str,
+        generation: int,
+        overlay_path: Path,
+        viewer_pair: dict,
+        overlay_pages_manifest_path: Optional[Path] = None,
+    ):
+        super().__init__()
+        self.pair_id = str(pair_id)
+        self.generation = int(generation)
+        self.overlay_path = Path(overlay_path)
+        self.overlay_pages_manifest_path = (
+            Path(overlay_pages_manifest_path) if overlay_pages_manifest_path else None
+        )
+        self.viewer_pair = dict(viewer_pair or {})
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        started = perf_counter()
+        try:
+            overlay_bytes = 0
+            strategy = "overlay_json"
+            page_count = 0
+            declared_overlay_count = 0
+            overlays: list[dict] = []
+            page_a = _int_value(self.viewer_pair.get("page_a", self.viewer_pair.get("page", 0)), 0)
+            page_b = _int_value(self.viewer_pair.get("page_b", self.viewer_pair.get("page", 0)), 0)
+            filter_to_pdf_page = _viewer_pair_is_pdf(self.viewer_pair)
+            if (
+                self.overlay_pages_manifest_path is not None
+                and self.overlay_pages_manifest_path.exists()
+            ):
+                strategy = "paged_overlay_store"
+                store = OverlayPageStore(self.overlay_pages_manifest_path)
+                page_count = int(store.page_count)
+                declared_overlay_count = int(store.overlay_count)
+                overlay_bytes = int(store.total_bytes)
+                source_iter = (
+                    store.iter_visible_pdf_pages(page_a, page_b)
+                    if filter_to_pdf_page
+                    else store.iter_overlays()
+                )
+                for overlay in source_iter:
+                    if self._cancelled:
+                        return
+                    overlays.append(overlay)
+                page_files_read = int(store.last_page_files_read)
+                page_files_skipped = int(store.last_page_files_skipped)
+            else:
+                page_files_read = 0
+                page_files_skipped = 0
+                payload = json.loads(self.overlay_path.read_text(encoding="utf-8"))
+                loaded = payload.get("overlays", []) if isinstance(payload, dict) else []
+                if isinstance(loaded, list):
+                    overlays = [item for item in loaded if isinstance(item, dict)]
+                declared_overlay_count = (
+                    int(payload.get("overlay_total_count") or payload.get("overlay_count") or len(overlays))
+                    if isinstance(payload, dict)
+                    else len(overlays)
+                )
+                try:
+                    overlay_bytes = int(self.overlay_path.stat().st_size)
+                except OSError:
+                    overlay_bytes = 0
+            if self._cancelled:
+                return
+            visible = list(overlays)
+            if filter_to_pdf_page and strategy != "paged_overlay_store":
+                visible = _filter_overlays_by_pdf_pages(visible, page_a, page_b)
+            load_ms = round((perf_counter() - started) * 1000.0, 3)
+            self.loaded.emit(
+                self.pair_id,
+                self.generation,
+                {
+                    "overlays": overlays,
+                    "visible": visible,
+                    "overlay_load_ms": load_ms,
+                    "overlay_json_bytes": overlay_bytes,
+                    "overlay_load_worker": True,
+                    "overlay_load_strategy": strategy,
+                    "overlay_page_count": page_count,
+                    "overlay_page_files_read": page_files_read,
+                    "overlay_page_files_skipped": page_files_skipped,
+                    "declared_overlay_count": max(declared_overlay_count, len(overlays)),
+                    "materialized_overlay_count": len(overlays),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Full zone tree overlay load failed")
+            self.failed.emit(self.pair_id, self.generation, str(exc))
+
+
+class FullZoneTreePlanWorker(QThread):
+    """Build the serialisable full-zone tree plan off the GUI thread."""
+
+    planned = Signal(str, int, object)  # pair_id, generation, payload
+    failed = Signal(str, int, str)
+
+    def __init__(
+        self,
+        *,
+        pair_id: str,
+        generation: int,
+        overlays: list[dict],
+        dashboard_issues: list[dict],
+        category_by_zone: Mapping[str, Any],
+        active_zone_id: str,
+        clustering_enabled: bool,
+    ):
+        super().__init__()
+        self.pair_id = str(pair_id)
+        self.generation = int(generation)
+        self.overlays = list(overlays or [])
+        self.dashboard_issues = list(dashboard_issues or [])
+        self.category_by_zone = dict(category_by_zone or {})
+        self.active_zone_id = str(active_zone_id or "")
+        self.clustering_enabled = bool(clustering_enabled)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        started = perf_counter()
+        try:
+            plan, active_issue_by_zone = _build_zone_tree_plan_data_v2(
+                dashboard_issues=self.dashboard_issues,
+                overlays=self.overlays,
+                preview_zones=[],
+                category_by_zone=self.category_by_zone,
+                active_zone_id=self.active_zone_id,
+                allow_clustering=False,
+                clustering_enabled=self.clustering_enabled,
+                prefer_overlays=True,
+            )
+            if self._cancelled:
+                return
+            self.planned.emit(
+                self.pair_id,
+                self.generation,
+                {
+                    "plan": plan,
+                    "active_issue_by_zone": active_issue_by_zone,
+                    "plan_build_ms": round((perf_counter() - started) * 1000.0, 3),
+                    "plan_build_worker": True,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Full zone tree plan build failed")
+            self.failed.emit(self.pair_id, self.generation, str(exc))
+
+
 class ZoneRenderProcessController(QObject):
     """Persistent JSONL render subprocess for one active drawing pair."""
 
     finished = Signal(str, str, object, object, object)
-    error = Signal(str, str, str, str)
+    error = Signal(str, str, str, str, str)
 
     def __init__(self, *, timeout_ms: int = 10_000, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -1241,7 +1745,13 @@ class ZoneRenderProcessController(QObject):
         if self.is_busy():
             return False
         if not self._ensure_process(process_key):
-            self.error.emit(str(request.get("pair_uuid") or ""), str(request.get("zone_id") or ""), "렌더 프로세스를 시작할 수 없습니다.", "render_failed")
+            self.error.emit(
+                str(request.get("pair_uuid") or ""),
+                str(request.get("zone_id") or ""),
+                "렌더 프로세스를 시작할 수 없습니다.",
+                "render_failed",
+                str(request.get("request_id") or ""),
+            )
             return False
         self._active_context = {
             "request_id": str(request.get("request_id") or ""),
@@ -1323,7 +1833,13 @@ class ZoneRenderProcessController(QObject):
         pair_id = str(context.get("pair_id") or payload.get("pair_uuid") or "")
         zone_id = str(context.get("zone_id") or payload.get("zone_id") or "")
         if not payload.get("ok"):
-            self.error.emit(pair_id, zone_id, str(payload.get("error") or "렌더 실패"), "render_failed")
+            status = str(
+                payload.get("reason_code")
+                or payload.get("fallback_reason_code")
+                or payload.get("render_lifecycle")
+                or "render_failed"
+            )
+            self.error.emit(pair_id, zone_id, str(payload.get("error") or "렌더 실패"), status, request_id)
             return
         result_payload = payload.get("result") or {}
         try:
@@ -1366,7 +1882,13 @@ class ZoneRenderProcessController(QObject):
         self._process = None
         self._process_key = ""
         self._process_ready = False
-        self.error.emit(pair_id, zone_id, "렌더 시간 초과, 상대 위치만 표시합니다.", "render_timeout")
+        self.error.emit(
+            pair_id,
+            zone_id,
+            "렌더 시간 초과, 상대 위치만 표시합니다.",
+            "render_timeout",
+            str(context.get("request_id") or ""),
+        )
 
     def _on_process_finished(self, *_args) -> None:
         if self._active_context:
@@ -1374,7 +1896,13 @@ class ZoneRenderProcessController(QObject):
             self._active_context = None
             self._timeout_timer.stop()
             message = self._stderr_buffer.strip() or "렌더 프로세스가 예기치 않게 종료되었습니다."
-            self.error.emit(str(context.get("pair_id") or ""), str(context.get("zone_id") or ""), message, "render_failed")
+            self.error.emit(
+                str(context.get("pair_id") or ""),
+                str(context.get("zone_id") or ""),
+                message,
+                "render_failed",
+                str(context.get("request_id") or ""),
+            )
         self._process = None
         self._process_key = ""
         self._process_ready = False
@@ -1778,6 +2306,7 @@ class GpuDrawingViewport(QWidget):
     # viewport. Forwarded from the QML root's overlayClicked signal so
     # the workbench can _select_zone_in_list_v2(zone_id).
     overlayClicked = Signal(str)
+    tileWindowMissing = Signal(str, object, float)
 
     def __init__(self):
         super().__init__()
@@ -1792,6 +2321,7 @@ class GpuDrawingViewport(QWidget):
         self._tile_manifest: dict = {}
         self._viewer_root: Optional[Path] = None
         self._pair_id = ""
+        self._last_missing_tile_request_key = ""
         self._selected_zone_id = ""
         self._overlays_by_zone: dict[str, dict] = {}
         self._overlay_opacity_scale: float = 1.0
@@ -1855,6 +2385,7 @@ class GpuDrawingViewport(QWidget):
         self._last_fallback_message = fallback_message
         self._tile_manifest = dict(tile_manifest or {})
         self._pair_id = str(pair_id or self._pair_id or "")
+        self._last_missing_tile_request_key = ""
         # Track the DPI for the side that just got loaded
         try:
             dpi_value = float(image_dpi or 0.0)
@@ -1879,6 +2410,11 @@ class GpuDrawingViewport(QWidget):
             )
             return
         self._refresh_quick_model(record_perf=True)
+
+    def update_tile_manifest(self, tile_manifest: Optional[dict]) -> None:
+        self._tile_manifest = dict(tile_manifest or {})
+        if self._quick_ready and self._quick and self._quick.rootObject():
+            self._refresh_quick_model(record_perf=False)
 
     def set_selected_zone(self, zone_id: str) -> None:
         self._selected_zone_id = zone_id
@@ -2132,6 +2668,8 @@ class GpuDrawingViewport(QWidget):
         viewport = self._viewport_rect(real_image=real_image)
         tile_result = self._visible_tiles(viewport)
         visible_tiles = list(tile_result.get("tiles") or [])
+        if viewport:
+            self._maybe_emit_missing_tile_request(tile_result, viewport)
         use_tiles = bool(visible_tiles)
         scene_width, scene_height = self._scene_size(real_image=real_image, source=source)
         focus_only_mode = should_use_focus_only_overlay_mode(len(self._last_overlays))
@@ -2193,6 +2731,24 @@ class GpuDrawingViewport(QWidget):
                 cull_ms=round((perf_counter() - started) * 1000.0, 3),
                 tile_level=tile_result.get("level", -1),
             )
+
+    def _maybe_emit_missing_tile_request(self, tile_result: dict, viewport_rect: dict[str, float]) -> None:
+        if not self._pair_id or not self._viewer_root or not self._tile_manifest:
+            return
+        if str(tile_result.get("status") or "") != "tile_pending":
+            return
+        if self._tile_manifest.get("pyramid_complete") is not False:
+            return
+        window = tile_result.get("tile_window")
+        if not isinstance(window, (list, tuple)) or len(window) < 4:
+            return
+        level = int(tile_result.get("level") or 0)
+        zoom = self._current_zoom()
+        request_key = f"{self._pair_id}:{level}:{','.join(str(int(v)) for v in window[:4])}:{zoom:.4f}"
+        if request_key == self._last_missing_tile_request_key:
+            return
+        self._last_missing_tile_request_key = request_key
+        self.tileWindowMissing.emit(self._pair_id, dict(viewport_rect), float(zoom))
 
     def _viewport_rect(self, *, real_image: bool) -> Optional[dict[str, float]]:
         if not real_image or not self._quick or not self._quick.rootObject():
@@ -2620,8 +3176,17 @@ class DrawingCompareWorkbench(QMainWindow):
             from src.services.comparison.dwg_differ import DwgDiffer
 
             status = DwgDiffer.get_status()
-            if not status.get("oda_converter"):
-                messages.append("ODA Converter not found; DWG inputs will be limited to DXF/PDF mode.")
+            if not status.get("dwg_support"):
+                messages.append("DWG importer unavailable; DWG inputs may fail before comparison.")
+            else:
+                supported = ", ".join(status.get("dwg_supported_versions") or [])
+                planned = ", ".join(status.get("dwg_planned_versions") or [])
+                if supported and planned:
+                    messages.append(
+                        f"DWG native import limited to {supported}; {planned} requires an approved adapter."
+                    )
+            if status.get("legacy_oda_required"):
+                messages.append("Legacy ODA fallback requires explicit internal configuration.")
         except Exception as exc:
             messages.append(f"DWG backend status unavailable: {exc}")
 
@@ -3589,6 +4154,157 @@ def _group_zones_by_category_v2(
     ]
 
 
+def _build_zone_tree_plan_data_v2(
+    *,
+    dashboard_issues: list[dict],
+    overlays: list[dict],
+    preview_zones: list[dict],
+    category_by_zone: Mapping[str, Any],
+    active_zone_id: str,
+    allow_clustering: bool = True,
+    clustering_enabled: bool = True,
+    prefer_overlays: bool = False,
+) -> tuple[list[dict], dict[str, dict]]:
+    """Pure zone-tree plan builder safe to run off the GUI thread.
+
+    The returned plan contains only serialisable row data. QTreeWidgetItem
+    objects are still created on the GUI thread by the caller.
+    """
+
+    active_issue_by_zone: dict[str, dict] = {}
+    zones_for_grouping: list[dict] = []
+    row_label_fn = None
+
+    use_overlays = bool(prefer_overlays and overlays)
+    if dashboard_issues and not use_overlays:
+        def _issue_sort_key(issue: dict) -> tuple:
+            zid = str(issue.get("zone_id") or "")
+            cat = category_by_zone.get(zid)
+            boost = -(int(getattr(cat, "severity_boost", 0) or 0) if cat else 0)
+            return (boost, -float(issue.get("priority_score") or 0.0), zid)
+
+        zones_for_grouping = sorted(dashboard_issues, key=_issue_sort_key)
+        for issue in zones_for_grouping:
+            zone_id = str(issue.get("zone_id") or "")
+            if zone_id:
+                active_issue_by_zone[zone_id] = issue
+
+        def _issue_label(issue: dict) -> str:
+            zone_id = str(issue.get("zone_id") or "")
+            return (
+                f"{zone_id} · "
+                f"{issue.get('change_type_ko') or _ko_change_type(issue.get('change_type'))} · "
+                f"{issue.get('severity_ko') or issue.get('severity')} · "
+                f"점수 {float(issue.get('priority_score') or 0.0):.1f} · "
+                f"변경 {_format_count(issue.get('raw_change_count'))}"
+            )
+
+        row_label_fn = _issue_label
+    elif overlays:
+        def _overlay_sort_key(overlay: dict) -> tuple:
+            zid = str(overlay.get("zone_id") or "")
+            cat = category_by_zone.get(zid)
+            boost = -(int(getattr(cat, "severity_boost", 0) or 0) if cat else 0)
+            return (boost, -_int_value(overlay.get("raw_change_count")), zid)
+
+        zones_for_grouping = sorted(overlays, key=_overlay_sort_key)
+
+        def _overlay_label(overlay: dict) -> str:
+            zone_id = str(overlay.get("zone_id") or "")
+            return (
+                f"{zone_id} · "
+                f"{overlay.get('change_label') or _ko_change_type(overlay.get('change_type'))} · "
+                f"{overlay.get('severity')} · "
+                f"변경 {_format_count(overlay.get('raw_change_count'))}"
+            )
+
+        row_label_fn = _overlay_label
+    elif preview_zones:
+        zones_for_grouping = sorted(
+            preview_zones,
+            key=lambda item: (-_int_value(item.get("raw_change_count")), str(item.get("zone_id") or "")),
+        )
+
+        def _preview_label(zone: dict) -> str:
+            return (
+                f"{zone.get('zone_id') or ''} · "
+                f"{_ko_change_type(zone.get('change_type'))} · "
+                f"{zone.get('severity')} · "
+                f"변경 {_format_count(zone.get('raw_change_count'))}"
+            )
+
+        row_label_fn = _preview_label
+
+    if not zones_for_grouping or row_label_fn is None:
+        return [], active_issue_by_zone
+
+    groups = _group_zones_by_category_v2(
+        zones_for_grouping,
+        lambda zid: category_by_zone.get(str(zid or "")),
+    )
+    from src.services.comparison.zone_clusterer import (
+        ClusterOptions, cluster_zones,
+    )
+
+    cluster_opts = ClusterOptions(enabled=bool(allow_clustering and clustering_enabled))
+    plan: list[dict] = []
+    active_zone_id = str(active_zone_id or "")
+    for group_idx, (label, _boost, zones_in_group) in enumerate(groups):
+        total_count = len(zones_in_group)
+        clusters = cluster_zones(zones_in_group, options=cluster_opts)
+        row_count = len(clusters)
+        active_zone_in_group = bool(
+            active_zone_id
+            and any(str(z.get("zone_id") or "") == active_zone_id for z in zones_in_group)
+        )
+        items: list[dict] = []
+        for cluster in clusters:
+            if cluster.is_singleton:
+                zone = cluster.representative
+                zone_id = str(zone.get("zone_id") or "")
+                if not zone_id:
+                    continue
+                items.append({
+                    "kind": "leaf",
+                    "label": row_label_fn(zone),
+                    "zone_id": zone_id,
+                })
+            else:
+                children: list[dict] = []
+                has_active = False
+                for zone in cluster.members:
+                    zone_id = str(zone.get("zone_id") or "")
+                    if not zone_id:
+                        continue
+                    children.append({
+                        "kind": "leaf",
+                        "label": row_label_fn(zone),
+                        "zone_id": zone_id,
+                    })
+                    if active_zone_id and zone_id == active_zone_id:
+                        has_active = True
+                items.append({
+                    "kind": "cluster",
+                    "label": f"  {cluster.summary_label}",
+                    "tooltip": (
+                        f"{cluster.summary_label} — {cluster.size}개 변경구역 묶음. "
+                        f"펼쳐서 개별 구역을 검토할 수 있습니다."
+                    ),
+                    "expanded": has_active,
+                    "children": children,
+                })
+        plan.append({
+            "header_text": f"{_zone_category_icon_v2(label)} {label}  ({total_count})",
+            "tooltip": (
+                f"{label} · {total_count}개 변경구역"
+                + (f" ({row_count}행으로 묶임)" if row_count != total_count else "")
+            ),
+            "expanded": bool((group_idx == 0) or active_zone_in_group),
+            "items": items,
+        })
+    return plan, active_issue_by_zone
+
+
 def _format_zone_count_summary_v2(
     counts: dict[str, int],
     *,
@@ -3710,6 +4426,45 @@ def _preview_status_label(status, available=None) -> str:
     return "렌더대기"
 
 
+class QtQuickUnavailableLightweightViewport(QWidget):
+    """No-op stand-in used when Qt Quick is disabled for startup stability."""
+
+    viewportChanged = Signal(float, float, float)
+    overlayClicked = Signal(str)
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        side: str = "after",
+    ) -> None:
+        super().__init__(parent)
+        self._side = side
+        self._pdf_render_state: Optional[dict] = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._notice = QLabel("Qt Quick viewer disabled; compatibility preview is active.")
+        self._notice.setProperty("role", "muted")
+        self._notice.setAlignment(Qt.AlignCenter)
+        self._notice.setWordWrap(True)
+        layout.addWidget(self._notice)
+
+    def load_scene_pack(self, *_args, empty_notice: str = "", **_kwargs) -> bool:
+        if empty_notice:
+            self._notice.setText(empty_notice)
+        return False
+
+    def load_pdf_page(self, *_args, **_kwargs) -> bool:
+        self._notice.setText("PDF lightweight viewer unavailable in compatibility mode.")
+        return False
+
+    def set_overlays(self, *_args, **_kwargs) -> None:
+        return None
+
+    def set_overlay_opacity_scale(self, *_args, **_kwargs) -> None:
+        return None
+
+
 class DrawingCompareWorkbenchV2(QMainWindow):
     """Korean, single-action drawing comparison UX."""
 
@@ -3758,20 +4513,44 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._review_records_v2: dict[str, ReviewStateRecord] = {}
         self._viewer_pairs_by_id: dict[str, dict] = {}
         self._viewer_overlay_cache: dict[str, list[dict]] = {}
+        self._viewer_overlay_cache_order_v2: list[str] = []
+        self._viewer_overlay_cache_bytes_by_pair_v2: dict[str, int] = {}
+        self._viewer_overlay_cache_total_bytes_v2: int = 0
+        self._viewer_overlay_cache_evictions_v2: int = 0
+        self._tile_manifest_cache_v2: dict[tuple[str, int, int, str, str], dict] = {}
         self._lightweight_raster_pairs: set[str] = set()
         self._render_status_by_pair: dict[str, str] = {}
         self._render_worker: Optional[PairPreviewRenderWorker] = None
+        self._visible_tile_worker_v2: Optional[VisibleTileWindowWorker] = None
+        self._visible_tile_pending_request_v2: Optional[dict[str, Any]] = None
+        self._visible_tile_generation_v2: int = 0
+        self._full_zone_tree_overlay_worker_v2: Optional[FullZoneTreeOverlayLoadWorker] = None
+        self._full_zone_tree_plan_worker_v2: Optional[FullZoneTreePlanWorker] = None
         self._retired_qthreads_v2: list[QThread] = []
         self._pending_render_request_v2: Optional[tuple[str, dict, dict]] = None
+        self._zone_tree_rebuild_generation_v2: int = 0
+        self._pending_full_zone_tree_pair_id_v2: str = ""
+        self._full_zone_tree_chunk_state_v2: Optional[dict] = None
+        self._defer_next_initial_zone_heavy_render_v2: Optional[tuple[str, str]] = None
+        self._initial_zone_heavy_render_generation_v2: int = 0
+        self._lightweight_pair_load_generation_v2: int = 0
+        self._pdf_prewarm_generation_v2: int = 0
         self._zone_render_controller_v2 = ZoneRenderProcessController(timeout_ms=10_000, parent=self)
         self._zone_render_controller_v2.finished.connect(self._on_zone_crop_render_finished_v2)
         self._zone_render_controller_v2.error.connect(self._on_zone_crop_render_error_v2)
-        self._pending_zone_render_request_v2: Optional[tuple[str, str]] = None
+        self._pending_zone_render_request_v2: Optional[tuple[str, str] | tuple[str, str, str]] = None
+        self._selected_zone_render_generation_v2: int = 0
+        self._active_zone_render_request_v2: Optional[tuple[str, str, str]] = None
         self._active_issue_by_zone: dict[str, dict] = {}
+        self._active_all_overlays_by_zone: dict[str, dict] = {}
         self._active_overlays_by_zone: dict[str, dict] = {}
         self._active_row: Optional[dict] = None
         self._active_zone_id = ""
         self._syncing_preview_viewports = False
+        self._visible_tile_request_timer_v2 = QTimer(self)
+        self._visible_tile_request_timer_v2.setSingleShot(True)
+        self._visible_tile_request_timer_v2.setInterval(180)
+        self._visible_tile_request_timer_v2.timeout.connect(self._run_pending_visible_tile_window_v2)
         self._viewer_perf_summary: dict = {}
         self._active_pattern_filter_v2: str = ""
         self._run_completion_v2: dict = {}
@@ -4121,7 +4900,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         self.act_lightweight_viewer_v2.setCheckable(True)
         self.act_lightweight_viewer_v2.setChecked(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
-        if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+        if not QT_QUICK_AVAILABLE:
+            self.act_lightweight_viewer_v2.setEnabled(False)
+            self.act_lightweight_viewer_v2.setVisible(False)
+        elif DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             self.act_lightweight_viewer_v2.setEnabled(False)
             self.act_lightweight_viewer_v2.setVisible(False)
         else:
@@ -4171,6 +4953,17 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self._on_toggle_zone_clustering_v2
         )
         view_menu.addAction(self.act_zone_clustering_v2)
+
+        self.act_region_match_results_v2 = QAction("Detail Region Matching", self)
+        self.act_region_match_results_v2.setToolTip(
+            "Review region_detection_summary.json and region_match_summary.json, "
+            "then save manual_region_matches.json for the next gated comparison run."
+        )
+        self.act_region_match_results_v2.triggered.connect(
+            self._show_region_match_dialog_v2
+        )
+        self.act_region_match_results_v2.setEnabled(False)
+        view_menu.addAction(self.act_region_match_results_v2)
 
         # 설정 메뉴 (PDF 보고서 브랜딩 + 검토자 정보 + AI 분류기)
         settings_menu = menu_bar.addMenu("&설정")
@@ -4655,7 +5448,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.drawing_list_v2.currentItemChanged.connect(self._on_drawing_selected_v2)
         layout.addWidget(self.drawing_list_v2, stretch=1)
         self.btn_detail_match_v2 = QPushButton("상세 매칭 보기")
-        self.btn_detail_match_v2.clicked.connect(self._show_matching_detail_v2)
+        self.btn_detail_match_v2.setText("Detail Region Matching")
+        self.btn_detail_match_v2.setToolTip(
+            "Review detected detail regions, whole_modelspace fallbacks, review gates, and "
+            "manual_region_matches.json overrides."
+        )
+        self.btn_detail_match_v2.clicked.connect(self._show_region_match_dialog_v2)
         self.btn_detail_match_v2.setEnabled(False)
         layout.addWidget(self.btn_detail_match_v2)
         return panel
@@ -4800,8 +5598,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # Phase G2.2 — lightweight viewport (hidden by default; toggled
         # via Ctrl+L from the View menu). Created up-front so the toggle
         # action is instant and the layout doesn't shift.
-        from src.gui.lightweight_viewport import LightweightDrawingViewport
-        self.preview_before_lightweight_v2 = LightweightDrawingViewport(side="before")
+        if QT_QUICK_AVAILABLE and QQuickWidget is not None:
+            from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+            self.preview_before_lightweight_v2 = LightweightDrawingViewport(side="before")
+        else:
+            self.preview_before_lightweight_v2 = QtQuickUnavailableLightweightViewport(side="before")
         self.preview_before_lightweight_v2.setVisible(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
         # Phase G2.3 — camera sync: when the user pans/zooms one side,
         # mirror the camera state to the other so before/after stay aligned
@@ -4818,7 +5620,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.preview_after_v2 = GpuDrawingViewport()
         self.preview_after_v2.setVisible(not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
         after_layout.addWidget(self.preview_after_v2)
-        self.preview_after_lightweight_v2 = LightweightDrawingViewport(side="after")
+        if QT_QUICK_AVAILABLE and QQuickWidget is not None:
+            self.preview_after_lightweight_v2 = LightweightDrawingViewport(side="after")
+        else:
+            self.preview_after_lightweight_v2 = QtQuickUnavailableLightweightViewport(side="after")
         self.preview_after_lightweight_v2.setVisible(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)
         self.preview_after_lightweight_v2.viewportChanged.connect(
             lambda cx, cy, upp: self._on_lightweight_camera_changed_v2("after", cx, cy, upp)
@@ -4833,6 +5638,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.preview_after_v2.viewportChanged.connect(
             lambda zoom, pan_x, pan_y: self._sync_preview_viewport_v2(self.preview_before_v2, zoom, pan_x, pan_y)
         )
+        self.preview_before_v2.tileWindowMissing.connect(self._schedule_visible_tile_window_v2)
+        self.preview_after_v2.tileWindowMissing.connect(self._schedule_visible_tile_window_v2)
         # Phase I4 — viewer-side overlay click → list auto-select. Both
         # legacy GPU viewports and lightweight viewports forward the QML
         # overlayClicked signal so a click on either side selects the
@@ -5454,7 +6261,57 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.zone_memo_v2.setPlainText(memo)
         self.btn_save_memo_v2.setEnabled(True)
 
-    def _compute_zone_categories_for_pair_v2(self, pair_id: str, overlays: list[dict]) -> None:
+    def _missing_category_overlays_for_pair_v2(self, pair_id: str, overlays: list[dict]) -> list[dict]:
+        existing_results = self._zone_categories_v2.setdefault(pair_id, {})
+        missing_overlays: list[dict] = []
+        for overlay in overlays or []:
+            if not isinstance(overlay, dict):
+                continue
+            zone_id = str(overlay.get("zone_id") or overlay.get("id") or "")
+            if zone_id and zone_id not in existing_results:
+                missing_overlays.append(overlay)
+        return missing_overlays
+
+    def _zone_category_issues_by_zone_v2(self) -> dict[str, dict]:
+        return {
+            str(issue.get("zone_id") or ""): issue
+            for issue in ((self._active_row or {}).get("top_issues") or [])
+            if isinstance(issue, dict) and issue.get("zone_id")
+        }
+
+    def _classify_zone_category_record_v2(
+        self,
+        pair_id: str,
+        overlay: dict,
+        *,
+        cfg: object,
+        issues_by_zone: dict[str, dict],
+    ) -> bool:
+        existing_results = self._zone_categories_v2.setdefault(pair_id, {})
+        zone_id = str(overlay.get("zone_id") or overlay.get("id") or "")
+        if not zone_id or zone_id in existing_results:
+            return False
+        merged = dict(overlay)
+        issue = issues_by_zone.get(zone_id)
+        if isinstance(issue, dict):
+            merged.update({k: v for k, v in issue.items() if v is not None})
+        try:
+            existing_results[zone_id] = classify_zone_with_cascade(merged, config=cfg)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "classify_zone_with_cascade crashed for zone %s — "
+                "falling back to heuristic", zone_id,
+            )
+            existing_results[zone_id] = classify_zone(merged)
+        return True
+
+    def _compute_zone_categories_for_pair_v2(
+        self,
+        pair_id: str,
+        overlays: list[dict],
+        *,
+        max_records: Optional[int] = None,
+    ) -> int:
         """E2 + Phase N — zone classification cache for the active pair.
 
         Routes through ``classify_zone_with_cascade(zone, cfg)`` so that:
@@ -5477,8 +6334,11 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         of the same drawing is instant.
         """
 
-        if pair_id in self._zone_categories_v2:
-            return
+        missing_overlays = self._missing_category_overlays_for_pair_v2(pair_id, overlays)
+        if not missing_overlays:
+            return 0
+        if max_records is not None:
+            missing_overlays = missing_overlays[: max(0, int(max_records))]
 
         # Phase N: load AI config once per pair (cheap — just a JSON read)
         # so the cascade path is decided per-comparison, not per-zone.
@@ -5489,32 +6349,19 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             cfg = None
 
         # Index dashboard top_issues by zone_id for quick lookup
-        issues_by_zone = {
-            str(issue.get("zone_id") or ""): issue
-            for issue in ((self._active_row or {}).get("top_issues") or [])
-            if isinstance(issue, dict) and issue.get("zone_id")
-        }
-        results: dict[str, ZoneCategoryResult] = {}
-        for overlay in overlays or []:
+        issues_by_zone = self._zone_category_issues_by_zone_v2()
+        classified = 0
+        for overlay in missing_overlays:
             if not isinstance(overlay, dict):
                 continue
-            zone_id = str(overlay.get("zone_id") or overlay.get("id") or "")
-            if not zone_id:
-                continue
-            # Merge overlay + dashboard issue (issue wins on conflict)
-            merged = dict(overlay)
-            issue = issues_by_zone.get(zone_id)
-            if isinstance(issue, dict):
-                merged.update({k: v for k, v in issue.items() if v is not None})
-            try:
-                results[zone_id] = classify_zone_with_cascade(merged, config=cfg)
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "classify_zone_with_cascade crashed for zone %s — "
-                    "falling back to heuristic", zone_id,
-                )
-                results[zone_id] = classify_zone(merged)
-        self._zone_categories_v2[pair_id] = results
+            if self._classify_zone_category_record_v2(
+                pair_id,
+                overlay,
+                cfg=cfg,
+                issues_by_zone=issues_by_zone,
+            ):
+                classified += 1
+        return classified
 
     def _zone_category_for(self, pair_id: str, zone_id: str) -> Optional[ZoneCategoryResult]:
         return self._zone_categories_v2.get(pair_id, {}).get(zone_id)
@@ -6159,7 +7006,11 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             # affects PREVIEW sharpness; comparison accuracy stays anchored
             # at the proven baseline.
             pdf_compare_dpi=200,
-            max_preview_pairs=0,
+            # Keep at least the first completed pair's static preview
+            # available. 0 means "skip every preview" in
+            # export_preview_artifacts(), which made successful GUI runs show
+            # no drawing preview despite export_preview=True.
+            max_preview_pairs=1,
             viewer_engine="auto",
             viewer_cache_dir=_workbench_data_dir() / "viewer_cache",
             tile_size=GPU_VIEWER_TILE_SIZE,
@@ -6209,6 +7060,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_status_v2.setText("준비 중")
         self._worker = AutoFolderCompareWorker(request)
         self._worker.progress.connect(self._on_auto_progress_v2)
+        self._worker.review_ready.connect(self._on_auto_review_ready_v2)
         self._worker.finished.connect(self._on_auto_finished_v2)
         self._worker.error.connect(self._on_auto_error_v2)
         self._worker.start()
@@ -6258,6 +7110,24 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._render_worker = None
         self._retire_qthread_v2(worker)
 
+    def _retire_visible_tile_worker_v2(self, worker: Optional[QThread] = None) -> None:
+        target = worker or self._visible_tile_worker_v2
+        if worker is None or worker is self._visible_tile_worker_v2:
+            self._visible_tile_worker_v2 = None
+        self._retire_qthread_v2(target)
+
+    def _retire_full_zone_tree_overlay_worker_v2(self, worker: Optional[QThread] = None) -> None:
+        target = worker or self._full_zone_tree_overlay_worker_v2
+        if worker is None or worker is self._full_zone_tree_overlay_worker_v2:
+            self._full_zone_tree_overlay_worker_v2 = None
+        self._retire_qthread_v2(target)
+
+    def _retire_full_zone_tree_plan_worker_v2(self, worker: Optional[QThread] = None) -> None:
+        target = worker or self._full_zone_tree_plan_worker_v2
+        if worker is None or worker is self._full_zone_tree_plan_worker_v2:
+            self._full_zone_tree_plan_worker_v2 = None
+        self._retire_qthread_v2(target)
+
     def _stop_qthread_for_close_v2(self, worker: Optional[QThread], *, timeout_ms: int) -> bool:
         if worker is None:
             return True
@@ -6276,7 +7146,13 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
     def _stop_background_threads_for_close_v2(self) -> bool:
         threads: list[QThread] = []
-        for worker in (self._worker, self._render_worker):
+        for worker in (
+            self._worker,
+            self._render_worker,
+            self._visible_tile_worker_v2,
+            self._full_zone_tree_overlay_worker_v2,
+            self._full_zone_tree_plan_worker_v2,
+        ):
             if worker is not None:
                 threads.append(worker)
         threads.extend(list(self._retired_qthreads_v2))
@@ -6288,6 +7164,36 @@ class DrawingCompareWorkbenchV2(QMainWindow):
     def _on_auto_progress_v2(self, percent: int, message: str) -> None:
         self.progress_v2.setValue(percent)
         self.lbl_status_v2.setText(message)
+
+    def _on_auto_review_ready_v2(self, result: FolderCompareRunResult) -> None:
+        if getattr(result, "package_complete", False):
+            return
+        self._result = result
+        self.progress_v2.setValue(min(99, max(0, int(self.progress_v2.value() or 0), 97)))
+        self.lbl_status_v2.setText("검토 가능 - 최종 패키지 정리 중")
+        self._preview_by_pair = {
+            artifact.pair_id: artifact
+            for artifact in getattr(result.preview_package, "artifacts", [])
+        }
+        self._load_dashboard_v2()
+        self._load_review_state_v2()
+        self._load_viewer_manifest_v2()
+        self._load_drawing_rows_v2()
+        self._populate_summary_v2()
+        self._populate_top_issues_v2()
+        self._populate_pattern_groups_v2()
+        self._refresh_drawing_list_v2()
+        self.btn_detail_match_v2.setEnabled(True)
+        if hasattr(self, "act_region_match_results_v2"):
+            self.act_region_match_results_v2.setEnabled(True)
+        self.btn_open_executive_v2.setEnabled(bool(self._dashboard))
+        self.btn_open_priority_csv_v2.setEnabled(bool(self._dashboard))
+        self.btn_open_viewer_v2.setEnabled(bool(self._viewer_manifest))
+        if hasattr(self, "btn_open_source_external_v2"):
+            self.btn_open_source_external_v2.setEnabled(bool(self._drawing_rows))
+        if hasattr(self, "btn_open_perf_diag_v2"):
+            self.btn_open_perf_diag_v2.setEnabled(bool(self._viewer_root))
+        QApplication.processEvents()
 
     def _on_auto_finished_v2(self, result: FolderCompareRunResult) -> None:
         self._retire_active_worker_v2()
@@ -6336,6 +7242,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._populate_pattern_groups_v2()
         self._refresh_drawing_list_v2()
         self.btn_detail_match_v2.setEnabled(True)
+        if hasattr(self, "act_region_match_results_v2"):
+            self.act_region_match_results_v2.setEnabled(True)
         self.btn_open_executive_v2.setEnabled(True)
         self.btn_open_priority_csv_v2.setEnabled(bool(self._dashboard))
         self.btn_open_viewer_v2.setEnabled(bool(self._viewer_manifest))
@@ -6741,13 +7649,17 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         dialog.exec()
 
     def _is_lightweight_viewer_active_v2(self) -> bool:
+        if not QT_QUICK_AVAILABLE:
+            return False
         if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             return True
         action = getattr(self, "act_lightweight_viewer_v2", None)
         return bool(action is not None and action.isChecked())
 
     def _set_lightweight_viewer_visible_v2(self, enabled: bool) -> None:
-        if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+        if not QT_QUICK_AVAILABLE:
+            enabled = False
+        elif DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             enabled = True
         for widget, visible in (
             (getattr(self, "preview_before_v2", None), not enabled),
@@ -6771,6 +7683,9 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         """
 
         if not hasattr(self, "act_lightweight_viewer_v2"):
+            return
+        if not QT_QUICK_AVAILABLE:
+            self._set_lightweight_viewer_visible_v2(False)
             return
         if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             if not self.act_lightweight_viewer_v2.isChecked():
@@ -6862,6 +7777,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
     def _on_auto_error_v2(self, message: str) -> None:
         self._retire_active_worker_v2()
         self._set_v2_busy(False)
+        if hasattr(self, "act_region_match_results_v2"):
+            self.act_region_match_results_v2.setEnabled(False)
         self.progress_v2.setValue(0)
         self.lbl_status_v2.setText("오류")
         QMessageBox.critical(self, "도면 변경 비교", message)
@@ -6962,13 +7879,27 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._viewer_root = None
         self._viewer_pairs_by_id = {}
         self._viewer_overlay_cache = {}
+        self._viewer_overlay_cache_order_v2 = []
+        self._viewer_overlay_cache_bytes_by_pair_v2 = {}
+        self._viewer_overlay_cache_total_bytes_v2 = 0
+        self._viewer_overlay_cache_evictions_v2 = 0
+        self._tile_manifest_cache_v2 = {}
         self._lightweight_raster_pairs = set()
         self._render_status_by_pair = {}
         self._active_issue_by_zone = {}
+        self._active_all_overlays_by_zone = {}
         self._active_overlays_by_zone = {}
         self._active_row = None
         self._active_zone_id = ""
         self._active_pattern_filter_v2 = ""
+        self._cancel_full_zone_tree_rebuild_v2("session_reset", bump_generation=True)
+        self._cancel_visible_tile_window_v2("session_reset", bump_generation=True)
+        self._defer_next_initial_zone_heavy_render_v2 = None
+        self._initial_zone_heavy_render_generation_v2 += 1
+        self._lightweight_pair_load_generation_v2 += 1
+        self._pdf_prewarm_generation_v2 += 1
+        self._selected_zone_render_generation_v2 += 1
+        self._active_zone_render_request_v2 = None
         self._zone_categories_v2.clear()
         self._active_category_filter_v2 = "전체"
         self._user_picked_category_filter_v2 = False
@@ -7222,6 +8153,1313 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             int(target.get("page_b", 0) or 0),
         )
 
+    def _apply_active_pdf_page_pair_to_viewer_pair_v2(self, viewer_pair: dict) -> None:
+        if not isinstance(viewer_pair, dict):
+            return
+        pairs = list(viewer_pair.get("page_match_pairs") or [])
+        if not pairs:
+            return
+        idx = max(0, min(int(self._active_pdf_page_index_v2 or 0), len(pairs) - 1))
+        self._active_pdf_page_index_v2 = idx
+        current = pairs[idx] if 0 <= idx < len(pairs) else {}
+        try:
+            viewer_pair["page_a"] = int(current.get("page_a", 0) or 0)
+            viewer_pair["page_b"] = int(current.get("page_b", 0) or 0)
+        except (TypeError, ValueError):
+            viewer_pair["page_a"] = 0
+            viewer_pair["page_b"] = 0
+
+    def _visible_overlays_for_pdf_page_v2(
+        self,
+        pair_id: str,
+        viewer_pair: dict,
+        overlays: Optional[list[dict]] = None,
+        *,
+        load_when_empty: bool = True,
+    ) -> list[dict]:
+        base = list(overlays) if overlays is not None else list(
+            self._active_all_overlays_by_zone.values()
+        )
+        if not base and load_when_empty:
+            paged_visible = self._viewer_visible_overlays_from_page_store_v2(pair_id, viewer_pair)
+            if paged_visible is not None:
+                return paged_visible
+            base = self._viewer_overlays_for_pair_v2(pair_id)
+        if not _viewer_pair_is_pdf(viewer_pair):
+            return base
+        page_a = _int_value(viewer_pair.get("page_a", viewer_pair.get("page", 0)), 0)
+        page_b = _int_value(viewer_pair.get("page_b", viewer_pair.get("page", 0)), 0)
+        return _filter_overlays_by_pdf_pages(base, page_a, page_b)
+
+    def _set_active_overlays_v2(self, overlays: list[dict]) -> None:
+        self._active_overlays_by_zone = {
+            str(overlay.get("zone_id") or ""): overlay
+            for overlay in overlays
+            if isinstance(overlay, dict) and overlay.get("zone_id")
+        }
+
+    def _top_issue_overlays_for_selection_v2(self, row: dict, pair_id: str) -> list[dict]:
+        overlays: list[dict] = []
+        for issue in list((row or {}).get("top_issues") or []):
+            if not isinstance(issue, dict):
+                continue
+            zone_id = str(issue.get("zone_id") or "")
+            if not zone_id:
+                continue
+            overlay = dict(issue)
+            overlay.setdefault("pair_id", pair_id)
+            overlay.setdefault("pair_uuid", pair_id)
+            overlay.setdefault("label", zone_id)
+            overlay.setdefault("selected_for_review", True)
+            overlay.setdefault("change_type", issue.get("change_type") or "modified")
+            overlay.setdefault("severity", issue.get("severity") or issue.get("severity_ko") or "")
+            overlay.setdefault("raw_change_count", issue.get("raw_change_count") or issue.get("change_count") or 0)
+            overlays.append(overlay)
+        return overlays
+
+    def _preview_overlays_for_selection_v2(
+        self,
+        preview: Optional[PreviewArtifact],
+    ) -> list[dict]:
+        if not preview:
+            return []
+        out: list[dict] = []
+        for overlay in getattr(preview, "zone_overlays", []) or []:
+            if hasattr(overlay, "to_dict"):
+                try:
+                    out.append(overlay.to_dict())
+                    continue
+                except Exception:
+                    logger.debug("Failed to convert preview overlay", exc_info=True)
+            if isinstance(overlay, dict):
+                out.append(dict(overlay))
+        return out
+
+    def _initial_overlays_for_pair_selection_v2(
+        self,
+        pair_id: str,
+        row: dict,
+        preview: Optional[PreviewArtifact],
+        viewer_pair: dict,
+    ) -> tuple[list[dict], bool, str]:
+        limit = max(1, int(GUI_FIRST_SELECTION_ZONE_LIMIT))
+        top_issue_overlays = self._top_issue_overlays_for_selection_v2(row, pair_id)
+        if top_issue_overlays:
+            zone_count = max(
+                _int_value(row.get("zone_count")),
+                _int_value(viewer_pair.get("overlay_total_count")),
+                len(top_issue_overlays),
+            )
+            return top_issue_overlays[:limit], zone_count > min(limit, len(top_issue_overlays)), "top_issues"
+
+        preview_overlays = self._preview_overlays_for_selection_v2(preview)
+        if preview_overlays:
+            return preview_overlays[:limit], len(preview_overlays) > limit, "preview"
+
+        cached = self._viewer_overlay_cache.get(pair_id)
+        if cached is not None:
+            self._touch_viewer_overlay_cache_v2(pair_id)
+            return list(cached[:limit]), len(cached) > limit, "cache"
+
+        paged_initial = self._viewer_initial_overlays_from_page_store_v2(pair_id, limit)
+        if paged_initial is not None:
+            declared = max(
+                _int_value(row.get("zone_count")),
+                _int_value(viewer_pair.get("overlay_total_count")),
+                self._viewer_declared_overlay_count_for_pair_v2(pair_id, row=row, viewer_pair=viewer_pair),
+                len(paged_initial),
+            )
+            return paged_initial, declared > len(paged_initial), "paged_overlay_store"
+
+        declared_overlay_count = max(
+            _int_value(row.get("zone_count")),
+            _int_value(viewer_pair.get("overlay_total_count")),
+        )
+        if declared_overlay_count > limit:
+            return [], True, "overlay_json_deferred"
+
+        overlay_json_bytes = self._overlay_json_file_size_for_pair_v2(pair_id)
+        if declared_overlay_count <= 0 and overlay_json_bytes > GUI_UNKNOWN_OVERLAY_JSON_DEFER_BYTES:
+            return [], True, "overlay_json_deferred_large_unknown"
+
+        overlays = self._viewer_overlays_for_pair_v2(pair_id)
+        return overlays[:limit], len(overlays) > limit, "overlay_json"
+
+    def _touch_viewer_overlay_cache_v2(self, pair_id: str) -> None:
+        if not pair_id:
+            return
+        try:
+            self._viewer_overlay_cache_order_v2.remove(pair_id)
+        except ValueError:
+            pass
+        self._viewer_overlay_cache_order_v2.append(pair_id)
+
+    def _estimate_overlay_cache_bytes_v2(self, overlays: list[dict]) -> int:
+        total = 0
+        for overlay in overlays:
+            total += self._estimate_overlay_value_bytes_v2(overlay)
+        return total
+
+    @staticmethod
+    def _estimate_overlay_value_bytes_v2(value: object) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, bool):
+            return 1
+        if isinstance(value, (int, float)):
+            return 8
+        if isinstance(value, str):
+            return len(value.encode("utf-8", errors="ignore"))
+        if isinstance(value, dict):
+            total = 256
+            for key, item in value.items():
+                total += len(str(key).encode("utf-8", errors="ignore"))
+                total += DrawingCompareWorkbenchV2._estimate_overlay_value_bytes_v2(item)
+            return total
+        if isinstance(value, (list, tuple)):
+            return 64 + sum(DrawingCompareWorkbenchV2._estimate_overlay_value_bytes_v2(item) for item in value)
+        return len(str(value).encode("utf-8", errors="ignore"))
+
+    def _cache_viewer_overlays_v2(self, pair_id: str, overlays: list[dict]) -> None:
+        if not pair_id:
+            return
+        previous_bytes = int(self._viewer_overlay_cache_bytes_by_pair_v2.get(pair_id, 0))
+        overlay_bytes = self._estimate_overlay_cache_bytes_v2(overlays)
+        self._viewer_overlay_cache[pair_id] = overlays
+        self._viewer_overlay_cache_bytes_by_pair_v2[pair_id] = overlay_bytes
+        self._viewer_overlay_cache_total_bytes_v2 = max(
+            0,
+            int(self._viewer_overlay_cache_total_bytes_v2) - previous_bytes + overlay_bytes,
+        )
+        self._touch_viewer_overlay_cache_v2(pair_id)
+        self._evict_viewer_overlay_cache_if_needed_v2()
+
+    def _evict_viewer_overlay_cache_if_needed_v2(self) -> None:
+        active_pair = str((self._active_row or {}).get("pair_id") or "")
+        pair_limit = max(1, int(GUI_OVERLAY_CACHE_PAIR_LIMIT))
+        byte_limit = max(1, int(GUI_OVERLAY_CACHE_BYTE_LIMIT))
+        while self._viewer_overlay_cache_order_v2 and (
+            len(self._viewer_overlay_cache_order_v2) > pair_limit
+            or self._viewer_overlay_cache_total_bytes_v2 > byte_limit
+        ):
+            reason = (
+                "pair_limit"
+                if len(self._viewer_overlay_cache_order_v2) > pair_limit
+                else "byte_limit"
+            )
+            evict_pair = self._viewer_overlay_cache_order_v2.pop(0)
+            if evict_pair == active_pair and self._viewer_overlay_cache_order_v2:
+                self._viewer_overlay_cache_order_v2.append(evict_pair)
+                continue
+            if evict_pair in self._viewer_overlay_cache:
+                evicted_bytes = int(self._viewer_overlay_cache_bytes_by_pair_v2.pop(evict_pair, 0))
+                self._viewer_overlay_cache.pop(evict_pair, None)
+                self._viewer_overlay_cache_total_bytes_v2 = max(
+                    0,
+                    self._viewer_overlay_cache_total_bytes_v2 - evicted_bytes,
+                )
+                self._viewer_overlay_cache_evictions_v2 += 1
+                if self._viewer_root:
+                    append_viewer_perf_event(
+                        self._viewer_root,
+                        "viewer_overlay_cache_evict",
+                        pair_uuid=evict_pair,
+                        overlay_cache_pair_limit=pair_limit,
+                        overlay_cache_byte_limit=byte_limit,
+                        overlay_cache_evicted_bytes=evicted_bytes,
+                        overlay_cache_total_bytes=self._viewer_overlay_cache_total_bytes_v2,
+                        overlay_cache_pair_count=len(self._viewer_overlay_cache),
+                        overlay_cache_eviction_reason=reason,
+                        overlay_cache_eviction_count=self._viewer_overlay_cache_evictions_v2,
+                    )
+            if (
+                len(self._viewer_overlay_cache_order_v2) == 1
+                and self._viewer_overlay_cache_order_v2[0] == active_pair
+                and self._viewer_overlay_cache_total_bytes_v2 > byte_limit
+            ):
+                break
+
+    def _schedule_full_zone_tree_rebuild_v2(self, pair_id: str) -> None:
+        if not pair_id:
+            return
+        self._cancel_full_zone_tree_rebuild_v2("superseded", bump_generation=True)
+        generation = self._zone_tree_rebuild_generation_v2
+        self._pending_full_zone_tree_pair_id_v2 = pair_id
+        QTimer.singleShot(
+            GUI_FULL_ZONE_TREE_IDLE_DELAY_MS,
+            lambda p=pair_id, g=generation: self._run_full_zone_tree_rebuild_v2(p, g),
+        )
+
+    def _full_zone_tree_request_is_current_v2(self, pair_id: str, generation: int) -> bool:
+        if int(generation) != int(self._zone_tree_rebuild_generation_v2):
+            return False
+        if str(pair_id or "") != str((self._active_row or {}).get("pair_id") or ""):
+            return False
+        pending = str(self._pending_full_zone_tree_pair_id_v2 or "")
+        return not pending or pending == str(pair_id or "")
+
+    def _cancel_full_zone_tree_rebuild_v2(self, reason: str, *, bump_generation: bool = True) -> None:
+        had_pending = bool(
+            self._pending_full_zone_tree_pair_id_v2
+            or self._full_zone_tree_chunk_state_v2
+            or self._full_zone_tree_overlay_worker_v2
+            or self._full_zone_tree_plan_worker_v2
+        )
+        if bump_generation:
+            self._zone_tree_rebuild_generation_v2 += 1
+        pair_id = str(
+            (self._full_zone_tree_chunk_state_v2 or {}).get("pair_id")
+            or self._pending_full_zone_tree_pair_id_v2
+            or ""
+        )
+        self._pending_full_zone_tree_pair_id_v2 = ""
+        self._full_zone_tree_chunk_state_v2 = None
+        if self._full_zone_tree_overlay_worker_v2 is not None:
+            self._full_zone_tree_overlay_worker_v2.cancel()
+            self._retire_full_zone_tree_overlay_worker_v2()
+        if self._full_zone_tree_plan_worker_v2 is not None:
+            self._full_zone_tree_plan_worker_v2.cancel()
+            self._retire_full_zone_tree_plan_worker_v2()
+        if had_pending and self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "full_zone_tree_rebuild_cancelled",
+                pair_uuid=pair_id,
+                reason_code=str(reason or "cancelled"),
+                generation=int(self._zone_tree_rebuild_generation_v2),
+            )
+
+    def _run_full_zone_tree_rebuild_v2(self, pair_id: str, generation: int) -> None:
+        if not self._full_zone_tree_request_is_current_v2(pair_id, generation):
+            return
+        started = perf_counter()
+        self._pending_full_zone_tree_pair_id_v2 = pair_id
+        viewer_pair = self._viewer_pairs_by_id.get(pair_id, {})
+        if (
+            str((self._active_row or {}).get("pair_id") or "") == str(pair_id)
+            and isinstance(viewer_pair, dict)
+            and _viewer_pair_is_pdf(viewer_pair)
+        ):
+            self._apply_active_pdf_page_pair_to_viewer_pair_v2(viewer_pair)
+        if pair_id in self._viewer_overlay_cache:
+            self._touch_viewer_overlay_cache_v2(pair_id)
+            self._continue_full_zone_tree_rebuild_with_overlays_v2(
+                pair_id=pair_id,
+                generation=generation,
+                viewer_pair=viewer_pair,
+                full_overlays=list(self._viewer_overlay_cache.get(pair_id) or []),
+                visible=None,
+                started=started,
+                overlay_load_ms=0.0,
+                overlay_json_bytes=int(self._viewer_overlay_cache_bytes_by_pair_v2.get(pair_id, 0)),
+                overlay_load_worker=False,
+            )
+            return
+        overlay_path = self._viewer_overlay_json_path_for_pair_v2(pair_id)
+        if overlay_path is not None and overlay_path.exists():
+            self._start_full_zone_tree_overlay_load_worker_v2(
+                pair_id=pair_id,
+                generation=generation,
+                viewer_pair=viewer_pair,
+                overlay_path=overlay_path,
+                overlay_pages_manifest_path=self._viewer_overlay_pages_manifest_path_for_pair_v2(pair_id),
+                started=started,
+            )
+            return
+
+        # Test/legacy fallback: synthetic rows may provide overlays only through
+        # an overridden method and no overlay_json artifact path.
+        full_overlays = self._viewer_overlays_for_pair_v2(pair_id)
+        self._continue_full_zone_tree_rebuild_with_overlays_v2(
+            pair_id=pair_id,
+            generation=generation,
+            viewer_pair=viewer_pair,
+            full_overlays=full_overlays,
+            visible=None,
+            started=started,
+            overlay_load_ms=round((perf_counter() - started) * 1000.0, 3),
+            overlay_json_bytes=0,
+            overlay_load_worker=False,
+        )
+
+    def _viewer_overlay_json_path_for_pair_v2(self, pair_id: str) -> Optional[Path]:
+        pair = self._viewer_pairs_by_id.get(pair_id, {})
+        overlay_path = str(pair.get("overlay_json") or "")
+        if not overlay_path:
+            return None
+        return _resolve_viewer_artifact_path(overlay_path, self._viewer_root)
+
+    def _viewer_overlay_pages_manifest_path_for_pair_v2(self, pair_id: str) -> Optional[Path]:
+        pair = self._viewer_pairs_by_id.get(pair_id, {})
+        manifest_path = str(pair.get("overlay_pages_manifest") or "")
+        if not manifest_path:
+            return None
+        return _resolve_viewer_artifact_path(manifest_path, self._viewer_root)
+
+    def _viewer_overlay_page_store_for_pair_v2(self, pair_id: str) -> Optional[OverlayPageStore]:
+        manifest_path = self._viewer_overlay_pages_manifest_path_for_pair_v2(pair_id)
+        if manifest_path is None or not manifest_path.exists():
+            return None
+        return OverlayPageStore(manifest_path)
+
+    def _viewer_initial_overlays_from_page_store_v2(
+        self, pair_id: str, limit: int,
+    ) -> Optional[list[dict]]:
+        store = self._viewer_overlay_page_store_for_pair_v2(pair_id)
+        if store is None:
+            return None
+        return list(store.iter_initial(max(0, int(limit))))
+
+    def _viewer_visible_overlays_from_page_store_v2(
+        self, pair_id: str, viewer_pair: dict,
+    ) -> Optional[list[dict]]:
+        store = self._viewer_overlay_page_store_for_pair_v2(pair_id)
+        if store is None or not _viewer_pair_is_pdf(viewer_pair):
+            return None
+        page_a = _int_value(viewer_pair.get("page_a", viewer_pair.get("page", 0)), 0)
+        page_b = _int_value(viewer_pair.get("page_b", viewer_pair.get("page", 0)), 0)
+        return list(store.iter_visible_pdf_pages(page_a, page_b))
+
+    def _viewer_declared_overlay_count_for_pair_v2(
+        self,
+        pair_id: str,
+        *,
+        row: Optional[dict] = None,
+        viewer_pair: Optional[dict] = None,
+    ) -> int:
+        if row is None:
+            for candidate in list(getattr(self, "_drawing_rows", []) or []):
+                if isinstance(candidate, dict) and str(candidate.get("pair_id") or "") == str(pair_id):
+                    row = candidate
+                    break
+        pair = viewer_pair if isinstance(viewer_pair, dict) else self._viewer_pairs_by_id.get(pair_id, {})
+        declared = max(
+            _int_value((row or {}).get("zone_count")),
+            _int_value((row or {}).get("raw_change_count")),
+            _int_value((pair or {}).get("overlay_total_count")),
+        )
+        cache = getattr(self, "_viewer_overlay_cache", {}) or {}
+        cached = cache.get(pair_id) or []
+        declared = max(declared, len(cached))
+        store = self._viewer_overlay_page_store_for_pair_v2(pair_id)
+        if store is not None:
+            declared = max(declared, int(store.overlay_count))
+        return int(declared)
+
+    def _review_record_counts_for_pair_v2(self, pair_id: str) -> tuple[int, int]:
+        prefix = f"{pair_id}:"
+        done = 0
+        confirmed = 0
+        for key, record in (self._review_records_v2 or {}).items():
+            if not str(key).startswith(prefix):
+                continue
+            status = normalize_review_status(record.status)
+            if status != "needs_review":
+                done += 1
+            if status == "confirmed":
+                confirmed += 1
+        return done, confirmed
+
+    def _start_full_zone_tree_overlay_load_worker_v2(
+        self,
+        *,
+        pair_id: str,
+        generation: int,
+        viewer_pair: dict,
+        overlay_path: Path,
+        overlay_pages_manifest_path: Optional[Path] = None,
+        started: float,
+    ) -> None:
+        if self._full_zone_tree_overlay_worker_v2 is not None:
+            self._full_zone_tree_overlay_worker_v2.cancel()
+            self._retire_full_zone_tree_overlay_worker_v2()
+        worker = FullZoneTreeOverlayLoadWorker(
+            pair_id=pair_id,
+            generation=generation,
+            overlay_path=overlay_path,
+            viewer_pair=viewer_pair,
+            overlay_pages_manifest_path=overlay_pages_manifest_path,
+        )
+        worker.loaded.connect(
+            lambda p, g, payload, s=started, vp=dict(viewer_pair): (
+                self._on_full_zone_tree_overlay_loaded_v2(p, g, payload, vp, s)
+            )
+        )
+        worker.failed.connect(self._on_full_zone_tree_overlay_failed_v2)
+        self._full_zone_tree_overlay_worker_v2 = worker
+        worker.start()
+
+    def _on_full_zone_tree_overlay_loaded_v2(
+        self,
+        pair_id: str,
+        generation: int,
+        payload: object,
+        viewer_pair: dict,
+        started: float,
+    ) -> None:
+        sender = self.sender()
+        self._retire_full_zone_tree_overlay_worker_v2(sender if isinstance(sender, QThread) else None)
+        if not self._full_zone_tree_request_is_current_v2(pair_id, generation):
+            return
+        data = payload if isinstance(payload, dict) else {}
+        full_overlays = data.get("overlays") if isinstance(data.get("overlays"), list) else []
+        visible = data.get("visible") if isinstance(data.get("visible"), list) else None
+        overlay_load_strategy = str(data.get("overlay_load_strategy") or "overlay_json")
+        declared_overlay_count = max(
+            int(data.get("declared_overlay_count") or 0),
+            len(full_overlays),
+        )
+        materialized_overlay_count = int(data.get("materialized_overlay_count") or len(full_overlays))
+        cache_is_complete = materialized_overlay_count >= declared_overlay_count
+        if overlay_load_strategy != "paged_overlay_store" or cache_is_complete:
+            self._cache_viewer_overlays_v2(pair_id, full_overlays)
+        self._continue_full_zone_tree_rebuild_with_overlays_v2(
+            pair_id=pair_id,
+            generation=generation,
+            viewer_pair=viewer_pair,
+            full_overlays=full_overlays,
+            visible=visible,
+            started=started,
+            overlay_load_ms=float(data.get("overlay_load_ms") or 0.0),
+            overlay_json_bytes=int(data.get("overlay_json_bytes") or 0),
+            overlay_load_worker=bool(data.get("overlay_load_worker")),
+            overlay_load_strategy=overlay_load_strategy,
+            overlay_page_count=int(data.get("overlay_page_count") or 0),
+            overlay_page_files_read=int(data.get("overlay_page_files_read") or 0),
+            overlay_page_files_skipped=int(data.get("overlay_page_files_skipped") or 0),
+            declared_overlay_count=declared_overlay_count,
+            materialized_overlay_count=materialized_overlay_count,
+        )
+
+    def _on_full_zone_tree_overlay_failed_v2(self, pair_id: str, generation: int, message: str) -> None:
+        sender = self.sender()
+        self._retire_full_zone_tree_overlay_worker_v2(sender if isinstance(sender, QThread) else None)
+        if not self._full_zone_tree_request_is_current_v2(pair_id, generation):
+            return
+        self._pending_full_zone_tree_pair_id_v2 = ""
+        if self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "full_zone_tree_rebuild",
+                pair_uuid=pair_id,
+                elapsed_ms=0.0,
+                overlay_count=0,
+                visible_overlay_count=0,
+                chunked=False,
+                chunk_count=0,
+                max_chunk_elapsed_ms=0.0,
+                overlay_load_worker=True,
+                error_message=str(message or "overlay_load_failed"),
+            )
+
+    def _continue_full_zone_tree_rebuild_with_overlays_v2(
+        self,
+        *,
+        pair_id: str,
+        generation: int,
+        viewer_pair: dict,
+        full_overlays: list[dict],
+        visible: Optional[list[dict]],
+        started: float,
+        overlay_load_ms: float,
+        overlay_json_bytes: int,
+        overlay_load_worker: bool,
+        overlay_load_strategy: str = "overlay_json",
+        overlay_page_count: int = 0,
+        overlay_page_files_read: int = 0,
+        overlay_page_files_skipped: int = 0,
+        declared_overlay_count: int = 0,
+        materialized_overlay_count: Optional[int] = None,
+    ) -> None:
+        if not self._full_zone_tree_request_is_current_v2(pair_id, generation):
+            return
+        if not full_overlays:
+            self._pending_full_zone_tree_pair_id_v2 = ""
+            return
+        effective_declared_overlay_count = max(int(declared_overlay_count or 0), len(full_overlays))
+        effective_materialized_overlay_count = (
+            int(materialized_overlay_count)
+            if materialized_overlay_count is not None
+            else len(full_overlays)
+        )
+        self._active_all_overlays_by_zone = {
+            str(overlay.get("zone_id") or ""): overlay
+            for overlay in full_overlays
+            if isinstance(overlay, dict) and overlay.get("zone_id")
+        }
+        if visible is None:
+            visible = self._visible_overlays_for_pdf_page_v2(
+                pair_id,
+                viewer_pair,
+                full_overlays,
+                load_when_empty=False,
+            )
+        self._set_active_overlays_v2(visible)
+        if self._is_lightweight_viewer_active_v2():
+            try:
+                self._push_overlays_to_lightweight_v2(pair_id, focus_zone_id=self._active_zone_id or "")
+            except Exception:
+                logger.debug("Failed to push refreshed full-tree overlays to lightweight viewer", exc_info=True)
+        active_zone = self._active_zone_id
+        if len(visible) >= int(GUI_FULL_ZONE_TREE_CHUNK_ZONE_THRESHOLD):
+            self._start_full_zone_tree_chunked_rebuild_v2(
+                pair_id=pair_id,
+                generation=generation,
+                visible=visible,
+                full_overlay_count=effective_declared_overlay_count,
+                active_zone=active_zone,
+                started=started,
+                overlay_load_ms=overlay_load_ms,
+                overlay_json_bytes=overlay_json_bytes,
+                overlay_load_worker=overlay_load_worker,
+                overlay_load_strategy=overlay_load_strategy,
+                overlay_page_count=overlay_page_count,
+                overlay_page_files_read=overlay_page_files_read,
+                overlay_page_files_skipped=overlay_page_files_skipped,
+                materialized_overlay_count=effective_materialized_overlay_count,
+            )
+            return
+        self._compute_zone_categories_for_pair_v2(pair_id, visible)
+        plan_started = perf_counter()
+        self._populate_zone_list_v2(self._preview_by_pair.get(pair_id), visible, prefer_overlays=True)
+        plan_build_ms = round((perf_counter() - plan_started) * 1000.0, 3)
+        self._refresh_zone_list_filter_v2()
+        if active_zone:
+            was_blocked = self.zone_list_v2.blockSignals(True)
+            try:
+                self._select_zone_in_list_v2(active_zone)
+            finally:
+                self.zone_list_v2.blockSignals(was_blocked)
+        elif not self.zone_list_v2.currentItem():
+            self._schedule_initial_zone_selection_v2(pair_id)
+        self._update_review_progress_v2()
+        self._update_category_summary_v2()
+        self._pending_full_zone_tree_pair_id_v2 = ""
+        if self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "full_zone_tree_rebuild",
+                pair_uuid=pair_id,
+                elapsed_ms=round((perf_counter() - started) * 1000.0, 3),
+                overlay_count=effective_declared_overlay_count,
+                visible_overlay_count=len(visible),
+                materialized_overlay_count=effective_materialized_overlay_count,
+                chunked=False,
+                chunk_count=1,
+                max_chunk_elapsed_ms=round((perf_counter() - started) * 1000.0, 3),
+                overlay_load_ms=round(float(overlay_load_ms or 0.0), 3),
+                overlay_json_bytes=int(overlay_json_bytes or 0),
+                overlay_load_worker=bool(overlay_load_worker),
+                overlay_load_strategy=str(overlay_load_strategy or ""),
+                overlay_page_count=int(overlay_page_count or 0),
+                overlay_page_files_read=int(overlay_page_files_read or 0),
+                overlay_page_files_skipped=int(overlay_page_files_skipped or 0),
+                plan_build_ms=plan_build_ms,
+                plan_build_worker=False,
+                worker_spawned=bool(overlay_load_worker),
+            )
+
+    def _start_full_zone_tree_chunked_rebuild_v2(
+        self,
+        *,
+        pair_id: str,
+        generation: int,
+        visible: list[dict],
+        full_overlay_count: int,
+        active_zone: str,
+        started: float,
+        overlay_load_ms: float = 0.0,
+        overlay_json_bytes: int = 0,
+        overlay_load_worker: bool = False,
+        overlay_load_strategy: str = "overlay_json",
+        overlay_page_count: int = 0,
+        overlay_page_files_read: int = 0,
+        overlay_page_files_skipped: int = 0,
+        materialized_overlay_count: int = 0,
+    ) -> None:
+        missing = self._missing_category_overlays_for_pair_v2(pair_id, visible)
+        try:
+            cfg = self._load_ai_config_v2()
+        except Exception:  # noqa: BLE001
+            logger.exception("AI config load failed — falling back to heuristic")
+            cfg = None
+        self._full_zone_tree_chunk_state_v2 = {
+            "pair_id": pair_id,
+            "generation": int(generation),
+            "visible": list(visible),
+            "full_overlay_count": int(full_overlay_count),
+            "active_zone": str(active_zone or ""),
+            "started": started,
+            "stage": "classify",
+            "missing": missing,
+            "missing_index": 0,
+            "cfg": cfg,
+            "issues_by_zone": self._zone_category_issues_by_zone_v2(),
+            "plan": [],
+            "plan_group_index": 0,
+            "plan_item_index": 0,
+            "current_header": None,
+            "chunk_count": 0,
+            "max_chunk_elapsed_ms": 0.0,
+            "classified_count": 0,
+            "tree_item_count": 0,
+            "overlay_load_ms": round(float(overlay_load_ms or 0.0), 3),
+            "overlay_json_bytes": int(overlay_json_bytes or 0),
+            "overlay_load_worker": bool(overlay_load_worker),
+            "overlay_load_strategy": str(overlay_load_strategy or ""),
+            "overlay_page_count": int(overlay_page_count or 0),
+            "overlay_page_files_read": int(overlay_page_files_read or 0),
+            "overlay_page_files_skipped": int(overlay_page_files_skipped or 0),
+            "materialized_overlay_count": int(materialized_overlay_count or len(visible)),
+            "plan_build_ms": 0.0,
+            "plan_build_worker": False,
+        }
+        QTimer.singleShot(
+            int(GUI_FULL_ZONE_TREE_CHUNK_DELAY_MS),
+            lambda p=pair_id, g=generation: self._run_full_zone_tree_chunk_v2(p, g),
+        )
+
+    def _full_zone_tree_chunk_state_is_current_v2(self, pair_id: str, generation: int) -> bool:
+        state = self._full_zone_tree_chunk_state_v2
+        if not isinstance(state, dict):
+            return False
+        state_generation = state.get("generation")
+        if state_generation is None or int(state_generation) != int(generation):
+            return False
+        if str(state.get("pair_id") or "") != str(pair_id or ""):
+            return False
+        if generation != self._zone_tree_rebuild_generation_v2:
+            return False
+        if pair_id != str((self._active_row or {}).get("pair_id") or ""):
+            return False
+        return True
+
+    def _record_full_zone_tree_chunk_elapsed_v2(self, state: dict, elapsed_ms: float) -> None:
+        state["chunk_count"] = int(state.get("chunk_count") or 0) + 1
+        state["max_chunk_elapsed_ms"] = max(
+            float(state.get("max_chunk_elapsed_ms") or 0.0),
+            float(elapsed_ms),
+        )
+
+    def _run_full_zone_tree_chunk_v2(self, pair_id: str, generation: int) -> None:
+        if not self._full_zone_tree_chunk_state_is_current_v2(pair_id, generation):
+            return
+        state = self._full_zone_tree_chunk_state_v2
+        if not isinstance(state, dict):
+            return
+        chunk_started = perf_counter()
+        budget_ms = max(1.0, float(GUI_FULL_ZONE_TREE_CHUNK_TIME_BUDGET_MS))
+        item_limit = max(1, int(GUI_FULL_ZONE_TREE_CHUNK_ITEM_LIMIT))
+
+        if state.get("stage") == "classify":
+            missing = state.get("missing") if isinstance(state.get("missing"), list) else []
+            idx = int(state.get("missing_index") or 0)
+            processed = 0
+            while idx < len(missing) and processed < item_limit:
+                overlay = missing[idx]
+                idx += 1
+                processed += 1
+                if isinstance(overlay, dict) and self._classify_zone_category_record_v2(
+                    pair_id,
+                    overlay,
+                    cfg=state.get("cfg"),
+                    issues_by_zone=state.get("issues_by_zone") if isinstance(state.get("issues_by_zone"), dict) else {},
+                ):
+                    state["classified_count"] = int(state.get("classified_count") or 0) + 1
+                if (perf_counter() - chunk_started) * 1000.0 >= budget_ms:
+                    break
+            state["missing_index"] = idx
+            elapsed_ms = round((perf_counter() - chunk_started) * 1000.0, 3)
+            self._record_full_zone_tree_chunk_elapsed_v2(state, elapsed_ms)
+            if idx < len(missing):
+                QTimer.singleShot(
+                    int(GUI_FULL_ZONE_TREE_CHUNK_DELAY_MS),
+                    lambda p=pair_id, g=generation: self._run_full_zone_tree_chunk_v2(p, g),
+                )
+                return
+            state["stage"] = "plan"
+            self._start_full_zone_tree_plan_worker_v2(pair_id, generation, state)
+            return
+
+        if state.get("stage") == "tree":
+            self._run_full_zone_tree_item_chunk_v2(pair_id, generation, state, chunk_started)
+
+    def _start_full_zone_tree_plan_worker_v2(self, pair_id: str, generation: int, state: dict) -> None:
+        if not self._full_zone_tree_chunk_state_is_current_v2(pair_id, generation):
+            return
+        if self._full_zone_tree_plan_worker_v2 is not None:
+            self._full_zone_tree_plan_worker_v2.cancel()
+            self._retire_full_zone_tree_plan_worker_v2()
+        category_snapshot = dict(self._zone_categories_v2.get(pair_id, {}))
+        worker = FullZoneTreePlanWorker(
+            pair_id=pair_id,
+            generation=generation,
+            overlays=state.get("visible") if isinstance(state.get("visible"), list) else [],
+            dashboard_issues=list((self._active_row or {}).get("top_issues") or []),
+            category_by_zone=category_snapshot,
+            active_zone_id=str(state.get("active_zone") or ""),
+            clustering_enabled=bool(getattr(self, "_zone_clustering_enabled_v2", True)),
+        )
+        worker.planned.connect(self._on_full_zone_tree_plan_ready_v2)
+        worker.failed.connect(self._on_full_zone_tree_plan_failed_v2)
+        self._full_zone_tree_plan_worker_v2 = worker
+        worker.start()
+
+    def _on_full_zone_tree_plan_ready_v2(self, pair_id: str, generation: int, payload: object) -> None:
+        sender = self.sender()
+        self._retire_full_zone_tree_plan_worker_v2(sender if isinstance(sender, QThread) else None)
+        if not self._full_zone_tree_chunk_state_is_current_v2(pair_id, generation):
+            return
+        state = self._full_zone_tree_chunk_state_v2
+        if not isinstance(state, dict):
+            return
+        data = payload if isinstance(payload, dict) else {}
+        state["plan"] = data.get("plan") if isinstance(data.get("plan"), list) else []
+        if isinstance(data.get("active_issue_by_zone"), dict):
+            self._active_issue_by_zone = data["active_issue_by_zone"]
+        state["plan_build_ms"] = round(float(data.get("plan_build_ms") or 0.0), 3)
+        state["plan_build_worker"] = bool(data.get("plan_build_worker"))
+        state["stage"] = "tree"
+        was_blocked = self.zone_list_v2.blockSignals(True)
+        try:
+            self.zone_list_v2.clear()
+            self._set_zone_action_buttons_enabled_v2(False)
+        finally:
+            self.zone_list_v2.blockSignals(was_blocked)
+        QTimer.singleShot(
+            int(GUI_FULL_ZONE_TREE_CHUNK_DELAY_MS),
+            lambda p=pair_id, g=generation: self._run_full_zone_tree_chunk_v2(p, g),
+        )
+
+    def _on_full_zone_tree_plan_failed_v2(self, pair_id: str, generation: int, message: str) -> None:
+        sender = self.sender()
+        self._retire_full_zone_tree_plan_worker_v2(sender if isinstance(sender, QThread) else None)
+        if not self._full_zone_tree_chunk_state_is_current_v2(pair_id, generation):
+            return
+        self._full_zone_tree_chunk_state_v2 = None
+        self._pending_full_zone_tree_pair_id_v2 = ""
+        if self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "full_zone_tree_rebuild",
+                pair_uuid=pair_id,
+                elapsed_ms=0.0,
+                overlay_count=0,
+                visible_overlay_count=0,
+                chunked=True,
+                chunk_count=0,
+                max_chunk_elapsed_ms=0.0,
+                plan_build_worker=True,
+                error_message=str(message or "plan_build_failed"),
+            )
+
+    def _run_full_zone_tree_item_chunk_v2(
+        self,
+        pair_id: str,
+        generation: int,
+        state: dict,
+        chunk_started: float,
+    ) -> None:
+        plan = state.get("plan") if isinstance(state.get("plan"), list) else []
+        budget_ms = max(1.0, float(GUI_FULL_ZONE_TREE_CHUNK_TIME_BUDGET_MS))
+        item_limit = max(1, int(GUI_FULL_ZONE_TREE_CHUNK_ITEM_LIMIT))
+        group_idx = int(state.get("plan_group_index") or 0)
+        item_idx = int(state.get("plan_item_index") or 0)
+        current_header = state.get("current_header")
+        added = 0
+        was_blocked = self.zone_list_v2.blockSignals(True)
+        try:
+            while group_idx < len(plan) and added < item_limit:
+                group = plan[group_idx]
+                if current_header is None:
+                    current_header = self._make_zone_tree_header_item_v2(group)
+                    self.zone_list_v2.addTopLevelItem(current_header)
+                    state["tree_item_count"] = int(state.get("tree_item_count") or 0) + 1
+                    added += 1
+                items = group.get("items") if isinstance(group, dict) else []
+                if not isinstance(items, list):
+                    items = []
+                while item_idx < len(items) and added < item_limit:
+                    added_count = self._append_zone_tree_plan_item_v2(current_header, items[item_idx])
+                    added += added_count
+                    item_idx += 1
+                    state["tree_item_count"] = int(state.get("tree_item_count") or 0) + added_count
+                    if (perf_counter() - chunk_started) * 1000.0 >= budget_ms:
+                        break
+                if item_idx >= len(items):
+                    current_header.setExpanded(bool(group.get("expanded")))
+                    group_idx += 1
+                    item_idx = 0
+                    current_header = None
+                if (perf_counter() - chunk_started) * 1000.0 >= budget_ms:
+                    break
+        finally:
+            self.zone_list_v2.blockSignals(was_blocked)
+        state["plan_group_index"] = group_idx
+        state["plan_item_index"] = item_idx
+        state["current_header"] = current_header
+        elapsed_ms = round((perf_counter() - chunk_started) * 1000.0, 3)
+        self._record_full_zone_tree_chunk_elapsed_v2(state, elapsed_ms)
+        if group_idx < len(plan):
+            QTimer.singleShot(
+                int(GUI_FULL_ZONE_TREE_CHUNK_DELAY_MS),
+                lambda p=pair_id, g=generation: self._run_full_zone_tree_chunk_v2(p, g),
+            )
+            return
+        self._finish_full_zone_tree_chunked_rebuild_v2(pair_id, generation)
+
+    def _finish_full_zone_tree_chunked_rebuild_v2(self, pair_id: str, generation: int) -> None:
+        if not self._full_zone_tree_chunk_state_is_current_v2(pair_id, generation):
+            return
+        state = self._full_zone_tree_chunk_state_v2 or {}
+        active_zone = str(state.get("active_zone") or "")
+        self._refresh_zone_list_filter_v2()
+        if active_zone:
+            was_blocked = self.zone_list_v2.blockSignals(True)
+            try:
+                self._select_zone_in_list_v2(active_zone)
+            finally:
+                self.zone_list_v2.blockSignals(was_blocked)
+        elif not self.zone_list_v2.currentItem():
+            self._schedule_initial_zone_selection_v2(pair_id)
+        self._update_review_progress_v2()
+        self._update_category_summary_v2()
+        self._pending_full_zone_tree_pair_id_v2 = ""
+        self._full_zone_tree_chunk_state_v2 = None
+        if self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "full_zone_tree_rebuild",
+                pair_uuid=pair_id,
+                elapsed_ms=round((perf_counter() - float(state.get("started") or perf_counter())) * 1000.0, 3),
+                overlay_count=int(state.get("full_overlay_count") or 0),
+                visible_overlay_count=len(state.get("visible") if isinstance(state.get("visible"), list) else []),
+                materialized_overlay_count=int(state.get("materialized_overlay_count") or 0),
+                classified_count=int(state.get("classified_count") or 0),
+                tree_item_count=int(state.get("tree_item_count") or 0),
+                chunked=True,
+                chunk_count=int(state.get("chunk_count") or 0),
+                max_chunk_elapsed_ms=round(float(state.get("max_chunk_elapsed_ms") or 0.0), 3),
+                overlay_load_ms=round(float(state.get("overlay_load_ms") or 0.0), 3),
+                overlay_json_bytes=int(state.get("overlay_json_bytes") or 0),
+                overlay_load_worker=bool(state.get("overlay_load_worker")),
+                overlay_load_strategy=str(state.get("overlay_load_strategy") or ""),
+                overlay_page_count=int(state.get("overlay_page_count") or 0),
+                overlay_page_files_read=int(state.get("overlay_page_files_read") or 0),
+                overlay_page_files_skipped=int(state.get("overlay_page_files_skipped") or 0),
+                plan_build_ms=round(float(state.get("plan_build_ms") or 0.0), 3),
+                plan_build_worker=bool(state.get("plan_build_worker")),
+                worker_spawned=bool(state.get("overlay_load_worker") or state.get("plan_build_worker")),
+            )
+
+    def _schedule_initial_zone_selection_v2(self, pair_id: str) -> None:
+        if not pair_id:
+            return
+        QTimer.singleShot(
+            GUI_INITIAL_ZONE_SELECT_DELAY_MS,
+            lambda p=pair_id: self._select_initial_zone_after_paint_v2(p),
+        )
+
+    def _select_initial_zone_after_paint_v2(self, pair_id: str) -> None:
+        if pair_id != str((self._active_row or {}).get("pair_id") or ""):
+            return
+        if self.zone_list_v2.currentItem():
+            return
+        leaf_items = self._zone_leaf_items_v2()
+        if leaf_items:
+            zone_id = str(leaf_items[0].data(0, Qt.UserRole) or "")
+            if zone_id:
+                self._defer_next_initial_zone_heavy_render_v2 = (pair_id, zone_id)
+            self._select_zone_leaf_v2(leaf_items[0])
+
+    def _consume_initial_zone_heavy_render_defer_v2(self, pair_id: str, zone_id: str) -> bool:
+        expected = self._defer_next_initial_zone_heavy_render_v2
+        if expected != (pair_id, zone_id):
+            return False
+        self._defer_next_initial_zone_heavy_render_v2 = None
+        return True
+
+    def _begin_selected_zone_render_request_v2(self, pair_id: str, zone_id: str) -> str:
+        self._selected_zone_render_generation_v2 += 1
+        request_id = f"{pair_id}:{zone_id}:{self._selected_zone_render_generation_v2}"
+        self._active_zone_render_request_v2 = (pair_id, zone_id, request_id)
+        return request_id
+
+    def _active_zone_render_request_id_v2(self, pair_id: str, zone_id: str) -> str:
+        active = self._active_zone_render_request_v2
+        if active and active[0] == pair_id and active[1] == zone_id:
+            return str(active[2] or "")
+        return ""
+
+    def _is_current_zone_render_request_v2(
+        self, pair_id: str, zone_id: str, request_id: str = "",
+    ) -> bool:
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        current_zone = str(self._active_zone_id or "")
+        if pair_id != current_pair or zone_id != current_zone:
+            return False
+        if not request_id:
+            return True
+        active = self._active_zone_render_request_v2
+        return bool(active and active == (pair_id, zone_id, request_id))
+
+    def _schedule_initial_zone_heavy_render_v2(self, pair_id: str, zone_id: str) -> None:
+        self._initial_zone_heavy_render_generation_v2 += 1
+        generation = self._initial_zone_heavy_render_generation_v2
+        if self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "zone_heavy_render_deferred",
+                pair_uuid=pair_id,
+                zone_id=zone_id,
+                delay_ms=GUI_INITIAL_ZONE_HEAVY_RENDER_DELAY_MS,
+            )
+        QTimer.singleShot(
+            GUI_INITIAL_ZONE_HEAVY_RENDER_DELAY_MS,
+            lambda p=pair_id, z=zone_id, g=generation: self._run_initial_zone_heavy_render_v2(p, z, g),
+        )
+
+    def _run_initial_zone_heavy_render_v2(self, pair_id: str, zone_id: str, generation: int) -> None:
+        if generation != self._initial_zone_heavy_render_generation_v2:
+            return
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        current_zone = str(self._active_zone_id or "")
+        if pair_id != current_pair or zone_id != current_zone:
+            self._record_zone_render_perf_event_v2(
+                "zone_render_pending_dropped",
+                pair_id,
+                zone_id,
+                current_pair_uuid=current_pair,
+                current_zone_id=current_zone,
+                reason_code="initial_zone_heavy_render_stale",
+            )
+            return
+        try:
+            self._focus_lightweight_on_zone_v2(zone_id)
+        except Exception:
+            logger.exception("Deferred lightweight zone focus failed for %s", zone_id)
+        self._start_zone_crop_render_v2(zone_id)
+        self._refresh_zone_vector_button_state_v2()
+
+    def _schedule_lightweight_pair_load_v2(self, pair_id: str, viewer_pair: dict) -> None:
+        if not pair_id or not self._is_lightweight_viewer_active_v2():
+            return
+        self._lightweight_pair_load_generation_v2 += 1
+        generation = self._lightweight_pair_load_generation_v2
+        if self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "lightweight_pair_load_deferred",
+                pair_uuid=pair_id,
+                delay_ms=GUI_LIGHTWEIGHT_PAIR_LOAD_DELAY_MS,
+                input_format="pdf" if _viewer_pair_is_pdf(viewer_pair) else "raster",
+            )
+        QTimer.singleShot(
+            GUI_LIGHTWEIGHT_PAIR_LOAD_DELAY_MS,
+            lambda p=pair_id, vp=dict(viewer_pair), g=generation: self._run_lightweight_pair_load_v2(p, vp, g),
+        )
+
+    def _run_lightweight_pair_load_v2(self, pair_id: str, viewer_pair: dict, generation: int) -> None:
+        if generation != self._lightweight_pair_load_generation_v2:
+            return
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        if pair_id != current_pair or not self._is_lightweight_viewer_active_v2():
+            if self._viewer_root:
+                append_viewer_perf_event(
+                    self._viewer_root,
+                    "lightweight_pair_load_dropped",
+                    pair_uuid=pair_id,
+                    current_pair_uuid=current_pair,
+                    reason_code="stale_pair_selection",
+                )
+            return
+
+        started = perf_counter()
+        try:
+            if _viewer_pair_is_pdf(viewer_pair):
+                stats = self._load_lightweight_pdf_v2(pair_id, viewer_pair)
+            else:
+                stats = self._load_lightweight_raster_preview_v2(pair_id, viewer_pair)
+        except Exception:
+            logger.exception("Deferred lightweight pair load failed for %s", pair_id)
+            stats = {
+                "input_format": "pdf" if _viewer_pair_is_pdf(viewer_pair) else "raster",
+                "loaded_before": False,
+                "loaded_after": False,
+                "cache_state": "error",
+            }
+        if self._viewer_root:
+            elapsed_ms = round((perf_counter() - started) * 1000.0, 3)
+            append_viewer_perf_event(
+                self._viewer_root,
+                "lightweight_pair_load",
+                pair_uuid=pair_id,
+                elapsed_ms=elapsed_ms,
+                load_ms=elapsed_ms,
+                input_format=str(stats.get("input_format") or ""),
+                pdf_cache_state=str(stats.get("cache_state") or ""),
+                loaded_before=bool(stats.get("loaded_before")),
+                loaded_after=bool(stats.get("loaded_after")),
+                before_cache_hit=stats.get("before_cache_hit"),
+                after_cache_hit=stats.get("after_cache_hit"),
+                before_metadata_hit=stats.get("before_metadata_hit"),
+                after_metadata_hit=stats.get("after_metadata_hit"),
+                before_effective_dpi=stats.get("before_effective_dpi"),
+                after_effective_dpi=stats.get("after_effective_dpi"),
+                before_dpi_capped=stats.get("before_dpi_capped"),
+                after_dpi_capped=stats.get("after_dpi_capped"),
+            )
+        if (
+            stats.get("input_format") == "pdf"
+            and (bool(stats.get("loaded_before")) or bool(stats.get("loaded_after")))
+            and generation == self._lightweight_pair_load_generation_v2
+        ):
+            self._schedule_adjacent_pdf_prewarm_v2(pair_id, viewer_pair, generation)
+
+    def _adjacent_pdf_prewarm_targets_v2(self, viewer_pair: dict) -> list[dict[str, int]]:
+        page_pairs = list(viewer_pair.get("page_match_pairs") or [])
+        if len(page_pairs) <= 1:
+            return []
+        try:
+            current_a = int(viewer_pair.get("page_a", viewer_pair.get("page", 0)) or 0)
+            current_b = int(viewer_pair.get("page_b", viewer_pair.get("page", 0)) or 0)
+        except (TypeError, ValueError):
+            current_a = 0
+            current_b = 0
+        current_idx = int(getattr(self, "_active_pdf_page_index_v2", 0) or 0)
+        for idx, page_pair in enumerate(page_pairs):
+            if not isinstance(page_pair, dict):
+                continue
+            try:
+                if (
+                    int(page_pair.get("page_a", 0) or 0) == current_a
+                    and int(page_pair.get("page_b", 0) or 0) == current_b
+                ):
+                    current_idx = idx
+                    break
+            except (TypeError, ValueError):
+                continue
+        targets: list[dict[str, int]] = []
+        for idx in (current_idx + 1, current_idx - 1):
+            if idx < 0 or idx >= len(page_pairs):
+                continue
+            page_pair = page_pairs[idx]
+            if not isinstance(page_pair, dict):
+                continue
+            try:
+                targets.append(
+                    {
+                        "index": int(idx),
+                        "page_a": int(page_pair.get("page_a", 0) or 0),
+                        "page_b": int(page_pair.get("page_b", 0) or 0),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+        return targets[:2]
+
+    def _schedule_adjacent_pdf_prewarm_v2(
+        self,
+        pair_id: str,
+        viewer_pair: dict,
+        lightweight_generation: int,
+    ) -> None:
+        if not pair_id or not self._is_lightweight_viewer_active_v2():
+            return
+        if not _viewer_pair_is_pdf(viewer_pair):
+            return
+        targets = self._adjacent_pdf_prewarm_targets_v2(viewer_pair)
+        if not targets:
+            return
+        self._pdf_prewarm_generation_v2 += 1
+        prewarm_generation = self._pdf_prewarm_generation_v2
+        if self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "lightweight_pdf_prewarm_deferred",
+                pair_uuid=pair_id,
+                delay_ms=GUI_PDF_ADJACENT_PREWARM_DELAY_MS,
+                target_count=len(targets),
+                lightweight_generation=int(lightweight_generation),
+                prewarm_generation=int(prewarm_generation),
+            )
+        QTimer.singleShot(
+            GUI_PDF_ADJACENT_PREWARM_DELAY_MS,
+            lambda p=pair_id, vp=dict(viewer_pair), targets=list(targets), lg=int(lightweight_generation), pg=int(prewarm_generation): (
+                self._run_adjacent_pdf_prewarm_v2(p, vp, targets, lg, pg)
+            ),
+        )
+
+    def _run_adjacent_pdf_prewarm_v2(
+        self,
+        pair_id: str,
+        viewer_pair: dict,
+        targets: list[dict[str, int]],
+        lightweight_generation: int,
+        prewarm_generation: int,
+    ) -> None:
+        if lightweight_generation != self._lightweight_pair_load_generation_v2:
+            return
+        if prewarm_generation != self._pdf_prewarm_generation_v2:
+            return
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        if pair_id != current_pair or not self._is_lightweight_viewer_active_v2():
+            return
+        started = perf_counter()
+        from src.gui.lightweight_viewport import prewarm_pdf_page_cache
+        from src.services.comparison.safe_unicode import safe_unicode
+
+        viewer_pair_for_pdf = dict(viewer_pair)
+        viewer_pair_for_pdf["source_a"] = safe_unicode(str(viewer_pair_for_pdf.get("source_a") or ""))
+        viewer_pair_for_pdf["source_b"] = safe_unicode(str(viewer_pair_for_pdf.get("source_b") or ""))
+        before_pdf, before_pdf_key = _resolve_pdf_viewer_source_path(
+            viewer_pair_for_pdf, "before", self._viewer_root,
+        )
+        after_pdf, after_pdf_key = _resolve_pdf_viewer_source_path(
+            viewer_pair_for_pdf, "after", self._viewer_root,
+        )
+        result_items: list[dict[str, object]] = []
+        for target in targets:
+            page_index = int(target.get("index", -1))
+            page_a = int(target.get("page_a", -1))
+            page_b = int(target.get("page_b", -1))
+            if before_pdf is not None and page_a >= 0:
+                result = prewarm_pdf_page_cache(
+                    before_pdf,
+                    page_index=page_a,
+                    target_dpi=150.0,
+                    max_render_pixels=GUI_PDF_INITIAL_RENDER_MAX_PIXELS,
+                )
+                result_items.append(
+                    {
+                        "side": "before",
+                        "source_key": before_pdf_key,
+                        "page_pair_index": page_index,
+                        "page_index": page_a,
+                        **result,
+                    }
+                )
+            if after_pdf is not None and page_b >= 0:
+                result = prewarm_pdf_page_cache(
+                    after_pdf,
+                    page_index=page_b,
+                    target_dpi=150.0,
+                    max_render_pixels=GUI_PDF_INITIAL_RENDER_MAX_PIXELS,
+                )
+                result_items.append(
+                    {
+                        "side": "after",
+                        "source_key": after_pdf_key,
+                        "page_pair_index": page_index,
+                        "page_index": page_b,
+                        **result,
+                    }
+                )
+        if not self._viewer_root:
+            return
+        ok_count = sum(1 for item in result_items if bool(item.get("ok")))
+        cache_hit_count = sum(1 for item in result_items if bool(item.get("cache_hit")))
+        metadata_hit_count = sum(1 for item in result_items if bool(item.get("metadata_hit")))
+        rendered_count = sum(
+            1
+            for item in result_items
+            if bool(item.get("ok")) and not bool(item.get("cache_hit"))
+        )
+        append_viewer_perf_event(
+            self._viewer_root,
+            "lightweight_pdf_prewarm",
+            pair_uuid=pair_id,
+            elapsed_ms=round((perf_counter() - started) * 1000.0, 3),
+            target_count=len(targets),
+            item_count=len(result_items),
+            ok_count=ok_count,
+            failed_count=max(0, len(result_items) - ok_count),
+            cache_hit_count=cache_hit_count,
+            rendered_count=rendered_count,
+            metadata_hit_count=metadata_hit_count,
+            lightweight_generation=int(lightweight_generation),
+            prewarm_generation=int(prewarm_generation),
+            results=result_items,
+        )
+
+    def _record_pair_selection_event_v2(
+        self,
+        pair_id: str,
+        started: float,
+        *,
+        initial_overlay_count: int,
+        full_tree_deferred: bool,
+        initial_source: str,
+        viewer_pair: Optional[dict] = None,
+    ) -> None:
+        if not self._viewer_root:
+            return
+        elapsed_ms = round((perf_counter() - started) * 1000.0, 3)
+        pair = viewer_pair or {}
+        declared_overlay_count = max(
+            _int_value((self._active_row or {}).get("zone_count")),
+            _int_value(pair.get("overlay_total_count")),
+            int(initial_overlay_count or 0),
+        )
+        append_viewer_perf_event(
+            self._viewer_root,
+            "pair_selection_initial_load",
+            pair_uuid=pair_id,
+            elapsed_ms=elapsed_ms,
+            gui_block_ms=elapsed_ms,
+            initial_overlay_count=initial_overlay_count,
+            materialized_overlay_count=initial_overlay_count,
+            declared_overlay_count=declared_overlay_count,
+            overlay_json_bytes=self._overlay_json_file_size_for_pair_v2(pair_id),
+            overlay_json_read_for_first_paint=initial_source == "overlay_json",
+            full_tree_deferred=bool(full_tree_deferred),
+            initial_source=initial_source,
+            input_format="pdf" if _viewer_pair_is_pdf(pair) else "raster",
+            lightweight_load_deferred=self._is_lightweight_viewer_active_v2(),
+            overlay_cache_pair_count=len(self._viewer_overlay_cache),
+            overlay_cache_evictions=self._viewer_overlay_cache_evictions_v2,
+            overlay_cache_total_bytes=self._viewer_overlay_cache_total_bytes_v2,
+            overlay_cache_byte_limit=GUI_OVERLAY_CACHE_BYTE_LIMIT,
+        )
+
+    def _record_zone_selection_event_v2(self, zone_id: str, started: float) -> None:
+        if not self._viewer_root:
+            return
+        pair_id = str((self._active_row or {}).get("pair_id") or "")
+        if not pair_id or not zone_id:
+            return
+        append_viewer_perf_event(
+            self._viewer_root,
+            "zone_selection",
+            pair_uuid=pair_id,
+            zone_id=zone_id,
+            gui_block_ms=round((perf_counter() - started) * 1000.0, 3),
+            overlay_count=len(self._active_overlays_by_zone),
+            vector_cache_hit=bool(self._zone_vector_paths.get((pair_id, zone_id))),
+        )
+
+    def _record_zone_render_perf_event_v2(self, event: str, pair_id: str, zone_id: str, **metrics: object) -> None:
+        if not self._viewer_root:
+            return
+        append_viewer_perf_event(
+            self._viewer_root,
+            event,
+            pair_uuid=pair_id,
+            zone_id=zone_id,
+            **metrics,
+        )
+
+    def _selection_build_lod_tiles_enabled_v2(self) -> bool:
+        if getattr(self._result, "package_complete", True) is False:
+            return False
+        metadata = getattr(self._result, "first_review_metadata", {}) if self._result else {}
+        deferred = metadata.get("deferred_outputs", {}) if isinstance(metadata, dict) else {}
+        if isinstance(deferred, dict) and deferred.get("lod_tiles") == "deferred":
+            return False
+        if self._viewer_manifest.get("build_lod_tiles") is False:
+            return False
+        return True
+
     def _show_pdf_page_pair_v2(self, page_a: int, page_b: int) -> None:
         """Phase H — Re-render backgrounds + filter overlays + re-push.
 
@@ -7239,46 +9477,128 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not isinstance(viewer_pair, dict):
             return
 
+        started = perf_counter()
         # Mutate page indices so downstream consumers (lightweight load,
         # overlay filter, etc.) see the new page pair.
         viewer_pair["page_a"] = int(page_a)
         viewer_pair["page_b"] = int(page_b)
+        page_pairs = list(viewer_pair.get("page_match_pairs") or [])
+        for idx, page_pair in enumerate(page_pairs):
+            if not isinstance(page_pair, dict):
+                continue
+            try:
+                matches_page = (
+                    int(page_pair.get("page_a", 0) or 0) == int(page_a)
+                    and int(page_pair.get("page_b", 0) or 0) == int(page_b)
+                )
+                if matches_page:
+                    self._active_pdf_page_index_v2 = idx
+                    break
+            except (TypeError, ValueError):
+                continue
 
-        # Filter overlays for the active page pair so cloud markers
-        # match the displayed background. This rebuilds the zone tree
-        # too — removing zones from other matched pages keeps the user
-        # focused on the page they're currently looking at.
-        all_overlays = list(self._active_overlays_by_zone.values())
-        filtered = _filter_overlays_by_pdf_pages(all_overlays, page_a, page_b)
-        self._active_overlays_by_zone = {
-            str(o.get("zone_id") or ""): o
-            for o in filtered
-            if isinstance(o, dict) and o.get("zone_id")
-        }
-
-        # Refresh tree + summary so the user sees only this page's zones
-        preview = self._preview_by_pair.get(pair_id)
-        self._populate_zone_list_v2(preview, list(self._active_overlays_by_zone.values()))
-        try:
-            self._update_category_summary_v2()
-        except Exception:
-            logger.debug("Failed to refresh category summary on page switch", exc_info=True)
-
-        # Re-render lightweight PDF backgrounds for the new pages.
-        if self._is_lightweight_viewer_active_v2():
-            if _viewer_pair_is_pdf(viewer_pair):
-                self._load_lightweight_pdf_v2(pair_id, viewer_pair)
-            else:
-                self._load_lightweight_raster_preview_v2(pair_id, viewer_pair)
-
-        # Update the navigator label
+        # Re-render lightweight PDF backgrounds for the new pages immediately.
+        # Overlay/tree refresh below is allowed to defer so page navigation
+        # never cold-reads a large full_overlays JSON on the click path.
+        lightweight_deferred = self._is_lightweight_viewer_active_v2()
+        if lightweight_deferred:
+            self._schedule_lightweight_pair_load_v2(pair_id, viewer_pair)
         self._update_page_nav_v2(viewer_pair)
-        logger.info(
-            "Page navigation: switched to A.page %d ↔ B.page %d (%d zones visible)",
-            page_a, page_b, len(self._active_overlays_by_zone),
+
+        if _viewer_pair_is_pdf(viewer_pair) and self._viewer_overlay_pages_manifest_path_for_pair_v2(pair_id):
+            all_overlays = []
+            self._active_all_overlays_by_zone = {}
+        else:
+            all_overlays = list(self._active_all_overlays_by_zone.values())
+        if not all_overlays:
+            self._set_active_overlays_v2([])
+            was_blocked = self.zone_list_v2.blockSignals(True)
+            try:
+                self.zone_list_v2.clear()
+                self._set_zone_action_buttons_enabled_v2(False)
+            finally:
+                self.zone_list_v2.blockSignals(was_blocked)
+            try:
+                self._update_category_summary_v2()
+            except Exception:
+                logger.debug("Failed to refresh category summary on deferred page switch", exc_info=True)
+            self._schedule_full_zone_tree_rebuild_v2(pair_id)
+            self._record_pdf_page_navigation_event_v2(
+                pair_id=pair_id,
+                page_a=page_a,
+                page_b=page_b,
+                started=started,
+                visible_overlay_count=0,
+                overlay_load_deferred=True,
+                lightweight_load_deferred=lightweight_deferred,
+            )
+            logger.info(
+                "Page navigation: switched to A.page %d ↔ B.page %d (overlay load deferred)",
+                page_a, page_b,
+            )
+            return
+
+        self._cancel_full_zone_tree_rebuild_v2("page_navigation", bump_generation=True)
+        generation = self._zone_tree_rebuild_generation_v2
+        self._pending_full_zone_tree_pair_id_v2 = pair_id
+        QTimer.singleShot(
+            0,
+            lambda p=pair_id, g=generation, vp=dict(viewer_pair), overlays=list(all_overlays), s=started: (
+                self._continue_full_zone_tree_rebuild_with_overlays_v2(
+                    pair_id=p,
+                    generation=g,
+                    viewer_pair=vp,
+                    full_overlays=overlays,
+                    visible=None,
+                    started=s,
+                    overlay_load_ms=0.0,
+                    overlay_json_bytes=int(self._viewer_overlay_cache_bytes_by_pair_v2.get(p, 0)),
+                    overlay_load_worker=False,
+                )
+            ),
+        )
+        self._record_pdf_page_navigation_event_v2(
+            pair_id=pair_id,
+            page_a=page_a,
+            page_b=page_b,
+            started=started,
+            visible_overlay_count=0,
+            overlay_load_deferred=False,
+            lightweight_load_deferred=lightweight_deferred,
         )
 
-    def _load_lightweight_pdf_v2(self, pair_id: str, viewer_pair: dict) -> None:
+        logger.info(
+            "Page navigation: switched to A.page %d ↔ B.page %d (tree rebuild scheduled)",
+            page_a, page_b,
+        )
+
+    def _record_pdf_page_navigation_event_v2(
+        self,
+        *,
+        pair_id: str,
+        page_a: int,
+        page_b: int,
+        started: float,
+        visible_overlay_count: int,
+        overlay_load_deferred: bool,
+        lightweight_load_deferred: bool,
+    ) -> None:
+        if not self._viewer_root:
+            return
+        append_viewer_perf_event(
+            self._viewer_root,
+            "pdf_page_navigation",
+            pair_uuid=pair_id,
+            page_a=int(page_a),
+            page_b=int(page_b),
+            gui_block_ms=round((perf_counter() - started) * 1000.0, 3),
+            visible_overlay_count=int(visible_overlay_count),
+            overlay_load_deferred=bool(overlay_load_deferred),
+            lightweight_load_deferred=bool(lightweight_load_deferred),
+            trigger_reason="page_navigation",
+        )
+
+    def _load_lightweight_pdf_v2(self, pair_id: str, viewer_pair: dict) -> dict[str, object]:
         """Phase G2.7 — Push a PDF pair into both lightweight viewports.
 
         Qt PDF (QPdfDocument) renders the page at the requested DPI and
@@ -7296,6 +9616,20 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             "viewer_pair_keys=%s",
             pair_id, sorted(viewer_pair.keys()) if isinstance(viewer_pair, dict) else "<not-dict>",
         )
+        stats: dict[str, object] = {
+            "input_format": "pdf",
+            "loaded_before": False,
+            "loaded_after": False,
+            "before_cache_hit": None,
+            "after_cache_hit": None,
+            "before_metadata_hit": None,
+            "after_metadata_hit": None,
+            "before_effective_dpi": None,
+            "after_effective_dpi": None,
+            "before_dpi_capped": None,
+            "after_dpi_capped": None,
+            "cache_state": "unavailable",
+        }
 
         if (
             self.preview_before_lightweight_v2 is None
@@ -7307,7 +9641,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 self.preview_before_lightweight_v2 is not None,
                 self.preview_after_lightweight_v2 is not None,
             )
-            return
+            return stats
 
         # Verify Qt PDF backend is actually usable in this runtime
         try:
@@ -7364,11 +9698,31 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
         loaded_before = False
         loaded_after = False
-        if before_pdf is not None:
+        if page_a < 0:
+            try:
+                self.preview_before_lightweight_v2.load_scene_pack(
+                    None,
+                    empty_notice="No before-side PDF page for this unmatched page.",
+                )
+                self.preview_before_lightweight_v2.set_overlays([], [])
+            except Exception:
+                logger.debug("Could not clear unmatched before PDF side", exc_info=True)
+            logger.info("[PDF lightweight] before-side blank: page_a=%d", page_a)
+        elif before_pdf is not None:
             try:
                 loaded_before = self.preview_before_lightweight_v2.load_pdf_page(
-                    before_pdf, page_index=page_a, target_dpi=150.0,
+                    before_pdf,
+                    page_index=page_a,
+                    target_dpi=150.0,
+                    max_render_pixels=GUI_PDF_INITIAL_RENDER_MAX_PIXELS,
                 )
+                stats["loaded_before"] = bool(loaded_before)
+                state = getattr(self.preview_before_lightweight_v2, "_pdf_render_state", {}) or {}
+                if loaded_before and isinstance(state, dict):
+                    stats["before_cache_hit"] = bool(state.get("cache_hit"))
+                    stats["before_metadata_hit"] = bool(state.get("metadata_hit"))
+                    stats["before_effective_dpi"] = state.get("effective_dpi") or state.get("current_dpi")
+                    stats["before_dpi_capped"] = bool(state.get("dpi_capped"))
                 logger.info(
                     "[PDF lightweight] before-side load_pdf_page returned %s "
                     "(source=%r via=%s page=%d)",
@@ -7388,11 +9742,31 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 viewer_pair.get("before_page_pdf"),
                 viewer_pair.get("page_pdf"),
             )
-        if after_pdf is not None:
+        if page_b < 0:
+            try:
+                self.preview_after_lightweight_v2.load_scene_pack(
+                    None,
+                    empty_notice="No after-side PDF page for this unmatched page.",
+                )
+                self.preview_after_lightweight_v2.set_overlays([], [])
+            except Exception:
+                logger.debug("Could not clear unmatched after PDF side", exc_info=True)
+            logger.info("[PDF lightweight] after-side blank: page_b=%d", page_b)
+        elif after_pdf is not None:
             try:
                 loaded_after = self.preview_after_lightweight_v2.load_pdf_page(
-                    after_pdf, page_index=page_b, target_dpi=150.0,
+                    after_pdf,
+                    page_index=page_b,
+                    target_dpi=150.0,
+                    max_render_pixels=GUI_PDF_INITIAL_RENDER_MAX_PIXELS,
                 )
+                stats["loaded_after"] = bool(loaded_after)
+                state = getattr(self.preview_after_lightweight_v2, "_pdf_render_state", {}) or {}
+                if loaded_after and isinstance(state, dict):
+                    stats["after_cache_hit"] = bool(state.get("cache_hit"))
+                    stats["after_metadata_hit"] = bool(state.get("metadata_hit"))
+                    stats["after_effective_dpi"] = state.get("effective_dpi") or state.get("current_dpi")
+                    stats["after_dpi_capped"] = bool(state.get("dpi_capped"))
                 logger.info(
                     "[PDF lightweight] after-side load_pdf_page returned %s "
                     "(source=%r via=%s page=%d)",
@@ -7419,20 +9793,30 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             # a logged warning and a graceful fallback to ``relative_only``
             # state. The previous code masked Qt6Core invariant errors that
             # would later resurface as a BEX64 fast-fail (0xc0000409).
-            for side, vp in (
-                ("before", self.preview_before_lightweight_v2),
-                ("after", self.preview_after_lightweight_v2),
+            for side, vp, loaded in (
+                ("before", self.preview_before_lightweight_v2, loaded_before),
+                ("after", self.preview_after_lightweight_v2, loaded_after),
             ):
                 try:
+                    fidelity_mode = "exact_world_render" if loaded else "relative_only"
+                    effective_dpi = stats.get(f"{side}_effective_dpi")
+                    dpi_text = int(float(effective_dpi)) if effective_dpi else 150
+                    fidelity_text = (
+                        f"PDF DPI {dpi_text}"
+                        if loaded
+                        else "PDF preview unavailable on this side"
+                    )
                     vp.set_fidelity_state(
-                        "exact_world_render",
-                        status_text=f"PDF · DPI 150",
+                        fidelity_mode,
+                        status_text=fidelity_text,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "[PDF lightweight] %s-side set_fidelity_state(exact) "
+                        "[PDF lightweight] %s-side set_fidelity_state(%s) "
                         "failed (%s); falling back to relative_only state",
-                        side, exc,
+                        side,
+                        fidelity_mode,
+                        exc,
                     )
                     try:
                         vp.set_fidelity_state(
@@ -7466,6 +9850,18 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             "Lightweight PDF load: pair=%s before=%s after=%s",
             pair_id, loaded_before, loaded_after,
         )
+        cache_values = [
+            value
+            for value in (stats.get("before_cache_hit"), stats.get("after_cache_hit"))
+            if value is not None
+        ]
+        if cache_values and all(bool(value) for value in cache_values):
+            stats["cache_state"] = "all_cached"
+        elif cache_values and any(bool(value) for value in cache_values):
+            stats["cache_state"] = "mixed"
+        elif cache_values:
+            stats["cache_state"] = "all_cold"
+        return stats
 
     def _transform_world_bbox_v2(
         self,
@@ -7488,14 +9884,20 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self,
         pair_id: str,
         viewer_pair: dict,
-    ) -> None:
+    ) -> dict[str, object]:
         """Load rendered PNG previews into the lightweight viewer."""
 
+        stats: dict[str, object] = {
+            "input_format": "raster",
+            "loaded_before": False,
+            "loaded_after": False,
+            "cache_state": "not_pdf",
+        }
         if (
             self.preview_before_lightweight_v2 is None
             or self.preview_after_lightweight_v2 is None
         ):
-            return
+            return stats
         loaded_before = False
         loaded_after = False
         specs = (
@@ -7531,16 +9933,26 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 loaded = False
             loaded_before = loaded_before or (side == "before" and loaded)
             loaded_after = loaded_after or (side == "after" and loaded)
+            if side == "before":
+                stats["loaded_before"] = bool(loaded)
+            else:
+                stats["loaded_after"] = bool(loaded)
         if loaded_before or loaded_after:
             self._lightweight_raster_pairs.add(pair_id)
-            for viewport in (
-                self.preview_before_lightweight_v2,
-                self.preview_after_lightweight_v2,
+            for viewport, loaded in (
+                (self.preview_before_lightweight_v2, loaded_before),
+                (self.preview_after_lightweight_v2, loaded_after),
             ):
                 try:
+                    fidelity_mode = "exact_world_render" if loaded else "relative_only"
+                    fidelity_text = (
+                        "raster preview"
+                        if loaded
+                        else "raster preview unavailable on this side"
+                    )
                     viewport.set_fidelity_state(
-                        "exact_world_render",
-                        status_text="raster preview",
+                        fidelity_mode,
+                        status_text=fidelity_text,
                     )
                 except Exception:
                     logger.debug("Failed to set raster fidelity state", exc_info=True)
@@ -7553,6 +9965,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             loaded_before,
             loaded_after,
         )
+        return stats
 
     def _apply_session_state_to_viewport_v2(
         self, pair_id: str, side: str, mode: str,
@@ -7759,13 +10172,24 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not pair_id:
             return
         preview = self._preview_by_pair.get(pair_id)
-        overlays = self._viewer_overlays_for_pair_v2(pair_id)
-        if not overlays and preview:
-            overlays = [overlay.to_dict() for overlay in preview.zone_overlays]
-        self._populate_zone_list_v2(preview, overlays)
-        # Restore selection if the active zone is still in the new tree.
-        if self._active_zone_id:
-            self._select_zone_in_list_v2(self._active_zone_id)
+        overlays = list(self._active_overlays_by_zone.values())
+        if not overlays:
+            overlays = self._viewer_visible_overlays_from_page_store_v2(
+                pair_id,
+                self._viewer_pairs_by_id.get(pair_id, {}),
+            ) or []
+        if overlays:
+            self._populate_zone_list_v2(preview, overlays)
+            # Restore selection if the active zone is still in the new tree.
+            if self._active_zone_id:
+                self._select_zone_in_list_v2(self._active_zone_id)
+            return
+        if preview:
+            self._populate_zone_list_v2(preview, [overlay.to_dict() for overlay in preview.zone_overlays])
+            return
+        self._set_active_overlays_v2([])
+        self.zone_list_v2.clear()
+        self._schedule_full_zone_tree_rebuild_v2(pair_id)
 
     def _on_lightweight_camera_changed_v2(
         self, source_side: str, center_x: float, center_y: float, upp: float,
@@ -7789,6 +10213,47 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             target.set_camera(center_x, center_y, upp)
         finally:
             self._lightweight_camera_sync_in_progress = False
+        self._schedule_lightweight_visible_tile_window_v2(source_side, center_x, center_y, upp)
+
+    def _schedule_lightweight_visible_tile_window_v2(
+        self,
+        source_side: str,
+        center_x: Optional[float] = None,
+        center_y: Optional[float] = None,
+        upp: Optional[float] = None,
+    ) -> None:
+        if not self._is_lightweight_viewer_active_v2() or not self._viewer_root:
+            return
+        pair_id = str((self._active_row or {}).get("pair_id") or "")
+        if not pair_id:
+            return
+        viewer_pair = self._viewer_pairs_by_id.get(pair_id, {})
+        if not isinstance(viewer_pair, dict):
+            return
+        transform = viewer_pair.get("after_transform") or viewer_pair.get("before_transform") or {}
+        if not isinstance(transform, dict):
+            return
+        viewport = (
+            self.preview_before_lightweight_v2
+            if source_side == "before"
+            else self.preview_after_lightweight_v2
+        )
+        if viewport is None or not hasattr(viewport, "visible_world_rect"):
+            return
+        try:
+            visible_world = viewport.visible_world_rect(center_x, center_y, upp)
+        except Exception:
+            logger.debug("Lightweight visible-world rect unavailable", exc_info=True)
+            return
+        pixel_rect = _world_bbox_to_pixel_rect(visible_world, transform)
+        if not pixel_rect:
+            return
+        try:
+            effective_upp = float(upp) if upp is not None else abs(float(visible_world[2]) - float(visible_world[0])) / max(1.0, float(viewport.width() or 1.0))
+        except (TypeError, ValueError, IndexError):
+            effective_upp = 1.0
+        zoom = _lightweight_tile_zoom_from_transform(transform, effective_upp)
+        self._schedule_visible_tile_window_v2(pair_id, pixel_rect, zoom)
 
     def _push_overlays_to_lightweight_v2(
         self, pair_id: str, focus_zone_id: str = "",
@@ -7804,8 +10269,23 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
         if not pair_id:
             return
+        active_pair = ""
+        if isinstance(self._active_row, dict):
+            active_pair = str(self._active_row.get("pair_id") or "")
         try:
-            overlays = self._viewer_overlays_for_pair_v2(pair_id)
+            if active_pair == pair_id and self._active_overlays_by_zone:
+                overlays = list(self._active_overlays_by_zone.values())
+            elif active_pair == pair_id:
+                return
+            else:
+                viewer_pair = self._viewer_pairs_by_id.get(pair_id, {})
+                overlays = (
+                    self._viewer_visible_overlays_from_page_store_v2(pair_id, viewer_pair)
+                    if isinstance(viewer_pair, dict)
+                    else None
+                )
+                if overlays is None:
+                    return
         except Exception as exc:
             logger.debug("overlay fetch failed for %s: %s", pair_id, exc)
             return
@@ -7913,6 +10393,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             overlay.get("bbox"), overlay.get("old_bbox"),
         )
 
+        match_side = resolve_overlay_match_side(str(overlay.get("change_type") or ""))
         any_focused = False
         for vp, key in (
             (self.preview_before_lightweight_v2, "old_bbox"),
@@ -7922,7 +10403,15 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             if vp is None:
                 logger.debug("[ZONE FOCUS DBG]   side=%s viewport=None", side_label)
                 continue
-            raw = overlay.get(key) or overlay.get("bbox") or overlay.get("old_bbox")
+            if side_label == "before" and match_side == "b_only":
+                logger.debug("[ZONE FOCUS DBG]   side=before skipped for added-only zone")
+                continue
+            if side_label == "after" and match_side == "a_only":
+                logger.debug("[ZONE FOCUS DBG]   side=after skipped for deleted-only zone")
+                continue
+            raw = overlay.get(key)
+            if raw is None and match_side in {"matched", "mixed"}:
+                raw = overlay.get("bbox") or overlay.get("old_bbox")
             if not raw:
                 logger.debug(
                     "[ZONE FOCUS DBG]   side=%s NO raw bbox (key=%r)", side_label, key,
@@ -7950,6 +10439,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                     "[ZONE FOCUS DBG]   side=%s set_camera_to_world_bbox "
                     "OK world_bbox=%s", side_label, world_bbox,
                 )
+                self._schedule_lightweight_visible_tile_window_v2(side_label)
             except Exception as exc:
                 logger.warning(
                     "[ZONE FOCUS DBG]   side=%s set_camera_to_world_bbox "
@@ -7968,6 +10458,30 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if active_pair:
             self._push_overlays_to_lightweight_v2(active_pair, focus_zone_id=zone_id)
 
+    def _set_lightweight_zone_side_messages_v2(self, zone_id: str = "") -> None:
+        before_msg = ""
+        after_msg = ""
+        overlay = self._active_overlays_by_zone.get(str(zone_id or ""), {})
+        if isinstance(overlay, dict):
+            match_side = resolve_overlay_match_side(str(overlay.get("change_type") or ""))
+            if match_side == "b_only":
+                before_msg = "이전 도면에는 대응 요소가 없습니다"
+            elif match_side == "a_only":
+                after_msg = "변경 도면에는 대응 요소가 없습니다"
+            elif match_side == "mixed":
+                before_msg = "혼합 변경: 양쪽 위치를 함께 확인"
+                after_msg = "혼합 변경: 양쪽 위치를 함께 확인"
+        for viewport, message in (
+            (getattr(self, "preview_before_lightweight_v2", None), before_msg),
+            (getattr(self, "preview_after_lightweight_v2", None), after_msg),
+        ):
+            if viewport is None or not hasattr(viewport, "set_side_message"):
+                continue
+            try:
+                viewport.set_side_message(message)
+            except Exception:
+                logger.debug("Could not set lightweight side message", exc_info=True)
+
     def _on_toggle_lightweight_viewer_v2(self, checked: bool) -> None:
         """Phase G2.2 — Toggle visibility of the lightweight viewport.
 
@@ -7980,6 +10494,19 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         auto-enable logic for DXF/DWG runs doesn't overwrite their explicit
         choice on the next pair selection.
         """
+
+        if not QT_QUICK_AVAILABLE:
+            checked = False
+            action = getattr(self, "act_lightweight_viewer_v2", None)
+            if action is not None and action.isChecked():
+                previous = action.blockSignals(True)
+                try:
+                    action.setChecked(False)
+                finally:
+                    action.blockSignals(previous)
+            self._user_picked_lightweight_v2 = False
+            self._set_lightweight_viewer_visible_v2(False)
+            return
 
         if DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             checked = True
@@ -8293,7 +10820,15 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         cache = getattr(self, "_viewer_overlay_cache", {}) or {}
         overlays = cache.get(pair_id) or []
         if not overlays:
-            return ""
+            total = self._viewer_declared_overlay_count_for_pair_v2(pair_id)
+            if total <= 0:
+                return ""
+            done, confirmed = self._review_record_counts_for_pair_v2(pair_id)
+            if done <= 0:
+                return "▫ 미시작"
+            if done >= total:
+                return f"✅ 완료 (확인 {confirmed}건)"
+            return f"⏳ {done}/{total}"
         total = 0
         done = 0
         confirmed = 0
@@ -8320,6 +10855,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
     def _on_drawing_selected_v2(self, current, _previous=None) -> None:
         if not current:
             return
+        selection_started = perf_counter()
         row = current.data(Qt.UserRole) or {}
         self._active_row = row
         self._active_zone_id = ""
@@ -8328,6 +10864,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._active_pdf_page_index_v2 = 0
         self._set_zone_action_buttons_enabled_v2(False)
         pair_id = str(row.get("pair_id") or "")
+        self._cancel_full_zone_tree_rebuild_v2("pair_selection", bump_generation=True)
+        self._cancel_visible_tile_window_v2("pair_selection", bump_generation=True)
         # Phase G2.7-DIAG: log drawing-selection so we can trace the
         # silent preview-failure path. Captures pair_id, source kind
         # (pdf/dxf), preview availability, and viewer_pair completeness.
@@ -8345,6 +10883,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 pair_id,
                 sorted(viewer_pair.keys()) if isinstance(viewer_pair, dict) else "<empty>",
             )
+        self._apply_active_pdf_page_pair_to_viewer_pair_v2(viewer_pair)
         logger.info(
             "[drawing selected] preview=%s before_image=%r after_image=%r "
             "is_pdf=%s render_status=%r",
@@ -8360,18 +10899,34 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             else "렌더 중 - 변경구역 위치를 준비하고 있습니다."
         )
         self._set_preview_status_v2(pair_id, "rendering", render_message)
-        overlays = self._viewer_overlays_for_pair_v2(pair_id)
-        if not overlays and preview:
-            overlays = [overlay.to_dict() for overlay in preview.zone_overlays]
-        self._active_overlays_by_zone = {
+        overlays, full_tree_deferred, initial_overlay_source = (
+            self._initial_overlays_for_pair_selection_v2(
+                pair_id,
+                row,
+                preview,
+                viewer_pair,
+            )
+        )
+        self._active_all_overlays_by_zone = {
             str(overlay.get("zone_id") or ""): overlay
             for overlay in overlays
             if isinstance(overlay, dict) and overlay.get("zone_id")
         }
+        overlays = self._visible_overlays_for_pdf_page_v2(
+            pair_id,
+            viewer_pair,
+            overlays,
+            load_when_empty=False,
+        )
+        self._set_active_overlays_v2(overlays)
         self._set_preview_status_v2(pair_id, self._render_status_by_pair.get(pair_id, "not_requested"))
         before_image = str(viewer_pair.get("before_image") or (preview.before_image if preview else ""))
         after_image = str(viewer_pair.get("after_image") or (preview.after_image if preview else ""))
-        tile_manifest = self._tile_manifest_for_pair_v2(pair_id, viewer_pair)
+        tile_manifest = (
+            self._tile_manifest_for_pair_v2(pair_id, viewer_pair)
+            if self._selection_build_lod_tiles_enabled_v2()
+            else {}
+        )
         # Phase G2.7-DIAG — extract the rendered image DPI from the
         # transform metadata so the viewport can scale overlay bboxes
         # (which are at the comparison `pdf_dpi`, typically 200) to
@@ -8441,10 +10996,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # viewport is populated by _apply_session_state_to_viewport_v2
         # via the ViewerSession scene_pack pipeline, not here.
         if self._is_lightweight_viewer_active_v2():
-            if _viewer_pair_is_pdf(viewer_pair):
-                self._load_lightweight_pdf_v2(pair_id, viewer_pair)
-            else:
-                self._load_lightweight_raster_preview_v2(pair_id, viewer_pair)
+            self._schedule_lightweight_pair_load_v2(pair_id, viewer_pair)
 
         # Phase H multi-page nav — toggle the page navigator widget
         # based on whether this pair has > 1 matched page pairs. For
@@ -8485,6 +11037,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._refresh_zone_list_filter_v2()
         self._update_review_progress_v2()
         self._update_category_summary_v2()
+        if full_tree_deferred:
+            self._schedule_full_zone_tree_rebuild_v2(pair_id)
         # Always trigger background rendering on selection when the pair lacks a
         # ready PNG, regardless of input type. Both PDF (PyMuPDF) and DWG/DXF
         # (ezdxf+matplotlib) feed the same GpuDrawingViewport, so the user sees
@@ -8493,16 +11047,31 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self._start_pair_render_v2(pair_id, viewer_pair, row)
         # Phase I2 — pick the first leaf (zone) item in the tree, not
         # the first top-level (which is a category header without zone_id).
+        # R6-C defers this until after the pair background/list has had a
+        # chance to paint; otherwise drawing selection immediately fans out into
+        # crop + vector render work before the user sees the selected pair.
         if not self.zone_list_v2.currentItem():
-            leaf_items = self._zone_leaf_items_v2()
-            if leaf_items:
-                self._select_zone_leaf_v2(leaf_items[0])
+            self._schedule_initial_zone_selection_v2(pair_id)
+        self._record_pair_selection_event_v2(
+            pair_id,
+            selection_started,
+            initial_overlay_count=len(overlays),
+            full_tree_deferred=full_tree_deferred,
+            initial_source=initial_overlay_source,
+            viewer_pair=viewer_pair,
+        )
 
     def _viewer_overlays_for_pair_v2(self, pair_id: str) -> list[dict]:
         if not pair_id:
             return []
         if pair_id in self._viewer_overlay_cache:
+            self._touch_viewer_overlay_cache_v2(pair_id)
             return self._viewer_overlay_cache[pair_id]
+        pages_manifest_path = self._viewer_overlay_pages_manifest_path_for_pair_v2(pair_id)
+        if pages_manifest_path is not None and pages_manifest_path.exists():
+            overlays = list(iter_overlay_page_store(pages_manifest_path))
+            self._cache_viewer_overlays_v2(pair_id, overlays)
+            return overlays
         pair = self._viewer_pairs_by_id.get(pair_id, {})
         overlay_path = str(pair.get("overlay_json") or "")
         if not overlay_path:
@@ -8517,7 +11086,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 overlays = []
         except Exception:
             overlays = []
-        self._viewer_overlay_cache[pair_id] = overlays
+        self._cache_viewer_overlays_v2(pair_id, overlays)
         return overlays
 
     def _tile_manifest_for_pair_v2(self, pair_id: str, viewer_pair: Optional[dict] = None) -> dict:
@@ -8525,6 +11094,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             return {}
         candidates: list[Path] = []
         pair = viewer_pair or self._viewer_pairs_by_id.get(pair_id, {})
+        expected_cache_key = str(pair.get("tile_cache_key") or "") if isinstance(pair, dict) else ""
         if isinstance(pair, dict) and pair.get("tile_manifest"):
             candidate = _resolve_viewer_artifact_path(pair.get("tile_manifest"), self._viewer_root)
             if candidate:
@@ -8541,14 +11111,41 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             try:
                 if not path.exists():
                     continue
+                stat = path.stat()
+                cache_key = (
+                    str(path.resolve()),
+                    int(stat.st_mtime_ns),
+                    int(stat.st_size),
+                    pair_id,
+                    expected_cache_key,
+                )
+                cached = self._tile_manifest_cache_v2.get(cache_key)
+                if cached is not None:
+                    return dict(cached)
                 payload = json.loads(path.read_text(encoding="utf-8"))
-                pairs = payload.get("pairs", {}) if isinstance(payload, dict) else {}
-                manifest = pairs.get(pair_id) if isinstance(pairs, dict) else None
+                manifest = None
+                if isinstance(payload, dict) and str(payload.get("pair_uuid") or "") == pair_id:
+                    manifest = payload
+                else:
+                    pairs = payload.get("pairs", {}) if isinstance(payload, dict) else {}
+                    manifest = pairs.get(pair_id) if isinstance(pairs, dict) else None
                 if isinstance(manifest, dict):
-                    return manifest
+                    if expected_cache_key and str(manifest.get("cache_key") or "") != expected_cache_key:
+                        continue
+                    self._tile_manifest_cache_v2[cache_key] = dict(manifest)
+                    return dict(manifest)
             except Exception:
                 logger.debug("Failed to read tile manifest for %s from %s", pair_id, path, exc_info=True)
         return {}
+
+    def _overlay_json_file_size_for_pair_v2(self, pair_id: str) -> int:
+        path = self._viewer_overlay_json_path_for_pair_v2(pair_id)
+        if path is None:
+            return 0
+        try:
+            return int(path.stat().st_size)
+        except OSError:
+            return 0
 
     def _set_preview_status_v2(self, pair_id: str, status: str, message: str = "") -> None:
         normalized = status if status in RENDER_STATUS_LABELS else "not_requested"
@@ -8577,6 +11174,121 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             if hasattr(self, "lbl_zoom_value_v2"):
                 self.lbl_zoom_value_v2.setText(f"{slider_value}%")
 
+    def _cancel_visible_tile_window_v2(self, reason: str, *, bump_generation: bool = True) -> None:
+        self._visible_tile_request_timer_v2.stop()
+        self._visible_tile_pending_request_v2 = None
+        if bump_generation:
+            self._visible_tile_generation_v2 += 1
+        if self._visible_tile_worker_v2 is not None:
+            self._retire_visible_tile_worker_v2()
+        if reason and self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "visible_tile_window_cancel",
+                reason=reason,
+                generation=self._visible_tile_generation_v2,
+            )
+
+    def _schedule_visible_tile_window_v2(self, pair_id: str, viewport_rect: object, zoom: float) -> None:
+        pair_id = str(pair_id or "")
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        if not pair_id or pair_id != current_pair or not self._viewer_root:
+            return
+        if not self._selection_build_lod_tiles_enabled_v2():
+            return
+        pair = self._viewer_pairs_by_id.get(pair_id, {})
+        if not isinstance(pair, dict):
+            return
+        manifest = self._tile_manifest_for_pair_v2(pair_id, pair)
+        if manifest.get("pyramid_complete") is not False:
+            return
+        if not isinstance(viewport_rect, dict):
+            return
+        try:
+            request_rect = {
+                "x": float(viewport_rect.get("x", 0.0)),
+                "y": float(viewport_rect.get("y", 0.0)),
+                "width": max(1.0, float(viewport_rect.get("width", 1.0))),
+                "height": max(1.0, float(viewport_rect.get("height", 1.0))),
+            }
+            request_zoom = float(zoom or 1.0)
+        except (TypeError, ValueError):
+            return
+        self._visible_tile_pending_request_v2 = {
+            "pair_id": pair_id,
+            "viewer_pair": dict(pair),
+            "viewport_rect": request_rect,
+            "zoom": request_zoom,
+            "cache_key": str(pair.get("tile_cache_key") or manifest.get("cache_key") or ""),
+            "generation": self._visible_tile_generation_v2,
+        }
+        self._visible_tile_request_timer_v2.start()
+
+    def _run_pending_visible_tile_window_v2(self) -> None:
+        request = self._visible_tile_pending_request_v2
+        if not isinstance(request, dict):
+            return
+        if self._visible_tile_worker_v2 is not None and self._visible_tile_worker_v2.isRunning():
+            return
+        self._visible_tile_pending_request_v2 = None
+        pair_id = str(request.get("pair_id") or "")
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        if not pair_id or pair_id != current_pair or not self._viewer_root:
+            return
+        overlays = list(self._active_all_overlays_by_zone.values()) or list(self._active_overlays_by_zone.values())
+        worker = VisibleTileWindowWorker(
+            pair_id=pair_id,
+            generation=int(request.get("generation") or 0),
+            viewer_pair=dict(request.get("viewer_pair") or {}),
+            overlays=overlays,
+            viewer_root=self._viewer_root,
+            viewer_cache_root=self._viewer_cache_root_v2(),
+            viewport_rect=dict(request.get("viewport_rect") or {}),
+            zoom=float(request.get("zoom") or 1.0),
+            cache_key=str(request.get("cache_key") or ""),
+        )
+        worker.finished.connect(self._on_visible_tile_window_finished_v2)
+        worker.error.connect(self._on_visible_tile_window_error_v2)
+        self._visible_tile_worker_v2 = worker
+        worker.start()
+
+    def _on_visible_tile_window_finished_v2(self, pair_id: str, generation: int, manifest: object) -> None:
+        worker = self.sender()
+        if isinstance(worker, QThread):
+            self._retire_visible_tile_worker_v2(worker)
+        if int(generation) != self._visible_tile_generation_v2:
+            return
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        if str(pair_id or "") != current_pair or not isinstance(manifest, dict):
+            return
+        pair = dict(self._viewer_pairs_by_id.get(pair_id, {}))
+        pair["tile_manifest"] = str(pair_tile_manifest_path(self._viewer_cache_root_v2() / "tiles", pair_id))
+        pair["tile_cache_key"] = str(manifest.get("cache_key") or pair.get("tile_cache_key") or "")
+        pair["lod_tile_count"] = int(manifest.get("tile_count") or 0)
+        pair["overlay_tile_count"] = int(manifest.get("overlay_tile_count") or 0)
+        self._viewer_pairs_by_id[pair_id] = pair
+        self._tile_manifest_cache_v2.clear()
+        if not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+            self.preview_before_v2.update_tile_manifest(manifest)
+            self.preview_after_v2.update_tile_manifest(manifest)
+        if self._visible_tile_pending_request_v2:
+            self._visible_tile_request_timer_v2.start()
+
+    def _on_visible_tile_window_error_v2(self, pair_id: str, generation: int, message: str) -> None:
+        worker = self.sender()
+        if isinstance(worker, QThread):
+            self._retire_visible_tile_worker_v2(worker)
+        if int(generation) == self._visible_tile_generation_v2 and self._viewer_root:
+            append_viewer_perf_event(
+                self._viewer_root,
+                "visible_tile_window_error",
+                pair_uuid=str(pair_id or ""),
+                generation=int(generation),
+                message=str(message or ""),
+            )
+        if self._visible_tile_pending_request_v2:
+            self._visible_tile_request_timer_v2.start()
+
     def _pair_needs_render_v2(self, pair_id: str, viewer_pair: dict, overlays: list[dict]) -> bool:
         if not pair_id or not viewer_pair:
             return False
@@ -8593,6 +11305,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if _viewer_pair_is_pdf(viewer_pair):
             return not (has_images and has_transforms and has_pixel_boxes)
         has_tiles = bool(viewer_pair.get("tile_manifest") or viewer_pair.get("lod_tile_count"))
+        if not self._selection_build_lod_tiles_enabled_v2():
+            has_tiles = True
         return not (has_images and has_transforms and has_pixel_boxes and has_tiles)
 
     def _preview_status_label_v2(self, row: dict, viewer_pair: dict) -> str:
@@ -8638,16 +11352,77 @@ class DrawingCompareWorkbenchV2(QMainWindow):
     def _viewer_pair_from_row_v2(self, pair_id: str, row: dict) -> dict:
         viewer_pair = dict(self._viewer_pairs_by_id.get(pair_id, {}))
         if viewer_pair:
+            viewer_pair = self._repair_viewer_pair_source_paths_v2(pair_id, viewer_pair, row)
+            self._viewer_pairs_by_id[pair_id] = viewer_pair
             return viewer_pair
         issue = (row.get("top_issues") or [{}])[0] if isinstance(row.get("top_issues"), list) else {}
         source_a = issue.get("source_a") or row.get("source_a") or ""
         source_b = issue.get("source_b") or row.get("source_b") or ""
-        return {
+        viewer_pair = {
             "pair_id": pair_id,
             "source_a": source_a,
             "source_b": source_b,
             "render_status": "render_pending",
         }
+        return self._repair_viewer_pair_source_paths_v2(pair_id, viewer_pair, row)
+
+    def _repair_viewer_pair_source_paths_v2(self, pair_id: str, viewer_pair: dict, row: dict) -> dict:
+        """Restore local source paths when sharable manifests redact them.
+
+        The viewer package redacts ``source_a``/``source_b`` for sharable
+        artifacts.  That is correct for exported files, but the live Workbench
+        still needs real local paths when selected-zone crop rendering falls
+        back from overview PNG cropping to source DXF/DWG rendering.
+        """
+
+        repaired = dict(viewer_pair or {})
+        for key in ("source_a", "source_b"):
+            if self._is_usable_zone_render_source_v2(repaired.get(key)):
+                continue
+            replacement = self._source_path_replacement_v2(pair_id, row, key)
+            if replacement:
+                repaired[key] = replacement
+        return repaired
+
+    def _source_path_replacement_v2(self, pair_id: str, row: dict, key: str) -> str:
+        issue = (row.get("top_issues") or [{}])[0] if isinstance(row.get("top_issues"), list) else {}
+        for value in (issue.get(key), row.get(key)):
+            if self._is_usable_zone_render_source_v2(value):
+                return str(value)
+
+        result = getattr(self, "_result", None)
+        summary = getattr(result, "summary", None)
+        try:
+            from src.services.comparison.pair_identity import candidate_pair_uuid
+
+            for item in getattr(summary, "items", []) or []:
+                candidate = getattr(item, "candidate", None)
+                if not candidate or candidate_pair_uuid(candidate) != pair_id:
+                    continue
+                descriptor = getattr(candidate, key, None)
+                value = getattr(descriptor, "path", "")
+                if self._is_usable_zone_render_source_v2(value):
+                    return str(value)
+        except Exception:
+            logger.debug("Could not restore source path from comparison summary", exc_info=True)
+
+        # Single-file runs can safely fall back to the current input fields.
+        if len(self._viewer_pairs_by_id) <= 1:
+            value = self._source_a if key == "source_a" else self._source_b
+            if self._is_usable_zone_render_source_v2(value):
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _is_usable_zone_render_source_v2(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text or _is_redacted_artifact_path(text):
+            return False
+        try:
+            path = Path(text)
+            return path.is_file() and path.suffix.lower() in SUPPORTED_DRAWING_EXTENSIONS
+        except (OSError, ValueError, RuntimeError):
+            return False
 
     def _start_pair_render_v2(self, pair_id: str, viewer_pair: dict, row: dict) -> None:
         if not self._viewer_root:
@@ -8661,38 +11436,57 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self._set_preview_status_v2(pair_id, "failed", "원본 도면 경로를 찾을 수 없어 미리보기를 만들 수 없습니다.")
             return
         self._set_preview_status_v2(pair_id, "rendering", "렌더 중 - 변경구역 위치를 준비하고 있습니다.")
-        overlays = self._viewer_overlays_for_pair_v2(pair_id)
-        self.preview_before_v2.load_preview(
-            "",
-            overlays,
-            before=True,
-            fallback_message="렌더 중 - 변경구역 위치를 준비하고 있습니다.",
-        )
-        self.preview_after_v2.load_preview(
-            "",
-            overlays,
-            before=False,
-            fallback_message="렌더 중 - 변경구역 위치를 준비하고 있습니다.",
-        )
+        if not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+            overlays = self._viewer_overlays_for_pair_v2(pair_id)
+            self.preview_before_v2.load_preview(
+                "",
+                overlays,
+                before=True,
+                fallback_message="렌더 중 - 변경구역 위치를 준비하고 있습니다.",
+            )
+            self.preview_after_v2.load_preview(
+                "",
+                overlays,
+                before=False,
+                fallback_message="렌더 중 - 변경구역 위치를 준비하고 있습니다.",
+            )
         self._render_worker = PairPreviewRenderWorker(
             pair_id=pair_id,
             viewer_pair=viewer_pair,
             dxf_cache_dir=self._dxf_cache_dir,
             viewer_root=self._viewer_root,
             viewer_cache_root=Path(str(self._viewer_manifest.get("viewer_cache_dir") or self._viewer_root)),
+            build_lod_tiles=self._selection_build_lod_tiles_enabled_v2(),
         )
         self._render_worker.finished.connect(self._on_pair_render_finished_v2)
         self._render_worker.error.connect(self._on_pair_render_error_v2)
         self._render_worker.start()
 
     def _on_pair_render_finished_v2(self, pair_id: str, viewer_pair: dict, overlays: list[dict]) -> None:
+        current_pair = str((self._active_row or {}).get("pair_id") or "")
+        existing_pair = self._viewer_pairs_by_id.get(pair_id, {})
+        if isinstance(existing_pair, dict):
+            merged_pair = dict(existing_pair)
+            merged_pair.update(viewer_pair or {})
+        else:
+            merged_pair = dict(viewer_pair or {})
+        if current_pair == pair_id and _viewer_pair_is_pdf(merged_pair):
+            if not merged_pair.get("page_match_pairs") and isinstance(existing_pair, dict):
+                merged_pair["page_match_pairs"] = list(existing_pair.get("page_match_pairs") or [])
+            self._apply_active_pdf_page_pair_to_viewer_pair_v2(merged_pair)
+        viewer_pair = merged_pair
         self._viewer_pairs_by_id[pair_id] = viewer_pair
-        self._viewer_overlay_cache[pair_id] = overlays
+        overlay_scope = str(viewer_pair.get("_overlay_materialization_scope") or "")
+        if overlay_scope != "visible_pdf_page":
+            self._cache_viewer_overlays_v2(pair_id, overlays)
         render_status = str(viewer_pair.get("render_status") or "")
         render_warning = str(viewer_pair.get("render_warning") or "")
         if render_status == "rendered":
             status = "tile_ready" if int(viewer_pair.get("lod_tile_count") or 0) > 0 else "ready"
             message = "선택 도면의 실제 미리보기와 타일 캐시를 준비했습니다."
+            tile_manifest = self._tile_manifest_for_pair_v2(pair_id, viewer_pair) if int(viewer_pair.get("lod_tile_count") or 0) > 0 else {}
+            if tile_manifest and tile_manifest.get("pyramid_complete") is False:
+                message = "선택 도면의 실제 미리보기와 현재 화면 주변 타일을 우선 준비했습니다."
             if _viewer_pair_is_pdf(viewer_pair):
                 status = "pdf_render"
                 message = "PDF 시각 배경을 준비했습니다."
@@ -8704,32 +11498,47 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             message = render_warning or "원본 도면 미리보기 렌더에 실패해 실제 도면 배경 없이 상대 위치 오버레이로 표시합니다."
         self._set_preview_status_v2(pair_id, status, message)
         self._update_viewer_manifest_pair_v2(pair_id, viewer_pair)
-        current_pair = str((self._active_row or {}).get("pair_id") or "")
         if current_pair == pair_id:
-            tile_manifest = self._tile_manifest_for_pair_v2(pair_id, viewer_pair)
-            self._active_overlays_by_zone = {
+            self._active_all_overlays_by_zone = {
                 str(overlay.get("zone_id") or ""): overlay
                 for overlay in overlays
                 if isinstance(overlay, dict) and overlay.get("zone_id")
             }
-            self.preview_before_v2.load_preview(
-                str(viewer_pair.get("before_image") or ""),
+            visible_overlays = self._visible_overlays_for_pdf_page_v2(
+                pair_id,
+                viewer_pair,
                 overlays,
-                before=True,
-                tile_manifest=tile_manifest,
-                viewer_root=self._viewer_root,
-                pair_id=pair_id,
+                load_when_empty=False,
             )
-            self.preview_after_v2.load_preview(
-                str(viewer_pair.get("after_image") or ""),
-                overlays,
-                before=False,
-                tile_manifest=tile_manifest,
-                viewer_root=self._viewer_root,
-                pair_id=pair_id,
+            tile_manifest = (
+                self._tile_manifest_for_pair_v2(pair_id, viewer_pair)
+                if self._selection_build_lod_tiles_enabled_v2()
+                else {}
             )
+            self._active_overlays_by_zone = {
+                str(overlay.get("zone_id") or ""): overlay
+                for overlay in visible_overlays
+                if isinstance(overlay, dict) and overlay.get("zone_id")
+            }
+            if not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+                self.preview_before_v2.load_preview(
+                    str(viewer_pair.get("before_image") or ""),
+                    visible_overlays,
+                    before=True,
+                    tile_manifest=tile_manifest,
+                    viewer_root=self._viewer_root,
+                    pair_id=pair_id,
+                )
+                self.preview_after_v2.load_preview(
+                    str(viewer_pair.get("after_image") or ""),
+                    visible_overlays,
+                    before=False,
+                    tile_manifest=tile_manifest,
+                    viewer_root=self._viewer_root,
+                    pair_id=pair_id,
+                )
             active_zone = self._active_zone_id
-            self._populate_zone_list_v2(self._preview_by_pair.get(pair_id), overlays)
+            self._populate_zone_list_v2(self._preview_by_pair.get(pair_id), visible_overlays, prefer_overlays=True)
             if active_zone:
                 self._select_zone_in_list_v2(active_zone)
         self._retire_render_worker_v2()
@@ -8740,19 +11549,20 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._set_preview_status_v2(pair_id, "failed", message or "미리보기 렌더에 실패했습니다.")
         current_pair = str((self._active_row or {}).get("pair_id") or "")
         if current_pair == pair_id:
-            overlays = self._viewer_overlays_for_pair_v2(pair_id)
-            self.preview_before_v2.load_preview(
-                "",
-                overlays,
-                before=True,
-                fallback_message="미리보기 실패 - 상대위치 표시로 변경구역을 확인합니다.",
-            )
-            self.preview_after_v2.load_preview(
-                "",
-                overlays,
-                before=False,
-                fallback_message="미리보기 실패 - 상대위치 표시로 변경구역을 확인합니다.",
-            )
+            if not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+                overlays = self._viewer_overlays_for_pair_v2(pair_id)
+                self.preview_before_v2.load_preview(
+                    "",
+                    overlays,
+                    before=True,
+                    fallback_message="미리보기 실패 - 상대위치 표시로 변경구역을 확인합니다.",
+                )
+                self.preview_after_v2.load_preview(
+                    "",
+                    overlays,
+                    before=False,
+                    fallback_message="미리보기 실패 - 상대위치 표시로 변경구역을 확인합니다.",
+                )
         self._retire_render_worker_v2()
         self._start_pending_render_v2()
 
@@ -8819,19 +11629,52 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             if _viewer_pair_is_pdf(viewer_pair_for_fallback) and self._apply_pdf_page_pin_fallback_v2(
                 pair_id, zone_id, viewer_pair_for_fallback
             ):
+                self._record_zone_render_perf_event_v2(
+                    "zone_render_fallback",
+                    pair_id,
+                    zone_id,
+                    reason_code="pdf_page_pin_fallback",
+                    visual_fidelity="relative_overlay",
+                )
                 return
+            self._record_zone_render_perf_event_v2(
+                "zone_render_fallback",
+                pair_id,
+                zone_id,
+                reason_code="missing_cad_bbox",
+                visual_fidelity="relative_overlay",
+            )
             self._set_preview_status_v2(
                 pair_id,
                 "relative_only",
                 "선택 변경구역에 CAD bbox가 없어 상대 위치 표시만 유지합니다.",
             )
             return
+        request_id = self._active_zone_render_request_id_v2(pair_id, zone_id)
+        if not request_id:
+            request_id = self._begin_selected_zone_render_request_v2(pair_id, zone_id)
         if self._zone_render_controller_v2.is_busy():
-            self._pending_zone_render_request_v2 = (pair_id, zone_id)
+            previous = self._pending_zone_render_request_v2
+            if previous and previous[:2] != (pair_id, zone_id):
+                self._record_zone_render_perf_event_v2(
+                    "zone_render_pending_replaced",
+                    str(previous[0]),
+                    str(previous[1]),
+                    replacement_pair_uuid=pair_id,
+                    replacement_zone_id=zone_id,
+                )
+            self._pending_zone_render_request_v2 = (pair_id, zone_id, request_id)
             self._set_preview_status_v2(pair_id, "rendering", "현재 구역 렌더가 끝나면 이어서 준비합니다.")
             return
         viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
         if not viewer_pair.get("source_a") or not viewer_pair.get("source_b"):
+            self._record_zone_render_perf_event_v2(
+                "zone_render_fallback",
+                pair_id,
+                zone_id,
+                reason_code="missing_source_path",
+                visual_fidelity="relative_overlay",
+            )
             self._set_preview_status_v2(pair_id, "relative_only", "원본 도면 경로를 찾을 수 없어 상대 위치만 표시합니다.")
             return
         self._set_preview_status_v2(pair_id, "rendering", "선택 변경구역 실도면 crop을 렌더 중입니다.")
@@ -8839,14 +11682,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             has_pdf_background = bool(viewer_pair.get("before_image")) and bool(viewer_pair.get("after_image"))
             has_pdf_transform = bool(viewer_pair.get("before_transform")) and bool(viewer_pair.get("after_transform"))
             if not (has_pdf_background and has_pdf_transform):
-                self._pending_zone_render_request_v2 = (pair_id, zone_id)
+                previous = self._pending_zone_render_request_v2
+                if previous and previous[:2] != (pair_id, zone_id):
+                    self._record_zone_render_perf_event_v2(
+                        "zone_render_pending_replaced",
+                        str(previous[0]),
+                        str(previous[1]),
+                        replacement_pair_uuid=pair_id,
+                        replacement_zone_id=zone_id,
+                    )
+                self._pending_zone_render_request_v2 = (pair_id, zone_id, request_id)
                 if self._render_status_by_pair.get(pair_id) != "rendering":
                     self._start_pair_render_v2(pair_id, viewer_pair, self._active_row or {})
                 else:
                     self._set_preview_status_v2(pair_id, "rendering", "PDF 배경 생성 중 - 선택 구역 렌더를 대기합니다.")
                 return
         render_environment_hash = render_environment_signature(dxf_cache_dir=self._dxf_cache_dir)
-        request_id = f"{pair_id}:{zone_id}:{int(perf_counter() * 1000)}"
         before_background = _resolve_viewer_artifact_path(viewer_pair.get("before_image"), self._viewer_root)
         after_background = _resolve_viewer_artifact_path(viewer_pair.get("after_image"), self._viewer_root)
         render_bbox = (
@@ -8882,7 +11733,35 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             overlays=list(self._active_overlays_by_zone.values()),
         )
         if not started:
-            self._pending_zone_render_request_v2 = (pair_id, zone_id)
+            self._record_zone_render_perf_event_v2(
+                "zone_render_pending_deferred",
+                pair_id,
+                zone_id,
+                reason_code="controller_busy_or_unavailable",
+            )
+            self._pending_zone_render_request_v2 = (pair_id, zone_id, request_id)
+
+    def _start_selected_zone_deferred_enhancement_v2(
+        self, pair_id: str, zone_id: str, request_id: str = "",
+    ) -> None:
+        if not self._is_current_zone_render_request_v2(pair_id, zone_id, request_id):
+            self._record_zone_render_perf_event_v2(
+                "zone_render_stale",
+                pair_id,
+                zone_id,
+                reason_code="deferred_enhancement_stale",
+                request_id=request_id,
+                active_request_id=self._active_zone_render_request_id_v2(pair_id, zone_id),
+            )
+            return
+        try:
+            self._request_zone_focus_v2(zone_id)
+        except Exception:
+            logger.exception("Deferred lightweight zone focus failed for %s", zone_id)
+        viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
+        if not _viewer_pair_is_pdf(viewer_pair):
+            self._apply_or_start_zone_vector_render_v2(pair_id, zone_id)
+        self._refresh_zone_vector_button_state_v2()
 
     def _on_zone_crop_render_finished_v2(
         self,
@@ -8893,11 +11772,35 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         local_overlays: list[dict],
     ) -> None:
         if pair_id not in self._viewer_pairs_by_id:
+            self._record_zone_render_perf_event_v2(
+                "zone_render_stale",
+                pair_id,
+                zone_id,
+                reason_code="inactive_pair_result",
+            )
             logger.debug(
                 "Ignoring stale zone crop render result for inactive pair=%s zone=%s",
                 pair_id,
                 zone_id,
             )
+            return
+        result_request_id = str(result_payload.get("request_id") or "")
+        if not self._is_current_zone_render_request_v2(pair_id, zone_id, result_request_id):
+            self._record_zone_render_perf_event_v2(
+                "zone_render_stale",
+                pair_id,
+                zone_id,
+                reason_code="superseded_request",
+                request_id=result_request_id,
+                active_request_id=self._active_zone_render_request_id_v2(pair_id, zone_id),
+            )
+            logger.debug(
+                "Ignoring stale zone crop render result for superseded request pair=%s zone=%s request=%s",
+                pair_id,
+                zone_id,
+                result_request_id,
+            )
+            self._start_pending_zone_render_v2()
             return
         self._viewer_pairs_by_id[pair_id] = viewer_pair
         if self._viewer_root:
@@ -8905,6 +11808,54 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 elapsed_ms = float(result_payload.get("elapsed_ms") or 0.0)
             except (TypeError, ValueError):
                 elapsed_ms = 0.0
+            pdf_cache_metrics = {}
+            for key in (
+                "pdf_display_list_render_count",
+                "pdf_display_list_cache_lookup_count",
+                "pdf_display_list_cache_hit_count",
+                "pdf_display_list_cache_miss_count",
+                "pdf_display_list_cache_hit_rate",
+                "pdf_display_list_cache_eviction_count",
+                "pdf_display_list_cache_evicted_estimated_bytes",
+                "pdf_display_list_cache_total_estimated_bytes",
+                "pdf_display_list_cache_byte_limit",
+                "pdf_display_list_cache_entry_estimated_bytes_max",
+                "pdf_display_list_worker_rss_mb",
+                "pdf_pil_fallback_count",
+            ):
+                if key in result_payload:
+                    pdf_cache_metrics[key] = result_payload.get(key)
+            nested_pdf_cache = result_payload.get("pdf_display_list_cache")
+            if isinstance(nested_pdf_cache, dict):
+                pdf_cache_metrics["pdf_display_list_cache"] = nested_pdf_cache
+            dxf_index_metrics = {}
+            for key in (
+                "dxf_index_cache_entries",
+                "dxf_index_cache_capacity_entries",
+                "dxf_index_cache_byte_limit",
+                "dxf_index_cache_entry_estimated_bytes_max",
+                "dxf_index_cache_total_estimated_bytes",
+                "dxf_index_cache_lookup_count",
+                "dxf_index_cache_hit_count",
+                "dxf_index_cache_miss_count",
+                "dxf_index_cache_hit_rate",
+                "dxf_index_cache_eviction_count",
+                "dxf_index_cache_evicted_estimated_bytes",
+                "dxf_index_cache_last_eviction_reason",
+                "dxf_index_cache_worker_rss_mb",
+            ):
+                if key in result_payload:
+                    dxf_index_metrics[key] = result_payload.get(key)
+            nested_dxf_index_cache = result_payload.get("dxf_index_cache")
+            if isinstance(nested_dxf_index_cache, dict):
+                dxf_index_metrics["dxf_index_cache"] = nested_dxf_index_cache
+            warning_payload = result_payload.get("warnings")
+            if isinstance(warning_payload, list):
+                warning_items = list(warning_payload)
+            elif warning_payload:
+                warning_items = [str(warning_payload)]
+            else:
+                warning_items = []
             append_viewer_perf_event(
                 self._viewer_root,
                 "zone_crop_render",
@@ -8914,6 +11865,11 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 cache_hit=bool(result_payload.get("cache_hit")),
                 render_lifecycle=str(result_payload.get("render_lifecycle") or ""),
                 visual_fidelity=str(result_payload.get("visual_fidelity") or ""),
+                reason_code=str(result_payload.get("reason_code") or ""),
+                renderer_backend=str(result_payload.get("renderer_backend") or ""),
+                warnings=warning_items,
+                **pdf_cache_metrics,
+                **dxf_index_metrics,
             )
             self._refresh_viewer_perf_summary_only()
         for overlay in local_overlays:
@@ -8926,50 +11882,99 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             before_image = str(result_payload.get("before_image") or "")
             after_image = str(result_payload.get("after_image") or "")
             lifecycle = str(result_payload.get("render_lifecycle") or "ready")
+            reason_code = str(result_payload.get("reason_code") or "")
             message = "실도면 렌더 - 선택 구역 주변만 빠르게 표시합니다."
             status = "ready"
             if str(result_payload.get("visual_fidelity") or "") == "pdf_render":
                 status = "pdf_render"
                 message = "PDF 시각 배경 - 선택 구역 주변만 빠르게 표시합니다."
-            if lifecycle == "skipped_missing_page_bbox":
+            if lifecycle == "skipped_missing_page_bbox" or reason_code == "missing_page_bbox":
                 status = "relative_only"
-                message = "PDF 위치 좌표 없음 - 상대 위치만 표시합니다."
+                message = self._zone_render_reason_message_ko("missing_page_bbox")
+            elif lifecycle == "fallback_visible":
+                status = "relative_only"
+                message = self._zone_render_reason_message_ko(reason_code)
             elif result_payload.get("cache_hit"):
                 message = "실도면 렌더 - 캐시된 선택 구역 crop을 표시합니다."
-            warnings = result_payload.get("warnings") or []
-            if warnings:
-                message = f"{message}\n{warnings[0]}"
             self._set_preview_status_v2(pair_id, status, message)
-            self.preview_before_v2.load_preview(
-                before_image,
-                local_overlays,
-                before=True,
-                fallback_message="렌더 실패 시 상대 위치로 표시합니다.",
-                viewer_root=self._viewer_root,
-                pair_id=pair_id,
-            )
-            self.preview_after_v2.load_preview(
-                after_image,
-                local_overlays,
-                before=False,
-                fallback_message="렌더 실패 시 상대 위치로 표시합니다.",
-                viewer_root=self._viewer_root,
-                pair_id=pair_id,
-            )
-            self.preview_before_v2.set_selected_zone(zone_id)
-            self.preview_after_v2.set_selected_zone(zone_id)
-            self.preview_before_v2.focus_zone(zone_id, padding_ratio=0.25)
-            self.preview_after_v2.focus_zone(zone_id, padding_ratio=0.25)
+            if not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
+                self.preview_before_v2.load_preview(
+                    before_image,
+                    local_overlays,
+                    before=True,
+                    fallback_message="렌더 실패 시 상대 위치로 표시합니다.",
+                    viewer_root=self._viewer_root,
+                    pair_id=pair_id,
+                )
+                self.preview_after_v2.load_preview(
+                    after_image,
+                    local_overlays,
+                    before=False,
+                    fallback_message="렌더 실패 시 상대 위치로 표시합니다.",
+                    viewer_root=self._viewer_root,
+                    pair_id=pair_id,
+                )
+                self.preview_before_v2.set_selected_zone(zone_id)
+                self.preview_after_v2.set_selected_zone(zone_id)
+                self.preview_before_v2.focus_zone(zone_id, padding_ratio=0.25)
+                self.preview_after_v2.focus_zone(zone_id, padding_ratio=0.25)
             self.zone_detail_v2.setHtml(self._zone_detail_text_v2(zone_id))
+            self._start_selected_zone_deferred_enhancement_v2(pair_id, zone_id, result_request_id)
         self._start_pending_zone_render_v2()
 
-    def _on_zone_crop_render_error_v2(self, pair_id: str, zone_id: str, message: str, status: str = "relative_only") -> None:
+    @staticmethod
+    def _zone_render_reason_message_ko(reason_code: str) -> str:
+        messages = {
+            "missing_page_bbox": "PDF 위치 좌표가 없어 실제 crop 대신 상대 위치 캔버스로 표시합니다.",
+            "source_render_failed": "선택 구역 렌더가 실패해 실제 도면 배경 대신 상대 위치 캔버스로 표시합니다.",
+            "outside_background_bounds": "선택 구역이 렌더된 배경 범위 밖이라 상대 위치 캔버스로 표시합니다.",
+            "outside_output_bounds": "선택 구역을 출력 이미지 좌표로 매핑하지 못해 상대 위치 캔버스로 표시합니다.",
+        }
+        return messages.get(
+            str(reason_code or "").strip(),
+            "선택 구역을 실제 배경으로 렌더하지 못해 상대 위치 캔버스로 표시합니다.",
+        )
+
+    def _on_zone_crop_render_error_v2(
+        self,
+        pair_id: str,
+        zone_id: str,
+        message: str,
+        status: str = "relative_only",
+        request_id: str = "",
+    ) -> None:
         if pair_id not in self._viewer_pairs_by_id:
+            self._record_zone_render_perf_event_v2(
+                "zone_render_stale",
+                pair_id,
+                zone_id,
+                reason_code="inactive_pair_error",
+                status=status,
+            )
             logger.debug(
                 "Ignoring stale zone crop render error for inactive pair=%s zone=%s",
                 pair_id,
                 zone_id,
             )
+            return
+        request_id = str(request_id or "")
+        if not self._is_current_zone_render_request_v2(pair_id, zone_id, request_id):
+            self._record_zone_render_perf_event_v2(
+                "zone_render_stale",
+                pair_id,
+                zone_id,
+                reason_code="superseded_error",
+                status=status,
+                request_id=request_id,
+                active_request_id=self._active_zone_render_request_id_v2(pair_id, zone_id),
+            )
+            logger.debug(
+                "Ignoring stale zone crop render error for superseded request pair=%s zone=%s request=%s",
+                pair_id,
+                zone_id,
+                request_id,
+            )
+            self._start_pending_zone_render_v2()
             return
         current_pair = str((self._active_row or {}).get("pair_id") or "")
         if current_pair == pair_id:
@@ -8988,15 +11993,35 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._pending_zone_render_request_v2 = None
         if not pending:
             return
-        pair_id, zone_id = pending
+        pair_id, zone_id = str(pending[0]), str(pending[1])
+        request_id = str(pending[2]) if len(pending) >= 3 else ""
         current_pair = str((self._active_row or {}).get("pair_id") or "")
         current_zone = str(self._active_zone_id or "")
-        if pair_id == current_pair and zone_id == current_zone:
+        if (
+            pair_id == current_pair
+            and zone_id == current_zone
+            and self._is_current_zone_render_request_v2(pair_id, zone_id, request_id)
+        ):
             self._start_zone_crop_render_v2(zone_id)
+        else:
+            self._record_zone_render_perf_event_v2(
+                "zone_render_pending_dropped",
+                pair_id,
+                zone_id,
+                current_pair_uuid=current_pair,
+                current_zone_id=current_zone,
+                request_id=request_id,
+                active_request_id=self._active_zone_render_request_id_v2(pair_id, zone_id),
+            )
 
     def _update_viewer_manifest_pair_v2(self, pair_id: str, viewer_pair: dict) -> None:
         if not self._viewer_manifest_path or not self._viewer_manifest:
             return
+        viewer_pair = {
+            key: value
+            for key, value in dict(viewer_pair or {}).items()
+            if not str(key).startswith("_overlay_")
+        }
         pairs = self._viewer_manifest.get("pairs")
         if not isinstance(pairs, list):
             return
@@ -9528,8 +12553,20 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             return
         cur_drawing_row = self.drawing_list_v2.currentRow()
 
-        def _pair_has_unreviewed(target_pair_id: str) -> bool:
-            overlays = self._viewer_overlays_for_pair_v2(target_pair_id) or []
+        def _pair_has_unreviewed(target_pair_id: str, target_row: dict) -> bool:
+            declared = self._viewer_declared_overlay_count_for_pair_v2(
+                target_pair_id,
+                row=target_row,
+                viewer_pair=self._viewer_pairs_by_id.get(target_pair_id, {}),
+            )
+            done, _confirmed = self._review_record_counts_for_pair_v2(target_pair_id)
+            if declared > 0:
+                return done < declared
+            overlays = self._viewer_initial_overlays_from_page_store_v2(target_pair_id, 1)
+            if overlays is None:
+                if self._overlay_json_file_size_for_pair_v2(target_pair_id) > GUI_UNKNOWN_OVERLAY_JSON_DEFER_BYTES:
+                    return done == 0
+                overlays = self._viewer_overlays_for_pair_v2(target_pair_id) or []
             for ov in overlays:
                 zid = str(ov.get("zone_id") or "")
                 if not zid:
@@ -9550,7 +12587,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             target_pair_id = str(row.get("pair_id") or "")
             if not target_pair_id or target_pair_id == pair_id:
                 continue
-            if _pair_has_unreviewed(target_pair_id):
+            if _pair_has_unreviewed(target_pair_id, row):
                 logger.info(
                     "Auto-advance: current pair done, jumping to drawing row %d (%s)",
                     idx, target_pair_id,
@@ -9683,24 +12720,29 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         done = confirmed + hold + false_positive
         pct = int(round(done / total * 100)) if total else 0
 
-        # Phase G3.6 — project-wide totals across every cached pair.
+        # Phase G3.6/P5 — project-wide totals from declared row/package counts.
+        # The full overlay cache is intentionally bounded and may be empty for
+        # paged stores, so it cannot be the source of project progress truth.
         proj_total = 0
         proj_done = 0
         proj_confirmed = 0
-        cache = getattr(self, "_viewer_overlay_cache", {}) or {}
-        for cache_pair_id, overlays in cache.items():
-            for ov in overlays or []:
-                if not isinstance(ov, dict):
-                    continue
-                zid = str(ov.get("zone_id") or "")
-                if not zid:
-                    continue
-                proj_total += 1
-                status = self._review_status_for_zone_v2(cache_pair_id, zid)
-                if status != "needs_review":
-                    proj_done += 1
-                if status == "confirmed":
-                    proj_confirmed += 1
+        seen_pairs: set[str] = set()
+        for row in list(getattr(self, "_drawing_rows", []) or []):
+            if not isinstance(row, dict):
+                continue
+            row_pair_id = str(row.get("pair_id") or "")
+            if not row_pair_id or row_pair_id in seen_pairs:
+                continue
+            seen_pairs.add(row_pair_id)
+            declared = self._viewer_declared_overlay_count_for_pair_v2(
+                row_pair_id,
+                row=row,
+                viewer_pair=self._viewer_pairs_by_id.get(row_pair_id, {}),
+            )
+            row_done, row_confirmed = self._review_record_counts_for_pair_v2(row_pair_id)
+            proj_total += max(0, int(declared))
+            proj_done += min(max(0, int(row_done)), max(0, int(declared))) if declared > 0 else 0
+            proj_confirmed += min(max(0, int(row_confirmed)), max(0, int(declared))) if declared > 0 else 0
         # Use the visible-zone count when project cache hasn't loaded yet.
         if proj_total < total:
             proj_total = total
@@ -9731,7 +12773,85 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_zone_progress_v2.setTextFormat(Qt.RichText)
         self.lbl_zone_progress_v2.setText(html)
 
-    def _populate_zone_list_v2(self, preview: Optional[PreviewArtifact], overlays: Optional[list[dict]] = None) -> None:
+    def _build_zone_tree_plan_v2(
+        self,
+        preview: Optional[PreviewArtifact],
+        overlays: Optional[list[dict]] = None,
+        *,
+        allow_clustering: bool = True,
+        prefer_overlays: bool = False,
+    ) -> list[dict]:
+        pair_id_for_cat = str((self._active_row or {}).get("pair_id") or "")
+        preview_zones: list[dict] = []
+        if preview:
+            for zone in sorted(
+                getattr(preview, "zone_overlays", []) or [],
+                key=lambda item: (-int(getattr(item, "raw_change_count", 0) or 0), str(getattr(item, "zone_id", ""))),
+            ):
+                preview_zones.append({
+                    "zone_id": getattr(zone, "zone_id", ""),
+                    "change_type": getattr(zone, "change_type", ""),
+                    "severity": getattr(zone, "severity", ""),
+                    "raw_change_count": int(getattr(zone, "raw_change_count", 0) or 0),
+                })
+        plan, active_issue_by_zone = _build_zone_tree_plan_data_v2(
+            dashboard_issues=list((self._active_row or {}).get("top_issues") or []),
+            overlays=list(overlays or []),
+            preview_zones=preview_zones,
+            category_by_zone=dict(self._zone_categories_v2.get(pair_id_for_cat, {})),
+            active_zone_id=str(self._active_zone_id or ""),
+            allow_clustering=allow_clustering,
+            clustering_enabled=bool(getattr(self, "_zone_clustering_enabled_v2", True)),
+            prefer_overlays=prefer_overlays,
+        )
+        self._active_issue_by_zone = active_issue_by_zone
+        return plan
+
+    def _make_zone_tree_header_item_v2(self, group: dict) -> QTreeWidgetItem:
+        header = QTreeWidgetItem([str(group.get("header_text") or "")])
+        header.setData(0, Qt.UserRole, "")
+        tooltip = str(group.get("tooltip") or "")
+        if tooltip:
+            header.setToolTip(0, tooltip)
+        return header
+
+    def _append_zone_tree_plan_item_v2(self, parent: QTreeWidgetItem, item: dict) -> int:
+        kind = str(item.get("kind") or "")
+        if kind == "cluster":
+            cluster_node = QTreeWidgetItem([str(item.get("label") or "")])
+            cluster_node.setData(0, Qt.UserRole, "")
+            tooltip = str(item.get("tooltip") or "")
+            if tooltip:
+                cluster_node.setToolTip(0, tooltip)
+            parent.addChild(cluster_node)
+            added = 1
+            for child in item.get("children") or []:
+                added += self._append_zone_tree_plan_item_v2(cluster_node, child)
+            cluster_node.setExpanded(bool(item.get("expanded")))
+            return added
+        zone_id = str(item.get("zone_id") or "")
+        if not zone_id:
+            return 0
+        leaf = QTreeWidgetItem([str(item.get("label") or "")])
+        leaf.setData(0, Qt.UserRole, zone_id)
+        parent.addChild(leaf)
+        return 1
+
+    def _append_zone_tree_plan_immediate_v2(self, plan: list[dict]) -> None:
+        for group in plan:
+            header = self._make_zone_tree_header_item_v2(group)
+            self.zone_list_v2.addTopLevelItem(header)
+            for item in group.get("items") or []:
+                self._append_zone_tree_plan_item_v2(header, item)
+            header.setExpanded(bool(group.get("expanded")))
+
+    def _populate_zone_list_v2(
+        self,
+        preview: Optional[PreviewArtifact],
+        overlays: Optional[list[dict]] = None,
+        *,
+        prefer_overlays: bool = False,
+    ) -> None:
         """Phase I2 — Build the category-grouped zone tree.
 
         The tree is two levels deep:
@@ -9749,7 +12869,6 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
         self.zone_list_v2.clear()
         self._set_zone_action_buttons_enabled_v2(False)
-        self._active_issue_by_zone = {}
         self._active_overlays_by_zone = {
             str(overlay.get("zone_id") or ""): overlay
             for overlay in (overlays or [])
@@ -9758,175 +12877,11 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # Phase G3.7 — batch action available whenever the active pair
         # has at least one zone, regardless of per-zone selection.
         self._set_batch_action_button_enabled_v2(bool(self._active_overlays_by_zone))
-        pair_id_for_cat = str((self._active_row or {}).get("pair_id") or "")
-
-        def _classify(zid: str):
-            return self._zone_category_for(pair_id_for_cat, zid)
-
-        # ---- Pick the data source + per-row label builder -------------
-        zones_for_grouping: list[dict] = []
-        row_label_fn = None  # zone dict -> str label
-
-        dashboard_issues = list((self._active_row or {}).get("top_issues") or [])
-        if dashboard_issues:
-            # Sort by severity boost first, then priority score
-            def _issue_sort_key(issue: dict) -> tuple:
-                zid = str(issue.get("zone_id") or "")
-                cat = self._zone_category_for(pair_id_for_cat, zid)
-                boost = -(cat.severity_boost if cat else 0)
-                return (boost, -float(issue.get("priority_score") or 0.0), zid)
-
-            zones_for_grouping = sorted(dashboard_issues, key=_issue_sort_key)
-            for issue in zones_for_grouping:
-                zone_id = str(issue.get("zone_id") or "")
-                if zone_id:
-                    self._active_issue_by_zone[zone_id] = issue
-
-            def _issue_label(issue: dict) -> str:
-                zone_id = str(issue.get("zone_id") or "")
-                return (
-                    f"{zone_id} · "
-                    f"{issue.get('change_type_ko') or _ko_change_type(issue.get('change_type'))} · "
-                    f"{issue.get('severity_ko') or issue.get('severity')} · "
-                    f"점수 {float(issue.get('priority_score') or 0.0):.1f} · "
-                    f"변경 {_format_count(issue.get('raw_change_count'))}"
-                )
-
-            row_label_fn = _issue_label
-
-        elif overlays:
-            def _overlay_sort_key(overlay: dict) -> tuple:
-                zid = str(overlay.get("zone_id") or "")
-                cat = self._zone_category_for(pair_id_for_cat, zid)
-                boost = -(cat.severity_boost if cat else 0)
-                return (boost, -_int_value(overlay.get("raw_change_count")), zid)
-
-            zones_for_grouping = sorted(overlays, key=_overlay_sort_key)
-
-            def _overlay_label(overlay: dict) -> str:
-                zone_id = str(overlay.get("zone_id") or "")
-                return (
-                    f"{zone_id} · "
-                    f"{overlay.get('change_label') or _ko_change_type(overlay.get('change_type'))} · "
-                    f"{overlay.get('severity')} · "
-                    f"변경 {_format_count(overlay.get('raw_change_count'))}"
-                )
-
-            row_label_fn = _overlay_label
-
-        elif preview:
-            # Adapt PreviewArtifact zone_overlays (objects, not dicts) into
-            # a uniform dict shape for the grouping helper.
-            preview_zones = sorted(
-                preview.zone_overlays,
-                key=lambda item: (-int(item.raw_change_count), item.zone_id),
-            )
-            zones_for_grouping = [
-                {
-                    "zone_id": z.zone_id,
-                    "change_type": z.change_type,
-                    "severity": z.severity,
-                    "raw_change_count": int(z.raw_change_count),
-                }
-                for z in preview_zones
-            ]
-
-            def _preview_label(zone: dict) -> str:
-                return (
-                    f"{zone['zone_id']} · "
-                    f"{_ko_change_type(zone['change_type'])} · "
-                    f"{zone['severity']} · "
-                    f"변경 {_format_count(zone['raw_change_count'])}"
-                )
-
-            row_label_fn = _preview_label
-
-        if not zones_for_grouping or row_label_fn is None:
-            return
-
-        # ---- Build tree structure ------------------------------------
-        groups = _group_zones_by_category_v2(zones_for_grouping, _classify)
-
-        # Phase I3 — fold near-duplicate zones inside each category into
-        # cluster nodes so the user sees "[12] DIM-A · 수정 · TEXT" once
-        # instead of 12 nearly-identical rows. Toggle-able via the
-        # _zone_clustering_enabled_v2 flag (default True; flipped from a
-        # future Settings menu).
-        from src.services.comparison.zone_clusterer import (
-            ClusterOptions, cluster_zones,
-        )
-
-        clustering_enabled = bool(getattr(self, "_zone_clustering_enabled_v2", True))
-        cluster_opts = ClusterOptions(enabled=clustering_enabled)
-
-        # Auto-expand only the top-priority (first) category to keep the
-        # initial view focused; user can expand others on demand.
-        for group_idx, (label, _boost, zones_in_group) in enumerate(groups):
-            total_count = len(zones_in_group)
-            clusters = cluster_zones(zones_in_group, options=cluster_opts)
-            row_count = len(clusters)
-            # Header text: "🏗️ 구조 부재 변경  (12)" — count is total
-            # zones, not row count, so the user always knows the true
-            # change count even when clustering compresses rows.
-            header = QTreeWidgetItem(
-                [f"{_zone_category_icon_v2(label)} {label}  ({total_count})"]
-            )
-            header.setData(0, Qt.UserRole, "")
-            header.setToolTip(
-                0,
-                f"{label} · {total_count}개 변경구역"
-                + (f" ({row_count}행으로 묶임)" if row_count != total_count else ""),
-            )
-            self.zone_list_v2.addTopLevelItem(header)
-
-            active_zone_in_group = bool(
-                self._active_zone_id
-                and any(
-                    str(z.get("zone_id") or "") == self._active_zone_id
-                    for z in zones_in_group
-                )
-            )
-
-            for cluster in clusters:
-                if cluster.is_singleton:
-                    # Render directly as a leaf under the category header
-                    zone = cluster.representative
-                    zone_id = str(zone.get("zone_id") or "")
-                    if not zone_id:
-                        continue
-                    leaf = QTreeWidgetItem([row_label_fn(zone)])
-                    leaf.setData(0, Qt.UserRole, zone_id)
-                    header.addChild(leaf)
-                else:
-                    # Cluster node — sub-header with each zone as grandchild
-                    cluster_node = QTreeWidgetItem([f"  {cluster.summary_label}"])
-                    cluster_node.setData(0, Qt.UserRole, "")  # not selectable as a zone
-                    cluster_node.setToolTip(
-                        0,
-                        f"{cluster.summary_label} — {cluster.size}개 변경구역 묶음. "
-                        f"펼쳐서 개별 구역을 검토할 수 있습니다.",
-                    )
-                    header.addChild(cluster_node)
-                    has_active = False
-                    for zone in cluster.members:
-                        zone_id = str(zone.get("zone_id") or "")
-                        if not zone_id:
-                            continue
-                        leaf = QTreeWidgetItem([row_label_fn(zone)])
-                        leaf.setData(0, Qt.UserRole, zone_id)
-                        cluster_node.addChild(leaf)
-                        if self._active_zone_id and zone_id == self._active_zone_id:
-                            has_active = True
-                    # Cluster nodes start collapsed unless they contain
-                    # the currently-active zone.
-                    cluster_node.setExpanded(has_active)
-
-            # Auto-expand category: first (highest-severity) by default,
-            # plus any category that contains the currently active zone.
-            should_expand_category = bool((group_idx == 0) or active_zone_in_group)
-            header.setExpanded(should_expand_category)
+        plan = self._build_zone_tree_plan_v2(preview, overlays, prefer_overlays=prefer_overlays)
+        self._append_zone_tree_plan_immediate_v2(plan)
 
     def _on_zone_selected_v2(self, current, _previous=None) -> None:
+        selection_started = perf_counter()
         if not current:
             return
         # Phase I2 — QTreeWidgetItem.data takes (column, role); category
@@ -9939,23 +12894,28 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         zone_id = str(current.data(0, Qt.UserRole) or "")
         if not zone_id:
             self._active_zone_id = ""
+            self._selected_zone_render_generation_v2 += 1
+            self._active_zone_render_request_v2 = None
             self._set_zone_action_buttons_enabled_v2(False)
+            self._set_lightweight_zone_side_messages_v2("")
             return
         self._active_zone_id = zone_id
         self._set_zone_action_buttons_enabled_v2(bool(zone_id))
         if not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY:
             self.preview_before_v2.focus_zone(zone_id, padding_ratio=0.25)
             self.preview_after_v2.focus_zone(zone_id, padding_ratio=0.25)
+        pair_id = str((self._active_row or {}).get("pair_id") or "")
+        self._begin_selected_zone_render_request_v2(pair_id, zone_id)
+        defer_heavy_render = self._consume_initial_zone_heavy_render_defer_v2(pair_id, zone_id)
         # Phase G2.3 — also focus the lightweight viewport when active.
         # No-op when the legacy viewport is showing (toggle OFF).
         try:
+            self._set_lightweight_zone_side_messages_v2(zone_id)
             self._focus_lightweight_on_zone_v2(zone_id)
-            self._request_zone_focus_v2(zone_id)
         except Exception:
             logger.exception("Lightweight zone focus failed for %s", zone_id)
         self.zone_detail_v2.setHtml(self._zone_detail_text_v2(zone_id))
         self._load_current_zone_memo_v2()
-        self._start_zone_crop_render_v2(zone_id)
         # Phase B1.5 — clear any prior zone's vector overlay before we
         # decide whether to push a new one. Stale overlay would visually
         # misalign with the new zone's PNG focus.
@@ -9963,23 +12923,26 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self.preview_before_v2.clear_vector_overlay()
         if hasattr(self, "preview_after_v2"):
             self.preview_after_v2.clear_vector_overlay()
-        pair_id = str((self._active_row or {}).get("pair_id") or "")
-        cached = self._zone_vector_paths.get((pair_id, zone_id)) if pair_id else None
-        if cached and Path(cached).exists():
-            # Cached SVG → push inline immediately (no subprocess wait).
-            self._apply_zone_vector_to_qml_v2(pair_id, zone_id, cached)
-        elif pair_id and zone_id:
-            # Auto-trigger inline vector render on selection so the SVG
-            # arrives ~15-20 s later without the user having to click
-            # the button. The button is still useful for users who want
-            # the external open path; it sets _zone_vector_button_external
-            # so finishing render also opens externally.
-            self._start_zone_vector_render_v2(pair_id, zone_id)
+        if defer_heavy_render:
+            self._schedule_initial_zone_heavy_render_v2(pair_id, zone_id)
+        else:
+            self._start_zone_crop_render_v2(zone_id)
         self._refresh_zone_vector_button_state_v2()
+        self._record_zone_selection_event_v2(zone_id, selection_started)
 
     # ------------------------------------------------------------------
     # Phase B1 — Vector zone inspection
     # ------------------------------------------------------------------
+
+    def _apply_or_start_zone_vector_render_v2(self, pair_id: str, zone_id: str) -> None:
+        cached = self._zone_vector_paths.get((pair_id, zone_id)) if pair_id else None
+        if cached and Path(cached).exists():
+            self._apply_zone_vector_to_qml_v2(pair_id, zone_id, cached)
+        elif pair_id and zone_id:
+            # Vector SVG is an enhancement. It may be slow on malformed or
+            # block-heavy CAD, so P2 keeps it out of the immediate initial
+            # pair-paint path and only runs it from the explicit heavy phase.
+            self._start_zone_vector_render_v2(pair_id, zone_id)
 
     def _refresh_zone_vector_button_state_v2(self) -> None:
         """Enable the vector button only when we have a valid zone bbox to
@@ -10151,8 +13114,6 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         cache_dir.mkdir(parents=True, exist_ok=True)
         output_svg = self._zone_vector_output_path(pair_id, zone_id)
         result_json = output_svg.with_suffix(".result.json")
-        self._zone_vector_result_json = result_json
-        self._zone_vector_pending = (pair_id, zone_id, str(output_svg))
 
         # Use '=' separator on every flag whose value can plausibly start
         # with '-' (negative DXF world coords are common: drawings frequently
@@ -10171,8 +13132,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
         if self._zone_vector_qprocess is not None and self._zone_vector_qprocess.state() != QProcess.NotRunning:
             # Existing render still in flight — let it finish; new request
-            # supersedes it on next button click.
+            # can be retried after it finishes. Do not rewrite the running
+            # request metadata; that lets a stale SVG masquerade as the new
+            # selected zone.
             return
+        self._zone_vector_result_json = result_json
+        self._zone_vector_pending = (pair_id, zone_id, str(output_svg))
 
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -10203,7 +13168,23 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             except Exception as exc:
                 logger.warning("zone_vector result.json parse failed: %s", exc)
         svg_path = str(payload.get("svg_path") or "")
-        if exit_code == 0 and svg_path and Path(svg_path).exists():
+        svg_matches_request = False
+        if svg_path:
+            try:
+                svg_matches_request = Path(svg_path).resolve() == Path(expected_svg).resolve()
+            except Exception:
+                svg_matches_request = str(svg_path) == str(expected_svg)
+        if svg_path and not svg_matches_request:
+            logger.debug(
+                "Ignoring stale zone vector result for pair=%s zone=%s svg=%s expected=%s",
+                pair_id,
+                zone_id,
+                svg_path,
+                expected_svg,
+            )
+            self._refresh_zone_vector_button_state_v2()
+            return
+        if exit_code == 0 and svg_path and svg_matches_request and Path(svg_path).exists():
             self._zone_vector_paths[(pair_id, zone_id)] = svg_path
             # If the user is still on the same zone, push the SVG INLINE
             # to the QML viewer (Phase B1.5). Inline overlay replaces the
@@ -10528,6 +13509,14 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             notice_lines.append(
                 f"이 변경은 '{pattern_group}' 그룹에 속합니다 - 좌측 '반복 패턴' 탭에서 함께 보기"
             )
+        if resolve_overlay_match_side(change_type) == "b_only":
+            notice_lines.append(
+                "추가 영역: 이전 도면에는 같은 요소가 없어 왼쪽 뷰가 비어 보일 수 있습니다."
+            )
+        elif resolve_overlay_match_side(change_type) == "a_only":
+            notice_lines.append(
+                "삭제 영역: 변경 도면에는 같은 요소가 없어 오른쪽 뷰가 비어 보일 수 있습니다."
+            )
         notice_block = "\n".join(notice_lines) + "\n"
 
         # Phase G3.2 — recommended action banner
@@ -10746,7 +13735,13 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         body_lines = [format_viewer_perf_summary_korean(summary), ""]
         body_lines.append(json.dumps(summary, ensure_ascii=False, indent=2))
         if self._viewer_root:
-            body_lines.extend(["", f"원본 로그: {self._viewer_root / 'viewer_perf.json'}"])
+            body_lines.extend(
+                [
+                    "",
+                    f"원본 로그(JSONL): {self._viewer_root / 'viewer_perf.jsonl'}",
+                    f"호환 인덱스(JSON): {self._viewer_root / 'viewer_perf.json'}",
+                ]
+            )
         QMessageBox.information(self, "성능 진단", "\n".join(body_lines))
 
     def _show_suppression_audit_v2(self) -> None:
@@ -10972,6 +13967,92 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             except Exception:
                 logger.exception("ViewerSession shutdown raised")
         super().closeEvent(event)
+
+    def _region_match_artifact_paths_v2(self) -> tuple[Optional[Path], Optional[Path], Optional[Path]]:
+        """Resolve region-aware review artifacts for the current run."""
+
+        if not self._result:
+            return None, None, None
+        artifact_dir_value = getattr(self._result, "artifact_dir", "")
+        artifact_dir = Path(str(artifact_dir_value)) if artifact_dir_value else None
+        output_dir_value = getattr(self._result, "output_dir", "")
+        output_dir = (
+            Path(str(output_dir_value))
+            if output_dir_value
+            else artifact_dir.parent if artifact_dir is not None else None
+        )
+        artifact_package = getattr(self._result, "artifact_package", None)
+        output_paths = getattr(artifact_package, "output_paths", {}) or {}
+
+        def from_output_paths(key: str, fallback_name: str) -> Optional[Path]:
+            value = output_paths.get(key) if isinstance(output_paths, dict) else ""
+            if value:
+                return Path(str(value))
+            if artifact_dir is None:
+                return None
+            return artifact_dir / fallback_name
+
+        detection_path = from_output_paths(
+            "region_detection_summary_json",
+            "region_detection_summary.json",
+        )
+        match_path = from_output_paths(
+            "region_match_summary_json",
+            "region_match_summary.json",
+        )
+        manual_value = (
+            output_paths.get("manual_region_matches_json")
+            if isinstance(output_paths, dict)
+            else ""
+        )
+        manual_path = (
+            Path(str(manual_value))
+            if manual_value
+            else output_dir / "manual_region_matches.json" if output_dir is not None else None
+        )
+        return detection_path, match_path, manual_path
+
+    def _manual_region_matches_path_v2(self) -> Optional[Path]:
+        """Path used by the region review dialog and the next compare run."""
+
+        _detection_path, _match_path, manual_path = self._region_match_artifact_paths_v2()
+        return manual_path
+
+    def _show_region_match_dialog_v2(self) -> None:
+        if not self._result:
+            return
+        detection_path, match_path, manual_path = self._region_match_artifact_paths_v2()
+        missing = [
+            str(path)
+            for path in (detection_path, match_path)
+            if path is None or not path.exists()
+        ]
+        if missing or manual_path is None:
+            QMessageBox.warning(
+                self,
+                "Detail Region Matching",
+                "Region-aware artifacts are not available for this run.\n\n"
+                "Expected region_detection_summary.json and region_match_summary.json.\n"
+                "Enable multi-detail region detection and run comparison again.\n\n"
+                f"Missing: {', '.join(missing) if missing else 'manual_region_matches.json path'}",
+            )
+            return
+        try:
+            from src.gui.region_match_dialog import RegionMatchReviewDialog
+
+            dialog = RegionMatchReviewDialog(
+                artifact_dir=detection_path.parent,
+                overrides_path=manual_path,
+                parent=self,
+            )
+            dialog.exec()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to open detail region matching dialog")
+            QMessageBox.critical(
+                self,
+                "Detail Region Matching",
+                f"Failed to open region match review dialog:\n{exc}",
+            )
 
     def _show_matching_detail_v2(self) -> None:
         if not self._result:

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Final, Literal, Tuple
+from typing import Any, Final, Literal, Optional, Tuple
 
 # A 6-element flat affine: ``[a, b, c, d, e, f]`` mapping ``(x, y, 1)`` →
 # ``(a·x + b·y + c, d·x + e·y + f)``. Compatible with PDF / SVG / Cairo
@@ -36,9 +36,219 @@ Bbox = Tuple[float, float, float, float]
 PixelSize = Tuple[int, int]
 
 TransformQuality = Literal["exact", "estimated", "relative_only"]
+CoordinateSpace = Literal[
+    "cad_wcs_mm",
+    "region_local_cad",
+    "pdf_page_points_bl",
+    "image_pixels_tl",
+    # Legacy aliases kept readable because old viewer packages already use them.
+    "world_xy_2d",
+    "cad_world",
+    "image_pixels",
+]
+SourceTruth = Literal["cad_entity", "pdf_visual", "pdf_text", "ocr", "unknown"]
+YAxis = Literal["up", "down"]
 
 #: Sentinel returned when a world bbox collapses to a point (W or H ≤ 0).
 DEGENERATE_SCALE: Final[float] = 0.0
+
+COORDINATE_CONTRACT_VERSION: Final[str] = "coordinate_contract.v1"
+
+COORD_CAD_WCS_MM: Final[str] = "cad_wcs_mm"
+COORD_REGION_LOCAL_CAD: Final[str] = "region_local_cad"
+COORD_PDF_PAGE_POINTS_BL: Final[str] = "pdf_page_points_bl"
+COORD_IMAGE_PIXELS_TL: Final[str] = "image_pixels_tl"
+
+COORD_LEGACY_WORLD_XY_2D: Final[str] = "world_xy_2d"
+COORD_LEGACY_CAD_WORLD: Final[str] = "cad_world"
+COORD_LEGACY_IMAGE_PIXELS: Final[str] = "image_pixels"
+
+SOURCE_TRUTH_CAD_ENTITY: Final[str] = "cad_entity"
+SOURCE_TRUTH_PDF_VISUAL: Final[str] = "pdf_visual"
+SOURCE_TRUTH_UNKNOWN: Final[str] = "unknown"
+
+Y_AXIS_UP: Final[str] = "up"
+Y_AXIS_DOWN: Final[str] = "down"
+
+_COORDINATE_SPACE_ALIASES: Final[dict[str, str]] = {
+    "": COORD_CAD_WCS_MM,
+    "world": COORD_CAD_WCS_MM,
+    COORD_LEGACY_WORLD_XY_2D: COORD_CAD_WCS_MM,
+    COORD_LEGACY_CAD_WORLD: COORD_CAD_WCS_MM,
+    COORD_LEGACY_IMAGE_PIXELS: COORD_IMAGE_PIXELS_TL,
+    "pdf_page_points": COORD_PDF_PAGE_POINTS_BL,
+    "pdf_points": COORD_PDF_PAGE_POINTS_BL,
+}
+
+
+def normalize_coordinate_space(value: object) -> str:
+    """Return the canonical coordinate-space token for manifest metadata.
+
+    Old viewer packages used broad labels such as ``cad_world`` and
+    ``image_pixels``. R1 keeps those packages loadable while new manifests use
+    unambiguous axis/origin names.
+    """
+
+    raw = str(value or "").strip()
+    return _COORDINATE_SPACE_ALIASES.get(raw, raw)
+
+
+def coordinate_space_y_axis(space: object) -> str:
+    """Return ``"up"`` or ``"down"`` for a coordinate space."""
+
+    canonical = normalize_coordinate_space(space)
+    return Y_AXIS_DOWN if canonical == COORD_IMAGE_PIXELS_TL else Y_AXIS_UP
+
+
+def source_truth_for_coordinate_space(space: object) -> str:
+    """Best-effort source truth implied by a coordinate space."""
+
+    canonical = normalize_coordinate_space(space)
+    if canonical in {COORD_CAD_WCS_MM, COORD_REGION_LOCAL_CAD}:
+        return SOURCE_TRUTH_CAD_ENTITY
+    if canonical in {COORD_PDF_PAGE_POINTS_BL, COORD_IMAGE_PIXELS_TL}:
+        return SOURCE_TRUTH_PDF_VISUAL
+    return SOURCE_TRUTH_UNKNOWN
+
+
+def normalise_bbox(raw: object) -> Optional[Bbox]:
+    """Return a bbox tuple from dict/list forms used across manifests."""
+
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        try:
+            return (
+                float(raw["min_x"]),
+                float(raw["min_y"]),
+                float(raw["max_x"]),
+                float(raw["max_y"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+    if isinstance(raw, (list, tuple)):
+        if len(raw) < 4:
+            return None
+        try:
+            return (
+                float(raw[0]),
+                float(raw[1]),
+                float(raw[2]),
+                float(raw[3]),
+            )
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def transform_bbox(matrix: Affine6, bbox: Bbox) -> Bbox:
+    """Transform all four bbox corners and return the enclosing bbox."""
+
+    x0, y0, x1, y1 = bbox
+    points = (
+        apply_affine(matrix, x0, y0),
+        apply_affine(matrix, x0, y1),
+        apply_affine(matrix, x1, y0),
+        apply_affine(matrix, x1, y1),
+    )
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def pdf_image_pixels_to_page_points_bbox(
+    bbox: object,
+    *,
+    dpi: float,
+    page_height_points: float = 0.0,
+) -> Optional[Bbox]:
+    """Convert top-left image pixels to PDF/page points.
+
+    When ``page_height_points`` is supplied, the result uses bottom-left,
+    Y-up page coordinates. Without it, the helper performs only DPI scaling
+    and keeps the input Y orientation.
+    """
+
+    coords = normalise_bbox(bbox)
+    if coords is None:
+        return None
+    dpi_val = _safe_float(dpi)
+    if dpi_val <= 0:
+        return coords
+    scale = 72.0 / dpi_val
+    x0, y0, x1, y1 = coords
+    left = min(x0, x1) * scale
+    right = max(x0, x1) * scale
+    top = min(y0, y1) * scale
+    bottom = max(y0, y1) * scale
+    page_h = _safe_float(page_height_points)
+    if page_h > 0:
+        return (left, page_h - bottom, right, page_h - top)
+    return (left, top, right, bottom)
+
+
+def pdf_page_points_to_image_pixels_bbox(
+    bbox: object,
+    *,
+    dpi: float,
+    page_height_points: float = 0.0,
+) -> Optional[Bbox]:
+    """Convert PDF/page points to top-left image pixels."""
+
+    coords = normalise_bbox(bbox)
+    if coords is None:
+        return None
+    dpi_val = _safe_float(dpi)
+    if dpi_val <= 0:
+        return coords
+    scale = dpi_val / 72.0
+    x0, y0, x1, y1 = coords
+    left = min(x0, x1) * scale
+    right = max(x0, x1) * scale
+    y_min = min(y0, y1)
+    y_max = max(y0, y1)
+    page_h = _safe_float(page_height_points)
+    if page_h > 0:
+        return (
+            left,
+            (page_h - y_max) * scale,
+            right,
+            (page_h - y_min) * scale,
+        )
+    return (left, y_min * scale, right, y_max * scale)
+
+
+def convert_bbox_to_world_space(
+    bbox: object,
+    *,
+    coordinate_space: object = "",
+    pdf_dpi: float = 0.0,
+    page_height_points: float = 0.0,
+) -> Optional[Bbox]:
+    """Convert a bbox to the lightweight viewer's current world space.
+
+    CAD spaces are already world-like and pass through. PDF image-pixel bboxes
+    are scaled to PDF points and Y-flipped when the page height is known.
+    """
+
+    coords = normalise_bbox(bbox)
+    if coords is None:
+        return None
+    space = normalize_coordinate_space(coordinate_space)
+    if space == COORD_IMAGE_PIXELS_TL:
+        return pdf_image_pixels_to_page_points_bbox(
+            coords,
+            dpi=pdf_dpi,
+            page_height_points=page_height_points,
+        )
+    return coords
 
 
 @dataclass(frozen=True)
@@ -68,6 +278,9 @@ class AffineParams:
     world_to_pixel: Affine6
     pixel_to_world: Affine6
     quality: TransformQuality = "exact"
+    coordinate_space: str = COORD_CAD_WCS_MM
+    source_truth: str = SOURCE_TRUTH_CAD_ENTITY
+    y_axis: str = Y_AXIS_UP
 
     @property
     def units_per_pixel(self) -> float:
@@ -84,6 +297,10 @@ class AffineParams:
             "world_to_pixel": list(self.world_to_pixel),
             "pixel_to_world": list(self.pixel_to_world),
             "transform_quality": self.quality,
+            "coordinate_contract_version": COORDINATE_CONTRACT_VERSION,
+            "bbox_coordinate_space": self.coordinate_space,
+            "source_truth": self.source_truth,
+            "y_axis": self.y_axis,
             "scale_world_per_pixel": (
                 1.0 / self.scale if self.scale > 0 else None
             ),
@@ -97,6 +314,9 @@ def fit_world_to_pixels(
     *,
     padding_px: int | Tuple[int, int] = 0,
     quality: TransformQuality = "exact",
+    coordinate_space: CoordinateSpace | str = COORD_CAD_WCS_MM,
+    source_truth: SourceTruth | str | None = None,
+    y_axis: YAxis | str | None = None,
 ) -> AffineParams:
     """Compute the affine that fits ``world_bbox`` into ``pixel_size``.
 
@@ -118,6 +338,12 @@ def fit_world_to_pixels(
     Raises:
         ValueError: if ``pixel_size`` has a non-positive component.
     """
+
+    bbox_coordinate_space = normalize_coordinate_space(coordinate_space)
+    bbox_source_truth = str(
+        source_truth or source_truth_for_coordinate_space(bbox_coordinate_space)
+    )
+    bbox_y_axis = str(y_axis or coordinate_space_y_axis(bbox_coordinate_space))
 
     w_p, h_p = pixel_size
     if w_p <= 0 or h_p <= 0:
@@ -153,6 +379,9 @@ def fit_world_to_pixels(
             world_to_pixel=identity,
             pixel_to_world=identity,
             quality=quality,
+            coordinate_space=bbox_coordinate_space,
+            source_truth=bbox_source_truth,
+            y_axis=bbox_y_axis,
         )
 
     s = min(avail_w / world_w, avail_h / world_h)
@@ -200,6 +429,9 @@ def fit_world_to_pixels(
         world_to_pixel=world_to_pixel,
         pixel_to_world=pixel_to_world,
         quality=quality,
+        coordinate_space=bbox_coordinate_space,
+        source_truth=bbox_source_truth,
+        y_axis=bbox_y_axis,
     )
 
 
@@ -300,9 +532,33 @@ __all__ = [
     "Bbox",
     "PixelSize",
     "TransformQuality",
+    "CoordinateSpace",
+    "SourceTruth",
+    "YAxis",
     "DEGENERATE_SCALE",
+    "COORDINATE_CONTRACT_VERSION",
+    "COORD_CAD_WCS_MM",
+    "COORD_REGION_LOCAL_CAD",
+    "COORD_PDF_PAGE_POINTS_BL",
+    "COORD_IMAGE_PIXELS_TL",
+    "COORD_LEGACY_WORLD_XY_2D",
+    "COORD_LEGACY_CAD_WORLD",
+    "COORD_LEGACY_IMAGE_PIXELS",
+    "SOURCE_TRUTH_CAD_ENTITY",
+    "SOURCE_TRUTH_PDF_VISUAL",
+    "SOURCE_TRUTH_UNKNOWN",
+    "Y_AXIS_UP",
+    "Y_AXIS_DOWN",
     "AffineParams",
     "SharedCamera",
+    "normalize_coordinate_space",
+    "coordinate_space_y_axis",
+    "source_truth_for_coordinate_space",
+    "normalise_bbox",
+    "transform_bbox",
+    "pdf_image_pixels_to_page_points_bbox",
+    "pdf_page_points_to_image_pixels_bbox",
+    "convert_bbox_to_world_space",
     "fit_world_to_pixels",
     "apply_affine",
     "world_to_pixel",

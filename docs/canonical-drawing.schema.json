@@ -1,0 +1,1575 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://drawing-compare.local/schemas/canonical-drawing.schema.json",
+  "title": "CanonicalDrawing",
+  "description": "Internal format-neutral drawing model shared by DXF and DWG importers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "drawing",
+    "units",
+    "coordinate_system",
+    "tolerances",
+    "layers",
+    "blocks",
+    "entities",
+    "import_report"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "canonical-drawing/v1"
+    },
+    "drawing": {
+      "$ref": "#/$defs/DrawingMetadata"
+    },
+    "units": {
+      "$ref": "#/$defs/UnitPolicy"
+    },
+    "coordinate_system": {
+      "$ref": "#/$defs/CoordinateSystem"
+    },
+    "tolerances": {
+      "$ref": "#/$defs/TolerancePolicy"
+    },
+    "extents": {
+      "$ref": "#/$defs/BBox"
+    },
+    "layers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CanonicalLayer"
+      },
+      "uniqueItems": true
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CanonicalBlock"
+      },
+      "uniqueItems": true
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CanonicalEntity"
+      }
+    },
+    "import_report": {
+      "$ref": "#/$defs/ImportReport"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    }
+  },
+  "$defs": {
+    "NonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "DrawingMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "title": {
+          "type": "string"
+        },
+        "sheet_name": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceFile"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "importer": {
+          "$ref": "#/$defs/ImporterInfo"
+        },
+        "metadata": {
+          "$ref": "#/$defs/Metadata"
+        }
+      }
+    },
+    "SourceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "dxf",
+            "dwg"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        },
+        "acad_version": {
+          "type": "string"
+        },
+        "codepage": {
+          "type": "string"
+        },
+        "application": {
+          "type": "string"
+        }
+      }
+    },
+    "ImporterInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "version": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "backend_version": {
+          "type": "string"
+        }
+      }
+    },
+    "UnitPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_unit",
+        "source_unit",
+        "scale_to_mm"
+      ],
+      "properties": {
+        "canonical_unit": {
+          "type": "string",
+          "const": "mm"
+        },
+        "source_unit": {
+          "type": "string",
+          "enum": [
+            "unitless",
+            "inch",
+            "foot",
+            "mile",
+            "mm",
+            "cm",
+            "m",
+            "km",
+            "microinch",
+            "mil",
+            "yard",
+            "angstrom",
+            "nanometer",
+            "micron",
+            "decimeter",
+            "decameter",
+            "hectometer",
+            "gigameter",
+            "au",
+            "light_year",
+            "parsec",
+            "unknown"
+          ]
+        },
+        "scale_to_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "unit_source": {
+          "type": "string",
+          "enum": [
+            "header",
+            "importer_default",
+            "user_override",
+            "inferred"
+          ],
+          "default": "header"
+        }
+      }
+    },
+    "CoordinateSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "space",
+        "axis_order",
+        "origin",
+        "z_policy"
+      ],
+      "properties": {
+        "space": {
+          "type": "string",
+          "const": "WCS"
+        },
+        "axis_order": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "x"
+            },
+            {
+              "const": "y"
+            },
+            {
+              "const": "z"
+            }
+          ],
+          "items": false,
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "origin": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "z_policy": {
+          "type": "string",
+          "enum": [
+            "preserve",
+            "flatten_to_xy",
+            "mixed"
+          ]
+        },
+        "layout_policy": {
+          "type": "string",
+          "enum": [
+            "modelspace",
+            "paperspace",
+            "all_layouts_namespaced"
+          ],
+          "default": "all_layouts_namespaced"
+        }
+      }
+    },
+    "TolerancePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coordinate_quantum_mm",
+        "bbox_quantum_mm",
+        "angle_quantum_deg",
+        "geometry_hash_version"
+      ],
+      "properties": {
+        "coordinate_quantum_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.01
+        },
+        "bbox_quantum_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.01
+        },
+        "text_anchor_quantum_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.1
+        },
+        "angle_quantum_deg": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.001
+        },
+        "position_match_tolerance_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.0
+        },
+        "structural_position_tolerance_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.1
+        },
+        "text_near_match_radius_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 50.0
+        },
+        "geometry_hash_version": {
+          "type": "string",
+          "const": "geom-hash/v1"
+        }
+      }
+    },
+    "Point3D": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "z": {
+          "type": "number"
+        }
+      }
+    },
+    "BBox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_x",
+        "min_y",
+        "max_x",
+        "max_y",
+        "quality"
+      ],
+      "properties": {
+        "min_x": {
+          "type": "number"
+        },
+        "min_y": {
+          "type": "number"
+        },
+        "min_z": {
+          "type": "number"
+        },
+        "max_x": {
+          "type": "number"
+        },
+        "max_y": {
+          "type": "number"
+        },
+        "max_z": {
+          "type": "number"
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "estimated",
+            "control_points",
+            "missing"
+          ]
+        }
+      }
+    },
+    "CanonicalLayer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "normalized_name",
+        "visible",
+        "locked"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "normalized_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "color": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ]
+        },
+        "linetype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lineweight": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "frozen": {
+          "type": "boolean",
+          "default": false
+        },
+        "plot": {
+          "type": "boolean",
+          "default": true
+        },
+        "source_handle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/$defs/Metadata"
+        }
+      }
+    },
+    "CanonicalBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "normalized_name",
+        "origin",
+        "entity_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "normalized_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "origin": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "entity_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          }
+        },
+        "bbox": {
+          "$ref": "#/$defs/BBox"
+        },
+        "is_external_reference": {
+          "type": "boolean",
+          "default": false
+        },
+        "source_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/$defs/Metadata"
+        }
+      }
+    },
+    "EntitySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "raw_type"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "dxf",
+            "dwg"
+          ]
+        },
+        "raw_type": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "handle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner_handle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layout_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "block_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "EntityStyle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ]
+        },
+        "lineweight": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "linetype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_style": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dimension_style": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effective_color": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ],
+          "description": "Normalizer-resolved visual color after BYLAYER/BYBLOCK evaluation."
+        },
+        "effective_lineweight": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Normalizer-resolved visual lineweight after BYLAYER/BYBLOCK evaluation."
+        },
+        "effective_linetype": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Normalizer-resolved visual linetype after BYLAYER/BYBLOCK evaluation."
+        },
+        "resolution": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "color": {
+              "type": "string"
+            },
+            "linetype": {
+              "type": "string"
+            },
+            "lineweight": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "EntityHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "geometry_hash"
+      ],
+      "properties": {
+        "geometry_hash": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "semantic_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "style_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "CanonicalEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "source",
+        "layer_id",
+        "space",
+        "geometry",
+        "bbox",
+        "hashes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "line",
+            "arc",
+            "circle",
+            "polyline",
+            "text",
+            "mtext",
+            "block_reference",
+            "hatch",
+            "dimension"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/EntitySource"
+        },
+        "layer_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "block_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "space": {
+          "type": "string",
+          "enum": [
+            "model",
+            "paper",
+            "block"
+          ]
+        },
+        "layout_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geometry": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LineGeometry"
+            },
+            {
+              "$ref": "#/$defs/ArcGeometry"
+            },
+            {
+              "$ref": "#/$defs/CircleGeometry"
+            },
+            {
+              "$ref": "#/$defs/PolylineGeometry"
+            },
+            {
+              "$ref": "#/$defs/TextGeometry"
+            },
+            {
+              "$ref": "#/$defs/MTextGeometry"
+            },
+            {
+              "$ref": "#/$defs/BlockReferenceGeometry"
+            },
+            {
+              "$ref": "#/$defs/HatchGeometry"
+            },
+            {
+              "$ref": "#/$defs/DimensionGeometry"
+            }
+          ]
+        },
+        "bbox": {
+          "$ref": "#/$defs/BBox"
+        },
+        "hashes": {
+          "$ref": "#/$defs/EntityHashes"
+        },
+        "style": {
+          "$ref": "#/$defs/EntityStyle"
+        },
+        "visible": {
+          "type": "boolean",
+          "default": true
+        },
+        "metadata": {
+          "$ref": "#/$defs/Metadata"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "line"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/LineGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "arc"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/ArcGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "circle"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/CircleGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "polyline"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/PolylineGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "text"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/TextGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "mtext"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/MTextGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "block_reference"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/BlockReferenceGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "hatch"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/HatchGeometry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "dimension"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry": {
+                "$ref": "#/$defs/DimensionGeometry"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "LineGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "start",
+        "end"
+      ],
+      "properties": {
+        "type": {
+          "const": "line"
+        },
+        "start": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "end": {
+          "$ref": "#/$defs/Point3D"
+        }
+      }
+    },
+    "CircleGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "center",
+        "radius"
+      ],
+      "properties": {
+        "type": {
+          "const": "circle"
+        },
+        "center": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "radius": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "ArcGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "center",
+        "radius",
+        "start_angle_deg",
+        "end_angle_deg",
+        "normal"
+      ],
+      "properties": {
+        "type": {
+          "const": "arc"
+        },
+        "center": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "radius": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "start_angle_deg": {
+          "type": "number"
+        },
+        "end_angle_deg": {
+          "type": "number"
+        },
+        "normal": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "sweep_direction": {
+          "type": "string",
+          "enum": [
+            "ccw",
+            "cw"
+          ],
+          "default": "ccw"
+        }
+      }
+    },
+    "PolylineVertex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "point"
+      ],
+      "properties": {
+        "point": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "bulge": {
+          "type": "number",
+          "default": 0
+        },
+        "start_width": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "end_width": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "PolylineGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "vertices",
+        "closed"
+      ],
+      "properties": {
+        "type": {
+          "const": "polyline"
+        },
+        "vertices": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/PolylineVertex"
+          }
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "polyline_kind": {
+          "type": "string",
+          "enum": [
+            "lwpolyline",
+            "2d_polyline",
+            "3d_polyline"
+          ]
+        }
+      }
+    },
+    "TextGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "insert",
+        "text",
+        "canonical_text",
+        "height",
+        "rotation_deg"
+      ],
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "insert": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "text": {
+          "type": "string"
+        },
+        "canonical_text": {
+          "type": "string"
+        },
+        "height": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rotation_deg": {
+          "type": "number"
+        },
+        "alignment": {
+          "type": "string"
+        }
+      }
+    },
+    "MTextGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "insert",
+        "plain_text",
+        "canonical_text",
+        "height",
+        "rotation_deg"
+      ],
+      "properties": {
+        "type": {
+          "const": "mtext"
+        },
+        "insert": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "plain_text": {
+          "type": "string"
+        },
+        "canonical_text": {
+          "type": "string"
+        },
+        "raw_content": {
+          "type": "string"
+        },
+        "height": {
+          "type": "number",
+          "minimum": 0
+        },
+        "box_width": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rotation_deg": {
+          "type": "number"
+        },
+        "attachment": {
+          "type": "string"
+        }
+      }
+    },
+    "BlockAttribute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tag",
+        "text",
+        "canonical_text",
+        "insert"
+      ],
+      "properties": {
+        "tag": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "text": {
+          "type": "string"
+        },
+        "canonical_text": {
+          "type": "string"
+        },
+        "insert": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "source_handle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "BlockReferenceGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "block_id",
+        "block_name",
+        "insert",
+        "scale",
+        "rotation_deg",
+        "matrix"
+      ],
+      "properties": {
+        "type": {
+          "const": "block_reference"
+        },
+        "block_id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "block_name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "insert": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "scale": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "rotation_deg": {
+          "type": "number"
+        },
+        "matrix": {
+          "type": "array",
+          "minItems": 16,
+          "maxItems": 16,
+          "items": {
+            "type": "number"
+          }
+        },
+        "attributes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockAttribute"
+          }
+        },
+        "expanded_entity_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          }
+        }
+      }
+    },
+    "HatchBoundaryVertex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "point"
+      ],
+      "properties": {
+        "point": {
+          "$ref": "#/$defs/Point3D"
+        },
+        "bulge": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "HatchBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "vertices"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "outer",
+            "inner",
+            "unknown"
+          ]
+        },
+        "vertices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HatchBoundaryVertex"
+          }
+        }
+      }
+    },
+    "HatchGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "pattern_name",
+        "solid_fill",
+        "boundaries"
+      ],
+      "properties": {
+        "type": {
+          "const": "hatch"
+        },
+        "pattern_name": {
+          "type": "string"
+        },
+        "solid_fill": {
+          "type": "boolean"
+        },
+        "pattern_scale": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pattern_angle_deg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "boundaries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HatchBoundary"
+          }
+        }
+      }
+    },
+    "DimensionGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "dimension_type",
+        "measurement",
+        "defpoints"
+      ],
+      "properties": {
+        "type": {
+          "const": "dimension"
+        },
+        "dimension_type": {
+          "type": "string",
+          "enum": [
+            "linear",
+            "aligned",
+            "angular",
+            "diameter",
+            "radius",
+            "ordinate",
+            "arc_length",
+            "unknown"
+          ]
+        },
+        "measurement": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "text_override": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canonical_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Point3D"
+          }
+        },
+        "text_midpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Point3D"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ImportWarning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        "message": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "entity_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_handle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "raw_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "details": {
+          "$ref": "#/$defs/Metadata"
+        }
+      }
+    },
+    "UnsupportedEntityReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw_type",
+        "count",
+        "policy"
+      ],
+      "properties": {
+        "raw_type": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy": {
+          "type": "string",
+          "enum": [
+            "skipped",
+            "approximated",
+            "exploded",
+            "rejected"
+          ]
+        },
+        "impact": {
+          "type": "string",
+          "enum": [
+            "none",
+            "visual_only",
+            "geometry_missing",
+            "comparison_incomplete",
+            "fatal"
+          ]
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "layer_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "layout_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "ImportReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "warnings",
+        "unsupported_entities"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "partial",
+            "failed"
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImportWarning"
+          }
+        },
+        "unsupported_entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnsupportedEntityReport"
+          }
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Fatal importer error code when status is failed; null otherwise."
+        },
+        "dwg_version": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true,
+          "description": "DWG version detector output for DWG imports."
+        },
+        "adapter": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true,
+          "description": "Adapter metadata for adapter-backed imports."
+        },
+        "stats": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "raw_entity_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "canonical_entity_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unsupported_entity_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "approximated_entity_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "elapsed_ms": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

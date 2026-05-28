@@ -59,7 +59,17 @@ from src.services.comparison.render_modes import (
     RenderMode,
     is_valid_mode,
 )
-from src.services.comparison.transform import Affine6, Bbox
+from src.services.comparison.transform import (
+    Affine6,
+    Bbox,
+    COORDINATE_CONTRACT_VERSION,
+    COORD_CAD_WCS_MM,
+    SOURCE_TRUTH_CAD_ENTITY,
+    Y_AXIS_UP,
+    coordinate_space_y_axis,
+    normalize_coordinate_space,
+    source_truth_for_coordinate_space,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +103,10 @@ class SourceSignature:
 
     source_path: str = ""
     file_hash: str = ""              # sha256 of the file
+    source_hash: str = ""            # lightweight path/size/mtime source identity
+    file_size: int = 0
+    mtime_ns: int = 0
+    signature_schema_version: str = ""
     dxf_version: str = ""            # e.g. "AC1027"
     font_sig: str = ""               # sha256 over resolved font paths
     backend_sig: str = ""            # "ezdxf-1.4.3|qt-6.10|qtpdf-6.10"
@@ -107,10 +121,21 @@ class SourceSignature:
         return cls(
             source_path=str(data.get("source_path", "")),
             file_hash=str(data.get("file_hash", "")),
+            source_hash=str(data.get("source_hash", "")),
+            file_size=_safe_int(data.get("file_size")),
+            mtime_ns=_safe_int(data.get("mtime_ns")),
+            signature_schema_version=str(data.get("signature_schema_version", "")),
             dxf_version=str(data.get("dxf_version", "")),
             font_sig=str(data.get("font_sig", "")),
             backend_sig=str(data.get("backend_sig", "")),
         )
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass
@@ -176,6 +201,10 @@ class ZoneRequestRef:
     zone_id: str = ""
     side: Literal["before", "after"] = "after"
     bbox_world: Bbox = (0.0, 0.0, 0.0, 0.0)
+    coordinate_contract_version: str = COORDINATE_CONTRACT_VERSION
+    bbox_coordinate_space: str = COORD_CAD_WCS_MM
+    source_truth: str = SOURCE_TRUTH_CAD_ENTITY
+    y_axis: str = Y_AXIS_UP
     pad_world: float = 0.0
     target_px_w: int = 0
     target_px_h: int = 0
@@ -189,6 +218,16 @@ class ZoneRequestRef:
             "zone_id": self.zone_id,
             "side": self.side,
             "bbox_world": list(self.bbox_world),
+            "coordinate_contract_version": self.coordinate_contract_version,
+            "bbox_coordinate_space": normalize_coordinate_space(self.bbox_coordinate_space),
+            "source_truth": _effective_source_truth(
+                self.source_truth,
+                normalize_coordinate_space(self.bbox_coordinate_space),
+            ),
+            "y_axis": _effective_y_axis(
+                self.y_axis,
+                normalize_coordinate_space(self.bbox_coordinate_space),
+            ),
             "pad_world": float(self.pad_world),
             "target_px_w": int(self.target_px_w),
             "target_px_h": int(self.target_px_h),
@@ -214,10 +253,19 @@ class ZoneRequestRef:
             bbox = (0.0, 0.0, 0.0, 0.0)
         side_raw = str(data.get("side", "after"))
         side: Literal["before", "after"] = side_raw if side_raw in {"before", "after"} else "after"  # type: ignore[assignment]
+        bbox_space = normalize_coordinate_space(
+            data.get("bbox_coordinate_space", data.get("coordinate_space", COORD_CAD_WCS_MM))
+        )
         return cls(
             zone_id=str(data.get("zone_id", "")),
             side=side,
             bbox_world=bbox,
+            coordinate_contract_version=str(
+                data.get("coordinate_contract_version", COORDINATE_CONTRACT_VERSION)
+            ),
+            bbox_coordinate_space=bbox_space,
+            source_truth=_effective_source_truth(data.get("source_truth"), bbox_space),
+            y_axis=_effective_y_axis(data.get("y_axis"), bbox_space),
             pad_world=float(data.get("pad_world", 0.0) or 0.0),
             target_px_w=int(data.get("target_px_w", 0) or 0),
             target_px_h=int(data.get("target_px_h", 0) or 0),
@@ -244,9 +292,18 @@ class EvidenceRef:
     pixel_size: Tuple[int, int] = (0, 0)
     world_to_pixel: Affine6 = IDENTITY_AFFINE
     pixel_to_world: Affine6 = IDENTITY_AFFINE
+    transform_quality: Literal["exact", "estimated", "relative_only"] = "exact"
+    coordinate_contract_version: str = COORDINATE_CONTRACT_VERSION
+    bbox_coordinate_space: str = COORD_CAD_WCS_MM
+    source_truth: str = SOURCE_TRUTH_CAD_ENTITY
+    y_axis: str = Y_AXIS_UP
     render_ms: float = 0.0
     cache_hit: bool = False
     request_cache_key: str = ""      # link back to ZoneRequestRef.cache_key
+    visual_fidelity: str = ""
+    render_lifecycle: str = ""
+    fallback_reason_code: str = ""
+    warnings: List[str] = field(default_factory=list)
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -258,9 +315,24 @@ class EvidenceRef:
             "pixel_size": list(self.pixel_size),
             "world_to_pixel": list(self.world_to_pixel),
             "pixel_to_world": list(self.pixel_to_world),
+            "transform_quality": self.transform_quality,
+            "coordinate_contract_version": self.coordinate_contract_version,
+            "bbox_coordinate_space": normalize_coordinate_space(self.bbox_coordinate_space),
+            "source_truth": _effective_source_truth(
+                self.source_truth,
+                normalize_coordinate_space(self.bbox_coordinate_space),
+            ),
+            "y_axis": _effective_y_axis(
+                self.y_axis,
+                normalize_coordinate_space(self.bbox_coordinate_space),
+            ),
             "render_ms": float(self.render_ms),
             "cache_hit": bool(self.cache_hit),
             "request_cache_key": self.request_cache_key,
+            "visual_fidelity": self.visual_fidelity,
+            "render_lifecycle": self.render_lifecycle,
+            "fallback_reason_code": self.fallback_reason_code,
+            "warnings": list(self.warnings),
             "notes": self.notes,
         }
 
@@ -283,6 +355,9 @@ class EvidenceRef:
             ps = (0, 0)
         side_raw = str(data.get("side", "after"))
         side: Literal["before", "after"] = side_raw if side_raw in {"before", "after"} else "after"  # type: ignore[assignment]
+        bbox_space = normalize_coordinate_space(
+            data.get("bbox_coordinate_space", data.get("coordinate_space", COORD_CAD_WCS_MM))
+        )
         return cls(
             zone_id=str(data.get("zone_id", "")),
             side=side,
@@ -291,9 +366,24 @@ class EvidenceRef:
             pixel_size=ps,
             world_to_pixel=tuple(data.get("world_to_pixel", IDENTITY_AFFINE)),  # type: ignore[arg-type]
             pixel_to_world=tuple(data.get("pixel_to_world", IDENTITY_AFFINE)),  # type: ignore[arg-type]
+            transform_quality=data.get("transform_quality", "exact"),
+            coordinate_contract_version=str(
+                data.get("coordinate_contract_version", COORDINATE_CONTRACT_VERSION)
+            ),
+            bbox_coordinate_space=bbox_space,
+            source_truth=_effective_source_truth(data.get("source_truth"), bbox_space),
+            y_axis=_effective_y_axis(data.get("y_axis"), bbox_space),
             render_ms=float(data.get("render_ms", 0.0) or 0.0),
             cache_hit=bool(data.get("cache_hit", False)),
             request_cache_key=str(data.get("request_cache_key", "")),
+            visual_fidelity=str(data.get("visual_fidelity", "")),
+            render_lifecycle=str(data.get("render_lifecycle", "")),
+            fallback_reason_code=str(
+                data.get("fallback_reason_code", data.get("reason_code", ""))
+            ),
+            warnings=[str(item) for item in data.get("warnings", [])]
+            if isinstance(data.get("warnings"), list)
+            else [],
             notes=str(data.get("notes", "")),
         )
 
@@ -469,6 +559,22 @@ def is_v3_manifest(path: Path) -> bool:
     except OSError:
         return False
     return f'"schema_version": "{SCHEMA_VERSION}"' in head
+
+
+def _effective_source_truth(value: Any, bbox_space: str) -> str:
+    inferred = source_truth_for_coordinate_space(bbox_space)
+    raw = str(value or "").strip()
+    if raw and not (raw == SOURCE_TRUTH_CAD_ENTITY and inferred != SOURCE_TRUTH_CAD_ENTITY):
+        return raw
+    return inferred
+
+
+def _effective_y_axis(value: Any, bbox_space: str) -> str:
+    inferred = coordinate_space_y_axis(bbox_space)
+    raw = str(value or "").strip()
+    if raw and not (raw == Y_AXIS_UP and inferred != Y_AXIS_UP):
+        return raw
+    return inferred
 
 
 __all__ = [

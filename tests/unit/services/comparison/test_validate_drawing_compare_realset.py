@@ -77,6 +77,17 @@ def _args(
     viewer_perf_log: bool = False,
     render_selected_zone_evidence: bool = False,
     selected_zone_evidence_per_pair: int = 1,
+    p5_g3_realset_gate: bool = False,
+    p5_g3_min_completed_pairs: int = 1,
+    p5_g3_min_selected_zone_renders: int = 1,
+    p5_g3_min_viewer_perf_events: int = 1,
+    p5_g3_min_nonblank_images: int = 1,
+    p5_g3_max_tile_orphan_bytes: int = 0,
+    p5_g3_require_tile_eviction: bool = False,
+    p5_g3_min_tile_evicted_pairs: int = 1,
+    p5_g3_min_tile_evicted_bytes: int = 1,
+    p5_g6_tile_cache_mb: float | None = None,
+    p5_g3_min_realset_datasets: int = 1,
     max_viewer_pages: int = 30,
     max_zone_tiles: int = 300,
     export_marked_pdf: bool = False,
@@ -137,6 +148,17 @@ def _args(
         viewer_perf_log=viewer_perf_log,
         render_selected_zone_evidence=render_selected_zone_evidence,
         selected_zone_evidence_per_pair=selected_zone_evidence_per_pair,
+        p5_g3_realset_gate=p5_g3_realset_gate,
+        p5_g3_min_completed_pairs=p5_g3_min_completed_pairs,
+        p5_g3_min_selected_zone_renders=p5_g3_min_selected_zone_renders,
+        p5_g3_min_viewer_perf_events=p5_g3_min_viewer_perf_events,
+        p5_g3_min_nonblank_images=p5_g3_min_nonblank_images,
+        p5_g3_max_tile_orphan_bytes=p5_g3_max_tile_orphan_bytes,
+        p5_g3_require_tile_eviction=p5_g3_require_tile_eviction,
+        p5_g3_min_tile_evicted_pairs=p5_g3_min_tile_evicted_pairs,
+        p5_g3_min_tile_evicted_bytes=p5_g3_min_tile_evicted_bytes,
+        p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
+        p5_g3_min_realset_datasets=p5_g3_min_realset_datasets,
         max_viewer_pages=max_viewer_pages,
         max_zone_tiles=max_zone_tiles,
         export_marked_pdf=export_marked_pdf,
@@ -159,6 +181,88 @@ def _args(
 def _write_placeholder_dxf(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("invalid dxf placeholder", encoding="utf-8")
+
+
+def _write_nonblank_png(path: Path) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image_module.new("RGB", (8, 8), (0, 0, 0)).save(path)
+
+
+def _p5_g3_payload(tmp_path: Path) -> dict[str, object]:
+    out_dir = tmp_path / "out"
+    viewer_dir = out_dir / "viewer"
+    pair_name = "pair-1"
+    tile_dir = viewer_dir / "tiles" / pair_name
+    overlay_dir = viewer_dir / "overlay_tiles" / pair_name
+    tile_path = tile_dir / "0" / "0_0.png"
+    overlay_path = overlay_dir / "0" / "0_0.json"
+    _write_nonblank_png(tile_path)
+    overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    overlay_path.write_text('{"overlays":[{"zone_id":"z1"}]}', encoding="utf-8")
+    tile_bytes = tile_path.stat().st_size
+    overlay_bytes = overlay_path.stat().st_size
+    retained_bytes = tile_bytes + overlay_bytes
+    pair_manifest = {
+        "pair_uuid": pair_name,
+        "cache_key": "p5-g3",
+        "tile_root": str(viewer_dir / "tiles"),
+        "overlay_tile_root": str(viewer_dir / "overlay_tiles"),
+        "tile_payload_bytes": tile_bytes,
+        "overlay_tile_payload_bytes": overlay_bytes,
+        "cache_total_estimated_bytes": retained_bytes,
+        "cache_byte_limit": retained_bytes + 1024,
+    }
+    (tile_dir / "tile_manifest.json").write_text(json.dumps(pair_manifest), encoding="utf-8")
+    (viewer_dir / "tiles_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pairs": {pair_name: pair_manifest},
+                "pair_count": 1,
+                "tile_count": 1,
+                "overlay_tile_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "output_dir": str(out_dir),
+        "quality": {"auto_precision": 1.0},
+        "ground_truth": {"recall": 1.0},
+        "matching": {"duplicate_a_assignments": 0, "duplicate_b_assignments": 0},
+        "comparison": {"completed_pairs": 1, "failed_pairs": 0, "change_zone_stream_mismatch_pairs": 0},
+        "timings": {"match_s": 0.0},
+        "runtime_budget": {"sampler_active": True, "sample_count": 2, "peak_rss_mb": 100.0},
+        "viewer_perf_summary": {
+            "status": "ready",
+            "event_count": 1,
+            "zone_crop_count": 1,
+            "tile_cache_event_count": 1,
+            "tile_cache_retained_estimated_bytes": retained_bytes,
+            "tile_cache_byte_limit": retained_bytes + 1024,
+            "tile_cache_evicted_pair_count": 0,
+            "tile_cache_evicted_estimated_bytes": 0,
+        },
+        "selected_zone_evidence": {
+            "status": "passed",
+            "render_count": 1,
+            "event_count": 2,
+            "failure_count": 0,
+            "renders": [{"zone_id": "z1"}],
+        },
+        "viewer_package": {
+            "viewer_dir": str(viewer_dir),
+            "pair_count": 1,
+            "tile_count": 1,
+            "output_paths": {
+                "viewer_dir": str(viewer_dir),
+                "viewer_tiles_dir": str(viewer_dir / "tiles"),
+                "viewer_overlay_tiles_dir": str(viewer_dir / "overlay_tiles"),
+                "viewer_tiles_manifest_json": str(viewer_dir / "tiles_manifest.json"),
+            },
+        },
+    }
 
 
 def _descriptor(name: str, root: Path) -> DrawingFileDescriptor:
@@ -206,6 +310,271 @@ def _confirmed_candidate(root: Path) -> MatchCandidate:
     )
 
 
+def test_runtime_budget_is_enabled_by_default() -> None:
+    args = runner.parse_args(["--a", "old", "--b", "new", "--out", "out"])
+    assert args.measure_runtime_budget is True
+
+    disabled = runner.parse_args(
+        ["--a", "old", "--b", "new", "--out", "out", "--no-runtime-budget"]
+    )
+    assert disabled.measure_runtime_budget is False
+
+
+def test_parse_args_accepts_p5_g3_realset_gate_flags() -> None:
+    args = runner.parse_args(
+        [
+            "--a",
+            "old",
+            "--b",
+            "new",
+            "--out",
+            "out",
+            "--p5-g3-realset-gate",
+            "--p5-g3-min-completed-pairs",
+            "3",
+            "--p5-g3-min-selected-zone-renders",
+            "2",
+            "--p5-g3-min-viewer-perf-events",
+            "4",
+            "--p5-g3-min-nonblank-images",
+            "2",
+            "--p5-g3-max-tile-orphan-bytes",
+            "16",
+            "--p5-g3-require-tile-eviction",
+            "--p5-g3-min-tile-evicted-pairs",
+            "2",
+            "--p5-g3-min-tile-evicted-bytes",
+            "2048",
+            "--p5-g6-tile-cache-mb",
+            "0.25",
+            "--p5-g3-min-realset-datasets",
+            "2",
+        ]
+    )
+
+    assert args.p5_g3_realset_gate is True
+    assert args.p5_g3_min_completed_pairs == 3
+    assert args.p5_g3_min_selected_zone_renders == 2
+    assert args.p5_g3_min_viewer_perf_events == 4
+    assert args.p5_g3_min_nonblank_images == 2
+    assert args.p5_g3_max_tile_orphan_bytes == 16
+    assert args.p5_g3_require_tile_eviction is True
+    assert args.p5_g3_min_tile_evicted_pairs == 2
+    assert args.p5_g3_min_tile_evicted_bytes == 2048
+    assert args.p5_g6_tile_cache_mb == 0.25
+    assert args.p5_g3_min_realset_datasets == 2
+
+
+def test_parse_args_accepts_p5_g6_tile_eviction_aliases() -> None:
+    args = runner.parse_args(
+        [
+            "--a",
+            "old",
+            "--b",
+            "new",
+            "--out",
+            "out",
+            "--p5-g6-require-tile-eviction",
+            "--p5-g6-min-tile-evicted-pairs",
+            "3",
+            "--p5-g6-min-tile-evicted-bytes",
+            "8192",
+            "--p5-g6-tile-cache-mb",
+            "0.5",
+        ]
+    )
+
+    assert args.p5_g3_require_tile_eviction is True
+    assert args.p5_g3_min_tile_evicted_pairs == 3
+    assert args.p5_g3_min_tile_evicted_bytes == 8192
+    assert args.p5_g6_tile_cache_mb == 0.5
+
+
+def test_manifest_child_args_propagates_p5_g3_realset_gate_flags(tmp_path) -> None:
+    parent = _args(
+        tmp_path / "old",
+        tmp_path / "new",
+        tmp_path / "out",
+        p5_g3_realset_gate=True,
+        p5_g3_min_completed_pairs=4,
+        p5_g3_min_selected_zone_renders=3,
+        p5_g3_min_viewer_perf_events=5,
+        p5_g3_min_nonblank_images=2,
+        p5_g3_max_tile_orphan_bytes=32,
+        p5_g3_require_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=3,
+        p5_g3_min_tile_evicted_bytes=4096,
+        p5_g6_tile_cache_mb=0.75,
+        p5_g3_min_realset_datasets=2,
+    )
+    dataset = {
+        "a": "old",
+        "b": "new",
+        "p5_g3_min_completed_pairs": 6,
+        "p5_g3_min_tile_evicted_pairs": 5,
+        "p5_g6_tile_cache_mb": 0.5,
+    }
+
+    child = runner._manifest_child_args(parent, dataset, tmp_path, tmp_path / "dataset-out", "case-a")
+
+    assert child.p5_g3_realset_gate is True
+    assert child.p5_g3_min_completed_pairs == 6
+    assert child.p5_g3_min_selected_zone_renders == 3
+    assert child.p5_g3_min_viewer_perf_events == 5
+    assert child.p5_g3_min_nonblank_images == 2
+    assert child.p5_g3_max_tile_orphan_bytes == 32
+    assert child.p5_g3_require_tile_eviction is True
+    assert child.p5_g3_min_tile_evicted_pairs == 5
+    assert child.p5_g3_min_tile_evicted_bytes == 4096
+    assert child.p5_g6_tile_cache_mb == 0.5
+    assert child.p5_g3_min_realset_datasets == 2
+
+
+def test_p5_g3_realset_gate_passes_with_complete_evidence(tmp_path) -> None:
+    payload = _p5_g3_payload(tmp_path)
+    args = _args(tmp_path, tmp_path, tmp_path / "out", p5_g3_realset_gate=True)
+
+    gate = runner._evaluate_quality_gate(payload, None, args)
+
+    assert gate["status"] == "passed"
+    assert payload["p5_g3_realset_gate"]["status"] == "passed"
+    tile_evidence = payload["p5_g3_realset_gate"]["evidence"]["tile_manifest"]
+    assert tile_evidence["pair_count"] == 1
+    assert tile_evidence["orphan_payload_bytes"] == 0
+
+
+def test_p5_g3_realset_gate_fails_without_tile_manifest(tmp_path) -> None:
+    payload = _p5_g3_payload(tmp_path)
+    manifest = Path(payload["viewer_package"]["output_paths"]["viewer_tiles_manifest_json"])
+    manifest.unlink()
+    args = _args(tmp_path, tmp_path, tmp_path / "out", p5_g3_realset_gate=True)
+
+    gate = runner._evaluate_quality_gate(payload, None, args)
+
+    assert gate["status"] == "failed"
+    issue = next(item for item in gate["issues"] if item["metric"] == "p5_g3_realset_gate")
+    assert any("tile_manifest:" in failure for failure in issue["failures"])
+
+
+def test_p5_g3_realset_gate_fails_without_nonblank_evidence(tmp_path) -> None:
+    payload = _p5_g3_payload(tmp_path)
+    viewer_dir = Path(payload["viewer_package"]["viewer_dir"])
+    for path in viewer_dir.rglob("*.png"):
+        path.unlink()
+    args = _args(tmp_path, tmp_path, tmp_path / "out", p5_g3_realset_gate=True)
+
+    gate = runner._evaluate_quality_gate(payload, None, args)
+
+    assert gate["status"] == "failed"
+    issue = next(item for item in gate["issues"] if item["metric"] == "p5_g3_realset_gate")
+    assert any("nonblank:" in failure for failure in issue["failures"])
+
+
+def test_p5_g3_realset_gate_can_require_tile_eviction_evidence(tmp_path) -> None:
+    payload = _p5_g3_payload(tmp_path)
+    args = _args(
+        tmp_path,
+        tmp_path,
+        tmp_path / "out",
+        p5_g3_realset_gate=True,
+        p5_g3_require_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=1,
+        p5_g3_min_tile_evicted_bytes=1,
+    )
+
+    gate = runner._evaluate_quality_gate(payload, None, args)
+
+    assert gate["status"] == "failed"
+    issue = next(item for item in gate["issues"] if item["metric"] == "p5_g3_realset_gate")
+    assert any("evicted_pair_count=0 < 1" in failure for failure in issue["failures"])
+    assert any("evicted_estimated_bytes=0 < 1" in failure for failure in issue["failures"])
+
+
+def test_tile_eviction_requirement_implies_p5_g3_realset_gate(tmp_path) -> None:
+    payload = _p5_g3_payload(tmp_path)
+    args = _args(
+        tmp_path,
+        tmp_path,
+        tmp_path / "out",
+        p5_g3_require_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=1,
+        p5_g3_min_tile_evicted_bytes=1,
+    )
+
+    gate = runner._evaluate_quality_gate(payload, None, args)
+
+    assert gate["status"] == "failed"
+    assert payload["p5_g3_realset_gate"]["requested"] is True
+    issue = next(item for item in gate["issues"] if item["metric"] == "p5_g3_realset_gate")
+    assert any("evicted_pair_count=0 < 1" in failure for failure in issue["failures"])
+
+
+def test_p5_g3_realset_gate_passes_with_required_tile_eviction_evidence(tmp_path) -> None:
+    payload = _p5_g3_payload(tmp_path)
+    payload["viewer_perf_summary"]["tile_cache_evicted_pair_count"] = 2
+    payload["viewer_perf_summary"]["tile_cache_evicted_estimated_bytes"] = 4096
+    args = _args(
+        tmp_path,
+        tmp_path,
+        tmp_path / "out",
+        p5_g3_realset_gate=True,
+        p5_g3_require_tile_eviction=True,
+        p5_g3_min_tile_evicted_pairs=2,
+        p5_g3_min_tile_evicted_bytes=4096,
+    )
+
+    gate = runner._evaluate_quality_gate(payload, None, args)
+
+    assert gate["status"] == "passed"
+    tile_evidence = payload["p5_g3_realset_gate"]["evidence"]["tile_manifest"]
+    assert tile_evidence["require_eviction"] is True
+    assert tile_evidence["evicted_pair_count"] == 2
+    assert tile_evidence["evicted_estimated_bytes"] == 4096
+
+
+def test_p5_g6_tile_cache_mb_sets_env_and_is_recorded(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv(runner.TILE_CACHE_MB_ENV_VAR, raising=False)
+    payload = _p5_g3_payload(tmp_path)
+    payload["viewer_perf_summary"]["tile_cache_evicted_pair_count"] = 1
+    payload["viewer_perf_summary"]["tile_cache_evicted_estimated_bytes"] = 1024
+    args = _args(
+        tmp_path,
+        tmp_path,
+        tmp_path / "out",
+        p5_g3_require_tile_eviction=True,
+        p5_g6_tile_cache_mb=0.25,
+    )
+
+    runner._apply_p5_g6_tile_cache_env(args)
+    gate = runner._evaluate_quality_gate(payload, None, args)
+
+    assert gate["status"] == "passed"
+    assert runner.os.environ[runner.TILE_CACHE_MB_ENV_VAR] == "0.25"
+    tile_evidence = payload["p5_g3_realset_gate"]["evidence"]["tile_manifest"]
+    assert tile_evidence["configured_tile_cache_mb"] == 0.25
+    assert tile_evidence["tile_cache_env_mb"] == "0.25"
+    assert tile_evidence["tile_cache_env_var"] == runner.TILE_CACHE_MB_ENV_VAR
+
+
+def test_aggregate_quality_gate_enforces_p5_g3_min_dataset_count(tmp_path) -> None:
+    args = _args(
+        tmp_path,
+        tmp_path,
+        tmp_path / "out",
+        p5_g3_realset_gate=True,
+        p5_g3_min_realset_datasets=2,
+    )
+    payload = {
+        "baseline_record": {"dataset_id": "case-a"},
+        "quality_gate": {"status": "passed", "issues": []},
+    }
+
+    gate = runner._aggregate_quality_gate([payload], args)
+
+    assert gate["status"] == "failed"
+    assert any(issue["metric"] == "p5_g3_realset_dataset_count" for issue in gate["issues"])
+
+
 def test_validation_runner_writes_reports_and_respects_no_cache(tmp_path) -> None:
     old_dir = tmp_path / "old"
     new_dir = tmp_path / "new"
@@ -227,6 +596,8 @@ def test_validation_runner_writes_reports_and_respects_no_cache(tmp_path) -> Non
 
     summary = json.loads((out_dir / "validation_summary.json").read_text(encoding="utf-8"))
     assert summary["matching"]["confirmed_pairs"] == 1
+    assert summary["runtime_budget"]["sampler_active"] is True
+    assert summary["runtime_budget"]["sample_count"] > 0
     assert summary["ai_policy"]["status"] == "passed"
     assert summary["ai_policy"]["ai_required"] is False
     assert summary["ai_policy"]["fallback_without_model"]["classifier_used"] == "heuristic"
@@ -1107,10 +1478,12 @@ def test_pdf_pdf_validation_runner_builds_review_queue_and_sharable_viewer_packa
             export_profile="sharable",
             review_ground_truth=review_truth,
             quality_gate=True,
+            p5_g3_realset_gate=True,
         )
     )
 
     assert payload["quality_gate"]["status"] == "passed"
+    assert payload["p5_g3_realset_gate"]["status"] == "passed"
     assert payload["selected_zone_evidence"]["status"] == "passed"
     assert payload["selected_zone_evidence"]["event_count"] >= 2
     # Plan §15 Phase A-1 (HIGH-1 wire) — actual_crop_stats must land in
@@ -1128,6 +1501,12 @@ def test_pdf_pdf_validation_runner_builds_review_queue_and_sharable_viewer_packa
     assert payload["viewer_perf_summary"]["zone_crop_count"] >= 2
     assert payload["viewer_perf_summary"]["zone_crop_cold_ms"]["p95"] > 0
     assert payload["viewer_perf_summary"]["zone_crop_cache_hit_ms"]["p95"] >= 0
+    assert "reason_code_counts" in payload["viewer_perf_summary"]
+    assert "renderer_backend_counts" in payload["viewer_perf_summary"]
+    selected_render = payload["selected_zone_evidence"]["renders"][0]
+    assert "reason_code" in selected_render
+    assert "renderer_backend" in selected_render
+    assert selected_render["source_format"] == "pdf"
     assert payload["review_ground_truth"]["recall"] == 1.0
     assert payload["quality"]["structural_review_recall"] == 1.0
     assert payload["comparison"]["completed_pairs"] == 1
