@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 from scripts import inventory_drawing_compare_customer_evidence as inventory
+from src.services.comparison.visual_asset import build_visual_asset_cache_key
 
 
 def _write_validation(
@@ -20,6 +22,8 @@ def _write_validation(
     cad_block_text_no_expand: bool = True,
     forced_tile_eviction: bool = False,
     tile_cache_mb: float = 0.25,
+    include_visual_asset_manifest: bool = True,
+    visual_asset_nonblank_status: str = "passed",
 ) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "_SUCCESS").write_text(json.dumps({"run_id": "run_test"}), encoding="utf-8")
@@ -37,6 +41,9 @@ def _write_validation(
         },
         "matching": {"cad_pdf_blocked_pairs": 1 if cad_pdf_blocked else 0},
         "comparison": {"completed_pairs": completed_pairs},
+        "outputs": {
+            "viewer_manifest_json": "viewer/viewer_manifest.json",
+        },
         "change_artifacts": {
             "artifacts": [
                 {
@@ -141,8 +148,136 @@ def _write_validation(
             }
         ]
     (path / "validation_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    if completed_pairs:
+        _write_visual_asset_manifest_fixture(
+            path,
+            include_manifest=include_visual_asset_manifest,
+            nonblank_status=visual_asset_nonblank_status,
+        )
     if workbench_acceptance:
         _write_workbench_acceptance(path / "workbench_acceptance_summary.json")
+
+
+def _write_visual_asset_manifest_fixture(
+    path: Path,
+    *,
+    include_manifest: bool = True,
+    nonblank_status: str = "passed",
+) -> None:
+    viewer_dir = path / "viewer"
+    viewer_dir.mkdir(parents=True, exist_ok=True)
+    if not include_manifest:
+        (viewer_dir / "viewer_manifest.json").write_text(
+            json.dumps({"schema_version": 2, "visual_asset_manifest_paths": [], "pairs": []}),
+            encoding="utf-8",
+        )
+        return
+
+    manifest_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/visual_asset_manifest.json")
+    manifest_ref = str(manifest_rel).replace("\\", "/")
+    probe_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/nonblank_probe.json")
+    probe_ref = str(probe_rel).replace("\\", "/")
+    target_rel = Path("viewer/images/S21-0001_after.png")
+    target_ref = str(target_rel).replace("\\", "/")
+    target_path = path / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(b"stable nonblank visual target")
+    target_hash = hashlib.sha256(target_path.read_bytes()).hexdigest()
+    source_hash = "test-source-hash"
+    source_signature = {"schema_version": 1, "source_hash": source_hash}
+    plot_profile_hash = "test-plot-profile"
+    cache_key_hash = build_visual_asset_cache_key(
+        source_hash=source_hash,
+        source_signature=source_signature,
+        backend_id="source_pdf",
+        backend_version="1",
+        license_id="customer_provided",
+        plot_profile_hash=plot_profile_hash,
+        page_index=0,
+        dpi=80,
+        page_size_pt=[612.0, 792.0],
+        pixel_size=[680, 880],
+        transform_quality="estimated",
+    )
+    probe_payload = {
+        "schema_version": 2,
+        "status": nonblank_status,
+        "method": "pixel_nonblank_probe",
+        "asset_path": "viewer/pages/S21-0001_after.pdf",
+        "asset_hash": "test-asset-hash",
+        "asset_size": 10,
+        "probe_target_path": target_ref,
+        "probe_target_hash": target_hash,
+        "probe_target_size": target_path.stat().st_size,
+        "source_hash": source_hash,
+        "cache_key_hash": cache_key_hash,
+        "page_index": 0,
+        "dpi": 80,
+        "pixel_width": 10,
+        "pixel_height": 10,
+        "mean": 200.0 if nonblank_status == "passed" else 255.0,
+        "channel_ranges": [10, 10, 10] if nonblank_status == "passed" else [0, 0, 0],
+        "extrema": (
+            [[0, 10], [0, 10], [0, 10]]
+            if nonblank_status == "passed"
+            else [[255, 255], [255, 255], [255, 255]]
+        ),
+        "nonblank": nonblank_status == "passed",
+    }
+    probe_payload["probe_hash"] = hashlib.sha256(
+        json.dumps(probe_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    probe_path = path / probe_rel
+    probe_path.parent.mkdir(parents=True, exist_ok=True)
+    probe_path.write_text(json.dumps(probe_payload), encoding="utf-8")
+
+    manifest_path = path / manifest_rel
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "visual_asset_id": "S21-0001:after:source_pdf",
+                "source_path": "new.pdf",
+                "asset_path": "viewer/pages/S21-0001_after.pdf",
+                "asset_kind": "source_pdf",
+                "status": "ready",
+                "source_hash": source_hash,
+                "source_signature": source_signature,
+                "cache_key_hash": cache_key_hash,
+                "plot_profile_hash": plot_profile_hash,
+                "page_index": 0,
+                "dpi": 80,
+                "page_size_pt": [612.0, 792.0],
+                "pixel_size": [680, 880],
+                "visual_backend_id": "source_pdf",
+                "visual_backend_version": "1",
+                "visual_backend_license_id": "customer_provided",
+                "visual_fidelity": "pdf_visual_background",
+                "render_lifecycle": "ready",
+                "transform_quality": "estimated",
+                "nonblank_probe_status": nonblank_status,
+                "metadata": {
+                    "nonblank_probe": probe_ref,
+                    "nonblank_probe_hash": probe_payload["probe_hash"],
+                    "probe_target_path": target_ref,
+                    "probe_target_hash": target_hash,
+                    "probe_method": "pixel_nonblank_probe",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (viewer_dir / "viewer_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "visual_asset_manifest_count": 1,
+                "visual_asset_manifest_paths": [manifest_ref],
+                "pairs": [{"pair_id": "S21-0001", "visual_asset_manifest_paths": [manifest_ref]}],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _write_workbench_acceptance(path: Path) -> None:
@@ -308,17 +443,105 @@ def _write_p5_g22_gui_soak(path: Path) -> None:
     )
 
 
-def _write_ready_inventory_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _write_p5_g26_selection_latency(path: Path) -> None:
+    gate_names = sorted(inventory.P5_G26_REQUIRED_GATES)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g26_selection_latency_soak",
+                "profile": "selection_latency_hard_gate",
+                "status": "passed",
+                "p5_g26_required_gate_names": gate_names,
+                "p5_g26_contract": {
+                    "wp_a_passed": True,
+                    "wp_b_passed": True,
+                    "has_zone_selection_evidence": True,
+                    "zone_selection_background_work_count": 0,
+                    "cad_to_pdf_hot_path_count": 0,
+                },
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": True,
+                        "required": True,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_p5_g27_selected_zone_crop(path: Path) -> None:
+    gate_names = sorted(inventory.P5_G27_REQUIRED_GATES)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g27_selected_zone_crop_soak",
+                "profile": "selected_zone_crop_first_lifecycle",
+                "status": "passed",
+                "p5_g27_required_gate_names": gate_names,
+                "p5_g27_contract": {
+                    "crop_first_result_visible": True,
+                    "crop_visible_before_vector_focus": True,
+                    "vector_failure_does_not_clear_background": True,
+                    "has_selected_zone_crop_first_evidence": True,
+                    "worker_cleanup_ok": True,
+                    "blank_selected_zone_count": 0,
+                    "stale_result_visible_count": 0,
+                    "cancel_without_visible_regression_count": 0,
+                    "timeout_count": 0,
+                    "fallback_missing_reason_count": 0,
+                    "orphan_worker_count": 0,
+                },
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": True,
+                        "required": True,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_ready_inventory_fixture(
+    tmp_path: Path,
+    *,
+    include_visual_asset_manifest: bool = True,
+    visual_asset_nonblank_status: str = "passed",
+) -> tuple[Path, Path, Path, Path]:
     cad = tmp_path / "cad_validation"
     pdf = tmp_path / "pdf_validation"
     blocked = tmp_path / "cad_pdf_block_validation"
-    _write_validation(cad, kind="cad", completed_pairs=1, source_extensions=("dwg", "dxf"))
+    _write_validation(
+        cad,
+        kind="cad",
+        completed_pairs=1,
+        source_extensions=("dwg", "dxf"),
+        include_visual_asset_manifest=include_visual_asset_manifest,
+        visual_asset_nonblank_status=visual_asset_nonblank_status,
+    )
     _write_validation(
         pdf,
         kind="pdf",
         completed_pairs=20,
         source_extensions=("pdf", "pdf"),
         workbench_acceptance=True,
+        include_visual_asset_manifest=include_visual_asset_manifest,
+        visual_asset_nonblank_status=visual_asset_nonblank_status,
     )
     _write_validation(
         blocked,
@@ -392,6 +615,7 @@ def test_inventory_reports_ready_for_manifest_when_customer_evidence_is_present(
     assert report["summary"]["dataset_strata_passed"] is True
     assert report["summary"]["first_interactive_ready_passed"] is True
     assert report["summary"]["bbox_quality_passed"] is True
+    assert report["summary"]["p5_g24_visual_asset_policy_passed"] is True
     assert report["summary"]["audited_review_ground_truth_rows"] == 12
     assert report["issues"] == []
     assert report["diagnostics"]["missing_format_coverage"] == []
@@ -418,6 +642,10 @@ def test_inventory_reports_ready_for_manifest_when_customer_evidence_is_present(
     assert strata["large_dwg_rows"] == 2
     assert report["first_interactive_readiness"]["status"] == "passed"
     assert report["bbox_quality"]["status"] == "passed"
+    assert report["p5_g24_visual_asset_policy"]["status"] == "passed"
+    assert report["p5_g24_visual_asset_policy"]["manifest_count"] == 2
+    assert report["diagnostics"]["p5_g24_visual_asset_policy_status"] == "passed"
+    assert report["diagnostics"]["p5_g24_visual_asset_policy_issues"] == []
     assert report["bbox_quality"]["relative_only_ratio"] == 0.0
     assert report["large_dwg_probe"]["resource_probe_status"] == "passed"
     assert report["large_dwg_probe"]["peak_rss_mb"] == 1024.0
@@ -435,6 +663,41 @@ def test_inventory_reports_ready_for_manifest_when_customer_evidence_is_present(
     )
     assert "--large-dwg-probe" in report["recommended_commands"]["final_audit_command"]
     assert "--require-large-dwg-probe" in report["recommended_commands"]["final_audit_command"]
+
+
+def test_inventory_requires_p5_g24_visual_asset_manifest_refs(tmp_path: Path) -> None:
+    _cad, _pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(
+        tmp_path,
+        include_visual_asset_manifest=False,
+    )
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "incomplete"
+    assert report["summary"]["p5_g24_visual_asset_policy_passed"] is False
+    assert "P5-G24 visual asset policy is missing or failing for one or more completed validation outputs" in report["issues"]
+    assert report["diagnostics"]["p5_g24_visual_asset_policy_status"] == "failed"
+    assert any(
+        "no visual asset manifest references" in issue
+        for issue in report["diagnostics"]["p5_g24_visual_asset_policy_issues"]
+    )
+
+
+def test_inventory_rejects_failed_p5_g24_nonblank_probe(tmp_path: Path) -> None:
+    _cad, _pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(
+        tmp_path,
+        visual_asset_nonblank_status="failed",
+    )
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "incomplete"
+    assert report["summary"]["p5_g24_visual_asset_policy_passed"] is False
+    assert report["diagnostics"]["p5_g24_visual_asset_policy_status"] == "failed"
+    assert any(
+        "nonblank_probe_status must be passed" in issue
+        for issue in report["diagnostics"]["p5_g24_visual_asset_policy_issues"]
+    )
 
 
 def test_inventory_discovers_p5_g16_replay_and_recommends_pipeline_flags(tmp_path: Path) -> None:
@@ -474,6 +737,50 @@ def test_inventory_discovers_p5_g22_gui_soak_and_recommends_pipeline_flags(tmp_p
     assert str(soak_json) in report["recommended_commands"]["final_audit_command"]
     assert "--p5-g22-gui-soak-json" in report["recommended_commands"]["prepare_manifest_command"]
     assert "--p5-g22-gui-soak-json" in report["recommended_commands"]["final_audit_command"]
+
+
+def test_inventory_discovers_p5_g26_selection_latency_and_recommends_pipeline_flags(tmp_path: Path) -> None:
+    _cad, pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(tmp_path)
+    soak_json = pdf / "p5_g26_selection_latency_soak.json"
+    _write_p5_g26_selection_latency(soak_json)
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "ready_for_manifest"
+    assert report["summary"]["p5_g26_selection_latency_count"] == 1
+    assert report["summary"]["p5_g26_selection_latency_passed_count"] == 1
+    assert report["p5_g26_selection_latency"][0]["status"] == "passed"
+    assert report["p5_g26_selection_latency"][0]["passed_required_gate_count"] == len(
+        inventory.P5_G26_REQUIRED_GATES
+    )
+    assert report["diagnostics"]["p5_g26_selection_latency_passed"][0]["path"] == str(soak_json)
+    assert report["diagnostics"]["p5_g26_selection_latency_failed"] == []
+    assert str(soak_json) in report["recommended_commands"]["prepare_manifest_command"]
+    assert str(soak_json) in report["recommended_commands"]["final_audit_command"]
+    assert "--p5-g26-selection-latency-json" in report["recommended_commands"]["prepare_manifest_command"]
+    assert "--p5-g26-selection-latency-json" in report["recommended_commands"]["final_audit_command"]
+
+
+def test_inventory_discovers_p5_g27_selected_zone_crop_and_recommends_pipeline_flags(tmp_path: Path) -> None:
+    _cad, pdf, _blocked, large_dwg_probe = _write_ready_inventory_fixture(tmp_path)
+    soak_json = pdf / "p5_g27_selected_zone_crop_soak.json"
+    _write_p5_g27_selected_zone_crop(soak_json)
+
+    report = inventory.inventory_roots([tmp_path], large_dwg_probe=large_dwg_probe)
+
+    assert report["status"] == "ready_for_manifest"
+    assert report["summary"]["p5_g27_selected_zone_crop_count"] == 1
+    assert report["summary"]["p5_g27_selected_zone_crop_passed_count"] == 1
+    assert report["p5_g27_selected_zone_crop"][0]["status"] == "passed"
+    assert report["p5_g27_selected_zone_crop"][0]["passed_required_gate_count"] == len(
+        inventory.P5_G27_REQUIRED_GATES
+    )
+    assert report["diagnostics"]["p5_g27_selected_zone_crop_passed"][0]["path"] == str(soak_json)
+    assert report["diagnostics"]["p5_g27_selected_zone_crop_failed"] == []
+    assert str(soak_json) in report["recommended_commands"]["prepare_manifest_command"]
+    assert str(soak_json) in report["recommended_commands"]["final_audit_command"]
+    assert "--p5-g27-selected-zone-crop-json" in report["recommended_commands"]["prepare_manifest_command"]
+    assert "--p5-g27-selected-zone-crop-json" in report["recommended_commands"]["final_audit_command"]
 
 
 def test_inventory_reports_p5_g7_forced_tile_eviction_candidate_without_counting_as_customer_corpus(

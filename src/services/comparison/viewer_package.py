@@ -74,6 +74,7 @@ from .viewer_tile_cache import (
 from .visual_asset import (
     VisualAssetManifest,
     build_visual_asset_cache_key,
+    probe_visual_asset_nonblank,
     write_visual_asset_manifest,
 )
 from .workbench_subprocess import (
@@ -373,6 +374,8 @@ def export_viewer_package(
         pair_artifact = pair_artifacts.get(pair_id, {})
         source_a = _source_path_for_pair(rows, pair_artifact, "a")
         source_b = _source_path_for_pair(rows, pair_artifact, "b")
+        sidecar_pdf_a = _sidecar_pdf_path_for_pair(rows, pair_artifact, "a", artifact_root=artifact_root)
+        sidecar_pdf_b = _sidecar_pdf_path_for_pair(rows, pair_artifact, "b", artifact_root=artifact_root)
         preview_entry = preview_by_pair.get(pair_id, {})
 
         # Phase H integration — pick the per-side PDF page indices for
@@ -537,11 +540,50 @@ def export_viewer_package(
         pair_lod_tile_count = 0
         pair_overlay_tile_count = 0
         tile_manifest_path = ""
+        before_page_path = _copy_reference_pdf(pair_id, source_a, page_dir, side="before")
+        after_page_path = _copy_reference_pdf(pair_id, source_b, page_dir, side="after")
+        before_sidecar_page_path = _copy_reference_pdf(
+            pair_id,
+            sidecar_pdf_a,
+            page_dir,
+            side="before_sidecar",
+        )
+        after_sidecar_page_path = _copy_reference_pdf(
+            pair_id,
+            sidecar_pdf_b,
+            page_dir,
+            side="after_sidecar",
+        )
+        page_path = after_page_path or before_page_path
+        if before_page_path or after_page_path or before_sidecar_page_path or after_sidecar_page_path:
+            page_count += 1
+        visual_assets, pair_visual_asset_paths = _write_pair_visual_asset_manifests(
+            pair_id=pair_id,
+            source_a=source_a,
+            source_b=source_b,
+            before_page_pdf=before_page_path,
+            after_page_pdf=after_page_path,
+            before_sidecar_pdf=before_sidecar_page_path,
+            after_sidecar_pdf=after_sidecar_page_path,
+            before_image=before_image,
+            after_image=after_image,
+            before_transform=before_transform,
+            after_transform=after_transform,
+            cad_visual_conversion=cad_visual_conversion,
+            visual_asset_dir=visual_asset_dir,
+            options=options,
+            page_a=primary_page_a,
+            page_b=primary_page_b,
+        )
+        pair_visual_asset_identity_hash = _pair_visual_asset_identity_hash(visual_assets)
+        visual_asset_manifest_count += len(pair_visual_asset_paths)
+        visual_asset_manifest_paths.extend(pair_visual_asset_paths)
         tile_cache_key = viewer_cache_key(
             pair_uuid=pair_id,
             source_a=source_a,
             source_b=source_b,
             options=tile_options,
+            visual_asset_cache_key=pair_visual_asset_identity_hash,
             rendered_background_signature=rendered_background_signature,
         )
         if (
@@ -662,30 +704,6 @@ def export_viewer_package(
             else:
                 marked_pdf_skipped_count += 1
 
-        before_page_path = _copy_reference_pdf(pair_id, source_a, page_dir, side="before")
-        after_page_path = _copy_reference_pdf(pair_id, source_b, page_dir, side="after")
-        page_path = after_page_path or before_page_path
-        if before_page_path or after_page_path:
-            page_count += 1
-        visual_assets, pair_visual_asset_paths = _write_pair_visual_asset_manifests(
-            pair_id=pair_id,
-            source_a=source_a,
-            source_b=source_b,
-            before_page_pdf=before_page_path,
-            after_page_pdf=after_page_path,
-            before_image=before_image,
-            after_image=after_image,
-            before_transform=before_transform,
-            after_transform=after_transform,
-            cad_visual_conversion=cad_visual_conversion,
-            visual_asset_dir=visual_asset_dir,
-            options=options,
-            page_a=primary_page_a,
-            page_b=primary_page_b,
-        )
-        visual_asset_manifest_count += len(pair_visual_asset_paths)
-        visual_asset_manifest_paths.extend(pair_visual_asset_paths)
-
         pair_entry = {
             "pair_id": pair_id,
             "pair_uuid": pair_id,
@@ -715,6 +733,8 @@ def export_viewer_package(
             "after_image": after_image,
             "before_page_pdf": str(before_page_path) if before_page_path else "",
             "after_page_pdf": str(after_page_path) if after_page_path else "",
+            "before_sidecar_pdf": str(before_sidecar_page_path) if before_sidecar_page_path else "",
+            "after_sidecar_pdf": str(after_sidecar_page_path) if after_sidecar_page_path else "",
             "page_pdf": str(page_path) if page_path else "",
             "overlay_json": str(overlay_path),
             "render_status": render_status,
@@ -732,6 +752,7 @@ def export_viewer_package(
             "tile_manifest": tile_manifest_path,
             "tile_cache_key": tile_cache_key,
             "rendered_background_signature": rendered_background_signature,
+            "visual_asset_identity_hash": pair_visual_asset_identity_hash,
             "visual_assets": visual_assets,
             "visual_asset_manifest_paths": pair_visual_asset_paths,
             "marked_pdf": marked_pdf_path,
@@ -1057,6 +1078,62 @@ def _source_path_for_pair(rows: Sequence[Dict[str, str]], artifact: Dict[str, An
     return None
 
 
+def _sidecar_pdf_path_for_pair(
+    rows: Sequence[Dict[str, str]],
+    artifact: Dict[str, Any],
+    side: str,
+    *,
+    artifact_root: Path,
+) -> Optional[Path]:
+    keys = (
+        (
+            "sidecar_pdf_a",
+            "a_sidecar_pdf",
+            "before_sidecar_pdf",
+            "source_a_pdf",
+            "before_pdf",
+            "converted_pdf_a",
+            "a_converted_pdf",
+            "before_converted_pdf",
+        )
+        if side == "a"
+        else (
+            "sidecar_pdf_b",
+            "b_sidecar_pdf",
+            "after_sidecar_pdf",
+            "source_b_pdf",
+            "after_pdf",
+            "converted_pdf_b",
+            "b_converted_pdf",
+            "after_converted_pdf",
+        )
+    )
+    for container in (artifact, *rows):
+        for key in keys:
+            value = container.get(key) if isinstance(container, dict) else None
+            resolved = _resolve_existing_pdf_path(value, artifact_root=artifact_root)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _resolve_existing_pdf_path(value: Any, *, artifact_root: Path) -> Optional[Path]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if candidate.suffix.lower() not in PDF_EXTENSIONS:
+        return None
+    candidates = [candidate] if candidate.is_absolute() else [artifact_root / candidate, candidate]
+    for item in candidates:
+        try:
+            if item.exists() and item.is_file():
+                return item
+        except OSError:
+            continue
+    return None
+
+
 def _cad_visual_conversion_provenance_for_pair(
     *,
     pair_id: str,
@@ -1169,6 +1246,8 @@ def _write_pair_visual_asset_manifests(
     source_b: Optional[Path],
     before_page_pdf: Optional[Path],
     after_page_pdf: Optional[Path],
+    before_sidecar_pdf: Optional[Path],
+    after_sidecar_pdf: Optional[Path],
     before_image: str,
     after_image: str,
     before_transform: Optional[Dict[str, Any]],
@@ -1182,10 +1261,10 @@ def _write_pair_visual_asset_manifests(
     visual_assets: Dict[str, Dict[str, Any]] = {}
     manifest_paths: List[str] = []
     sides = (
-        ("before", source_a, before_page_pdf, before_image, before_transform, int(page_a)),
-        ("after", source_b, after_page_pdf, after_image, after_transform, int(page_b)),
+        ("before", source_a, before_page_pdf, before_sidecar_pdf, before_image, before_transform, int(page_a)),
+        ("after", source_b, after_page_pdf, after_sidecar_pdf, after_image, after_transform, int(page_b)),
     )
-    for side, source, page_pdf, image, transform, page_index in sides:
+    for side, source, page_pdf, sidecar_pdf, image, transform, page_index in sides:
         side_assets: Dict[str, Any] = {}
         if source and source.suffix.lower() in PDF_EXTENSIONS and page_pdf:
             entry = _write_visual_asset_manifest_for_side(
@@ -1208,8 +1287,33 @@ def _write_pair_visual_asset_manifests(
                 bbox_coordinate_space="image_pixels" if transform else "",
                 reason_code="",
                 status="ready",
+                probe_target_path=Path(image) if image else None,
             )
             side_assets["source_pdf"] = entry
+            manifest_paths.append(entry["manifest_path"])
+        if sidecar_pdf and not (source and source.suffix.lower() in PDF_EXTENSIONS):
+            entry = _write_visual_asset_manifest_for_side(
+                pair_id=pair_id,
+                side=side,
+                role="sidecar_pdf",
+                source=sidecar_pdf,
+                asset_path=sidecar_pdf,
+                asset_kind="sidecar_pdf",
+                visual_asset_dir=visual_asset_dir,
+                options=options,
+                page_index=page_index,
+                transform=transform,
+                visual_backend_id="sidecar_pdf",
+                visual_backend_version="1",
+                visual_backend_license_id="customer_provided",
+                visual_fidelity="pdf_visual_background",
+                render_lifecycle="source_only",
+                transform_quality="relative_only",
+                bbox_coordinate_space="",
+                reason_code="sidecar_pdf_discovered",
+                status="source_only",
+            )
+            side_assets["sidecar_pdf"] = entry
             manifest_paths.append(entry["manifest_path"])
         if image:
             entry = _write_visual_asset_manifest_for_side(
@@ -1232,6 +1336,7 @@ def _write_pair_visual_asset_manifests(
                 bbox_coordinate_space="image_pixels" if transform else "",
                 reason_code="",
                 status="ready",
+                probe_target_path=Path(image),
             )
             side_assets["raster_fallback"] = entry
             manifest_paths.append(entry["manifest_path"])
@@ -1273,6 +1378,7 @@ def _write_visual_asset_manifest_for_side(
     bbox_coordinate_space: str,
     reason_code: str,
     status: str,
+    probe_target_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     safe_pair = _safe_name(pair_id)
     manifest_dir = visual_asset_dir / safe_pair / side / role
@@ -1289,6 +1395,8 @@ def _write_visual_asset_manifest_for_side(
     )
     source_hash = str(source_signature.get("source_hash") or "")
     dpi = _transform_dpi(transform, fallback=options.preview_dpi)
+    page_size_pt = _page_size_pt_from_transform(transform)
+    pixel_size = _transform_pixel_size(transform)
     cache_key_hash = build_visual_asset_cache_key(
         source_hash=source_hash,
         source_signature=source_signature,
@@ -1298,11 +1406,15 @@ def _write_visual_asset_manifest_for_side(
         plot_profile_hash=plot_profile_hash,
         page_index=page_index,
         dpi=dpi,
+        page_size_pt=page_size_pt,
+        pixel_size=pixel_size,
+        transform_quality=transform_quality,
     )
     probe_path = manifest_dir / "nonblank_probe.json"
     probe = _write_visual_asset_probe(
         probe_path,
         asset_path=asset_path,
+        probe_target_path=probe_target_path,
         source_hash=source_hash,
         cache_key_hash=cache_key_hash,
         page_index=page_index,
@@ -1321,8 +1433,8 @@ def _write_visual_asset_manifest_for_side(
         plot_profile_hash=plot_profile_hash,
         page_index=page_index,
         dpi=dpi,
-        page_size_pt=_page_size_pt_from_transform(transform),
-        pixel_size=_transform_pixel_size(transform),
+        page_size_pt=page_size_pt,
+        pixel_size=pixel_size,
         visual_backend_id=visual_backend_id,
         visual_backend_version=visual_backend_version,
         visual_backend_license_id=visual_backend_license_id,
@@ -1338,10 +1450,13 @@ def _write_visual_asset_manifest_for_side(
             "nonblank_probe": str(probe_path),
             "nonblank_probe_hash": str(probe.get("probe_hash") or ""),
             "asset_hash": str(probe.get("asset_hash") or ""),
+            "probe_target_hash": str(probe.get("probe_target_hash") or ""),
+            "probe_target_path": str(probe.get("probe_target_path") or ""),
             "probe_method": str(probe.get("method") or ""),
         },
     )
     manifest_path = write_visual_asset_manifest(manifest_dir / "visual_asset_manifest.json", manifest)
+    identity_hash = _visual_asset_identity_hash(manifest)
     return {
         "manifest_path": str(manifest_path),
         "asset_kind": manifest.asset_kind,
@@ -1349,6 +1464,9 @@ def _write_visual_asset_manifest_for_side(
         "reason_code": manifest.reason_code,
         "cache_key_hash": manifest.cache_key_hash,
         "nonblank_probe_status": manifest.nonblank_probe_status,
+        "nonblank_probe_hash": str(manifest.metadata.get("nonblank_probe_hash") or ""),
+        "probe_target_hash": str(manifest.metadata.get("probe_target_hash") or ""),
+        "visual_asset_identity_hash": identity_hash,
     }
 
 
@@ -1390,6 +1508,7 @@ def _write_cad_visual_provenance_manifest(
         plot_profile_hash=plot_profile_hash,
         page_index=0,
         dpi=options.preview_dpi,
+        transform_quality="estimated" if asset_kind == "cad_to_pdf" else "relative_only",
     )
     manifest = VisualAssetManifest(
         visual_asset_id=f"{pair_id}:{side}:cad_visual_provenance",
@@ -1421,6 +1540,7 @@ def _write_cad_visual_provenance_manifest(
         },
     )
     manifest_path = write_visual_asset_manifest(manifest_dir / "visual_asset_manifest.json", manifest)
+    identity_hash = _visual_asset_identity_hash(manifest)
     return {
         "manifest_path": str(manifest_path),
         "asset_kind": manifest.asset_kind,
@@ -1428,7 +1548,71 @@ def _write_cad_visual_provenance_manifest(
         "reason_code": manifest.reason_code,
         "cache_key_hash": manifest.cache_key_hash,
         "nonblank_probe_status": manifest.nonblank_probe_status,
+        "visual_asset_identity_hash": identity_hash,
     }
+
+
+def _visual_asset_identity_hash(manifest: VisualAssetManifest) -> str:
+    metadata = manifest.metadata if isinstance(manifest.metadata, dict) else {}
+    payload = {
+        "schema": 1,
+        "visual_asset_id": manifest.visual_asset_id,
+        "asset_kind": manifest.asset_kind,
+        "status": manifest.status,
+        "reason_code": manifest.reason_code,
+        "source_hash": manifest.source_hash,
+        "cache_key_hash": manifest.cache_key_hash,
+        "page_index": int(manifest.page_index or 0),
+        "dpi": int(manifest.dpi or 0),
+        "page_size_pt": list(manifest.page_size_pt or []),
+        "pixel_size": list(manifest.pixel_size or []),
+        "visual_backend_id": manifest.visual_backend_id,
+        "visual_backend_version": manifest.visual_backend_version,
+        "visual_backend_license_id": manifest.visual_backend_license_id,
+        "visual_fidelity": manifest.visual_fidelity,
+        "render_lifecycle": manifest.render_lifecycle,
+        "transform_quality": manifest.transform_quality,
+        "nonblank_probe_status": manifest.nonblank_probe_status,
+        "probe_target_hash": str(metadata.get("probe_target_hash") or ""),
+        "asset_hash": str(metadata.get("asset_hash") or ""),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _pair_visual_asset_identity_hash(visual_assets: Dict[str, Dict[str, Any]]) -> str:
+    identities: list[dict[str, str]] = []
+    for side in sorted(visual_assets):
+        side_assets = visual_assets.get(side)
+        if not isinstance(side_assets, dict):
+            continue
+        for role in sorted(side_assets):
+            entry = side_assets.get(role)
+            if not isinstance(entry, dict):
+                continue
+            identities.append(
+                {
+                    "side": str(side),
+                    "role": str(role),
+                    "asset_kind": str(entry.get("asset_kind") or ""),
+                    "status": str(entry.get("status") or ""),
+                    "cache_key_hash": str(entry.get("cache_key_hash") or ""),
+                    "nonblank_probe_status": str(entry.get("nonblank_probe_status") or ""),
+                    "probe_target_hash": str(entry.get("probe_target_hash") or ""),
+                    "visual_asset_identity_hash": str(entry.get("visual_asset_identity_hash") or ""),
+                }
+            )
+    if not identities:
+        return ""
+    return hashlib.sha256(
+        json.dumps(
+            {"schema": 1, "visual_assets": identities},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _visual_source_signature(
@@ -1499,28 +1683,20 @@ def _write_visual_asset_probe(
     path: Path,
     *,
     asset_path: Path,
+    probe_target_path: Optional[Path] = None,
     source_hash: str,
     cache_key_hash: str,
     page_index: int,
     dpi: int,
 ) -> Dict[str, Any]:
-    asset_signature = _file_signature_for_path(asset_path)
-    payload = {
-        "schema_version": 1,
-        "status": "not_probed",
-        "method": "hash_link_only",
-        "asset_path": str(asset_path),
-        "asset_hash": str(asset_signature.get("sha256") or ""),
-        "asset_size": int(asset_signature.get("size") or 0),
-        "source_hash": source_hash,
-        "cache_key_hash": cache_key_hash,
-        "page_index": int(page_index or 0),
-        "dpi": int(dpi or 0),
-        "note": "P5-G24 foundation hash-link; pixel nonblank probe is required before customer_grade pass.",
-    }
-    payload["probe_hash"] = hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    payload = probe_visual_asset_nonblank(
+        asset_path=asset_path,
+        probe_target_path=probe_target_path,
+        source_hash=source_hash,
+        cache_key_hash=cache_key_hash,
+        page_index=page_index,
+        dpi=dpi,
+    )
     _write_json(path, payload)
     return payload
 

@@ -20,6 +20,12 @@ from typing import Any, Sequence
 try:  # Running from release ``cli/`` next to the evidence tools.
     from prepare_drawing_compare_customer_evidence import (
         APPROVED_OPERATOR_REVIEWER_ROLES,
+        P5_G26_BENCHMARK_ID,
+        P5_G26_PROFILE,
+        P5_G26_REQUIRED_GATES,
+        P5_G27_BENCHMARK_ID,
+        P5_G27_PROFILE,
+        P5_G27_REQUIRED_GATES,
         REQUIRED_OPERATOR_WORKFLOW_CHECKS,
         REQUIRED_WORKBENCH_ACCEPTANCE_ITEMS,
         _has_cad_block_text_no_expand_evidence,
@@ -30,12 +36,19 @@ try:  # Running from release ``cli/`` next to the evidence tools.
         summarize_dataset_strata_csv,
         summarize_first_interactive_readiness,
         summarize_large_dwg_resource_probe,
+        summarize_p5_g24_visual_asset_policy,
         summarize_p5_g7_forced_tile_eviction_proof,
         summarize_review_decision_truth_csv,
     )
 except ImportError:  # Running from source checkout.
     from scripts.prepare_drawing_compare_customer_evidence import (
         APPROVED_OPERATOR_REVIEWER_ROLES,
+        P5_G26_BENCHMARK_ID,
+        P5_G26_PROFILE,
+        P5_G26_REQUIRED_GATES,
+        P5_G27_BENCHMARK_ID,
+        P5_G27_PROFILE,
+        P5_G27_REQUIRED_GATES,
         REQUIRED_OPERATOR_WORKFLOW_CHECKS,
         REQUIRED_WORKBENCH_ACCEPTANCE_ITEMS,
         _has_cad_block_text_no_expand_evidence,
@@ -46,6 +59,7 @@ except ImportError:  # Running from source checkout.
         summarize_dataset_strata_csv,
         summarize_first_interactive_readiness,
         summarize_large_dwg_resource_probe,
+        summarize_p5_g24_visual_asset_policy,
         summarize_p5_g7_forced_tile_eviction_proof,
         summarize_review_decision_truth_csv,
     )
@@ -232,6 +246,29 @@ def inventory_roots(
     p5_g22_gui_soaks = [
         _summarize_p5_g22_gui_soak(path) for path in sorted(scan["p5_g22_gui_soak_jsons"])
     ]
+    p5_g26_selection_latency_jsons = sorted(str(path) for path in scan["p5_g26_selection_latency_jsons"])
+    p5_g26_selection_latency = [
+        _summarize_p5_g26_selection_latency(path)
+        for path in sorted(scan["p5_g26_selection_latency_jsons"])
+    ]
+    p5_g27_selected_zone_crop_jsons = sorted(
+        str(path) for path in scan["p5_g27_selected_zone_crop_jsons"]
+    )
+    p5_g27_selected_zone_crop = [
+        _summarize_p5_g27_selected_zone_crop(path)
+        for path in sorted(scan["p5_g27_selected_zone_crop_jsons"])
+    ]
+    p5_g24_visual_asset_policy = summarize_p5_g24_visual_asset_policy(
+        [
+            {
+                "path": Path(item["summary_path"]).parent,
+                "summary": _load_json(Path(item["summary_path"])) or {},
+            }
+            for item in customer_validations
+        ],
+        evidence_level="customer_grade",
+        reference_base=roots[0] if roots else None,
+    )
     customer_manifests = sorted(str(path) for path in scan["customer_manifests"])
     customer_manifest_summaries = [
         _summarize_customer_manifest(path) for path in sorted(scan["customer_manifests"])
@@ -297,6 +334,8 @@ def inventory_roots(
         issues.append("missing passing large-DWG performance/progress probe")
     if require_p5_g7_forced_tile_eviction and not p5_g7_forced_tile_eviction_passed_outputs:
         issues.append("missing passing P5-G7 forced tile-eviction proof validation output")
+    if p5_g24_visual_asset_policy.get("status") != "passed":
+        issues.append("P5-G24 visual asset policy is missing or failing for one or more completed validation outputs")
 
     status = "ready_for_manifest" if not issues else "incomplete"
     commands = _recommended_commands(
@@ -320,6 +359,8 @@ def inventory_roots(
         p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
         p5_g16_replay_jsons=p5_g16_replay_jsons,
         p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
+        p5_g26_selection_latency_jsons=p5_g26_selection_latency_jsons,
+        p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
     )
     diagnostics = _diagnostics(
         validations=customer_validations,
@@ -347,6 +388,9 @@ def inventory_roots(
         p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
         p5_g16_replays=p5_g16_replays,
         p5_g22_gui_soaks=p5_g22_gui_soaks,
+        p5_g26_selection_latency=p5_g26_selection_latency,
+        p5_g27_selected_zone_crop=p5_g27_selected_zone_crop,
+        p5_g24_visual_asset_policy=p5_g24_visual_asset_policy,
     )
     report = {
         "schema_version": 1,
@@ -384,6 +428,15 @@ def inventory_roots(
             "p5_g22_actual_gui_soak_passed_count": len(
                 [item for item in p5_g22_gui_soaks if item.get("status") == "passed"]
             ),
+            "p5_g26_selection_latency_count": len(p5_g26_selection_latency),
+            "p5_g26_selection_latency_passed_count": len(
+                [item for item in p5_g26_selection_latency if item.get("status") == "passed"]
+            ),
+            "p5_g27_selected_zone_crop_count": len(p5_g27_selected_zone_crop),
+            "p5_g27_selected_zone_crop_passed_count": len(
+                [item for item in p5_g27_selected_zone_crop if item.get("status") == "passed"]
+            ),
+            "p5_g24_visual_asset_policy_passed": p5_g24_visual_asset_policy.get("status") == "passed",
         },
         "validation_outputs": validations,
         "drawing_file_groups": _summarize_drawing_groups(scan["drawing_files"]),
@@ -399,6 +452,11 @@ def inventory_roots(
         "p5_g16_real_corpus_replays": p5_g16_replays,
         "p5_g22_actual_gui_soak_jsons": p5_g22_gui_soak_jsons,
         "p5_g22_actual_gui_soaks": p5_g22_gui_soaks,
+        "p5_g26_selection_latency_jsons": p5_g26_selection_latency_jsons,
+        "p5_g26_selection_latency": p5_g26_selection_latency,
+        "p5_g27_selected_zone_crop_jsons": p5_g27_selected_zone_crop_jsons,
+        "p5_g27_selected_zone_crop": p5_g27_selected_zone_crop,
+        "p5_g24_visual_asset_policy": p5_g24_visual_asset_policy,
         "large_dwg_probe": large_dwg_probe_summary,
         "first_interactive_readiness": first_interactive_readiness,
         "bbox_quality": bbox_quality,
@@ -458,6 +516,8 @@ def _scan_paths(roots: Sequence[Path], *, include_ignored_dirs: bool) -> dict[st
         "release_manifests": set(),
         "p5_g16_replay_jsons": set(),
         "p5_g22_gui_soak_jsons": set(),
+        "p5_g26_selection_latency_jsons": set(),
+        "p5_g27_selected_zone_crop_jsons": set(),
     }
     for root in roots:
         if root.is_file():
@@ -501,6 +561,10 @@ def _classify_file(path: Path, found: dict[str, set[Path]]) -> None:
         found["p5_g16_replay_jsons"].add(path)
     elif lower == "p5_g22_actual_gui_soak.json":
         found["p5_g22_gui_soak_jsons"].add(path)
+    elif lower == "p5_g26_selection_latency_soak.json":
+        found["p5_g26_selection_latency_jsons"].add(path)
+    elif lower == "p5_g27_selected_zone_crop_soak.json":
+        found["p5_g27_selected_zone_crop_jsons"].add(path)
     elif path.stem.endswith("_confirmed") and suffix in CONFIRMED_EXPORT_SUFFIXES:
         found["confirmed_artifacts"].add(path)
 
@@ -606,6 +670,8 @@ def _recommended_commands(
     p5_g6_tile_cache_mb: float | None,
     p5_g16_replay_jsons: Sequence[str],
     p5_g22_gui_soak_jsons: Sequence[str],
+    p5_g26_selection_latency_jsons: Sequence[str],
+    p5_g27_selected_zone_crop_jsons: Sequence[str],
 ) -> dict[str, str]:
     result_args = " ".join(f'--results-dir "{item["path"]}"' for item in validations)
     p5_g7_proof_args = " ".join(
@@ -674,6 +740,30 @@ def _recommended_commands(
     )
     if p5_g22_args:
         p5_g22_args = p5_g22_args + " "
+    p5_g26_prepare_args = " ".join(
+        f'--p5-g26-selection-latency-json "{path}"'
+        for path in p5_g26_selection_latency_jsons
+    )
+    if p5_g26_prepare_args:
+        p5_g26_prepare_args = p5_g26_prepare_args + " "
+    p5_g26_audit_args = " ".join(
+        f'--p5-g26-selection-latency-json "{path}"'
+        for path in p5_g26_selection_latency_jsons
+    )
+    if p5_g26_audit_args:
+        p5_g26_audit_args = p5_g26_audit_args + " "
+    p5_g27_prepare_args = " ".join(
+        f'--p5-g27-selected-zone-crop-json "{path}"'
+        for path in p5_g27_selected_zone_crop_jsons
+    )
+    if p5_g27_prepare_args:
+        p5_g27_prepare_args = p5_g27_prepare_args + " "
+    p5_g27_audit_args = " ".join(
+        f'--p5-g27-selected-zone-crop-json "{path}"'
+        for path in p5_g27_selected_zone_crop_jsons
+    )
+    if p5_g27_audit_args:
+        p5_g27_audit_args = p5_g27_audit_args + " "
     # Plan §17 Phase B-5 (GPT Pro F3): the legacy 10000/2000 ms defaults
     # below trigger a deprecation warning on stderr. Once Phase B-2
     # (PyMuPDF DisplayList) + B-3 (DXF pre-filter) + B-4 (prefetch) have
@@ -694,6 +784,8 @@ def _recommended_commands(
         f"{p5_g7_proof_args} "
         f"{p5_g16_args}"
         f"{p5_g22_args}"
+        f"{p5_g26_prepare_args}"
+        f"{p5_g27_prepare_args}"
         f"{p5_g7_require_arg}{p5_g6_tile_cache_arg}"
         "--operator-reviewer-role structural_review_lead "
         f"--operator-notes-file \"{notes}\" --confirmed-export-artifact \"{confirmed}\" "
@@ -709,6 +801,8 @@ def _recommended_commands(
         f"--customer-evidence-manifest \"{manifest}\" --evidence-level customer_grade "
         f"{p5_g16_args}"
         f"{p5_g22_args}"
+        f"{p5_g26_audit_args}"
+        f"{p5_g27_audit_args}"
         f"--min-total-pairs {min_total_pairs} --max-total-pairs {max_total_pairs} "
         "--max-first-review-ready-s 1800 --max-cold-zone-render-ms 10000 "
         "--max-cache-hit-zone-render-ms 2000 --out <mvp_exit_audit.json> "
@@ -823,6 +917,182 @@ def _summarize_p5_g22_gui_soak(path: Path) -> dict[str, Any]:
     }
 
 
+def _summarize_p5_g26_selection_latency(path: Path) -> dict[str, Any]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return {
+            "path": str(path),
+            "readable": False,
+            "status": "failed",
+            "benchmark_id": "",
+            "profile": "",
+            "issues": ["p5_g26_selection_latency JSON is missing or unreadable"],
+        }
+    contract = payload.get("p5_g26_contract")
+    if not isinstance(contract, dict):
+        contract = payload.get("p5_g26_evidence")
+    if not isinstance(contract, dict):
+        contract = {}
+    gates = payload.get("gates")
+    gate_by_name = (
+        {
+            str(gate.get("name") or ""): gate
+            for gate in gates
+            if isinstance(gate, dict) and str(gate.get("name") or "")
+        }
+        if isinstance(gates, list)
+        else {}
+    )
+    issues: list[str] = []
+    if payload.get("benchmark_id") != P5_G26_BENCHMARK_ID:
+        issues.append(f"benchmark_id must be {P5_G26_BENCHMARK_ID}")
+    if payload.get("profile") != P5_G26_PROFILE:
+        issues.append(f"profile must be {P5_G26_PROFILE}")
+    if payload.get("status") != "passed":
+        issues.append(f"status={payload.get('status') or '<missing>'}")
+    if not contract:
+        issues.append("p5_g26_contract missing")
+    else:
+        if contract.get("wp_a_passed") is not True:
+            issues.append("p5_g26_contract.wp_a_passed must be true")
+        if contract.get("wp_b_passed") is not True:
+            issues.append("p5_g26_contract.wp_b_passed must be true")
+        if contract.get("has_zone_selection_evidence") is not True:
+            issues.append("p5_g26_contract.has_zone_selection_evidence must be true")
+    missing = sorted(P5_G26_REQUIRED_GATES - set(gate_by_name))
+    if missing:
+        issues.append("required gates missing: " + ", ".join(missing))
+    failed = sorted(
+        gate_name
+        for gate_name, gate in gate_by_name.items()
+        if gate_name in P5_G26_REQUIRED_GATES
+        and gate.get("required") is not False
+        and gate.get("passed") is not True
+    )
+    if failed:
+        issues.append("required gates failed: " + ", ".join(failed))
+    return {
+        "path": str(path),
+        "readable": True,
+        "status": "passed" if not issues else "failed",
+        "benchmark_id": str(payload.get("benchmark_id") or ""),
+        "profile": str(payload.get("profile") or ""),
+        "wp_a_passed": contract.get("wp_a_passed") is True,
+        "wp_b_passed": contract.get("wp_b_passed") is True,
+        "has_zone_selection_evidence": contract.get("has_zone_selection_evidence") is True,
+        "required_gate_count": len(P5_G26_REQUIRED_GATES),
+        "passed_required_gate_count": len(
+            [
+                gate
+                for name, gate in gate_by_name.items()
+                if name in P5_G26_REQUIRED_GATES
+                and gate.get("required") is not False
+                and gate.get("passed") is True
+            ]
+        ),
+        "issues": issues,
+    }
+
+
+def _summarize_p5_g27_selected_zone_crop(path: Path) -> dict[str, Any]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return {
+            "path": str(path),
+            "readable": False,
+            "status": "failed",
+            "benchmark_id": "",
+            "profile": "",
+            "issues": ["p5_g27_selected_zone_crop JSON is missing or unreadable"],
+        }
+    contract = payload.get("p5_g27_contract")
+    if not isinstance(contract, dict):
+        contract = payload.get("p5_g27_evidence")
+    if not isinstance(contract, dict):
+        contract = {}
+    gates = payload.get("gates")
+    gate_by_name = (
+        {
+            str(gate.get("name") or ""): gate
+            for gate in gates
+            if isinstance(gate, dict) and str(gate.get("name") or "")
+        }
+        if isinstance(gates, list)
+        else {}
+    )
+    issues: list[str] = []
+    if payload.get("benchmark_id") != P5_G27_BENCHMARK_ID:
+        issues.append(f"benchmark_id must be {P5_G27_BENCHMARK_ID}")
+    if payload.get("profile") != P5_G27_PROFILE:
+        issues.append(f"profile must be {P5_G27_PROFILE}")
+    if payload.get("status") != "passed":
+        issues.append(f"status={payload.get('status') or '<missing>'}")
+    if not contract:
+        issues.append("p5_g27_contract missing")
+    else:
+        if contract.get("crop_first_result_visible") is not True:
+            issues.append("p5_g27_contract.crop_first_result_visible must be true")
+        if contract.get("crop_visible_before_vector_focus") is not True:
+            issues.append("p5_g27_contract.crop_visible_before_vector_focus must be true")
+        if contract.get("vector_failure_does_not_clear_background") is not True:
+            issues.append(
+                "p5_g27_contract.vector_failure_does_not_clear_background must be true"
+            )
+        if contract.get("has_selected_zone_crop_first_evidence") is not True:
+            issues.append("p5_g27_contract.has_selected_zone_crop_first_evidence must be true")
+        if contract.get("worker_cleanup_ok") is not True:
+            issues.append("p5_g27_contract.worker_cleanup_ok must be true")
+        for key in (
+            "blank_selected_zone_count",
+            "stale_result_visible_count",
+            "cancel_without_visible_regression_count",
+            "timeout_count",
+            "fallback_missing_reason_count",
+            "orphan_worker_count",
+        ):
+            if _int(contract.get(key)) != 0:
+                issues.append(f"p5_g27_contract.{key} must be 0")
+    missing = sorted(P5_G27_REQUIRED_GATES - set(gate_by_name))
+    if missing:
+        issues.append("required gates missing: " + ", ".join(missing))
+    failed = sorted(
+        gate_name
+        for gate_name, gate in gate_by_name.items()
+        if gate_name in P5_G27_REQUIRED_GATES
+        and gate.get("required") is not False
+        and gate.get("passed") is not True
+    )
+    if failed:
+        issues.append("required gates failed: " + ", ".join(failed))
+    return {
+        "path": str(path),
+        "readable": True,
+        "status": "passed" if not issues else "failed",
+        "benchmark_id": str(payload.get("benchmark_id") or ""),
+        "profile": str(payload.get("profile") or ""),
+        "crop_first_result_visible": contract.get("crop_first_result_visible") is True,
+        "crop_visible_before_vector_focus": contract.get("crop_visible_before_vector_focus") is True,
+        "vector_failure_does_not_clear_background": (
+            contract.get("vector_failure_does_not_clear_background") is True
+        ),
+        "has_selected_zone_crop_first_evidence": (
+            contract.get("has_selected_zone_crop_first_evidence") is True
+        ),
+        "worker_cleanup_ok": contract.get("worker_cleanup_ok") is True,
+        "required_gate_count": len(P5_G27_REQUIRED_GATES),
+        "passed_required_gate_count": len(
+            [
+                gate
+                for name, gate in gate_by_name.items()
+                if name in P5_G27_REQUIRED_GATES
+                and gate.get("required") is not False
+                and gate.get("passed") is True
+            ]
+        ),
+        "issues": issues,
+    }
+
+
 def _diagnostics(
     *,
     validations: Sequence[dict[str, Any]],
@@ -850,6 +1120,9 @@ def _diagnostics(
     p5_g6_tile_cache_mb: float | None,
     p5_g16_replays: Sequence[dict[str, Any]],
     p5_g22_gui_soaks: Sequence[dict[str, Any]],
+    p5_g26_selection_latency: Sequence[dict[str, Any]],
+    p5_g27_selected_zone_crop: Sequence[dict[str, Any]],
+    p5_g24_visual_asset_policy: dict[str, Any],
 ) -> dict[str, Any]:
     completed = [item for item in validations if int(item["completed_pairs"]) > 0]
     missing_format_coverage: list[str] = []
@@ -979,6 +1252,23 @@ def _diagnostics(
         "p5_g22_actual_gui_soak_missing_shared_summaries": [
             item for item in p5_g22_gui_soaks if not item.get("shared_summaries_present")
         ],
+        "p5_g26_selection_latency_candidates": list(p5_g26_selection_latency),
+        "p5_g26_selection_latency_passed": [
+            item for item in p5_g26_selection_latency if item.get("status") == "passed"
+        ],
+        "p5_g26_selection_latency_failed": [
+            item for item in p5_g26_selection_latency if item.get("status") != "passed"
+        ],
+        "p5_g27_selected_zone_crop_candidates": list(p5_g27_selected_zone_crop),
+        "p5_g27_selected_zone_crop_passed": [
+            item for item in p5_g27_selected_zone_crop if item.get("status") == "passed"
+        ],
+        "p5_g27_selected_zone_crop_failed": [
+            item for item in p5_g27_selected_zone_crop if item.get("status") != "passed"
+        ],
+        "p5_g24_visual_asset_policy_status": p5_g24_visual_asset_policy.get("status"),
+        "p5_g24_visual_asset_policy_issues": list(p5_g24_visual_asset_policy.get("issues") or []),
+        "p5_g24_visual_asset_policy_evidence": list(p5_g24_visual_asset_policy.get("evidence") or []),
         "customer_evidence_manifest_count": len(customer_manifest_summaries),
         "customer_evidence_manifests_not_ready": [
             item for item in customer_manifest_summaries if not item["self_check_ready"]

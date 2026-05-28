@@ -534,6 +534,49 @@ P5_G22_REQUIRED_GATES = {
     "p5_g22_user_handle_positive_end_delta",
 }
 
+P5_G26_BENCHMARK_ID = "p5_g26_selection_latency_soak"
+P5_G26_PROFILE = "selection_latency_hard_gate"
+P5_G26_REQUIRED_GATES = {
+    "p5_g26_wp_a_gui_hot_path_contract",
+    "p5_g26_wp_b_pdf_first_responsiveness_contract",
+    "p5_g26_event_loop_gap_max_ms",
+    "p5_g26_click_hot_path_full_work_count",
+    "p5_g26_cached_page_navigation_render_call_count",
+    "p5_g26_repeat_cache_hit_rate",
+    "p5_g26_blank_viewer_count",
+    "p5_g26_cad_to_pdf_hot_path_count",
+    "p5_g26_zone_selection_count",
+    "p5_g26_zone_selection_telemetry_count",
+    "p5_g26_zone_selection_p95_ms",
+    "p5_g26_zone_selection_worker_spawn_count",
+    "p5_g26_zone_selection_background_work_count",
+    "p5_g26_zone_selection_stale_visible_count",
+}
+P5_G27_BENCHMARK_ID = "p5_g27_selected_zone_crop_soak"
+P5_G27_PROFILE = "selected_zone_crop_first_lifecycle"
+P5_G27_REQUIRED_GATES = {
+    "p5_g27_crop_first_result_visible",
+    "p5_g27_crop_visible_before_vector_focus",
+    "p5_g27_crop_visible_p95_ms",
+    "p5_g27_vector_failure_does_not_clear_background",
+    "p5_g27_blank_selected_zone_count",
+    "p5_g27_stale_result_visible_count",
+    "p5_g27_cancel_without_visible_regression_count",
+    "p5_g27_timeout_count",
+    "p5_g27_fallback_missing_reason_count",
+    "p5_g27_event_loop_gap_max_ms",
+    "p5_g27_worker_cleanup_ok",
+    "p5_g27_orphan_worker_count",
+}
+P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATES = {
+    "p5_g27_real_renderer_bridge_present",
+    "p5_g27_real_renderer_bridge_p5_g16_passed",
+    "p5_g27_real_renderer_bridge_zone_artifacts_present",
+    "p5_g27_real_renderer_bridge_nonblank_zone_outputs",
+    "p5_g27_real_renderer_bridge_zone_images_present",
+    "p5_g27_real_renderer_bridge_fallback_reasons",
+}
+
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -741,6 +784,48 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Fail the audit unless a passed P5-G22 actual GUI soak benchmark "
             "is available. Enabled automatically for customer_grade."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g26-selection-latency-json",
+        "--p5-g26-selection-latency-soak",
+        dest="p5_g26_selection_latency_json",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Optional p5_g26_selection_latency_soak.json artifact. Repeatable. "
+            "If omitted, the audit searches release/customer manifest "
+            "references, validation summary fields, and each results-dir."
+        ),
+    )
+    parser.add_argument(
+        "--require-p5-g26-selection-latency-soak",
+        action="store_true",
+        help=(
+            "Fail the audit unless a passed P5-G26 selection latency benchmark "
+            "is available. Enabled automatically for customer_grade."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g27-selected-zone-crop-json",
+        "--p5-g27-selected-zone-crop-soak",
+        dest="p5_g27_selected_zone_crop_json",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Optional p5_g27_selected_zone_crop_soak.json artifact. Repeatable. "
+            "If omitted, the audit searches release/customer manifest "
+            "references, validation summary fields, and each results-dir."
+        ),
+    )
+    parser.add_argument(
+        "--require-p5-g27-selected-zone-crop-soak",
+        action="store_true",
+        help=(
+            "Fail the audit unless a passed P5-G27 selected-zone crop-first "
+            "benchmark is available. Enabled automatically for customer_grade."
         ),
     )
     parser.add_argument(
@@ -1007,6 +1092,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         require_p5_g16_real_corpus_replay=getattr(args, "require_p5_g16_real_corpus_replay", False),
         p5_g22_gui_soak_json=[path.resolve() for path in args.p5_g22_gui_soak_json],
         require_p5_g22_actual_gui_soak=getattr(args, "require_p5_g22_actual_gui_soak", False),
+        p5_g26_selection_latency_json=[
+            path.resolve() for path in args.p5_g26_selection_latency_json
+        ],
+        require_p5_g26_selection_latency_soak=getattr(
+            args,
+            "require_p5_g26_selection_latency_soak",
+            False,
+        ),
+        p5_g27_selected_zone_crop_json=[
+            path.resolve() for path in args.p5_g27_selected_zone_crop_json
+        ],
+        require_p5_g27_selected_zone_crop_soak=getattr(
+            args,
+            "require_p5_g27_selected_zone_crop_soak",
+            False,
+        ),
         require_p5_g3_tile_eviction=getattr(args, "require_p5_g3_tile_eviction", False),
         p5_g3_min_tile_evicted_pairs=getattr(args, "p5_g3_min_tile_evicted_pairs", 1),
         p5_g3_min_tile_evicted_bytes=getattr(args, "p5_g3_min_tile_evicted_bytes", 1),
@@ -1077,6 +1178,12 @@ def run_audit(
     p5_g22_gui_soak_json: Sequence[Path] | None = None,
     p5_g22_actual_gui_soak: Path | None = None,
     require_p5_g22_actual_gui_soak: bool = False,
+    p5_g26_selection_latency_json: Sequence[Path] | None = None,
+    p5_g26_selection_latency_soak: Path | None = None,
+    require_p5_g26_selection_latency_soak: bool = False,
+    p5_g27_selected_zone_crop_json: Sequence[Path] | None = None,
+    p5_g27_selected_zone_crop_soak: Path | None = None,
+    require_p5_g27_selected_zone_crop_soak: bool = False,
     require_p5_g3_tile_eviction: bool = False,
     p5_g3_min_tile_evicted_pairs: int = 1,
     p5_g3_min_tile_evicted_bytes: int = 1,
@@ -1147,6 +1254,8 @@ def run_audit(
         require_p5_g3_realset_gate = True
         require_p5_g16_real_corpus_replay = True
         require_p5_g22_actual_gui_soak = True
+        require_p5_g26_selection_latency_soak = True
+        require_p5_g27_selected_zone_crop_soak = True
         if max_perf_summary_elapsed_ms is None:
             max_perf_summary_elapsed_ms = STRICT_MAX_PERF_SUMMARY_ELAPSED_MS
     if require_p5_g3_tile_eviction:
@@ -1242,6 +1351,32 @@ def run_audit(
             require_p5_g22_actual_gui_soak=require_p5_g22_actual_gui_soak,
             min_total_pairs=min_total_pairs,
             max_total_pairs=max_total_pairs,
+        ),
+        _check_p5_g26_selection_latency_soak(
+            explicit_paths=[
+                *(p5_g26_selection_latency_json or []),
+                *([p5_g26_selection_latency_soak] if p5_g26_selection_latency_soak else []),
+            ],
+            customer_manifest=customer_manifest,
+            customer_manifest_path=customer_evidence_manifest,
+            release=release,
+            release_manifest=release_manifest,
+            loaded=loaded,
+            evidence_level=evidence_level,
+            require_p5_g26_selection_latency_soak=require_p5_g26_selection_latency_soak,
+        ),
+        _check_p5_g27_selected_zone_crop_soak(
+            explicit_paths=[
+                *(p5_g27_selected_zone_crop_json or []),
+                *([p5_g27_selected_zone_crop_soak] if p5_g27_selected_zone_crop_soak else []),
+            ],
+            customer_manifest=customer_manifest,
+            customer_manifest_path=customer_evidence_manifest,
+            release=release,
+            release_manifest=release_manifest,
+            loaded=loaded,
+            evidence_level=evidence_level,
+            require_p5_g27_selected_zone_crop_soak=require_p5_g27_selected_zone_crop_soak,
         ),
         _check_preflight(summaries),
         _check_ai_optional_fallback(summaries),
@@ -2996,6 +3131,561 @@ def _p5_g22_payload_failures(
     return failures
 
 
+def _check_p5_g26_selection_latency_soak(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+    evidence_level: str,
+    require_p5_g26_selection_latency_soak: bool,
+) -> AuditCheck:
+    name = "p5_g26_selection_latency_soak"
+    candidates = _p5_g26_candidate_paths(
+        explicit_paths=explicit_paths,
+        customer_manifest=customer_manifest,
+        customer_manifest_path=customer_manifest_path,
+        release=release,
+        release_manifest=release_manifest,
+        loaded=loaded,
+    )
+    evidence = [str(path) for path in candidates]
+    if not require_p5_g26_selection_latency_soak and not explicit_paths and not candidates:
+        return AuditCheck(
+            name=name,
+            passed=True,
+            detail="P5-G26 selection latency evidence is advisory outside customer_grade",
+            evidence=[],
+        )
+    if not candidates:
+        return AuditCheck(
+            name=name,
+            passed=not require_p5_g26_selection_latency_soak,
+            detail="p5_g26_selection_latency_soak artifact missing",
+            evidence=[],
+        )
+
+    benchmark_path = candidates[0]
+    payload = _load_json(benchmark_path)
+    failures = _p5_g26_payload_failures(
+        payload,
+        require_customer_grade=evidence_level == "customer_grade" or require_p5_g26_selection_latency_soak,
+    )
+    detail_parts = [f"path={benchmark_path}"]
+    if isinstance(payload, dict):
+        detail_parts.append(f"status={payload.get('status') or '<missing>'}")
+        detail_parts.append(f"benchmark_id={payload.get('benchmark_id') or '<missing>'}")
+        contract = payload.get("p5_g26_contract")
+        if not isinstance(contract, dict):
+            contract = payload.get("p5_g26_evidence")
+        if isinstance(contract, dict):
+            detail_parts.append(f"wp_a={contract.get('wp_a_passed')}")
+            detail_parts.append(f"wp_b={contract.get('wp_b_passed')}")
+            detail_parts.append(
+                f"zone_p95_ms={contract.get('zone_selection_p95_ms') or '<missing>'}"
+            )
+    if failures:
+        detail_parts.append("failures=" + "; ".join(failures))
+    return AuditCheck(
+        name=name,
+        passed=not failures,
+        detail=", ".join(detail_parts),
+        evidence=evidence,
+    )
+
+
+def _p5_g26_candidate_paths(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve() if path.exists() else path
+        if resolved not in candidates:
+            candidates.append(resolved)
+
+    for path in explicit_paths:
+        add(path)
+    if isinstance(release, dict):
+        artifacts = release.get("artifacts") if isinstance(release.get("artifacts"), dict) else {}
+        for key in (
+            "p5_g26_selection_latency_json",
+            "p5_g26_selection_latency_soak_json",
+            "p5_g26_selection_latency_soak",
+            "selection_latency_soak",
+        ):
+            add(_manifest_reference_path(release_manifest, str(artifacts.get(key) or "").strip()))
+        jsons = artifacts.get("p5_g26_selection_latency_jsons") or artifacts.get(
+            "p5_g26_selection_latency_soak_jsons"
+        )
+        if isinstance(jsons, list):
+            for value in jsons:
+                add(_manifest_reference_path(release_manifest, str(value or "").strip()))
+    if isinstance(customer_manifest, dict):
+        for value in _p5_g26_manifest_path_values(customer_manifest):
+            add(_manifest_reference_path(customer_manifest_path, value))
+    for item in loaded:
+        summary = item.get("summary")
+        if isinstance(summary, dict):
+            add(_result_reference_path(item, str(_nested(summary, "outputs", "p5_g26_selection_latency_json") or "")))
+            add(_result_reference_path(item, str(_nested(summary, "benchmarks", "p5_g26_selection_latency", "output_json") or "")))
+        root = item.get("path")
+        if isinstance(root, Path):
+            candidate = root / "p5_g26_selection_latency_soak.json"
+            if candidate.exists():
+                add(candidate)
+    return candidates
+
+
+def _p5_g26_manifest_path_values(manifest: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+    for key in (
+        "p5_g26_selection_latency_json",
+        "p5_g26_selection_latency_soak_json",
+        "p5_g26_selection_latency_soak",
+        "selection_latency_soak",
+    ):
+        text = str(artifacts.get(key) or "").strip()
+        if text:
+            values.append(text)
+    for list_key in ("p5_g26_selection_latency_jsons", "p5_g26_selection_latency_soak_jsons"):
+        jsons = artifacts.get(list_key)
+        if isinstance(jsons, list):
+            values.extend(str(item).strip() for item in jsons if str(item or "").strip())
+    for key in ("p5_g26_selection_latency", "p5_g26_selection_latency_soak", "selection_latency_soak"):
+        section = manifest.get(key)
+        if isinstance(section, dict):
+            text = str(section.get("path") or section.get("json") or section.get("artifact") or "").strip()
+            if text:
+                values.append(text)
+        elif isinstance(section, str) and section.strip():
+            values.append(section.strip())
+    performance = manifest.get("performance_benchmarks")
+    if isinstance(performance, dict):
+        for key in ("p5_g26_selection_latency", "p5_g26_selection_latency_soak"):
+            section = performance.get(key)
+            if isinstance(section, dict):
+                text = str(
+                    section.get("benchmark_json")
+                    or section.get("path")
+                    or section.get("json")
+                    or section.get("artifact")
+                    or ""
+                ).strip()
+                if text:
+                    values.append(text)
+                benchmark_jsons = section.get("benchmark_jsons")
+                if isinstance(benchmark_jsons, list):
+                    values.extend(
+                        str(item).strip()
+                        for item in benchmark_jsons
+                        if str(item or "").strip()
+                    )
+            elif isinstance(section, str) and section.strip():
+                values.append(section.strip())
+    return values
+
+
+def _p5_g26_payload_failures(
+    payload: dict[str, Any] | None,
+    *,
+    require_customer_grade: bool,
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["p5_g26_selection_latency_soak JSON missing or unreadable"]
+    failures: list[str] = []
+    if payload.get("schema_version") != "workbench-gui-hotpath-benchmark/v1":
+        failures.append("schema_version must be workbench-gui-hotpath-benchmark/v1")
+    if payload.get("benchmark_id") != P5_G26_BENCHMARK_ID:
+        failures.append(f"benchmark_id must be {P5_G26_BENCHMARK_ID}")
+    if payload.get("profile") != P5_G26_PROFILE:
+        failures.append(f"profile must be {P5_G26_PROFILE}")
+    if payload.get("status") != "passed":
+        failures.append(f"status={payload.get('status') or '<missing>'}")
+
+    contract = payload.get("p5_g26_contract")
+    if not isinstance(contract, dict):
+        contract = payload.get("p5_g26_evidence")
+    if not isinstance(contract, dict):
+        failures.append("p5_g26_contract missing")
+        contract = {}
+    else:
+        if contract.get("wp_a_passed") is not True:
+            failures.append("p5_g26_contract.wp_a_passed must be true")
+        if contract.get("wp_b_passed") is not True:
+            failures.append("p5_g26_contract.wp_b_passed must be true")
+        if contract.get("has_zone_selection_evidence") is not True:
+            failures.append("p5_g26_contract.has_zone_selection_evidence must be true")
+        if _int(contract.get("zone_selection_background_work_count")) != 0:
+            failures.append("p5_g26_contract.zone_selection_background_work_count must be 0")
+        if _int(contract.get("cad_to_pdf_hot_path_count")) != 0:
+            failures.append("p5_g26_contract.cad_to_pdf_hot_path_count must be 0")
+
+    declared = payload.get("p5_g26_required_gate_names")
+    declared_set = {
+        str(item)
+        for item in declared
+        if str(item or "")
+    } if isinstance(declared, list) else set()
+    if require_customer_grade and not declared_set:
+        failures.append("p5_g26_required_gate_names missing")
+    elif declared_set:
+        missing_declared = sorted(P5_G26_REQUIRED_GATES - declared_set)
+        if missing_declared:
+            failures.append("p5_g26_required_gate_names missing: " + ", ".join(missing_declared))
+
+    gates = payload.get("gates")
+    if not isinstance(gates, list):
+        failures.append("gates[] missing")
+        gate_by_name: dict[str, dict[str, Any]] = {}
+    else:
+        gate_by_name = {
+            str(gate.get("name") or ""): gate
+            for gate in gates
+            if isinstance(gate, dict) and str(gate.get("name") or "")
+        }
+        missing = sorted(P5_G26_REQUIRED_GATES - set(gate_by_name))
+        if missing:
+            failures.append("required gates missing: " + ", ".join(missing))
+        failed = sorted(
+            gate_name
+            for gate_name, gate in gate_by_name.items()
+            if gate_name in P5_G26_REQUIRED_GATES
+            and gate.get("required") is not False
+            and gate.get("passed") is not True
+        )
+        if failed:
+            failures.append("required gates failed: " + ", ".join(failed))
+    return failures
+
+
+def _check_p5_g27_selected_zone_crop_soak(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+    evidence_level: str,
+    require_p5_g27_selected_zone_crop_soak: bool,
+) -> AuditCheck:
+    name = "p5_g27_selected_zone_crop_soak"
+    candidates = _p5_g27_candidate_paths(
+        explicit_paths=explicit_paths,
+        customer_manifest=customer_manifest,
+        customer_manifest_path=customer_manifest_path,
+        release=release,
+        release_manifest=release_manifest,
+        loaded=loaded,
+    )
+    evidence = [str(path) for path in candidates]
+    if not require_p5_g27_selected_zone_crop_soak and not explicit_paths and not candidates:
+        return AuditCheck(
+            name=name,
+            passed=True,
+            detail="P5-G27 selected-zone crop-first evidence is advisory outside customer_grade",
+            evidence=[],
+        )
+    if not candidates:
+        return AuditCheck(
+            name=name,
+            passed=not require_p5_g27_selected_zone_crop_soak,
+            detail="p5_g27_selected_zone_crop_soak artifact missing",
+            evidence=[],
+        )
+
+    benchmark_path = candidates[0]
+    payload = _load_json(benchmark_path)
+    failures = _p5_g27_payload_failures(
+        payload,
+        require_customer_grade=evidence_level == "customer_grade" or require_p5_g27_selected_zone_crop_soak,
+    )
+    detail_parts = [f"path={benchmark_path}"]
+    if isinstance(payload, dict):
+        detail_parts.append(f"status={payload.get('status') or '<missing>'}")
+        detail_parts.append(f"benchmark_id={payload.get('benchmark_id') or '<missing>'}")
+        contract = payload.get("p5_g27_contract")
+        if not isinstance(contract, dict):
+            contract = payload.get("p5_g27_evidence")
+        if isinstance(contract, dict):
+            detail_parts.append(f"crop_first={contract.get('crop_first_result_visible')}")
+            detail_parts.append(
+                f"crop_before_vector={contract.get('crop_visible_before_vector_focus')}"
+            )
+            detail_parts.append(
+                f"crop_p95_ms={contract.get('crop_visible_p95_ms') or '<missing>'}"
+            )
+    if failures:
+        detail_parts.append("failures=" + "; ".join(failures))
+    return AuditCheck(
+        name=name,
+        passed=not failures,
+        detail=", ".join(detail_parts),
+        evidence=evidence,
+    )
+
+
+def _p5_g27_candidate_paths(
+    *,
+    explicit_paths: Sequence[Path],
+    customer_manifest: dict[str, Any] | None,
+    customer_manifest_path: Path | None,
+    release: dict[str, Any] | None,
+    release_manifest: Path | None,
+    loaded: Sequence[dict[str, Any]],
+) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve() if path.exists() else path
+        if resolved not in candidates:
+            candidates.append(resolved)
+
+    for path in explicit_paths:
+        add(path)
+    if isinstance(release, dict):
+        artifacts = release.get("artifacts") if isinstance(release.get("artifacts"), dict) else {}
+        for key in (
+            "p5_g27_selected_zone_crop_json",
+            "p5_g27_selected_zone_crop_soak_json",
+            "p5_g27_selected_zone_crop_soak",
+            "selected_zone_crop_soak",
+        ):
+            add(_manifest_reference_path(release_manifest, str(artifacts.get(key) or "").strip()))
+        jsons = artifacts.get("p5_g27_selected_zone_crop_jsons") or artifacts.get(
+            "p5_g27_selected_zone_crop_soak_jsons"
+        )
+        if isinstance(jsons, list):
+            for value in jsons:
+                add(_manifest_reference_path(release_manifest, str(value or "").strip()))
+    if isinstance(customer_manifest, dict):
+        for value in _p5_g27_manifest_path_values(customer_manifest):
+            add(_manifest_reference_path(customer_manifest_path, value))
+    for item in loaded:
+        summary = item.get("summary")
+        if isinstance(summary, dict):
+            add(_result_reference_path(item, str(_nested(summary, "outputs", "p5_g27_selected_zone_crop_json") or "")))
+            add(_result_reference_path(item, str(_nested(summary, "benchmarks", "p5_g27_selected_zone_crop", "output_json") or "")))
+        root = item.get("path")
+        if isinstance(root, Path):
+            candidate = root / "p5_g27_selected_zone_crop_soak.json"
+            if candidate.exists():
+                add(candidate)
+    return candidates
+
+
+def _p5_g27_manifest_path_values(manifest: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+    for key in (
+        "p5_g27_selected_zone_crop_json",
+        "p5_g27_selected_zone_crop_soak_json",
+        "p5_g27_selected_zone_crop_soak",
+        "selected_zone_crop_soak",
+    ):
+        text = str(artifacts.get(key) or "").strip()
+        if text:
+            values.append(text)
+    for list_key in ("p5_g27_selected_zone_crop_jsons", "p5_g27_selected_zone_crop_soak_jsons"):
+        jsons = artifacts.get(list_key)
+        if isinstance(jsons, list):
+            values.extend(str(item).strip() for item in jsons if str(item or "").strip())
+    for key in ("p5_g27_selected_zone_crop", "p5_g27_selected_zone_crop_soak", "selected_zone_crop_soak"):
+        section = manifest.get(key)
+        if isinstance(section, dict):
+            text = str(section.get("path") or section.get("json") or section.get("artifact") or "").strip()
+            if text:
+                values.append(text)
+        elif isinstance(section, str) and section.strip():
+            values.append(section.strip())
+    performance = manifest.get("performance_benchmarks")
+    if isinstance(performance, dict):
+        for key in ("p5_g27_selected_zone_crop", "p5_g27_selected_zone_crop_soak"):
+            section = performance.get(key)
+            if isinstance(section, dict):
+                text = str(
+                    section.get("benchmark_json")
+                    or section.get("path")
+                    or section.get("json")
+                    or section.get("artifact")
+                    or ""
+                ).strip()
+                if text:
+                    values.append(text)
+                benchmark_jsons = section.get("benchmark_jsons")
+                if isinstance(benchmark_jsons, list):
+                    values.extend(
+                        str(item).strip()
+                        for item in benchmark_jsons
+                        if str(item or "").strip()
+                    )
+            elif isinstance(section, str) and section.strip():
+                values.append(section.strip())
+    return values
+
+
+def _p5_g27_payload_failures(
+    payload: dict[str, Any] | None,
+    *,
+    require_customer_grade: bool,
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["p5_g27_selected_zone_crop_soak JSON missing or unreadable"]
+    failures: list[str] = []
+    if payload.get("schema_version") != "workbench-gui-hotpath-benchmark/v1":
+        failures.append("schema_version must be workbench-gui-hotpath-benchmark/v1")
+    if payload.get("benchmark_id") != P5_G27_BENCHMARK_ID:
+        failures.append(f"benchmark_id must be {P5_G27_BENCHMARK_ID}")
+    if payload.get("profile") != P5_G27_PROFILE:
+        failures.append(f"profile must be {P5_G27_PROFILE}")
+    if payload.get("status") != "passed":
+        failures.append(f"status={payload.get('status') or '<missing>'}")
+
+    contract = payload.get("p5_g27_contract")
+    if not isinstance(contract, dict):
+        contract = payload.get("p5_g27_evidence")
+    if not isinstance(contract, dict):
+        failures.append("p5_g27_contract missing")
+        contract = {}
+    else:
+        if contract.get("crop_first_result_visible") is not True:
+            failures.append("p5_g27_contract.crop_first_result_visible must be true")
+        if contract.get("crop_visible_before_vector_focus") is not True:
+            failures.append("p5_g27_contract.crop_visible_before_vector_focus must be true")
+        if contract.get("vector_failure_does_not_clear_background") is not True:
+            failures.append(
+                "p5_g27_contract.vector_failure_does_not_clear_background must be true"
+            )
+        if contract.get("has_selected_zone_crop_first_evidence") is not True:
+            failures.append("p5_g27_contract.has_selected_zone_crop_first_evidence must be true")
+        if contract.get("worker_cleanup_ok") is not True:
+            failures.append("p5_g27_contract.worker_cleanup_ok must be true")
+        for key in (
+            "blank_selected_zone_count",
+            "stale_result_visible_count",
+            "cancel_without_visible_regression_count",
+            "timeout_count",
+            "fallback_missing_reason_count",
+            "orphan_worker_count",
+        ):
+            if _int(contract.get(key)) != 0:
+                failures.append(f"p5_g27_contract.{key} must be 0")
+
+    bridge = payload.get("p5_g27_real_renderer_bridge")
+    if require_customer_grade:
+        if not isinstance(bridge, dict):
+            failures.append("p5_g27_real_renderer_bridge missing")
+            bridge = {}
+        if bridge.get("bridge_present") is not True:
+            failures.append("p5_g27_real_renderer_bridge.bridge_present must be true")
+        if bridge.get("p5_g16_passed") is not True:
+            failures.append("p5_g27_real_renderer_bridge.p5_g16_passed must be true")
+        if bridge.get("real_renderer_quality_passed") is not True:
+            failures.append(
+                "p5_g27_real_renderer_bridge.real_renderer_quality_passed must be true"
+            )
+        if _int(bridge.get("zone_render_artifact_count")) <= 0:
+            failures.append("p5_g27_real_renderer_bridge.zone_render_artifact_count must be > 0")
+        for key in (
+            "blank_zone_output_count",
+            "missing_zone_image_count",
+            "fallback_missing_reason_count",
+            "stale_result_visible_count",
+            "timeout_count",
+            "cancel_count",
+        ):
+            if _int(bridge.get(key)) != 0:
+                failures.append(f"p5_g27_real_renderer_bridge.{key} must be 0")
+        declared_bridge = payload.get("p5_g27_real_renderer_bridge_required_gate_names")
+        declared_bridge_set = {
+            str(item)
+            for item in declared_bridge
+            if str(item or "")
+        } if isinstance(declared_bridge, list) else set()
+        if not declared_bridge_set:
+            failures.append("p5_g27_real_renderer_bridge_required_gate_names missing")
+        else:
+            missing_bridge_declared = sorted(
+                P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATES - declared_bridge_set
+            )
+            if missing_bridge_declared:
+                failures.append(
+                    "p5_g27_real_renderer_bridge_required_gate_names missing: "
+                    + ", ".join(missing_bridge_declared)
+                )
+
+    declared = payload.get("p5_g27_required_gate_names")
+    declared_set = {
+        str(item)
+        for item in declared
+        if str(item or "")
+    } if isinstance(declared, list) else set()
+    if require_customer_grade and not declared_set:
+        failures.append("p5_g27_required_gate_names missing")
+    elif declared_set:
+        missing_declared = sorted(P5_G27_REQUIRED_GATES - declared_set)
+        if missing_declared:
+            failures.append("p5_g27_required_gate_names missing: " + ", ".join(missing_declared))
+
+    gates = payload.get("gates")
+    if not isinstance(gates, list):
+        failures.append("gates[] missing")
+        gate_by_name: dict[str, dict[str, Any]] = {}
+    else:
+        gate_by_name = {
+            str(gate.get("name") or ""): gate
+            for gate in gates
+            if isinstance(gate, dict) and str(gate.get("name") or "")
+        }
+        missing = sorted(P5_G27_REQUIRED_GATES - set(gate_by_name))
+        if missing:
+            failures.append("required gates missing: " + ", ".join(missing))
+        failed = sorted(
+            gate_name
+            for gate_name, gate in gate_by_name.items()
+            if gate_name in P5_G27_REQUIRED_GATES
+            and gate.get("required") is not False
+            and gate.get("passed") is not True
+        )
+        if failed:
+            failures.append("required gates failed: " + ", ".join(failed))
+        if require_customer_grade:
+            missing_bridge_gates = sorted(
+                P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATES - set(gate_by_name)
+            )
+            if missing_bridge_gates:
+                failures.append(
+                    "real renderer bridge gates missing: "
+                    + ", ".join(missing_bridge_gates)
+                )
+            failed_bridge = sorted(
+                gate_name
+                for gate_name, gate in gate_by_name.items()
+                if gate_name in P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATES
+                and gate.get("required") is not False
+                and gate.get("passed") is not True
+            )
+            if failed_bridge:
+                failures.append(
+                    "real renderer bridge gates failed: " + ", ".join(failed_bridge)
+                )
+    return failures
+
+
 def _result_reference_path(item: dict[str, Any], value: str) -> Path | None:
     if not value:
         return None
@@ -4432,7 +5122,11 @@ def _check_visual_asset_policy(
             if not isinstance(payload, dict):
                 failures.append(f"{manifest_path}: visual asset manifest JSON missing or unreadable")
                 continue
-            policy_issues = _visual_asset_policy_issues(payload, customer_grade=True)
+            policy_issues = _visual_asset_policy_issues(
+                payload,
+                customer_grade=True,
+                manifest_path=manifest_path,
+            )
             if policy_issues:
                 failures.append(f"{manifest_path}: " + "; ".join(policy_issues))
 
@@ -4532,15 +5226,122 @@ def _visual_asset_policy_issues(
     payload: dict[str, Any],
     *,
     customer_grade: bool,
+    manifest_path: Path | None = None,
 ) -> list[str]:
     try:
-        from src.services.comparison.visual_asset import validate_visual_asset_policy
+        from src.services.comparison.visual_asset import (
+            file_signature_for_path,
+            validate_visual_asset_policy,
+        )
     except Exception as exc:
         return [f"visual asset policy validator unavailable: {exc}"]
     try:
-        return validate_visual_asset_policy(payload, customer_grade=customer_grade)
+        issues = validate_visual_asset_policy(payload, customer_grade=customer_grade)
     except Exception as exc:
         return [f"visual asset policy validation failed: {exc}"]
+    if customer_grade:
+        issues.extend(
+            _visual_asset_probe_artifact_issues(
+                payload,
+                manifest_path=manifest_path,
+                file_signature_for_path=file_signature_for_path,
+            )
+        )
+    return issues
+
+
+def _visual_asset_probe_artifact_issues(
+    payload: dict[str, Any],
+    *,
+    manifest_path: Path | None,
+    file_signature_for_path: Any,
+) -> list[str]:
+    asset_kind = str(payload.get("asset_kind") or "")
+    status = str(payload.get("status") or "")
+    if status != "ready" or asset_kind == "relative_only":
+        return []
+    if str(payload.get("nonblank_probe_status") or "") != "passed":
+        return []
+
+    issues: list[str] = []
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    probe_ref = str(metadata.get("nonblank_probe") or "")
+    if not probe_ref:
+        return ["nonblank probe artifact reference is required when nonblank_probe_status is passed"]
+    if manifest_path is None:
+        return ["nonblank probe artifact cannot be resolved without visual asset manifest path"]
+    probe_path = _resolve_visual_asset_artifact_ref(probe_ref, manifest_path=manifest_path)
+    if probe_path is None:
+        return [f"nonblank probe artifact not found: {probe_ref}"]
+    probe_payload = _load_json(probe_path)
+    if not isinstance(probe_payload, dict):
+        return [f"{probe_path}: nonblank probe JSON missing or unreadable"]
+
+    probe_hash = str(probe_payload.get("probe_hash") or "")
+    expected_probe_hash = _hash_json_without_probe_hash(probe_payload)
+    if not probe_hash:
+        issues.append(f"{probe_path}: probe_hash is required")
+    elif probe_hash != expected_probe_hash:
+        issues.append(f"{probe_path}: probe_hash does not match probe payload")
+    metadata_probe_hash = str(metadata.get("nonblank_probe_hash") or "")
+    if metadata_probe_hash and probe_hash and metadata_probe_hash != probe_hash:
+        issues.append(f"{probe_path}: metadata.nonblank_probe_hash does not match probe payload")
+    if str(probe_payload.get("method") or "") != "pixel_nonblank_probe":
+        issues.append(f"{probe_path}: probe method must be pixel_nonblank_probe")
+    if str(probe_payload.get("status") or "") != "passed":
+        issues.append(f"{probe_path}: probe status must be passed")
+    if probe_payload.get("nonblank") is not True:
+        issues.append(f"{probe_path}: probe nonblank must be true")
+
+    target_ref = str(probe_payload.get("probe_target_path") or metadata.get("probe_target_path") or "")
+    if not target_ref:
+        issues.append(f"{probe_path}: probe_target_path is required")
+        return issues
+    target_path = _resolve_visual_asset_artifact_ref(target_ref, manifest_path=manifest_path)
+    if target_path is None:
+        issues.append(f"{probe_path}: probe target not found: {target_ref}")
+        return issues
+    target_signature = file_signature_for_path(target_path)
+    target_hash = str(probe_payload.get("probe_target_hash") or "")
+    if not target_hash:
+        issues.append(f"{probe_path}: probe_target_hash is required")
+    elif target_hash != str(target_signature.get("sha256") or ""):
+        issues.append(f"{probe_path}: probe_target_hash does not match target file")
+    metadata_target_hash = str(metadata.get("probe_target_hash") or "")
+    if metadata_target_hash and target_hash and metadata_target_hash != target_hash:
+        issues.append(f"{probe_path}: metadata.probe_target_hash does not match probe payload")
+    return issues
+
+
+def _hash_json_without_probe_hash(payload: dict[str, Any]) -> str:
+    normalized = dict(payload)
+    normalized.pop("probe_hash", None)
+    return hashlib.sha256(
+        json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _resolve_visual_asset_artifact_ref(value: str, *, manifest_path: Path) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text)
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.append(manifest_path.parent / path)
+        parts = manifest_path.parts
+        if "viewer" in parts:
+            viewer_index = parts.index("viewer")
+            result_root = Path(*parts[:viewer_index])
+            viewer_root = result_root / "viewer"
+            candidates.append(result_root / path)
+            candidates.append(viewer_root / path)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _check_selected_zone_perf(

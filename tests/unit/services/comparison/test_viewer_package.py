@@ -29,6 +29,7 @@ from src.services.comparison.viewer_package import (
     _render_pair_backgrounds_with_timeout,
     export_viewer_package,
 )
+from src.services.comparison.visual_asset import validate_visual_asset_policy
 
 
 def _write_base_artifacts(base: Path, *, source_a: str = "old.dxf", source_b: str = "new.dxf") -> Path:
@@ -250,6 +251,96 @@ def test_viewer_package_writes_source_pdf_visual_asset_manifests_for_pdf_pair(tm
     assert before_manifest["nonblank_probe_status"] == "not_probed"
     assert after_manifest["asset_kind"] == "source_pdf"
     assert after_manifest["asset_path"].endswith("S21-0001_after.pdf")
+
+
+def test_viewer_package_tile_cache_key_tracks_visual_asset_target_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = tmp_path / "before.pdf"
+    after = tmp_path / "after.pdf"
+    before.write_bytes(b"%PDF-1.4\n% before\n%%EOF\n")
+    after.write_bytes(b"%PDF-1.4\n% after\n%%EOF\n")
+    artifact_dir = _write_base_artifacts(tmp_path, source_a=str(before), source_b=str(after))
+
+    def _fake_probe_first(**_kwargs: object) -> dict:
+        return {
+            "status": "not_probed",
+            "method": "pixel_nonblank_probe_unavailable",
+            "probe_hash": "probe-hash-v1",
+            "asset_hash": "asset-hash",
+            "probe_target_hash": "target-hash-v1",
+            "probe_target_path": "",
+        }
+
+    monkeypatch.setattr(viewer_package_module, "probe_visual_asset_nonblank", _fake_probe_first)
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer_1",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+    manifest_1 = json.loads((tmp_path / "viewer_1" / "viewer_manifest.json").read_text(encoding="utf-8"))
+
+    def _fake_probe_second(**_kwargs: object) -> dict:
+        payload = _fake_probe_first()
+        payload["probe_hash"] = "probe-hash-v2"
+        payload["probe_target_hash"] = "target-hash-v2"
+        return payload
+
+    monkeypatch.setattr(viewer_package_module, "probe_visual_asset_nonblank", _fake_probe_second)
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer_2",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+    manifest_2 = json.loads((tmp_path / "viewer_2" / "viewer_manifest.json").read_text(encoding="utf-8"))
+
+    pair_1 = manifest_1["pairs"][0]
+    pair_2 = manifest_2["pairs"][0]
+    assert pair_1["visual_asset_identity_hash"] != pair_2["visual_asset_identity_hash"]
+    assert pair_1["tile_cache_key"] != pair_2["tile_cache_key"]
+
+
+def test_viewer_package_writes_sidecar_pdf_visual_asset_manifests_for_cad_pair(tmp_path: Path) -> None:
+    artifact_dir = _write_base_artifacts(tmp_path, source_a="before.dwg", source_b="after.dxf")
+    before_sidecar = artifact_dir / "before_visual.pdf"
+    after_sidecar = artifact_dir / "after_visual.pdf"
+    before_sidecar.write_bytes(b"%PDF-1.4\n% before sidecar\n%%EOF\n")
+    after_sidecar.write_bytes(b"%PDF-1.4\n% after sidecar\n%%EOF\n")
+    manifest_path = artifact_dir / "artifact_manifest.json"
+    artifact_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_manifest["items"][0]["before_sidecar_pdf"] = before_sidecar.name
+    artifact_manifest["items"][0]["after_sidecar_pdf"] = after_sidecar.name
+    manifest_path.write_text(json.dumps(artifact_manifest, ensure_ascii=False), encoding="utf-8")
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="lazy",
+    )
+
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair = manifest["pairs"][0]
+    before_entry = pair["visual_assets"]["before"]["sidecar_pdf"]
+    after_entry = pair["visual_assets"]["after"]["sidecar_pdf"]
+    before_manifest = json.loads(Path(before_entry["manifest_path"]).read_text(encoding="utf-8"))
+    after_manifest = json.loads(Path(after_entry["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert manifest["visual_asset_manifest_count"] == 4
+    assert pair["before_sidecar_pdf"].endswith("S21-0001_before_sidecar.pdf")
+    assert pair["after_sidecar_pdf"].endswith("S21-0001_after_sidecar.pdf")
+    assert before_manifest["asset_kind"] == "sidecar_pdf"
+    assert before_manifest["status"] == "source_only"
+    assert before_manifest["asset_path"].endswith("S21-0001_before_sidecar.pdf")
+    assert before_manifest["source_hash"]
+    assert before_manifest["cache_key_hash"]
+    assert before_manifest["nonblank_probe_status"] == "not_probed"
+    assert validate_visual_asset_policy(before_manifest, customer_grade=True) == []
+    assert after_manifest["asset_kind"] == "sidecar_pdf"
+    assert "source_pdf" not in pair["visual_assets"]["before"]
 
 
 def test_viewer_package_ignores_env_cad_visual_backend_for_metadata_only_default(
@@ -605,6 +696,21 @@ def test_viewer_package_renders_pdf_pair_background(tmp_path: Path) -> None:
     assert pair["render_lifecycle"] == "ready"
     assert pair["pdf_page"] == 0
     assert Path(pair["after_image"]).exists()
+    assert manifest["visual_asset_manifest_count"] == 4
+    before_source_entry = pair["visual_assets"]["before"]["source_pdf"]
+    before_raster_entry = pair["visual_assets"]["before"]["raster_fallback"]
+    before_source_manifest = json.loads(Path(before_source_entry["manifest_path"]).read_text(encoding="utf-8"))
+    before_raster_manifest = json.loads(Path(before_raster_entry["manifest_path"]).read_text(encoding="utf-8"))
+    source_probe = json.loads(Path(before_source_manifest["metadata"]["nonblank_probe"]).read_text(encoding="utf-8"))
+    raster_probe = json.loads(Path(before_raster_manifest["metadata"]["nonblank_probe"]).read_text(encoding="utf-8"))
+    assert before_source_manifest["nonblank_probe_status"] == "passed"
+    assert before_raster_manifest["nonblank_probe_status"] == "passed"
+    assert source_probe["method"] == "pixel_nonblank_probe"
+    assert source_probe["asset_path"].endswith("S21-0001_before.pdf")
+    assert source_probe["probe_target_path"].endswith("S21-0001_before.png")
+    assert raster_probe["asset_path"].endswith("S21-0001_before.png")
+    assert validate_visual_asset_policy(before_source_manifest, customer_grade=True) == []
+    assert validate_visual_asset_policy(before_raster_manifest, customer_grade=True) == []
     overlay = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
     assert overlay["coordinate_source"] == "image_pixels"
     assert overlay["visual_fidelity"] == "pdf_render"

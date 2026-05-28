@@ -23,6 +23,16 @@ VisualAssetKind = Literal[
     "relative_only",
 ]
 
+PIXEL_PROBE_TARGET_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+
 
 class VisualAssetManifestValidationError(ValueError):
     """Raised when a visual asset manifest is incomplete."""
@@ -139,6 +149,9 @@ class VisualAssetManifest:
             layout_name=str(metadata.get("layout_name") or ""),
             page_index=_safe_int(metadata.get("page_index")),
             dpi=_safe_int(metadata.get("dpi")),
+            page_size_pt=_float_list(metadata.get("page_size_pt")),
+            pixel_size=_int_list(metadata.get("pixel_size")),
+            transform_quality=str(metadata.get("transform_quality") or ""),
             coordinate_contract_version=COORDINATE_CONTRACT_VERSION,
         )
         return cls(
@@ -192,6 +205,121 @@ def read_visual_asset_manifest(path: Path) -> VisualAssetManifest:
     return VisualAssetManifest.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+def probe_visual_asset_nonblank(
+    *,
+    asset_path: Path,
+    probe_target_path: Path | None = None,
+    source_hash: str = "",
+    cache_key_hash: str = "",
+    page_index: int = 0,
+    dpi: int = 0,
+    channel_range_threshold: int = 3,
+    white_mean_threshold: float = 250.0,
+) -> dict[str, Any]:
+    """Return hash-linked pixel evidence for a rendered visual asset.
+
+    ``asset_path`` is the provenance asset (for example a copied source PDF).
+    ``probe_target_path`` is the rendered bitmap inspected for nonblank pixels.
+    For raster assets both paths are usually the same.
+    """
+
+    asset_signature = file_signature_for_path(asset_path)
+    if probe_target_path is None and Path(asset_path).suffix.lower() not in PIXEL_PROBE_TARGET_EXTENSIONS:
+        payload = {
+            "schema_version": 2,
+            "status": "not_probed",
+            "method": "pixel_nonblank_probe_unavailable",
+            "reason_code": "probe_target_required",
+            "asset_path": str(asset_path),
+            "asset_hash": str(asset_signature.get("sha256") or ""),
+            "asset_size": int(asset_signature.get("size") or 0),
+            "probe_target_path": "",
+            "probe_target_hash": "",
+            "probe_target_size": 0,
+            "source_hash": source_hash,
+            "cache_key_hash": cache_key_hash,
+            "page_index": int(page_index or 0),
+            "dpi": int(dpi or 0),
+        }
+        return _with_probe_hash(payload)
+
+    target = Path(probe_target_path) if probe_target_path else Path(asset_path)
+    target_signature = file_signature_for_path(target)
+    payload: dict[str, Any] = {
+        "schema_version": 2,
+        "status": "not_probed",
+        "method": "pixel_nonblank_probe",
+        "asset_path": str(asset_path),
+        "asset_hash": str(asset_signature.get("sha256") or ""),
+        "asset_size": int(asset_signature.get("size") or 0),
+        "probe_target_path": str(target),
+        "probe_target_hash": str(target_signature.get("sha256") or ""),
+        "probe_target_size": int(target_signature.get("size") or 0),
+        "source_hash": source_hash,
+        "cache_key_hash": cache_key_hash,
+        "page_index": int(page_index or 0),
+        "dpi": int(dpi or 0),
+        "channel_range_threshold": int(channel_range_threshold),
+        "white_mean_threshold": float(white_mean_threshold),
+    }
+    if not target_signature.get("exists"):
+        payload.update(
+            {
+                "status": "not_probed",
+                "method": "pixel_nonblank_probe_unavailable",
+                "reason_code": "probe_target_missing",
+            }
+        )
+        return _with_probe_hash(payload)
+
+    try:
+        from PIL import Image, ImageStat  # type: ignore[import-not-found]
+    except Exception as exc:
+        payload.update(
+            {
+                "status": "not_probed",
+                "method": "pixel_nonblank_probe_unavailable",
+                "reason_code": "pillow_unavailable",
+                "error": str(exc),
+            }
+        )
+        return _with_probe_hash(payload)
+
+    try:
+        with Image.open(target) as image:
+            rgb = image.convert("RGB")
+            stat = ImageStat.Stat(rgb)
+            extrema = rgb.getextrema()
+            width, height = rgb.size
+    except Exception as exc:
+        payload.update(
+            {
+                "status": "not_probed",
+                "method": "pixel_nonblank_probe_unavailable",
+                "reason_code": "probe_target_unreadable",
+                "error": str(exc),
+            }
+        )
+        return _with_probe_hash(payload)
+
+    channel_ranges = [int(high) - int(low) for low, high in extrema]
+    mean = sum(float(value) for value in stat.mean) / max(1, len(stat.mean))
+    nonblank = any(value > int(channel_range_threshold) for value in channel_ranges) or mean < float(white_mean_threshold)
+    payload.update(
+        {
+            "status": "passed" if nonblank else "failed",
+            "reason_code": "" if nonblank else "blank_or_near_white",
+            "pixel_width": int(width),
+            "pixel_height": int(height),
+            "mean": round(mean, 3),
+            "channel_ranges": channel_ranges,
+            "extrema": [[int(low), int(high)] for low, high in extrema],
+            "nonblank": bool(nonblank),
+        }
+    )
+    return _with_probe_hash(payload)
+
+
 def build_visual_asset_cache_key(
     *,
     source_hash: str = "",
@@ -203,12 +331,15 @@ def build_visual_asset_cache_key(
     layout_name: str = "",
     page_index: int = 0,
     dpi: int = 0,
+    page_size_pt: list[float] | tuple[float, ...] | None = None,
+    pixel_size: list[int] | tuple[int, ...] | None = None,
+    transform_quality: str = "",
     coordinate_contract_version: str = COORDINATE_CONTRACT_VERSION,
 ) -> str:
     signature = source_signature if isinstance(source_signature, dict) else {}
     resolved_source_hash = source_hash or str(signature.get("source_hash") or "")
     components = {
-        "schema": 1,
+        "schema": "1.1",
         "source_hash": resolved_source_hash,
         "signature_schema_version": str(signature.get("schema_version") or ""),
         "backend_id": str(backend_id or ""),
@@ -218,6 +349,9 @@ def build_visual_asset_cache_key(
         "layout_name": str(layout_name or ""),
         "page_index": int(page_index or 0),
         "dpi": int(dpi or 0),
+        "page_size_pt": _normalized_float_pair(page_size_pt),
+        "pixel_size": _normalized_int_pair(pixel_size),
+        "transform_quality": str(transform_quality or ""),
         "coordinate_contract_version": str(coordinate_contract_version or ""),
     }
     encoded = json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -256,6 +390,9 @@ def validate_visual_asset_policy(
                 layout_name=manifest.layout_name,
                 page_index=manifest.page_index,
                 dpi=manifest.dpi,
+                page_size_pt=manifest.page_size_pt,
+                pixel_size=manifest.pixel_size,
+                transform_quality=manifest.transform_quality,
                 coordinate_contract_version=manifest.coordinate_contract_version,
             )
             if expected_cache_key != manifest.cache_key_hash:
@@ -266,6 +403,16 @@ def validate_visual_asset_policy(
             issues.append("transform_quality is required")
         if customer_grade and manifest.nonblank_probe_status != "passed":
             issues.append("nonblank_probe_status must be passed")
+        if customer_grade and manifest.nonblank_probe_status == "passed":
+            metadata = manifest.metadata
+            if not metadata.get("nonblank_probe"):
+                issues.append("metadata.nonblank_probe is required when nonblank probe passed")
+            if not metadata.get("nonblank_probe_hash"):
+                issues.append("metadata.nonblank_probe_hash is required when nonblank probe passed")
+            if not metadata.get("probe_target_hash"):
+                issues.append("metadata.probe_target_hash is required when nonblank probe passed")
+            if metadata.get("probe_method") != "pixel_nonblank_probe":
+                issues.append("metadata.probe_method must be pixel_nonblank_probe when nonblank probe passed")
 
     if pdf_like_asset and ready_visual and customer_grade:
         if len(manifest.page_size_pt) != 2 or any(float(value) <= 0 for value in manifest.page_size_pt):
@@ -319,6 +466,31 @@ def _default_visual_asset_id(source_path: str, asset_path: str) -> str:
     return f"{source_name}-{asset_name}".strip("-") or "visual-asset"
 
 
+def file_signature_for_path(path: Path | None) -> dict[str, Any]:
+    if not path:
+        return {"exists": False, "size": 0, "sha256": ""}
+    try:
+        target = Path(path)
+        stat = target.stat()
+    except OSError:
+        return {"exists": False, "size": 0, "sha256": ""}
+    digest = hashlib.sha256()
+    try:
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return {"exists": True, "size": int(stat.st_size), "sha256": ""}
+    return {"exists": True, "size": int(stat.st_size), "sha256": digest.hexdigest()}
+
+
+def _with_probe_hash(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["probe_hash"] = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return payload
+
+
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -338,6 +510,11 @@ def _float_list(value: Any) -> list[float]:
     return result
 
 
+def _normalized_float_pair(value: Any) -> list[float]:
+    values = _float_list(value)
+    return [round(float(item), 6) for item in values[:2] if float(item) > 0.0]
+
+
 def _int_list(value: Any) -> list[int]:
     if not isinstance(value, (list, tuple)):
         return []
@@ -349,8 +526,15 @@ def _int_list(value: Any) -> list[int]:
     return result
 
 
+def _normalized_int_pair(value: Any) -> list[int]:
+    return [int(item) for item in _int_list(value)[:2]]
+
+
 __all__ = [
     "build_visual_asset_cache_key",
+    "file_signature_for_path",
+    "PIXEL_PROBE_TARGET_EXTENSIONS",
+    "probe_visual_asset_nonblank",
     "VisualAssetKind",
     "VisualAssetManifest",
     "VisualAssetManifestValidationError",

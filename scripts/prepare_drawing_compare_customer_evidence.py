@@ -40,6 +40,9 @@ try:  # Running as ``python scripts/prepare_...``.
         summarize_large_dwg_resource_probe,
         summarize_review_decision_truth_csv,
         summarize_viewer_perf,
+        _resolve_viewer_manifest_ref,
+        _visual_asset_manifest_refs,
+        _visual_asset_policy_issues,
     )
 except ImportError:  # Imported as ``scripts.prepare_...`` in tests.
     from scripts.audit_drawing_compare_mvp_exit import (
@@ -63,12 +66,50 @@ except ImportError:  # Imported as ``scripts.prepare_...`` in tests.
         summarize_large_dwg_resource_probe,
         summarize_review_decision_truth_csv,
         summarize_viewer_perf,
+        _resolve_viewer_manifest_ref,
+        _visual_asset_manifest_refs,
+        _visual_asset_policy_issues,
     )
 
 # Plan §17 F6 (GPT Pro deep-research review) — manifest provenance helpers.
 # Add the repo root to sys.path so ``src.services.comparison.manifest_provenance``
 # resolves whether the script is invoked from the worktree or imported as
 # ``scripts.prepare_drawing_compare_customer_evidence`` from a test runner.
+P5_G26_BENCHMARK_ID = "p5_g26_selection_latency_soak"
+P5_G26_PROFILE = "selection_latency_hard_gate"
+P5_G26_REQUIRED_GATES = {
+    "p5_g26_wp_a_gui_hot_path_contract",
+    "p5_g26_wp_b_pdf_first_responsiveness_contract",
+    "p5_g26_event_loop_gap_max_ms",
+    "p5_g26_click_hot_path_full_work_count",
+    "p5_g26_cached_page_navigation_render_call_count",
+    "p5_g26_repeat_cache_hit_rate",
+    "p5_g26_blank_viewer_count",
+    "p5_g26_cad_to_pdf_hot_path_count",
+    "p5_g26_zone_selection_count",
+    "p5_g26_zone_selection_telemetry_count",
+    "p5_g26_zone_selection_p95_ms",
+    "p5_g26_zone_selection_worker_spawn_count",
+    "p5_g26_zone_selection_background_work_count",
+    "p5_g26_zone_selection_stale_visible_count",
+}
+P5_G27_BENCHMARK_ID = "p5_g27_selected_zone_crop_soak"
+P5_G27_PROFILE = "selected_zone_crop_first_lifecycle"
+P5_G27_REQUIRED_GATES = {
+    "p5_g27_crop_first_result_visible",
+    "p5_g27_crop_visible_before_vector_focus",
+    "p5_g27_crop_visible_p95_ms",
+    "p5_g27_vector_failure_does_not_clear_background",
+    "p5_g27_blank_selected_zone_count",
+    "p5_g27_stale_result_visible_count",
+    "p5_g27_cancel_without_visible_regression_count",
+    "p5_g27_timeout_count",
+    "p5_g27_fallback_missing_reason_count",
+    "p5_g27_event_loop_gap_max_ms",
+    "p5_g27_worker_cleanup_ok",
+    "p5_g27_orphan_worker_count",
+}
+
 _PREPARE_REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_PREPARE_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_PREPARE_REPO_ROOT))
@@ -281,6 +322,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--p5-g26-selection-latency-json",
+        "--p5-g26-selection-latency-soak",
+        dest="p5_g26_selection_latency_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G26 selection latency JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover GUI/PDF hot-path contract evidence without a manual handoff."
+        ),
+    )
+    parser.add_argument(
+        "--p5-g27-selected-zone-crop-json",
+        "--p5-g27-selected-zone-crop-soak",
+        dest="p5_g27_selected_zone_crop_json",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "P5-G27 selected-zone crop-first JSON. Repeat as needed. The path is "
+            "recorded in the customer evidence manifest so the final audit can "
+            "discover crop-first lifecycle evidence without a manual handoff."
+        ),
+    )
+    parser.add_argument(
         "--required-structural-coverage",
         action="append",
         choices=tuple(STRUCTURAL_COVERAGE_TERMS),
@@ -362,6 +429,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         p5_g6_tile_cache_mb=args.p5_g6_tile_cache_mb,
         p5_g16_benchmark_json=[path.resolve() for path in args.p5_g16_benchmark_json],
         p5_g22_gui_soak_json=[path.resolve() for path in args.p5_g22_gui_soak_json],
+        p5_g26_selection_latency_json=[
+            path.resolve() for path in args.p5_g26_selection_latency_json
+        ],
+        p5_g27_selected_zone_crop_json=[
+            path.resolve() for path in args.p5_g27_selected_zone_crop_json
+        ],
     )
     print(json.dumps(result, ensure_ascii=True, indent=2))
     return 0 if result["status"] == "ready" else 1
@@ -401,6 +474,8 @@ def prepare_manifest(
     p5_g6_tile_cache_mb: float | None = None,
     p5_g16_benchmark_json: Sequence[Path] | None = None,
     p5_g22_gui_soak_json: Sequence[Path] | None = None,
+    p5_g26_selection_latency_json: Sequence[Path] | None = None,
+    p5_g27_selected_zone_crop_json: Sequence[Path] | None = None,
 ) -> dict[str, Any]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     audit_json = audit_json or out_path.with_name("sharable_path_audit_summary.json")
@@ -473,6 +548,32 @@ def prepare_manifest(
         for item in p5_g22_actual_gui_soak["artifacts"]
         if item.get("benchmark_json")
     ]
+    p5_g26_selection_latency = summarize_p5_g26_selection_latency(
+        p5_g26_selection_latency_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g26_refs = [
+        item["benchmark_json"]
+        for item in p5_g26_selection_latency["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    p5_g27_selected_zone_crop = summarize_p5_g27_selected_zone_crop(
+        p5_g27_selected_zone_crop_json or [],
+        reference_base=out_path.parent,
+    )
+    p5_g27_refs = [
+        item["benchmark_json"]
+        for item in p5_g27_selected_zone_crop["artifacts"]
+        if item.get("benchmark_json")
+    ]
+    evidence_level = (
+        "customer_grade" if dataset_source_kind in CUSTOMER_GRADE_SOURCE_KINDS else "synthetic"
+    )
+    p5_g24_visual_asset_policy = summarize_p5_g24_visual_asset_policy(
+        loaded,
+        evidence_level=evidence_level,
+        reference_base=out_path.parent,
+    )
 
     path_audit = {
         "schema_version": 1,
@@ -493,9 +594,7 @@ def prepare_manifest(
 
     manifest = {
         "schema_version": 1,
-        "evidence_level": (
-            "customer_grade" if dataset_source_kind in CUSTOMER_GRADE_SOURCE_KINDS else "synthetic"
-        ),
+        "evidence_level": evidence_level,
         "dataset_id": dataset_id,
         "dataset_provenance": {
             "source_kind": dataset_source_kind,
@@ -559,14 +658,21 @@ def prepare_manifest(
             "p5_g16_real_corpus_replay_jsons": p5_g16_refs,
             "p5_g22_actual_gui_soak_json": p5_g22_refs[0] if p5_g22_refs else "",
             "p5_g22_actual_gui_soak_jsons": p5_g22_refs,
+            "p5_g26_selection_latency_json": p5_g26_refs[0] if p5_g26_refs else "",
+            "p5_g26_selection_latency_jsons": p5_g26_refs,
+            "p5_g27_selected_zone_crop_json": p5_g27_refs[0] if p5_g27_refs else "",
+            "p5_g27_selected_zone_crop_jsons": p5_g27_refs,
         },
         "performance_benchmarks": {
             "p5_g16_real_corpus_replay": p5_g16_real_corpus_replay,
             "p5_g22_actual_gui_soak": p5_g22_actual_gui_soak,
+            "p5_g26_selection_latency": p5_g26_selection_latency,
+            "p5_g27_selected_zone_crop": p5_g27_selected_zone_crop,
         },
         "cad_policy_evidence": cad_policy_evidence,
         "selected_zone_performance": selected_zone_performance,
         "p5_g7_forced_tile_eviction": p5_g7_forced_tile_eviction,
+        "p5_g24_visual_asset_policy": p5_g24_visual_asset_policy,
         "workbench_acceptance": workbench_acceptance,
         "ai_policy": ai_policy,
     }
@@ -698,6 +804,22 @@ def prepare_manifest(
                     )
             except Exception:
                 pass
+        for index, benchmark_json in enumerate(p5_g26_selection_latency_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g26_selection_latency_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
+        for index, benchmark_json in enumerate(p5_g27_selected_zone_crop_json or [], start=1):
+            try:
+                if benchmark_json.exists():
+                    input_file_hashes[f"p5_g27_selected_zone_crop_{index}"] = compute_file_sha256(
+                        Path(benchmark_json)
+                    )
+            except Exception:
+                pass
         manifest["provenance"] = build_provenance(
             manifest,
             input_file_hashes=input_file_hashes,
@@ -728,6 +850,9 @@ def prepare_manifest(
             "selected_zone_performance": selected_zone_performance,
             "p5_g16_real_corpus_replay": p5_g16_real_corpus_replay,
             "p5_g22_actual_gui_soak": p5_g22_actual_gui_soak,
+            "p5_g26_selection_latency": p5_g26_selection_latency,
+            "p5_g27_selected_zone_crop": p5_g27_selected_zone_crop,
+            "p5_g24_visual_asset_policy": p5_g24_visual_asset_policy,
             "p5_g7_forced_tile_eviction": p5_g7_forced_tile_eviction,
             "p5_g7_forced_tile_eviction_results_dir_rejections": forbidden_result_dir_proofs,
             "workbench_acceptance": workbench_acceptance,
@@ -947,6 +1072,372 @@ def summarize_p5_g22_actual_gui_soak(
         ),
         "artifacts": artifacts,
     }
+
+
+def summarize_p5_g26_selection_latency(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        contract = payload_dict.get("p5_g26_contract")
+        if not isinstance(contract, dict):
+            contract = payload_dict.get("p5_g26_evidence")
+        if not isinstance(contract, dict):
+            contract = {}
+        gates = payload_dict.get("gates")
+        gate_by_name = (
+            {
+                str(gate.get("name") or ""): gate
+                for gate in gates
+                if isinstance(gate, dict) and str(gate.get("name") or "")
+            }
+            if isinstance(gates, list)
+            else {}
+        )
+        declared_required = payload_dict.get("p5_g26_required_gate_names")
+        declared_required_set = {
+            str(item)
+            for item in declared_required
+            if str(item or "")
+        } if isinstance(declared_required, list) else set()
+        issues: list[str] = []
+        if not path.exists() or not isinstance(payload, dict):
+            issues.append("p5_g26_selection_latency JSON is missing or unreadable")
+        else:
+            if payload_dict.get("benchmark_id") != P5_G26_BENCHMARK_ID:
+                issues.append(f"benchmark_id must be {P5_G26_BENCHMARK_ID}")
+            if payload_dict.get("profile") != P5_G26_PROFILE:
+                issues.append(f"profile must be {P5_G26_PROFILE}")
+            if payload_dict.get("status") != "passed":
+                issues.append(f"status={payload_dict.get('status') or '<missing>'}")
+            if not contract:
+                issues.append("p5_g26_contract missing")
+            else:
+                if contract.get("wp_a_passed") is not True:
+                    issues.append("p5_g26_contract.wp_a_passed must be true")
+                if contract.get("wp_b_passed") is not True:
+                    issues.append("p5_g26_contract.wp_b_passed must be true")
+                if contract.get("has_zone_selection_evidence") is not True:
+                    issues.append("p5_g26_contract.has_zone_selection_evidence must be true")
+            if declared_required_set and not P5_G26_REQUIRED_GATES <= declared_required_set:
+                missing_declared = sorted(P5_G26_REQUIRED_GATES - declared_required_set)
+                issues.append("p5_g26_required_gate_names missing: " + ", ".join(missing_declared))
+            missing_gates = sorted(P5_G26_REQUIRED_GATES - set(gate_by_name))
+            if missing_gates:
+                issues.append("required gates missing: " + ", ".join(missing_gates))
+            failed_gates = sorted(
+                gate_name
+                for gate_name, gate in gate_by_name.items()
+                if gate_name in P5_G26_REQUIRED_GATES
+                and gate.get("required") is not False
+                and gate.get("passed") is not True
+            )
+            if failed_gates:
+                issues.append("required gates failed: " + ", ".join(failed_gates))
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "wp_a_passed": contract.get("wp_a_passed") is True,
+                "wp_b_passed": contract.get("wp_b_passed") is True,
+                "has_zone_selection_evidence": contract.get("has_zone_selection_evidence") is True,
+                "required_gate_count": len(P5_G26_REQUIRED_GATES),
+                "passed_required_gate_count": len(
+                    [
+                        gate
+                        for name, gate in gate_by_name.items()
+                        if name in P5_G26_REQUIRED_GATES
+                        and gate.get("required") is not False
+                        and gate.get("passed") is True
+                    ]
+                ),
+                "issues": issues,
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == P5_G26_BENCHMARK_ID
+        and item["profile"] == P5_G26_PROFILE
+        and item["wp_a_passed"]
+        and item["wp_b_passed"]
+        and item["has_zone_selection_evidence"]
+        and item["passed_required_gate_count"] == item["required_gate_count"]
+        and not item["issues"]
+    ]
+    status = "passed" if passed else ("failed" if any(item["exists"] for item in artifacts) else ("planned" if artifacts else "missing"))
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "required_gate_count": len(P5_G26_REQUIRED_GATES),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g27_selected_zone_crop(
+    benchmark_jsons: Sequence[Path],
+    *,
+    reference_base: Path,
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in benchmark_jsons:
+        payload = _load_json(path)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        contract = payload_dict.get("p5_g27_contract")
+        if not isinstance(contract, dict):
+            contract = payload_dict.get("p5_g27_evidence")
+        if not isinstance(contract, dict):
+            contract = {}
+        gates = payload_dict.get("gates")
+        gate_by_name = (
+            {
+                str(gate.get("name") or ""): gate
+                for gate in gates
+                if isinstance(gate, dict) and str(gate.get("name") or "")
+            }
+            if isinstance(gates, list)
+            else {}
+        )
+        declared_required = payload_dict.get("p5_g27_required_gate_names")
+        declared_required_set = {
+            str(item)
+            for item in declared_required
+            if str(item or "")
+        } if isinstance(declared_required, list) else set()
+        issues: list[str] = []
+        if not path.exists() or not isinstance(payload, dict):
+            issues.append("p5_g27_selected_zone_crop JSON is missing or unreadable")
+        else:
+            if payload_dict.get("benchmark_id") != P5_G27_BENCHMARK_ID:
+                issues.append(f"benchmark_id must be {P5_G27_BENCHMARK_ID}")
+            if payload_dict.get("profile") != P5_G27_PROFILE:
+                issues.append(f"profile must be {P5_G27_PROFILE}")
+            if payload_dict.get("status") != "passed":
+                issues.append(f"status={payload_dict.get('status') or '<missing>'}")
+            if not contract:
+                issues.append("p5_g27_contract missing")
+            else:
+                if contract.get("crop_first_result_visible") is not True:
+                    issues.append("p5_g27_contract.crop_first_result_visible must be true")
+                if contract.get("crop_visible_before_vector_focus") is not True:
+                    issues.append("p5_g27_contract.crop_visible_before_vector_focus must be true")
+                if contract.get("vector_failure_does_not_clear_background") is not True:
+                    issues.append(
+                        "p5_g27_contract.vector_failure_does_not_clear_background must be true"
+                    )
+                if contract.get("has_selected_zone_crop_first_evidence") is not True:
+                    issues.append(
+                        "p5_g27_contract.has_selected_zone_crop_first_evidence must be true"
+                    )
+                if contract.get("worker_cleanup_ok") is not True:
+                    issues.append("p5_g27_contract.worker_cleanup_ok must be true")
+                for key in (
+                    "blank_selected_zone_count",
+                    "stale_result_visible_count",
+                    "cancel_without_visible_regression_count",
+                    "timeout_count",
+                    "fallback_missing_reason_count",
+                    "orphan_worker_count",
+                ):
+                    if _int(contract.get(key)) != 0:
+                        issues.append(f"p5_g27_contract.{key} must be 0")
+            if declared_required_set and not P5_G27_REQUIRED_GATES <= declared_required_set:
+                missing_declared = sorted(P5_G27_REQUIRED_GATES - declared_required_set)
+                issues.append("p5_g27_required_gate_names missing: " + ", ".join(missing_declared))
+            missing_gates = sorted(P5_G27_REQUIRED_GATES - set(gate_by_name))
+            if missing_gates:
+                issues.append("required gates missing: " + ", ".join(missing_gates))
+            failed_gates = sorted(
+                gate_name
+                for gate_name, gate in gate_by_name.items()
+                if gate_name in P5_G27_REQUIRED_GATES
+                and gate.get("required") is not False
+                and gate.get("passed") is not True
+            )
+            if failed_gates:
+                issues.append("required gates failed: " + ", ".join(failed_gates))
+        artifacts.append(
+            {
+                "benchmark_json": _manifest_ref(reference_base, path),
+                "exists": path.exists(),
+                "status": str(payload_dict.get("status") or "planned"),
+                "benchmark_id": str(payload_dict.get("benchmark_id") or ""),
+                "profile": str(payload_dict.get("profile") or ""),
+                "crop_first_result_visible": contract.get("crop_first_result_visible") is True,
+                "crop_visible_before_vector_focus": (
+                    contract.get("crop_visible_before_vector_focus") is True
+                ),
+                "vector_failure_does_not_clear_background": (
+                    contract.get("vector_failure_does_not_clear_background") is True
+                ),
+                "has_selected_zone_crop_first_evidence": (
+                    contract.get("has_selected_zone_crop_first_evidence") is True
+                ),
+                "worker_cleanup_ok": contract.get("worker_cleanup_ok") is True,
+                "required_gate_count": len(P5_G27_REQUIRED_GATES),
+                "passed_required_gate_count": len(
+                    [
+                        gate
+                        for name, gate in gate_by_name.items()
+                        if name in P5_G27_REQUIRED_GATES
+                        and gate.get("required") is not False
+                        and gate.get("passed") is True
+                    ]
+                ),
+                "issues": issues,
+            }
+        )
+    passed = [
+        item
+        for item in artifacts
+        if item["exists"]
+        and item["status"] == "passed"
+        and item["benchmark_id"] == P5_G27_BENCHMARK_ID
+        and item["profile"] == P5_G27_PROFILE
+        and item["crop_first_result_visible"]
+        and item["crop_visible_before_vector_focus"]
+        and item["vector_failure_does_not_clear_background"]
+        and item["has_selected_zone_crop_first_evidence"]
+        and item["worker_cleanup_ok"]
+        and item["passed_required_gate_count"] == item["required_gate_count"]
+        and not item["issues"]
+    ]
+    status = "passed" if passed else ("failed" if any(item["exists"] for item in artifacts) else ("planned" if artifacts else "missing"))
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": True,
+        "artifact_count": len(artifacts),
+        "passed_count": len(passed),
+        "benchmark_json": artifacts[0]["benchmark_json"] if artifacts else "",
+        "benchmark_jsons": [item["benchmark_json"] for item in artifacts],
+        "required_gate_count": len(P5_G27_REQUIRED_GATES),
+        "artifacts": artifacts,
+    }
+
+
+def summarize_p5_g24_visual_asset_policy(
+    loaded: Sequence[dict[str, Any]],
+    *,
+    evidence_level: str,
+    reference_base: Path | None = None,
+) -> dict[str, Any]:
+    completed_output_count = 0
+    outputs_with_manifests = 0
+    manifest_count = 0
+    issues: list[str] = []
+    evidence: list[str] = []
+
+    for item in loaded:
+        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        completed_pairs = _int(_nested(summary, "comparison", "completed_pairs"))
+        if completed_pairs <= 0:
+            continue
+        completed_output_count += 1
+        result_root = item.get("path")
+        label = (
+            _manifest_ref(reference_base, result_root)
+            if reference_base and isinstance(result_root, Path)
+            else str(result_root or "<validation_output>")
+        )
+        viewer_manifest_path = _p5_g24_viewer_manifest_path_for_loaded_item(item)
+        if viewer_manifest_path is None:
+            issues.append(f"{label}: viewer_manifest_json missing or unreadable")
+            evidence.append(f"{label}: visual_asset_manifests=missing_viewer_manifest")
+            continue
+        viewer_manifest = _load_json(viewer_manifest_path)
+        if not isinstance(viewer_manifest, dict):
+            issues.append(f"{viewer_manifest_path}: viewer manifest JSON missing or unreadable")
+            evidence.append(f"{label}: visual_asset_manifests=missing_viewer_manifest")
+            continue
+        manifest_refs = _visual_asset_manifest_refs(viewer_manifest)
+        if not manifest_refs:
+            issues.append(f"{viewer_manifest_path}: no visual asset manifest references")
+            evidence.append(f"{label}: visual_asset_manifests=0")
+            continue
+        outputs_with_manifests += 1
+        evidence.append(
+            f"{label}: visual_asset_manifests={len(manifest_refs)}, "
+            f"viewer_manifest={_manifest_ref(reference_base, viewer_manifest_path) if reference_base else str(viewer_manifest_path)}"
+        )
+        for ref in manifest_refs:
+            manifest_path = _resolve_viewer_manifest_ref(
+                ref,
+                result_root=result_root,
+                viewer_root=viewer_manifest_path.parent,
+            )
+            manifest_count += 1
+            if manifest_path is None:
+                issues.append(f"{viewer_manifest_path}: visual asset manifest not found: {ref}")
+                continue
+            payload = _load_json(manifest_path)
+            if not isinstance(payload, dict):
+                issues.append(f"{manifest_path}: visual asset manifest JSON missing or unreadable")
+                continue
+            policy_issues = _visual_asset_policy_issues(
+                payload,
+                customer_grade=(evidence_level == "customer_grade"),
+                manifest_path=manifest_path,
+            )
+            if policy_issues:
+                manifest_label = (
+                    _manifest_ref(reference_base, manifest_path)
+                    if reference_base
+                    else str(manifest_path)
+                )
+                issues.append(f"{manifest_label}: " + "; ".join(policy_issues))
+
+    if evidence_level == "customer_grade":
+        if completed_output_count <= 0:
+            issues.append("customer_grade visual asset policy requires completed validation outputs")
+        if outputs_with_manifests < completed_output_count:
+            issues.append("customer_grade visual asset manifests must be present for every completed validation output")
+
+    status = "passed" if completed_output_count > 0 and manifest_count > 0 and not issues else "failed"
+    if evidence_level != "customer_grade" and completed_output_count <= 0:
+        status = "advisory"
+    return {
+        "schema_version": 1,
+        "status": status,
+        "required_for_customer_grade": evidence_level == "customer_grade",
+        "completed_output_count": completed_output_count,
+        "outputs_with_manifests": outputs_with_manifests,
+        "manifest_count": manifest_count,
+        "issues": issues,
+        "evidence": evidence[:20],
+    }
+
+
+def _p5_g24_viewer_manifest_path_for_loaded_item(item: dict[str, Any]) -> Path | None:
+    summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+    root = item.get("path")
+    for value in (
+        _nested(summary, "outputs", "viewer_manifest_json"),
+        _nested(summary, "viewer_package", "viewer_manifest"),
+    ):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        path = Path(text)
+        candidates = [path] if path.is_absolute() else ([root / path] if isinstance(root, Path) else [])
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+    return None
 
 
 def summarize_p5_g7_forced_tile_eviction_proof(
@@ -1267,6 +1758,12 @@ def _readiness_issues(
         and p5_g7_tile_eviction.get("status") != "passed"
     ):
         issues.append("p5_g7_forced_tile_eviction.status must be passed when required")
+    p5_g24 = manifest.get("p5_g24_visual_asset_policy")
+    if manifest.get("evidence_level") == "customer_grade":
+        if not isinstance(p5_g24, dict) or p5_g24.get("status") != "passed":
+            issues.append("p5_g24_visual_asset_policy.status must be passed for customer-grade visual asset evidence")
+            if isinstance(p5_g24, dict):
+                issues.extend(str(issue) for issue in p5_g24.get("issues", []) if str(issue))
     p5_g22 = _nested(manifest, "performance_benchmarks", "p5_g22_actual_gui_soak")
     if isinstance(p5_g22, dict) and _int(p5_g22.get("artifact_count")) > 0:
         if p5_g22.get("status") != "passed":
@@ -1281,6 +1778,20 @@ def _readiness_issues(
             issues.append("p5_g22_actual_gui_soak.native_resource_summary.measurement_available must be true")
         if worker_summary.get("cleanup_ok") is not True or _int(worker_summary.get("orphan_worker_count")) != 0:
             issues.append("p5_g22_actual_gui_soak.worker_tree_summary cleanup/orphan check must pass")
+    p5_g26 = _nested(manifest, "performance_benchmarks", "p5_g26_selection_latency")
+    if isinstance(p5_g26, dict) and _int(p5_g26.get("artifact_count")) > 0:
+        if p5_g26.get("status") != "passed":
+            issues.append("p5_g26_selection_latency.status must be passed when provided")
+            for item in p5_g26.get("artifacts", []):
+                if isinstance(item, dict):
+                    issues.extend(str(issue) for issue in item.get("issues", []) if str(issue))
+    p5_g27 = _nested(manifest, "performance_benchmarks", "p5_g27_selected_zone_crop")
+    if isinstance(p5_g27, dict) and _int(p5_g27.get("artifact_count")) > 0:
+        if p5_g27.get("status") != "passed":
+            issues.append("p5_g27_selected_zone_crop.status must be passed when provided")
+            for item in p5_g27.get("artifacts", []):
+                if isinstance(item, dict):
+                    issues.extend(str(issue) for issue in item.get("issues", []) if str(issue))
     if not operator_notes_file:
         issues.append("operator notes_file with workflow checklist is required")
     if not operator_notes_file and not operator_screenshots_dir:

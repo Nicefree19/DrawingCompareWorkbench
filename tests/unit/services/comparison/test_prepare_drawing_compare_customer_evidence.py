@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 from scripts import prepare_drawing_compare_customer_evidence as prepare
+from src.services.comparison.visual_asset import build_visual_asset_cache_key
 
 
 def _write_validation_summary(
@@ -32,6 +34,8 @@ def _write_validation_summary(
     cad_block_text_no_expand: bool = True,
     forced_tile_eviction: bool = False,
     tile_cache_mb: float = 0.25,
+    include_visual_asset_manifest: bool = True,
+    visual_asset_nonblank_status: str = "passed",
 ) -> None:
     if source_extensions is None:
         source_extensions = ("dwg", "dxf") if kind == "cad" else (kind, kind)
@@ -165,6 +169,12 @@ def _write_validation_summary(
             },
         }
     (path / "validation_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    if completed_pairs > 0:
+        _write_visual_asset_manifest_fixture(
+            path,
+            include_manifest=include_visual_asset_manifest,
+            nonblank_status=visual_asset_nonblank_status,
+        )
     if cad_pdf_blocked_pairs:
         (path / "blocked_pairs.csv").write_text(
             "a_path,b_path,a_kind,b_kind,reason\n"
@@ -177,6 +187,123 @@ def _write_validation_summary(
             item9b=workbench_item9b,
             item9c=workbench_item9c,
         )
+
+
+def _write_visual_asset_manifest_fixture(
+    path: Path,
+    *,
+    include_manifest: bool = True,
+    nonblank_status: str = "passed",
+) -> None:
+    viewer_dir = path / "viewer"
+    viewer_dir.mkdir(parents=True, exist_ok=True)
+    if not include_manifest:
+        (viewer_dir / "viewer_manifest.json").write_text(
+            json.dumps({"schema_version": 2, "visual_asset_manifest_paths": [], "pairs": []}),
+            encoding="utf-8",
+        )
+        return
+
+    manifest_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/visual_asset_manifest.json")
+    manifest_ref = str(manifest_rel).replace("\\", "/")
+    probe_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/nonblank_probe.json")
+    probe_ref = str(probe_rel).replace("\\", "/")
+    target_rel = Path("viewer/images/S21-0001_after.png")
+    target_ref = str(target_rel).replace("\\", "/")
+    target_path = path / target_rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(b"stable nonblank visual target")
+    target_hash = hashlib.sha256(target_path.read_bytes()).hexdigest()
+    source_hash = "test-source-hash"
+    source_signature = {"schema_version": 1, "source_hash": source_hash}
+    plot_profile_hash = "test-plot-profile"
+    cache_key_hash = build_visual_asset_cache_key(
+        source_hash=source_hash,
+        source_signature=source_signature,
+        backend_id="source_pdf",
+        backend_version="1",
+        license_id="customer_provided",
+        plot_profile_hash=plot_profile_hash,
+        page_index=0,
+        dpi=80,
+        page_size_pt=[612.0, 792.0],
+        pixel_size=[680, 880],
+        transform_quality="estimated",
+    )
+    probe_payload = {
+        "schema_version": 2,
+        "status": nonblank_status,
+        "method": "pixel_nonblank_probe",
+        "asset_path": "viewer/pages/S21-0001_after.pdf",
+        "asset_hash": "test-asset-hash",
+        "asset_size": 10,
+        "probe_target_path": target_ref,
+        "probe_target_hash": target_hash,
+        "probe_target_size": target_path.stat().st_size,
+        "source_hash": source_hash,
+        "cache_key_hash": cache_key_hash,
+        "page_index": 0,
+        "dpi": 80,
+        "pixel_width": 10,
+        "pixel_height": 10,
+        "mean": 200.0 if nonblank_status == "passed" else 255.0,
+        "channel_ranges": [10, 10, 10] if nonblank_status == "passed" else [0, 0, 0],
+        "extrema": [[0, 10], [0, 10], [0, 10]] if nonblank_status == "passed" else [[255, 255], [255, 255], [255, 255]],
+        "nonblank": nonblank_status == "passed",
+    }
+    probe_payload["probe_hash"] = hashlib.sha256(
+        json.dumps(probe_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    probe_path = path / probe_rel
+    probe_path.parent.mkdir(parents=True, exist_ok=True)
+    probe_path.write_text(json.dumps(probe_payload), encoding="utf-8")
+    manifest_path = path / manifest_rel
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "visual_asset_id": "S21-0001:after:source_pdf",
+                "source_path": "new.pdf",
+                "asset_path": "viewer/pages/S21-0001_after.pdf",
+                "asset_kind": "source_pdf",
+                "status": "ready",
+                "source_hash": source_hash,
+                "source_signature": source_signature,
+                "cache_key_hash": cache_key_hash,
+                "plot_profile_hash": plot_profile_hash,
+                "page_index": 0,
+                "dpi": 80,
+                "page_size_pt": [612.0, 792.0],
+                "pixel_size": [680, 880],
+                "visual_backend_id": "source_pdf",
+                "visual_backend_version": "1",
+                "visual_backend_license_id": "customer_provided",
+                "visual_fidelity": "pdf_visual_background",
+                "render_lifecycle": "ready",
+                "transform_quality": "estimated",
+                "nonblank_probe_status": nonblank_status,
+                "metadata": {
+                    "nonblank_probe": probe_ref,
+                    "nonblank_probe_hash": probe_payload["probe_hash"],
+                    "probe_target_path": target_ref,
+                    "probe_target_hash": target_hash,
+                    "probe_method": "pixel_nonblank_probe",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (viewer_dir / "viewer_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "visual_asset_manifest_count": 1,
+                "visual_asset_manifest_paths": [manifest_ref],
+                "pairs": [{"pair_id": "S21-0001", "visual_asset_manifest_paths": [manifest_ref]}],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _ai_policy() -> dict:
@@ -315,6 +442,80 @@ def _write_p5_g22_gui_soak(path: Path) -> None:
     )
 
 
+def _write_p5_g26_selection_latency(path: Path, *, failed_gate: str | None = None) -> None:
+    gate_names = sorted(prepare.P5_G26_REQUIRED_GATES)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g26_selection_latency_soak",
+                "profile": "selection_latency_hard_gate",
+                "status": "passed",
+                "p5_g26_required_gate_names": gate_names,
+                "p5_g26_contract": {
+                    "wp_a_passed": failed_gate is None,
+                    "wp_b_passed": failed_gate is None,
+                    "has_zone_selection_evidence": True,
+                    "zone_selection_background_work_count": 0,
+                    "cad_to_pdf_hot_path_count": 0,
+                },
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": name != failed_gate,
+                        "required": True,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_p5_g27_selected_zone_crop(path: Path, *, failed_gate: str | None = None) -> None:
+    gate_names = sorted(prepare.P5_G27_REQUIRED_GATES)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workbench-gui-hotpath-benchmark/v1",
+                "benchmark_id": "p5_g27_selected_zone_crop_soak",
+                "profile": "selected_zone_crop_first_lifecycle",
+                "status": "passed",
+                "p5_g27_required_gate_names": gate_names,
+                "p5_g27_contract": {
+                    "crop_first_result_visible": failed_gate is None,
+                    "crop_visible_before_vector_focus": failed_gate is None,
+                    "vector_failure_does_not_clear_background": failed_gate is None,
+                    "has_selected_zone_crop_first_evidence": True,
+                    "worker_cleanup_ok": True,
+                    "blank_selected_zone_count": 0,
+                    "stale_result_visible_count": 0,
+                    "cancel_without_visible_regression_count": 0,
+                    "timeout_count": 0,
+                    "fallback_missing_reason_count": 0,
+                    "orphan_worker_count": 0,
+                },
+                "gates": [
+                    {
+                        "name": name,
+                        "passed": name != failed_gate,
+                        "required": True,
+                        "actual": 0,
+                        "target": 0,
+                        "detail": "",
+                    }
+                    for name in gate_names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _run_prepare_ready_fixture(
     tmp_path: Path,
     *,
@@ -327,6 +528,10 @@ def _run_prepare_ready_fixture(
     p5_g6_tile_cache_mb: float | None = None,
     p5_g16_benchmark_json: list[Path] | None = None,
     p5_g22_gui_soak_json: list[Path] | None = None,
+    p5_g26_selection_latency_json: list[Path] | None = None,
+    p5_g27_selected_zone_crop_json: list[Path] | None = None,
+    include_visual_asset_manifest: bool = True,
+    visual_asset_nonblank_status: str = "passed",
 ) -> dict:
     cad_dir = tmp_path / "cad"
     pdf_dir = tmp_path / "pdf"
@@ -340,6 +545,8 @@ def _run_prepare_ready_fixture(
         kind="cad",
         completed_pairs=1,
         queue_summary="member beam moved structural text",
+        include_visual_asset_manifest=include_visual_asset_manifest,
+        visual_asset_nonblank_status=visual_asset_nonblank_status,
     )
     _write_validation_summary(
         pdf_dir,
@@ -347,6 +554,8 @@ def _run_prepare_ready_fixture(
         completed_pairs=20,
         queue_summary="section dimension D13@100 D13@200 SHD13@100 SHD13@200 grid",
         review_truth_rows=6,
+        include_visual_asset_manifest=include_visual_asset_manifest,
+        visual_asset_nonblank_status=visual_asset_nonblank_status,
     )
     _write_validation_summary(blocked_dir, kind="cad", completed_pairs=0, cad_pdf_blocked_pairs=1)
     _write_truth_csv(truth_csv)
@@ -378,6 +587,8 @@ def _run_prepare_ready_fixture(
         p5_g6_tile_cache_mb=p5_g6_tile_cache_mb,
         p5_g16_benchmark_json=p5_g16_benchmark_json,
         p5_g22_gui_soak_json=p5_g22_gui_soak_json,
+        p5_g26_selection_latency_json=p5_g26_selection_latency_json,
+        p5_g27_selected_zone_crop_json=p5_g27_selected_zone_crop_json,
     )
 
 
@@ -505,11 +716,38 @@ def test_prepare_customer_evidence_manifest_ready(tmp_path: Path) -> None:
     assert manifest["selected_zone_performance"]["status"] == "passed"
     assert manifest["selected_zone_performance"]["completed_outputs"] == 2
     assert manifest["selected_zone_performance"]["telemetry_outputs"] == 2
+    p5_g24 = manifest["p5_g24_visual_asset_policy"]
+    assert p5_g24["status"] == "passed"
+    assert p5_g24["completed_output_count"] == 2
+    assert p5_g24["outputs_with_manifests"] == 2
+    assert p5_g24["manifest_count"] == 2
     assert manifest["readiness"]["status"] == "ready"
     assert manifest["readiness"]["issue_count"] == 0
     assert manifest["readiness"]["issues"] == []
     assert result["summary"]["cad_policy_evidence"]["block_text_detection_without_expansion"] is True
+    assert result["summary"]["p5_g24_visual_asset_policy"]["status"] == "passed"
     assert (tmp_path / "sharable_path_audit_summary.json").exists()
+
+
+def test_prepare_customer_grade_requires_visual_asset_manifest_refs(tmp_path: Path) -> None:
+    result = _run_prepare_ready_fixture(tmp_path, include_visual_asset_manifest=False)
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    assert result["status"] == "incomplete"
+    assert manifest["p5_g24_visual_asset_policy"]["status"] == "failed"
+    assert "p5_g24_visual_asset_policy.status must be passed for customer-grade visual asset evidence" in result["issues"]
+    assert any("no visual asset manifest references" in issue for issue in result["issues"])
+    assert manifest["readiness"]["status"] == "incomplete"
+
+
+def test_prepare_customer_grade_rejects_failed_visual_asset_nonblank_probe(tmp_path: Path) -> None:
+    result = _run_prepare_ready_fixture(tmp_path, visual_asset_nonblank_status="failed")
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    assert result["status"] == "incomplete"
+    assert manifest["p5_g24_visual_asset_policy"]["status"] == "failed"
+    assert "p5_g24_visual_asset_policy.status must be passed for customer-grade visual asset evidence" in result["issues"]
+    assert any("nonblank_probe_status must be passed" in issue for issue in result["issues"])
 
 
 def test_prepare_preserves_p5_g7_forced_tile_eviction_proof_without_counting_as_customer_corpus(
@@ -604,6 +842,98 @@ def test_prepare_records_p5_g22_gui_soak_artifact_for_final_audit_discovery(tmp_
     assert p5_g22["worker_tree_summary"]["cleanup_ok"] is True
     assert p5_g22["shared_summary_count"] == 1
     assert result["summary"]["p5_g22_actual_gui_soak"]["passed_count"] == 1
+
+
+def test_prepare_records_p5_g26_selection_latency_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g26_selection_latency_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g26_selection_latency(soak_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g26_selection_latency_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g26_selection_latency_soak.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g26_selection_latency_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g26_selection_latency_jsons"] == [expected_ref]
+    p5_g26 = manifest["performance_benchmarks"]["p5_g26_selection_latency"]
+    assert p5_g26["status"] == "passed"
+    assert p5_g26["benchmark_json"] == expected_ref
+    assert p5_g26["required_gate_count"] == len(prepare.P5_G26_REQUIRED_GATES)
+    assert result["summary"]["p5_g26_selection_latency"]["passed_count"] == 1
+
+
+def test_prepare_rejects_failed_p5_g26_selection_latency_gate(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g26_selection_latency_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g26_selection_latency(
+        soak_json,
+        failed_gate="p5_g26_zone_selection_p95_ms",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g26_selection_latency_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g26 = manifest["performance_benchmarks"]["p5_g26_selection_latency"]
+    assert result["status"] == "incomplete"
+    assert p5_g26["status"] == "failed"
+    assert "p5_g26_selection_latency.status must be passed when provided" in result["issues"]
+    assert any(
+        "required gates failed: p5_g26_zone_selection_p95_ms" in issue
+        for issue in result["issues"]
+    )
+
+
+def test_prepare_records_p5_g27_selected_zone_crop_artifact_for_final_audit_discovery(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g27_selected_zone_crop_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g27_selected_zone_crop(soak_json)
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g27_selected_zone_crop_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    expected_ref = "pdf/p5_g27_selected_zone_crop_soak.json"
+    assert result["status"] == "ready"
+    assert manifest["artifacts"]["p5_g27_selected_zone_crop_json"] == expected_ref
+    assert manifest["artifacts"]["p5_g27_selected_zone_crop_jsons"] == [expected_ref]
+    p5_g27 = manifest["performance_benchmarks"]["p5_g27_selected_zone_crop"]
+    assert p5_g27["status"] == "passed"
+    assert p5_g27["benchmark_json"] == expected_ref
+    assert p5_g27["required_gate_count"] == len(prepare.P5_G27_REQUIRED_GATES)
+    assert result["summary"]["p5_g27_selected_zone_crop"]["passed_count"] == 1
+
+
+def test_prepare_rejects_failed_p5_g27_selected_zone_crop_gate(tmp_path: Path) -> None:
+    soak_json = tmp_path / "pdf" / "p5_g27_selected_zone_crop_soak.json"
+    soak_json.parent.mkdir(parents=True)
+    _write_p5_g27_selected_zone_crop(
+        soak_json,
+        failed_gate="p5_g27_crop_visible_before_vector_focus",
+    )
+
+    result = _run_prepare_ready_fixture(
+        tmp_path,
+        p5_g27_selected_zone_crop_json=[soak_json],
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    p5_g27 = manifest["performance_benchmarks"]["p5_g27_selected_zone_crop"]
+    assert result["status"] == "incomplete"
+    assert p5_g27["status"] == "failed"
+    assert "p5_g27_selected_zone_crop.status must be passed when provided" in result["issues"]
+    assert any(
+        "required gates failed: p5_g27_crop_visible_before_vector_focus" in issue
+        for issue in result["issues"]
+    )
 
 
 def test_prepare_rejects_p5_g22_gui_soak_without_shared_summaries(tmp_path: Path) -> None:

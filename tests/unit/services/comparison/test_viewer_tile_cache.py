@@ -78,6 +78,31 @@ def test_cache_key_changes_when_rendered_background_signature_changes(tmp_path: 
     assert key1 != key2
 
 
+def test_cache_key_changes_when_visual_asset_identity_changes(tmp_path: Path) -> None:
+    a = tmp_path / "a.pdf"
+    b = tmp_path / "b.pdf"
+    a.write_text("a", encoding="utf-8")
+    b.write_text("b", encoding="utf-8")
+    options = ViewerTileCacheOptions(tile_size=512)
+
+    key1 = viewer_cache_key(
+        pair_uuid="pair",
+        source_a=a,
+        source_b=b,
+        options=options,
+        visual_asset_cache_key="visual-identity-v1",
+    )
+    key2 = viewer_cache_key(
+        pair_uuid="pair",
+        source_a=a,
+        source_b=b,
+        options=options,
+        visual_asset_cache_key="visual-identity-v2",
+    )
+
+    assert key1 != key2
+
+
 def test_tile_file_signature_uses_shared_source_hash(tmp_path: Path) -> None:
     source = tmp_path / "tile-source.pdf"
     source.write_bytes(b"%PDF")

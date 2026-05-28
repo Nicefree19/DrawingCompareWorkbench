@@ -248,6 +248,7 @@ def _check_plan(readiness: dict[str, Any], plan: dict[str, Any]) -> list[Readine
     checks.append(_check_inventory_and_prepare_routing(plan, steps))
     checks.append(_check_p5_g16_replay_routing(plan, steps))
     checks.append(_check_p5_g22_gui_soak_routing(plan, steps))
+    checks.append(_check_p5_g27_selected_zone_crop_routing(plan, steps))
     checks.append(_check_tile_cache_env_isolation(readiness, plan, steps))
     checks.append(_check_final_audit_command(steps))
     return checks
@@ -307,6 +308,10 @@ def _check_plan_invariants(plan: dict[str, Any]) -> ReadinessCheck:
         failures.append("plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan must be true")
     if invariants.get("final_audit_p5_g22_gui_soak_jsons_equal_plan") is not True:
         failures.append("plan.invariants.final_audit_p5_g22_gui_soak_jsons_equal_plan must be true")
+    if invariants.get("final_audit_p5_g27_selected_zone_crop_jsons_equal_plan") is not True:
+        failures.append(
+            "plan.invariants.final_audit_p5_g27_selected_zone_crop_jsons_equal_plan must be true"
+        )
     if _as_int(invariants.get("final_audit_results_dir_count")) < 1:
         failures.append("plan.invariants.final_audit_results_dir_count must be >= 1")
     return ReadinessCheck(
@@ -442,6 +447,43 @@ def _check_p5_g22_gui_soak_routing(plan: dict[str, Any], steps: list[Any]) -> Re
     )
 
 
+def _check_p5_g27_selected_zone_crop_routing(plan: dict[str, Any], steps: list[Any]) -> ReadinessCheck:
+    planned_jsons = [
+        str(path)
+        for path in plan.get("p5_g27_selected_zone_crop_jsons", [])
+        if isinstance(path, str)
+    ]
+    prepare = _step_by_name(steps, "prepare_customer_evidence_manifest")
+    final_step = _step_by_name(steps, "final_customer_grade_audit")
+    prepare_jsons = _values_after(
+        _command_values(prepare),
+        "--p5-g27-selected-zone-crop-json",
+    )
+    final_jsons = _values_after(
+        _command_values(final_step),
+        "--p5-g27-selected-zone-crop-json",
+    )
+    failures: list[str] = []
+    if planned_jsons and prepare_jsons != planned_jsons:
+        failures.append(
+            "prepare --p5-g27-selected-zone-crop-json values must equal "
+            "plan.p5_g27_selected_zone_crop_jsons"
+        )
+    if planned_jsons and final_jsons != planned_jsons:
+        failures.append(
+            "final audit --p5-g27-selected-zone-crop-json values must equal "
+            "plan.p5_g27_selected_zone_crop_jsons"
+        )
+    return ReadinessCheck(
+        "p5_g27_selected_zone_crop_routing",
+        not failures,
+        "P5-G27 selected-zone crop-first JSON is routed through prepare and final audit"
+        if not failures
+        else "; ".join(failures),
+        planned_jsons,
+    )
+
+
 def _check_tile_cache_env_isolation(
     readiness: dict[str, Any],
     plan: dict[str, Any],
@@ -561,6 +603,7 @@ def _context_values(step: dict[str, Any], key: str) -> list[str]:
             "validation_summary": "--validation-summary",
             "p5_g16_benchmark_json": "--p5-g16-benchmark-json",
             "p5_g22_gui_soak_json": "--p5-g22-gui-soak-json",
+            "p5_g27_selected_zone_crop_json": "--p5-g27-selected-zone-crop-json",
         }.get(key)
         if option:
             return _values_after([str(value) for value in command], option)

@@ -3692,3 +3692,493 @@ Next slice:
 3. Add sidecar PDF discovery and tests for `sidecar_pdf` manifests.
 4. Promote visual asset cache key v1.1 once nonblank probe hash and page geometry
    are available.
+
+## 26. 2026-05-28 P5-G24 Pixel Nonblank Probe and Evidence Propagation
+
+This slice turns the previous hash-link-only placeholder into real pixel-level
+viewer evidence for already-rendered bitmap targets. It keeps the PDF-first
+boundary strict: the probe does not open PDFs or CAD files by itself, and it does
+not add a new render/conversion path. Source PDFs are probed through the rendered
+PNG background that the viewer package already produced.
+
+Implemented behavior:
+
+- `probe_visual_asset_nonblank()` records schema v2 pixel probe artifacts with
+  asset hash, probe-target hash, cache key, page/DPI, pixel dimensions, mean,
+  channel ranges, extrema, nonblank boolean, and deterministic `probe_hash`;
+- PDF visual assets require an explicit rendered bitmap `probe_target_path`;
+  without one, they are recorded as `not_probed` instead of pretending a PDF byte
+  hash proves visual content;
+- viewer-package manifests now write `pixel_nonblank_probe` metadata for
+  source-PDF and raster fallback assets when a rendered PNG target exists;
+- customer-grade visual asset policy now requires `nonblank_probe`,
+  `nonblank_probe_hash`, `probe_target_hash`, and `probe_method`;
+- final MVP audit reloads the probe JSON, recomputes the probe hash, verifies the
+  probe status/nonblank result, resolves the probe target, and compares the
+  recorded target hash against the actual file;
+- prepare and inventory now summarize `p5_g24_visual_asset_policy` and fail
+  customer-grade readiness when completed validation outputs lack viewer visual
+  asset manifests or have failed/missing nonblank proof.
+
+Validation evidence:
+
+- prepare/inventory P5-G24 propagation tests passed: `75 passed`;
+- expanded P5-G24 target suite passed: `252 passed` across visual asset policy,
+  CAD visual backend, CAD policy gate, tile cache, viewer package, MVP audit,
+  prepare, and inventory tests;
+- repository policy gate passed with `python scripts\cad_policy_gate.py`;
+- `git diff --check` passed after code and test changes.
+
+Self-review findings:
+
+- This is intentionally probe-over-rendered-output, not a second renderer. That
+  avoids reintroducing the performance issue the PDF-first plan is trying to
+  eliminate.
+- The audit now treats manifests as pointers to evidence, not evidence by
+  themselves. Broken probe files, altered probe hashes, and target-hash mismatch
+  are release-blocking.
+- Sidecar PDF discovery is still not complete. `source_pdf` and
+  `raster_fallback` are now hardened; `sidecar_pdf` should be the next P5-G24
+  completion item before enabling any CAD-to-PDF customer workflow.
+- Visual asset cache key v1.1 still needs page geometry, transform quality, and
+  probe hash promoted into first-class cache identity.
+
+Next slice:
+
+1. Add sidecar PDF discovery and `sidecar_pdf` visual asset manifests.
+2. Promote visual asset cache key v1.1 with page geometry, transform quality,
+   and nonblank probe hash.
+3. Add stale visual asset reuse tests that prove changed rendered output cannot
+   reuse old tiles or old probe evidence.
+4. Move to P5-G26 GUI hot-path gates once P5-G24 cache identity is closed.
+
+## 27. 2026-05-28 P5-G24 Sidecar PDF and Visual Cache Identity Slice
+
+This slice closes the next P5-G24 gap without enabling CAD-to-PDF conversion.
+It treats sidecar PDFs as discovered visual assets only, and hardens cache
+identity so page geometry, pixel geometry, transform quality, and rendered
+visual content can invalidate stale viewer tiles.
+
+Implemented behavior:
+
+- viewer package discovers conservative sidecar PDF fields from pair artifacts
+  or zone rows: `sidecar_pdf_a/b`, `before_sidecar_pdf/after_sidecar_pdf`,
+  `source_a_pdf/source_b_pdf`, `before_pdf/after_pdf`, and converted-PDF
+  aliases;
+- discovered sidecar PDFs are copied into `viewer/pages` and emitted as
+  `sidecar_pdf` visual asset manifests under the existing visual-assets tree;
+- PDF sources still use `source_pdf`; sidecar discovery does not duplicate
+  `source_pdf` assets when the source itself is already PDF;
+- `build_visual_asset_cache_key()` is promoted to schema `1.1` by adding
+  `page_size_pt`, `pixel_size`, and `transform_quality` to the provenance hash;
+- `validate_visual_asset_policy()` now recomputes the v1.1 key with the same
+  geometry/quality fields and rejects stale keys when transform quality or
+  page/pixel geometry changes;
+- viewer-package tile cache keys now receive a pair-level visual asset identity
+  hash built from visual asset cache keys and content hashes, including
+  `probe_target_hash`, while avoiding path-sensitive `probe_hash` values so
+  repeat exports to different viewer directories still reuse cache correctly.
+
+Validation evidence:
+
+- focused visual/cache/viewer tests passed: `56 passed`;
+- audit/prepare/inventory propagation tests passed: `186 passed`;
+- expanded P5-G24 target suite passed: `257 passed` across visual asset policy,
+  CAD visual backend, CAD policy gate, tile cache, viewer package, MVP audit,
+  prepare, and inventory tests;
+- repository policy gate passed with `python scripts\cad_policy_gate.py`;
+- `git diff --check` passed.
+
+Self-review findings:
+
+- The slice intentionally records discovered sidecar PDFs as `source_only`
+  unless a future rendering path proves the sidecar rendered pixels. That keeps
+  provenance honest and avoids claiming customer-grade nonblank evidence from a
+  file path alone.
+- The initial design idea of placing `nonblank_probe_hash` directly into tile
+  cache identity was rejected during testing because probe hashes include output
+  paths and would break repeat-cache reuse across viewer directories. The final
+  design uses stable content hashes (`asset_hash`, `probe_target_hash`) for tile
+  invalidation and leaves `probe_hash` for audit evidence integrity.
+- Existing cache entries will intentionally miss after key v1.1 because the
+  identity now covers geometry and transform quality.
+
+Next slice:
+
+1. Add a rendered-sidecar path only when the viewer has explicit sidecar-derived
+   bitmap evidence, then allow `sidecar_pdf` to become customer-grade `ready`.
+2. Add stale visual asset reuse tests around changed `probe_target_hash` with
+   retained cache manifests from a previous run.
+3. Start P5-G26 GUI hot-path gates: prove pair/page selection does not trigger
+   full conversion, full tile pyramid generation, or eager overlay materializing.
+
+## 28. 2026-05-28 P5-G26 Selection Latency Contract Seed
+
+This slice starts P5-G26 without replacing the existing P2/P5 GUI benchmark
+probes. It adds a named evidence envelope and aggregate contract gates on top
+of the existing hot-path measurements so later prepare/inventory/audit scripts
+can discover and validate P5-G26 as a first-class customer artifact.
+
+Implemented behavior:
+
+- `benchmark_workbench_gui_hotpath.py` now exposes
+  `P5_G26_BENCHMARK_ID = "p5_g26_selection_latency_soak"` and
+  `P5_G26_PROFILE = "selection_latency_hard_gate"`;
+- `--include-p5-g26-contract` writes `benchmark_id`, `profile`,
+  `p5_g26_evidence`, `p5_g26_contract`, and `p5_g26_required_gate_names` into
+  the benchmark payload;
+- P5-G26 WP-A gates aggregate cached/cold pair selection latency, hard
+  event-loop max, no eager tile-pyramid work, no first-paint full overlay JSON,
+  no first-visible full overlay cache materialisation, and no CAD conversion on
+  the click hot path;
+- P5-G26 WP-B gates aggregate cached page navigation render-call count,
+  repeated cached-navigation hit rate, blank viewer count, event-loop max, and
+  CAD-to-PDF hot-path count;
+- `--include-p5-g26-contract` now also runs the synthetic
+  `zone_selection_hotpath_probe`, and `--include-zone-selection-hotpath` can run
+  it directly with configurable selection count, zone count, and p95 target;
+- the zone-selection gates require explicit evidence, matching viewer_perf
+  telemetry count, p95 within budget, no worker/process/full-tree/crop/vector
+  background work, and no stale/cancel/fallback visible-zone results;
+- the contract is opt-in, so the default fast benchmark keeps its existing
+  behavior while explicit P5-G26 runs produce machine-readable evidence.
+
+Validation evidence:
+
+- `python -m py_compile scripts\benchmark_workbench_gui_hotpath.py
+  tests\unit\scripts\test_benchmark_workbench_gui_hotpath.py`;
+- `python -m pytest tests\unit\scripts\test_benchmark_workbench_gui_hotpath.py
+  -q -o log_cli=false --tb=short` passed with `24 passed`.
+
+Self-review findings:
+
+- This is an evidence contract seed, not full customer-grade propagation. It
+  gives downstream scripts a stable benchmark id/profile/gate set to validate,
+  but prepare/inventory/final audit still need explicit P5-G26 wiring.
+- The CAD-to-PDF hot-path count is currently a contract field. Final
+  customer-grade enforcement should combine this benchmark field with P5-G24
+  visual-asset policy checks so conversion provenance cannot bypass the gate.
+- `--include-p5-g26-contract` intentionally fails when cached page-navigation
+  evidence is missing. P5-G26 acceptance runs should include the real PDF
+  prewarm/cache navigation probe rather than treating missing evidence as a
+  pass.
+- The zone-selection probe is a handler-level hot-path proof. It intentionally
+  disables lightweight pair loading, full-tree rebuild scheduling, vector
+  render, crop QProcess launch, and delayed zone-render prewarm so it can
+  isolate selection responsiveness; the production crop-first worker lifecycle
+  still needs its own P5-G27/P5-G26 hardening gate.
+
+Next slice:
+
+1. Add production crop-first lifecycle gates for P5-G27/P5-G26: selected-zone
+   crop worker cancellation, stale result suppression, and fallback-free visible
+   output validation.
+2. Run an end-to-end P5-G26 acceptance artifact with real PDF prewarm/cache
+   navigation enabled, not just unit fixtures.
+3. Feed P5-G26 into the composite P5-G30 customer visual-performance release
+   gate.
+
+## 29. 2026-05-28 P5-G26 Evidence Propagation
+
+This slice turns the P5-G26 benchmark envelope into a customer-grade evidence
+artifact instead of leaving it as a standalone benchmark JSON.
+
+Implemented behavior:
+
+- `prepare_drawing_compare_customer_evidence.py` accepts repeatable
+  `--p5-g26-selection-latency-json` / `--p5-g26-selection-latency-soak`
+  inputs, records safe manifest artifact refs, includes input hashes in
+  provenance, summarizes the P5-G26 contract, and rejects provided artifacts
+  unless the contract and required gates pass;
+- `inventory_drawing_compare_customer_evidence.py` discovers
+  `p5_g26_selection_latency_soak.json`, summarizes pass/fail gate state,
+  exposes count/pass diagnostics, and carries the P5-G26 path into recommended
+  prepare/final-audit commands;
+- `audit_drawing_compare_mvp_exit.py` accepts repeatable P5-G26 paths, searches
+  release/customer manifests and result-dir sibling artifacts, and makes
+  `p5_g26_selection_latency_soak` required automatically for
+  `customer_grade` audits;
+- final audit validates the P5-G26 string schema, benchmark id/profile, status,
+  `p5_g26_contract` / `p5_g26_evidence`, WP-A/WP-B pass flags,
+  zone-selection evidence, no CAD conversion/background work counters, declared
+  required gate names, and all required gate pass states.
+
+Validation evidence:
+
+- `python -m py_compile scripts\prepare_drawing_compare_customer_evidence.py
+  scripts\inventory_drawing_compare_customer_evidence.py
+  scripts\audit_drawing_compare_mvp_exit.py
+  tests\unit\services\comparison\test_prepare_drawing_compare_customer_evidence.py
+  tests\unit\services\comparison\test_inventory_drawing_compare_customer_evidence.py
+  tests\unit\services\comparison\test_audit_drawing_compare_mvp_exit.py`;
+- `python -m pytest
+  tests\unit\services\comparison\test_prepare_drawing_compare_customer_evidence.py
+  tests\unit\services\comparison\test_inventory_drawing_compare_customer_evidence.py
+  tests\unit\services\comparison\test_audit_drawing_compare_mvp_exit.py
+  -q -o log_cli=false --tb=short` passed with `193 passed`.
+
+Self-review findings:
+
+- The propagation gate proves artifact shape, required gate names, and pass/fail
+  state. It does not prove a real customer-sized P5-G26 run has already been
+  executed; that remains an acceptance execution task.
+- P5-G26 is intentionally not tied to customer manifest hashes because it is a
+  synthetic hot-path benchmark over GUI/PDF behavior. The audit instead proves
+  that customer-grade release packets include a current, passing benchmark
+  contract.
+- The production selected-zone crop/vector worker lifecycle remains outside
+  this slice and belongs in P5-G27/P5-G26 hardening.
+
+## 30. 2026-05-28 P5-G27 Selected-Zone Crop-First Contract Seed
+
+This slice starts P5-G27 as a separate selected-zone lifecycle benchmark rather
+than overloading the P5-G26 selection-latency contract. P5-G26 proves the zone
+selection handler does not trigger heavy work. P5-G27 proves the heavy selected
+zone lifecycle itself is safe: crop becomes visible first, vector enhancement
+is deferred, and vector failure does not blank the already visible crop.
+
+Implemented behavior:
+
+- `benchmark_workbench_gui_hotpath.py` now exposes
+  `P5_G27_BENCHMARK_ID = "p5_g27_selected_zone_crop_soak"` and
+  `P5_G27_PROFILE = "selected_zone_crop_first_lifecycle"`;
+- `--include-p5-g27-selected-zone-crop-first` writes `benchmark_id`,
+  `profile`, `p5_g27_evidence`, `p5_g27_contract`, and
+  `p5_g27_required_gate_names` into the benchmark payload;
+- the new `selected_zone_crop_first_probe` uses the real workbench zone
+  selection and crop-finish handlers with a fake crop controller so the test
+  exercises request-id ordering without spawning QProcess workers;
+- the probe forces a non-PDF/CAD pair so vector enhancement is attempted after
+  crop completion, then simulates vector worker failure through the existing
+  vector finish handler;
+- P5-G27 gates require crop-visible evidence for every completed selection,
+  crop completion before deferred focus/vector start, crop-visible p95 within
+  budget, vector failure preserving the crop background, zero blank selected
+  zones, zero stale/cancel/fallback/timeout regressions, bounded event-loop
+  gaps, and no worker cleanup debt.
+- comparison package import now disables Python's Windows WMI platform probe
+  before CAD/ezdxf imports, forcing the stdlib fallback path when WMI is
+  unhealthy so benchmark/test startup does not hang in `platform.system()`.
+
+Validation evidence:
+
+- `python -m py_compile scripts\benchmark_workbench_gui_hotpath.py`;
+- `python -m pytest tests\unit\scripts\test_benchmark_workbench_gui_hotpath.py
+  -q -o log_cli=false --tb=short` passed with `28 passed`;
+- selected-zone GUI lifecycle subset passed with `5 passed, 43 deselected`
+  under the same WMI fallback wrapper;
+- smoke artifact command passed and wrote
+  `.tmp\p5_g27_smoke_current\p5_g27_selected_zone_crop_soak.json` with
+  `benchmark_id=p5_g27_selected_zone_crop_soak`, `profile`,
+  `status=passed`, required gate names, and all P5-G27 gates passing.
+
+Self-review findings:
+
+- This is a contract seed over synthetic selected-zone lifecycle behavior. It
+  proves crop-first ordering and vector-failure isolation through the real GUI
+  handlers, but it does not yet replace P5-G15/P5-G16 real render evidence.
+- The fake crop controller is intentional: this first gate should catch GUI
+  lifecycle regressions without depending on DXF/PDF renderer cost or worker
+  availability. Production renderer cache/RSS behavior remains covered by
+  P5-G15/P5-G16 and should be joined into P5-G27 propagation later.
+- P5-G27 is not yet wired into prepare/inventory/final audit. The next slice
+  should mirror the P5-G26 propagation pattern with
+  `p5_g27_selected_zone_crop_soak.json`.
+- The Windows WMI import guard is intentionally local to the comparison
+  package. Standalone pytest startup can still hit WMI before importing project
+  code through third-party packages such as `faker` or `pyreadline3`; the local
+  validation wrapper patched `platform._wmi_query` at process start to prove the
+  project tests.
+
+Next slice:
+
+1. Propagate `p5_g27_selected_zone_crop_soak.json` through inventory, prepare,
+   and final audit, including required gate-name validation.
+2. Add a real renderer-backed P5-G27 mode or bridge from P5-G15/P5-G16 so
+   customer-grade packages prove both lifecycle safety and render quality.
+3. Feed P5-G27 into the P5-G30 composite visual-performance release gate.
+
+## 31. 2026-05-28 P5-G27 Evidence Propagation
+
+This slice promotes the P5-G27 crop-first benchmark from a standalone synthetic
+contract into the customer-grade evidence pipeline.
+
+Implemented behavior:
+
+- `prepare_drawing_compare_customer_evidence.py` accepts repeatable
+  `--p5-g27-selected-zone-crop-json` /
+  `--p5-g27-selected-zone-crop-soak` inputs, records safe artifact refs,
+  includes input hashes in manifest provenance, summarizes the P5-G27 contract,
+  and rejects provided artifacts unless required gates pass;
+- `inventory_drawing_compare_customer_evidence.py` discovers
+  `p5_g27_selected_zone_crop_soak.json`, reports candidate/pass/fail
+  diagnostics, and carries the path into recommended prepare/final-audit
+  commands;
+- `audit_drawing_compare_mvp_exit.py` accepts explicit P5-G27 paths, searches
+  release/customer manifest references and result-dir sibling artifacts, and
+  auto-requires `p5_g27_selected_zone_crop_soak` for `customer_grade` audits;
+- final audit validates schema/profile/status, `p5_g27_contract` /
+  `p5_g27_evidence`, crop-first visibility, crop-before-vector ordering,
+  vector-failure background preservation, evidence presence, worker cleanup,
+  zero blank/stale/cancel/timeout/fallback/orphan counters, declared required
+  gate names, and all required gate pass states.
+
+Validation evidence:
+
+- `python -m py_compile scripts\prepare_drawing_compare_customer_evidence.py
+  scripts\inventory_drawing_compare_customer_evidence.py
+  scripts\audit_drawing_compare_mvp_exit.py
+  tests\unit\services\comparison\test_prepare_drawing_compare_customer_evidence.py
+  tests\unit\services\comparison\test_inventory_drawing_compare_customer_evidence.py
+  tests\unit\services\comparison\test_audit_drawing_compare_mvp_exit.py`;
+- focused P5-G27 propagation tests passed with `7 passed`;
+- prepare/inventory/final-audit regression files passed with `200 passed`;
+- `git diff --check` passed.
+
+Self-review findings:
+
+- The final audit now prevents a customer-grade packet from omitting the
+  crop-first lifecycle proof, but the benchmark remains synthetic.
+- The P5-G27 propagation proves lifecycle ordering and failure isolation, not
+  production renderer visual quality. Real renderer-backed P5-G27 or a bridge
+  from P5-G15/P5-G16 remains the next technical risk to close.
+- Candidate path discovery mirrors P5-G26, so release manifests, customer
+  manifests, validation summaries, and result-dir sibling JSON are all accepted.
+
+Next slice:
+
+1. Add a real renderer-backed P5-G27 evidence mode or explicitly bind P5-G27
+   to P5-G15/P5-G16 replay outputs for production visual-quality proof.
+2. Feed P5-G27 status into the P5-G30 composite visual-performance release
+   gate.
+3. Add closeout/readiness/release packaging propagation if the customer packet
+   tooling needs a separate P5-G27 handoff path beyond final audit discovery.
+
+## 32. 2026-05-28 P5-G27 Closeout and Release Routing
+
+This slice closes the handoff gap left after P5-G27 evidence propagation by
+making the closeout runner, readiness audit, release manifest, README, and
+customer closeout packet all route the same crop-first artifact explicitly.
+
+Implemented behavior:
+
+- `closeout_drawing_compare_customer_evidence.py` accepts repeatable
+  `--p5-g27-selected-zone-crop-json` /
+  `--p5-g27-selected-zone-crop-soak` inputs, checks they exist during
+  preflight, forwards them to manifest preparation and final audit commands,
+  records them in dry-run/passed outputs, and adds the invariant
+  `final_audit_p5_g27_selected_zone_crop_jsons_equal_plan`;
+- `audit_closeout_readiness.py` audits P5-G27 routing when explicit crop-first
+  JSONs are supplied and fails the readiness packet if prepare/final-audit
+  command values diverge from `plan.p5_g27_selected_zone_crop_jsons`;
+- `release_drawing_compare_workbench.py` accepts and validates P5-G27 JSON
+  inputs, writes release-manifest artifact refs, forwards the paths to the
+  optional customer-grade audit, and includes the P5-G27 flag in the generated
+  README, prompt-to-artifact checklist, and customer closeout packet examples;
+- release/closeout tests now cover alias parsing, missing artifact rejection,
+  manifest artifact refs, explicit routing success, and mismatched final-audit
+  routing failure.
+
+Validation evidence:
+
+- `python -m py_compile scripts\closeout_drawing_compare_customer_evidence.py
+  scripts\audit_closeout_readiness.py
+  scripts\release_drawing_compare_workbench.py
+  tests\unit\scripts\test_audit_closeout_readiness.py
+  tests\unit\services\comparison\test_release_drawing_compare_workbench.py`;
+- focused closeout/release P5-G27 tests passed with `14 passed`;
+- closeout/readiness/release regression files passed with `51 passed`;
+- prepare/inventory/final-audit/closeout/readiness/release regression files
+  passed with `251 passed`;
+- `python scripts\cad_policy_gate.py` passed;
+- `git diff --check` passed.
+
+Self-review findings:
+
+- P5-G27 is now visible across final-audit discovery and explicit closeout
+  handoff paths, so reviewers no longer need to infer whether the crop-first
+  JSON reached the final customer-grade audit.
+- The closeout runner still does not generate P5-G27 automatically. That is
+  intentional for this slice because generation order must be handled carefully:
+  prepare rejects invalid supplied P5-G27 artifacts, while generated artifacts
+  would need to exist before strict manifest preparation can include them.
+- The technical risk remaining from Section 31 is unchanged: current P5-G27
+  evidence proves GUI lifecycle ordering and failure isolation, not a real
+  renderer-backed crop-quality contract.
+
+Next slice:
+
+1. Add a real renderer-backed P5-G27 mode or explicitly bind P5-G27 to
+   P5-G15/P5-G16 outputs so crop-first safety and production visual quality are
+   proven together.
+2. Decide whether closeout should auto-generate P5-G27 after a strict
+   generation-order design, or keep P5-G27 as an explicit supplied artifact.
+3. Feed P5-G27 status into the P5-G30 composite visual-performance release
+   gate.
+
+## 33. 2026-05-28 P5-G27 Real Renderer Bridge
+
+This slice binds P5-G27 crop-first lifecycle evidence to existing P5-G16
+real-corpus renderer replay evidence. It avoids adding another heavy renderer
+pass while ensuring customer-grade final audit no longer accepts a purely
+synthetic P5-G27 JSON.
+
+Implemented behavior:
+
+- `benchmark_workbench_gui_hotpath.py` accepts
+  `--p5-g27-real-renderer-bridge-json <p5_g16_real_corpus_replay.json>` and
+  `--p5-g27-require-real-renderer-bridge` for P5-G27 runs;
+- P5-G27 payloads can now include `p5_g27_real_renderer_bridge` with the
+  bridged P5-G16 benchmark id/profile/status, validation-summary hash,
+  selected-zone artifact count, nonblank/missing-image/fallback-reason
+  counters, stale/timeout/cancel counters, and an aggregate
+  `real_renderer_quality_passed` flag;
+- P5-G27 benchmark gates add
+  `p5_g27_real_renderer_bridge_*` checks when a bridge is supplied or required;
+- customer-grade `audit_drawing_compare_mvp_exit.py` now requires the bridge
+  inside `p5_g27_selected_zone_crop_soak.json`, requires the bridge gate-name
+  declaration, and fails when P5-G16 did not pass, no real selected-zone render
+  artifacts exist, blank/missing/fallback/stale/timeout/cancel counts are
+  nonzero, or bridge gates are missing/failed;
+- release README/checklist/closeout-packet text now states that the supplied
+  P5-G27 JSON must include the P5-G16 bridge so crop-first safety is bound to
+  real nonblank selected-zone render artifacts.
+
+Validation evidence:
+
+- `python -m py_compile scripts\benchmark_workbench_gui_hotpath.py
+  scripts\audit_drawing_compare_mvp_exit.py
+  scripts\release_drawing_compare_workbench.py
+  tests\unit\scripts\test_benchmark_workbench_gui_hotpath.py
+  tests\unit\services\comparison\test_audit_drawing_compare_mvp_exit.py
+  tests\unit\services\comparison\test_release_drawing_compare_workbench.py`;
+- focused P5-G27 bridge/audit/release tests passed with `7 passed` and
+  `3 passed`;
+- full benchmark/final-audit regression files passed with `152 passed`;
+- release regression file passed with `31 passed`;
+- `python scripts\cad_policy_gate.py` passed;
+- `git diff --check` passed.
+
+Self-review findings:
+
+- The bridge is a strict evidence join, not a new renderer execution path. This
+  is the right minimal step because P5-G16 already validates real selected-zone
+  artifacts, RSS/cache behavior, blank/missing image counts, and fallback
+  reason hygiene.
+- Customer-grade final audit now rejects synthetic-only P5-G27 payloads. Any
+  closeout packet that supplies P5-G27 must regenerate it with the P5-G16 bridge
+  or the final audit will fail.
+- The remaining limitation is generation orchestration: closeout still routes
+  explicit P5-G27 JSON but does not auto-generate a bridge-bearing P5-G27 JSON
+  after P5-G16. That ordering should be designed before enabling automatic
+  generation.
+
+Next slice:
+
+1. Design closeout generation order for bridge-bearing P5-G27, or keep P5-G27
+   as explicit supplied evidence with stronger inventory diagnostics.
+2. Add a P5-G30 composite customer visual-performance release gate that joins
+   P5-G3, P5-G16, P5-G22, P5-G24, P5-G26, and P5-G27 status.
+3. If renderer failures still appear in live runs, add a targeted production
+   P5-G27 mode that opens real viewer packages and measures crop-first ordering
+   directly rather than through the P5-G16 bridge.

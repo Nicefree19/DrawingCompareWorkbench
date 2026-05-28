@@ -9,6 +9,25 @@ Author: TEKLA_MCP Team
 Date: 2025-12-14
 """
 
+import platform
+import sys
+
+
+def _disable_windows_wmi_platform_probe() -> None:
+    if sys.platform != "win32" or not hasattr(platform, "_wmi_query"):
+        return
+
+    def _raise_wmi_unavailable(*_args, **_kwargs):
+        raise OSError("WMI platform probe disabled for CAD import stability")
+
+    platform._wmi_query = _raise_wmi_unavailable
+
+
+# ezdxf font initialization calls platform.system(), which can block inside
+# Python's WMI probe on unhealthy Windows hosts. The stdlib fallback path uses
+# sys.getwindowsversion()/ver and is sufficient for CAD rendering decisions.
+_disable_windows_wmi_platform_probe()
+
 from .base import BaseComparator, ComparisonResult, ChangeRecord, ChangeType
 from .excel_differ import ExcelDiffer
 from .drawing_differ import DrawingDiffer

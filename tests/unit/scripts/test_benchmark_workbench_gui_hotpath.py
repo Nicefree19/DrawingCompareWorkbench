@@ -30,6 +30,10 @@ def benchmark_module():
 
 def test_module_imports_and_exposes_expected_helpers(benchmark_module) -> None:
     assert benchmark_module.SCHEMA_VERSION == "workbench-gui-hotpath-benchmark/v1"
+    assert benchmark_module.P5_G26_BENCHMARK_ID == "p5_g26_selection_latency_soak"
+    assert benchmark_module.P5_G26_PROFILE == "selection_latency_hard_gate"
+    assert benchmark_module.P5_G27_BENCHMARK_ID == "p5_g27_selected_zone_crop_soak"
+    assert benchmark_module.P5_G27_PROFILE == "selected_zone_crop_first_lifecycle"
     assert hasattr(benchmark_module, "main")
     assert hasattr(benchmark_module, "_run_pair_selection_probe")
     assert hasattr(benchmark_module, "_run_first_review_tile_probe")
@@ -38,6 +42,8 @@ def test_module_imports_and_exposes_expected_helpers(benchmark_module) -> None:
     assert hasattr(benchmark_module, "_run_page_navigation_probe")
     assert hasattr(benchmark_module, "_run_rapid_page_navigation_probe")
     assert hasattr(benchmark_module, "_run_navigation_soak_probe")
+    assert hasattr(benchmark_module, "_run_zone_selection_hotpath_probe")
+    assert hasattr(benchmark_module, "_run_selected_zone_crop_first_probe")
     assert hasattr(benchmark_module, "_run_p4_overlay_streaming_probe")
     assert hasattr(benchmark_module, "_run_p5_overlay_page_store_query_probe")
     assert hasattr(benchmark_module, "_run_p4_visible_tile_probe")
@@ -76,6 +82,60 @@ def test_parse_args_exposes_real_pdf_prewarm_targets(benchmark_module) -> None:
     assert args.real_pdf_prewarm_cached_target_ms == 250.0
     assert args.real_pdf_prewarm_background_target_ms == 300.0
     assert args.real_pdf_prewarm_gap_max_target_ms == 500.0
+
+
+def test_parse_args_exposes_p5_g26_contract_targets(benchmark_module) -> None:
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g26-contract",
+            "--p5-g26-event-loop-max-target-ms",
+            "450",
+            "--p5-g26-repeat-cache-hit-rate-target",
+            "0.98",
+            "--include-zone-selection-hotpath",
+            "--zone-selection-runs",
+            "12",
+            "--zone-selection-count",
+            "64",
+            "--p5-g26-zone-selection-p95-target-ms",
+            "80",
+        ]
+    )
+
+    assert args.include_p5_g26_contract is True
+    assert args.p5_g26_event_loop_max_target_ms == 450.0
+    assert args.p5_g26_repeat_cache_hit_rate_target == 0.98
+    assert args.include_zone_selection_hotpath is True
+    assert args.zone_selection_runs == 12
+    assert args.zone_selection_count == 64
+    assert args.p5_g26_zone_selection_p95_target_ms == 80.0
+
+
+def test_parse_args_exposes_p5_g27_selected_zone_crop_targets(benchmark_module) -> None:
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g27-selected-zone-crop-first",
+            "--p5-g27-zone-selection-runs",
+            "12",
+            "--p5-g27-zone-selection-count",
+            "64",
+            "--p5-g27-crop-visible-p95-target-ms",
+            "420",
+            "--p5-g27-event-loop-gap-max-target-ms",
+            "450",
+            "--p5-g27-real-renderer-bridge-json",
+            "p5_g16_real_corpus_replay.json",
+            "--p5-g27-require-real-renderer-bridge",
+        ]
+    )
+
+    assert args.include_p5_g27_selected_zone_crop_first is True
+    assert args.p5_g27_zone_selection_runs == 12
+    assert args.p5_g27_zone_selection_count == 64
+    assert args.p5_g27_crop_visible_p95_target_ms == 420.0
+    assert args.p5_g27_event_loop_gap_max_target_ms == 450.0
+    assert args.p5_g27_real_renderer_bridge_json == Path("p5_g16_real_corpus_replay.json")
+    assert args.p5_g27_require_real_renderer_bridge is True
 
 
 def test_parse_args_exposes_navigation_soak_targets(benchmark_module) -> None:
@@ -302,6 +362,413 @@ def _passing_gate_payload() -> dict:
             "full_tree_summary": {"overlay_load_worker_count": 1, "plan_build_worker_count": 1},
         },
     }
+
+
+def _add_successful_p5_g26_evidence(payload: dict) -> None:
+    for probe_name in (
+        "full_tree_responsiveness_probe",
+        "page_navigation_probe",
+        "rapid_page_navigation_probe",
+    ):
+        payload[probe_name]["event_loop_gap"]["max_ms"] = 40.0
+    payload["p4_overlay_streaming_probe"]["overlay_json_read_call_count"] = 0
+    payload["p5_overlay_page_store_query_probe"] = {
+        "phase_results": {
+            "first_visible": {
+                "legacy_overlay_json_read_count": 0,
+                "cached_overlay_count": 0,
+            }
+        }
+    }
+    payload["real_pdf_prewarm_cache_probe"] = {
+        "completed": True,
+        "qtpdf_available": True,
+        "phase_results": {
+            "post_prewarm_cached": {
+                "cache_hit": True,
+                "metadata_fast_path": True,
+                "inferred_render_call_count": 0,
+                "time_to_background_ready_ms": {"p95_ms": 120.0},
+                "event_loop_gap": {"max_ms": 40.0, "over_500ms_count": 0},
+                "before_background": {"background_ready": True},
+                "after_background": {"background_ready": True},
+            },
+            "cached_navigation_plateau": {
+                "navigation_count": 100,
+                "all_cached_count": 100,
+            },
+        },
+        "event_loop_gap": {"max_ms": 40.0, "over_500ms_count": 0},
+    }
+    payload["zone_selection_hotpath_probe"] = {
+        "completed": True,
+        "requested_selection_count": 20,
+        "completed_selection_count": 20,
+        "visible_leaf_count": 20,
+        "zone_crop_start_call_count": 20,
+        "zone_vector_start_call_count": 0,
+        "selection_call_ms": {"p95_ms": 20.0, "max_ms": 25.0},
+        "event_loop_gap": {"max_ms": 40.0, "over_500ms_count": 0},
+        "worker_spawned_count": 0,
+        "worker_process_count_max": 0,
+        "full_tree_overlay_load_worker_count": 0,
+        "full_tree_plan_build_worker_count": 0,
+        "zone_crop_count": 0,
+        "selected_zone_stale_count": 0,
+        "selected_zone_cancel_count": 0,
+        "selected_zone_fallback_count": 0,
+        "viewer_perf_summary": {
+            "zone_selection_count": 20,
+            "zone_selection_gui_block_ms": {"p95": 20.0},
+            "worker_spawned_count": 0,
+            "worker_process_count_max": 0,
+            "full_tree_overlay_load_worker_count": 0,
+            "full_tree_plan_build_worker_count": 0,
+            "zone_crop_count": 0,
+            "selected_zone_stale_count": 0,
+            "selected_zone_cancel_count": 0,
+            "selected_zone_fallback_count": 0,
+        },
+    }
+
+
+def _add_successful_p5_g27_evidence(payload: dict) -> None:
+    payload["selected_zone_crop_first_probe"] = {
+        "completed": True,
+        "requested_selection_count": 20,
+        "completed_selection_count": 20,
+        "visible_leaf_count": 20,
+        "crop_visible_count": 20,
+        "crop_first_sequence_count": 20,
+        "vector_start_count": 20,
+        "vector_failure_count": 20,
+        "vector_failure_background_preserved_count": 20,
+        "blank_selected_zone_count": 0,
+        "fallback_missing_reason_count": 0,
+        "timeout_count": 0,
+        "crop_visible_ms": {"p95_ms": 120.0, "max_ms": 130.0},
+        "event_loop_gap": {"max_ms": 40.0, "over_500ms_count": 0},
+        "worker_spawned_count": 0,
+        "worker_process_count_max": 0,
+        "orphan_worker_count": 0,
+        "zone_crop_count": 20,
+        "selected_zone_stale_count": 0,
+        "selected_zone_cancel_count": 0,
+        "selected_zone_fallback_count": 0,
+        "viewer_perf_summary": {
+            "zone_crop_count": 20,
+            "selected_zone_stale_count": 0,
+            "selected_zone_cancel_count": 0,
+            "selected_zone_fallback_count": 0,
+            "worker_spawned_count": 0,
+            "worker_process_count_max": 0,
+        },
+    }
+
+
+def _write_p5_g16_bridge_json(path: Path, *, failed: bool = False) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "p5-g16-real-corpus-replay/v1",
+                "benchmark_id": "p5_g16_real_corpus_replay",
+                "profile": "real_corpus_artifact_replay",
+                "status": "failed" if failed else "passed",
+                "source": {
+                    "validation_summary": {
+                        "sha256": "0" * 64,
+                    }
+                },
+                "summary": {
+                    "viewer_root_present": True,
+                    "zone_render_artifact_count": 2,
+                    "blank_zone_output_count": 0,
+                    "missing_zone_image_count": 0,
+                    "fallback_missing_reason_count": 0,
+                    "stale_result_visible_count": 0,
+                    "timeout_count": 0,
+                    "cancel_count": 0,
+                },
+                "gates": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_gate_summary_flags_p5_g26_contract_failures(benchmark_module) -> None:
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g26-contract",
+            "--p5-g26-event-loop-max-target-ms",
+            "500",
+            "--p5-g26-repeat-cache-hit-rate-target",
+            "0.95",
+        ]
+    )
+    payload = _passing_gate_payload()
+    _add_successful_p5_g26_evidence(payload)
+    payload["full_tree_responsiveness_probe"]["event_loop_gap"]["max_ms"] = 501.0
+    payload["first_review_tile_probe"]["passed"] = False
+    payload["p4_overlay_streaming_probe"]["overlay_json_read_for_first_paint"] = True
+    payload["p4_overlay_streaming_probe"]["overlay_json_read_call_count"] = 2
+    payload["p5_overlay_page_store_query_probe"]["phase_results"]["first_visible"] = {
+        "legacy_overlay_json_read_count": 1,
+        "cached_overlay_count": 1,
+    }
+    payload["real_pdf_prewarm_cache_probe"]["phase_results"]["post_prewarm_cached"] = {
+        "cache_hit": False,
+        "metadata_fast_path": False,
+        "inferred_render_call_count": 1,
+        "time_to_background_ready_ms": {"p95_ms": 301.0},
+        "event_loop_gap": {"max_ms": 501.0, "over_500ms_count": 1},
+        "before_background": {"background_ready": True},
+        "after_background": {"background_ready": False},
+    }
+    payload["real_pdf_prewarm_cache_probe"]["phase_results"]["cached_navigation_plateau"] = {
+        "navigation_count": 100,
+        "all_cached_count": 94,
+    }
+    payload["zone_selection_hotpath_probe"]["completed_selection_count"] = 0
+    payload["zone_selection_hotpath_probe"]["selection_call_ms"]["p95_ms"] = 101.0
+    payload["zone_selection_hotpath_probe"]["worker_spawned_count"] = 1
+    payload["zone_selection_hotpath_probe"]["worker_process_count_max"] = 1
+    payload["zone_selection_hotpath_probe"]["full_tree_overlay_load_worker_count"] = 1
+    payload["zone_selection_hotpath_probe"]["zone_crop_count"] = 1
+    payload["zone_selection_hotpath_probe"]["zone_vector_start_call_count"] = 1
+    payload["zone_selection_hotpath_probe"]["selected_zone_stale_count"] = 1
+    payload["p5_g26_cad_to_pdf_hot_path_count"] = 1
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert by_name["p5_g26_wp_a_gui_hot_path_contract"].passed is False
+    assert by_name["p5_g26_wp_b_pdf_first_responsiveness_contract"].passed is False
+    assert by_name["p5_g26_event_loop_gap_max_ms"].passed is False
+    assert by_name["p5_g26_click_hot_path_full_work_count"].actual == 6
+    assert by_name["p5_g26_click_hot_path_full_work_count"].passed is False
+    assert by_name["p5_g26_cached_page_navigation_render_call_count"].passed is False
+    assert by_name["p5_g26_repeat_cache_hit_rate"].actual == 0.94
+    assert by_name["p5_g26_repeat_cache_hit_rate"].passed is False
+    assert by_name["p5_g26_blank_viewer_count"].passed is False
+    assert by_name["p5_g26_cad_to_pdf_hot_path_count"].passed is False
+    assert by_name["p5_g26_zone_selection_count"].passed is False
+    assert by_name["p5_g26_zone_selection_telemetry_count"].passed is False
+    assert by_name["p5_g26_zone_selection_p95_ms"].passed is False
+    assert by_name["p5_g26_zone_selection_worker_spawn_count"].passed is False
+    assert by_name["p5_g26_zone_selection_background_work_count"].passed is False
+    assert by_name["p5_g26_zone_selection_stale_visible_count"].passed is False
+
+
+def test_gate_summary_passes_p5_g26_contract_success_payload(benchmark_module) -> None:
+    args = benchmark_module.parse_args(["--include-p5-g26-contract"])
+    payload = _passing_gate_payload()
+    _add_successful_p5_g26_evidence(payload)
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert set(benchmark_module.P5_G26_REQUIRED_GATE_NAMES) <= set(by_name)
+    assert by_name["p5_g26_wp_a_gui_hot_path_contract"].passed is True
+    assert by_name["p5_g26_wp_b_pdf_first_responsiveness_contract"].passed is True
+    assert by_name["p5_g26_event_loop_gap_max_ms"].passed is True
+    assert by_name["p5_g26_click_hot_path_full_work_count"].passed is True
+    assert by_name["p5_g26_cached_page_navigation_render_call_count"].passed is True
+    assert by_name["p5_g26_repeat_cache_hit_rate"].passed is True
+    assert by_name["p5_g26_blank_viewer_count"].passed is True
+    assert by_name["p5_g26_cad_to_pdf_hot_path_count"].passed is True
+    assert by_name["p5_g26_zone_selection_count"].passed is True
+    assert by_name["p5_g26_zone_selection_telemetry_count"].passed is True
+    assert by_name["p5_g26_zone_selection_p95_ms"].passed is True
+    assert by_name["p5_g26_zone_selection_worker_spawn_count"].passed is True
+    assert by_name["p5_g26_zone_selection_background_work_count"].passed is True
+    assert by_name["p5_g26_zone_selection_stale_visible_count"].passed is True
+
+
+def test_gate_summary_flags_p5_g27_selected_zone_crop_failures(benchmark_module) -> None:
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g27-selected-zone-crop-first",
+            "--p5-g27-crop-visible-p95-target-ms",
+            "500",
+            "--p5-g27-event-loop-gap-max-target-ms",
+            "500",
+        ]
+    )
+    payload = _passing_gate_payload()
+    _add_successful_p5_g27_evidence(payload)
+    probe = payload["selected_zone_crop_first_probe"]
+    probe["crop_visible_count"] = 19
+    probe["crop_first_sequence_count"] = 18
+    probe["crop_visible_ms"]["p95_ms"] = 501.0
+    probe["vector_failure_background_preserved_count"] = 19
+    probe["blank_selected_zone_count"] = 1
+    probe["selected_zone_stale_count"] = 1
+    probe["selected_zone_cancel_count"] = 1
+    probe["timeout_count"] = 1
+    probe["fallback_missing_reason_count"] = 1
+    probe["event_loop_gap"]["max_ms"] = 501.0
+    probe["worker_spawned_count"] = 1
+    probe["orphan_worker_count"] = 1
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert by_name["p5_g27_crop_first_result_visible"].passed is False
+    assert by_name["p5_g27_crop_visible_before_vector_focus"].passed is False
+    assert by_name["p5_g27_crop_visible_p95_ms"].passed is False
+    assert by_name["p5_g27_vector_failure_does_not_clear_background"].passed is False
+    assert by_name["p5_g27_blank_selected_zone_count"].passed is False
+    assert by_name["p5_g27_stale_result_visible_count"].passed is False
+    assert by_name["p5_g27_cancel_without_visible_regression_count"].passed is False
+    assert by_name["p5_g27_timeout_count"].passed is False
+    assert by_name["p5_g27_fallback_missing_reason_count"].passed is False
+    assert by_name["p5_g27_event_loop_gap_max_ms"].passed is False
+    assert by_name["p5_g27_worker_cleanup_ok"].passed is False
+    assert by_name["p5_g27_orphan_worker_count"].passed is False
+
+
+def test_gate_summary_passes_p5_g27_selected_zone_crop_success_payload(benchmark_module) -> None:
+    args = benchmark_module.parse_args(["--include-p5-g27-selected-zone-crop-first"])
+    payload = _passing_gate_payload()
+    _add_successful_p5_g27_evidence(payload)
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert set(benchmark_module.P5_G27_REQUIRED_GATE_NAMES) <= set(by_name)
+    for gate_name in benchmark_module.P5_G27_REQUIRED_GATE_NAMES:
+        assert by_name[gate_name].passed is True
+
+
+def test_p5_g27_real_renderer_bridge_summary_reads_p5_g16_payload(
+    benchmark_module,
+    tmp_path: Path,
+) -> None:
+    bridge_json = tmp_path / "p5_g16_real_corpus_replay.json"
+    _write_p5_g16_bridge_json(bridge_json)
+
+    bridge = benchmark_module._p5_g27_real_renderer_bridge_summary(bridge_json)
+
+    assert bridge["bridge_present"] is True
+    assert bridge["p5_g16_passed"] is True
+    assert bridge["real_renderer_quality_passed"] is True
+    assert bridge["zone_render_artifact_count"] == 2
+    assert bridge["validation_summary_sha256"] == "0" * 64
+
+
+def test_gate_summary_requires_p5_g27_real_renderer_bridge(
+    benchmark_module,
+) -> None:
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g27-selected-zone-crop-first",
+            "--p5-g27-require-real-renderer-bridge",
+        ]
+    )
+    payload = _passing_gate_payload()
+    _add_successful_p5_g27_evidence(payload)
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert set(benchmark_module.P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES) <= set(
+        by_name
+    )
+    assert by_name["p5_g27_real_renderer_bridge_present"].passed is False
+    assert by_name["p5_g27_real_renderer_bridge_p5_g16_passed"].passed is False
+
+
+def test_gate_summary_passes_p5_g27_real_renderer_bridge(
+    benchmark_module,
+    tmp_path: Path,
+) -> None:
+    bridge_json = tmp_path / "p5_g16_real_corpus_replay.json"
+    _write_p5_g16_bridge_json(bridge_json)
+    args = benchmark_module.parse_args(
+        [
+            "--include-p5-g27-selected-zone-crop-first",
+            "--p5-g27-real-renderer-bridge-json",
+            str(bridge_json),
+        ]
+    )
+    payload = _passing_gate_payload()
+    _add_successful_p5_g27_evidence(payload)
+    payload["p5_g27_real_renderer_bridge"] = (
+        benchmark_module._p5_g27_real_renderer_bridge_summary(bridge_json)
+    )
+
+    gates = benchmark_module._gate_summary(payload, args)
+    by_name = {gate.name: gate for gate in gates}
+
+    assert set(benchmark_module.P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES) <= set(
+        by_name
+    )
+    for gate_name in benchmark_module.P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES:
+        assert by_name[gate_name].passed is True
+
+
+def test_zone_selection_hotpath_probe_records_selection_events(benchmark_module, tmp_path: Path) -> None:
+    scratch = tmp_path / "scratch"
+    viewer_root = tmp_path / "viewer"
+    scratch.mkdir()
+    viewer_root.mkdir()
+
+    result = benchmark_module._run_zone_selection_hotpath_probe(
+        scratch,
+        viewer_root,
+        zone_count=4,
+        runs=3,
+        heartbeat_interval_ms=0,
+    )
+
+    assert result["completed"] is True
+    assert result["completed_selection_count"] == 3
+    assert result["visible_leaf_count"] == 4
+    assert result["zone_crop_start_call_count"] == 3
+    assert result["zone_vector_start_call_count"] == 0
+    assert result["worker_spawned_count"] == 0
+    assert result["worker_process_count_max"] == 0
+    assert result["full_tree_overlay_load_worker_count"] == 0
+    assert result["full_tree_plan_build_worker_count"] == 0
+    assert result["zone_crop_count"] == 0
+    assert result["selected_zone_stale_count"] == 0
+    assert result["viewer_perf_summary"]["zone_selection_count"] == 3
+
+
+def test_selected_zone_crop_first_probe_records_crop_before_vector_failure(benchmark_module, tmp_path: Path) -> None:
+    scratch = tmp_path / "scratch"
+    viewer_root = tmp_path / "viewer"
+    scratch.mkdir()
+    viewer_root.mkdir()
+
+    result = benchmark_module._run_selected_zone_crop_first_probe(
+        scratch,
+        viewer_root,
+        zone_count=4,
+        runs=3,
+        heartbeat_interval_ms=0,
+    )
+
+    assert result["completed"] is True
+    assert result["completed_selection_count"] == 3
+    assert result["visible_leaf_count"] == 4
+    assert result["crop_visible_count"] == 3
+    assert result["crop_first_sequence_count"] == 3
+    assert result["vector_start_count"] == 3
+    assert result["vector_failure_count"] == 3
+    assert result["vector_failure_background_preserved_count"] == 3
+    assert result["blank_selected_zone_count"] == 0
+    assert result["fallback_missing_reason_count"] == 0
+    assert result["timeout_count"] == 0
+    assert result["worker_spawned_count"] == 0
+    assert result["worker_process_count_max"] == 0
+    assert result["orphan_worker_count"] == 0
+    assert result["zone_crop_count"] == 3
+    assert result["selected_zone_stale_count"] == 0
+    assert result["selected_zone_cancel_count"] == 0
+    assert result["selected_zone_fallback_count"] == 0
+    assert result["viewer_perf_summary"]["zone_crop_count"] == 3
 
 
 def test_gate_summary_flags_real_pdf_prewarm_cache_failures(benchmark_module) -> None:

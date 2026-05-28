@@ -272,6 +272,14 @@ def _source_artifacts(
 def _write_viewer_manifest_with_visual_asset(path: Path) -> None:
     manifest_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/visual_asset_manifest.json")
     manifest_ref = str(manifest_rel).replace("\\", "/")
+    probe_rel = Path("viewer/visual_assets/S21-0001/after/source_pdf/nonblank_probe.json")
+    probe_ref = str(probe_rel).replace("\\", "/")
+    probe_target_rel = Path("viewer/images/S21-0001_after.png")
+    probe_target_ref = str(probe_target_rel).replace("\\", "/")
+    probe_target_path = path / probe_target_rel
+    probe_target_path.parent.mkdir(parents=True, exist_ok=True)
+    probe_target_path.write_bytes(b"not a real png but stable nonblank audit target")
+    probe_target_hash = hashlib.sha256(probe_target_path.read_bytes()).hexdigest()
     source_hash = "test-source-hash"
     source_signature = {"schema_version": 1, "source_hash": source_hash}
     plot_profile_hash = "test-plot-profile"
@@ -284,7 +292,37 @@ def _write_viewer_manifest_with_visual_asset(path: Path) -> None:
         plot_profile_hash=plot_profile_hash,
         page_index=0,
         dpi=80,
+        page_size_pt=[612.0, 792.0],
+        pixel_size=[680, 880],
+        transform_quality="estimated",
     )
+    probe_payload = {
+        "schema_version": 2,
+        "status": "passed",
+        "method": "pixel_nonblank_probe",
+        "asset_path": "viewer/pages/S21-0001_after.pdf",
+        "asset_hash": "test-asset-hash",
+        "asset_size": 10,
+        "probe_target_path": probe_target_ref,
+        "probe_target_hash": probe_target_hash,
+        "probe_target_size": probe_target_path.stat().st_size,
+        "source_hash": source_hash,
+        "cache_key_hash": cache_key_hash,
+        "page_index": 0,
+        "dpi": 80,
+        "pixel_width": 10,
+        "pixel_height": 10,
+        "mean": 200.0,
+        "channel_ranges": [10, 10, 10],
+        "extrema": [[0, 10], [0, 10], [0, 10]],
+        "nonblank": True,
+    }
+    probe_payload["probe_hash"] = hashlib.sha256(
+        json.dumps(probe_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    probe_path = path / probe_rel
+    probe_path.parent.mkdir(parents=True, exist_ok=True)
+    probe_path.write_text(json.dumps(probe_payload), encoding="utf-8")
     manifest_path = path / manifest_rel
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
@@ -312,8 +350,11 @@ def _write_viewer_manifest_with_visual_asset(path: Path) -> None:
                 "transform_quality": "estimated",
                 "nonblank_probe_status": "passed",
                 "metadata": {
-                    "nonblank_probe": "viewer/visual_assets/S21-0001/after/source_pdf/nonblank_probe.json",
-                    "nonblank_probe_hash": "test-probe-hash",
+                    "nonblank_probe": probe_ref,
+                    "nonblank_probe_hash": probe_payload["probe_hash"],
+                    "probe_target_path": probe_target_ref,
+                    "probe_target_hash": probe_target_hash,
+                    "probe_method": "pixel_nonblank_probe",
                 },
             }
         ),
@@ -495,6 +536,50 @@ def test_parse_args_accepts_p5_g22_gui_soak_json(tmp_path: Path) -> None:
 
     assert args.p5_g22_gui_soak_json == [soak_a, soak_b]
     assert args.require_p5_g22_actual_gui_soak is True
+
+
+def test_parse_args_accepts_p5_g26_selection_latency_json(tmp_path: Path) -> None:
+    result_dir = tmp_path / "validation"
+    result_dir.mkdir()
+    soak_a = tmp_path / "p5_g26_a.json"
+    soak_b = tmp_path / "p5_g26_b.json"
+
+    args = audit.parse_args(
+        [
+            "--results-dir",
+            str(result_dir),
+            "--p5-g26-selection-latency-json",
+            str(soak_a),
+            "--p5-g26-selection-latency-soak",
+            str(soak_b),
+            "--require-p5-g26-selection-latency-soak",
+        ]
+    )
+
+    assert args.p5_g26_selection_latency_json == [soak_a, soak_b]
+    assert args.require_p5_g26_selection_latency_soak is True
+
+
+def test_parse_args_accepts_p5_g27_selected_zone_crop_json(tmp_path: Path) -> None:
+    result_dir = tmp_path / "validation"
+    result_dir.mkdir()
+    soak_a = tmp_path / "p5_g27_a.json"
+    soak_b = tmp_path / "p5_g27_b.json"
+
+    args = audit.parse_args(
+        [
+            "--results-dir",
+            str(result_dir),
+            "--p5-g27-selected-zone-crop-json",
+            str(soak_a),
+            "--p5-g27-selected-zone-crop-soak",
+            str(soak_b),
+            "--require-p5-g27-selected-zone-crop-soak",
+        ]
+    )
+
+    assert args.p5_g27_selected_zone_crop_json == [soak_a, soak_b]
+    assert args.require_p5_g27_selected_zone_crop_soak is True
 
 
 def _ai_policy() -> dict:
@@ -820,6 +905,12 @@ def _write_p5_g16_replay_json(
         validation_summary,
         customer_manifest,
     )
+    _write_p5_g26_selection_latency_soak_json(
+        path.parent / "p5_g26_selection_latency_soak.json",
+    )
+    _write_p5_g27_selected_zone_crop_soak_json(
+        path.parent / "p5_g27_selected_zone_crop_soak.json",
+    )
 
 
 def _write_p5_g22_actual_gui_soak_json(
@@ -915,6 +1006,148 @@ def _write_p5_g22_actual_gui_soak_json(
         "samples": [{} for _ in range(100)],
         "gates": gates,
     }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_p5_g26_selection_latency_soak_json(
+    path: Path,
+    *,
+    status: str = "passed",
+    failed_gate: str | None = None,
+    omit_gate: str | None = None,
+) -> None:
+    gate_names = sorted(audit.P5_G26_REQUIRED_GATES)
+    gates = [
+        {
+            "name": name,
+            "domain": "unit",
+            "passed": name != failed_gate,
+            "observed": 0,
+            "threshold": 0,
+            "actual": 0,
+            "target": 0,
+            "op": "==",
+            "required": True,
+            "detail": "",
+        }
+        for name in gate_names
+        if name != omit_gate
+    ]
+    payload = {
+        "schema_version": "workbench-gui-hotpath-benchmark/v1",
+        "benchmark_id": "p5_g26_selection_latency_soak",
+        "profile": "selection_latency_hard_gate",
+        "status": status,
+        "p5_g26_required_gate_names": gate_names,
+        "p5_g26_contract": {
+            "wp_a_passed": failed_gate is None and status == "passed",
+            "wp_b_passed": failed_gate is None and status == "passed",
+            "has_zone_selection_evidence": True,
+            "zone_selection_p95_ms": 20.0,
+            "zone_selection_background_work_count": 0,
+            "cad_to_pdf_hot_path_count": 0,
+        },
+        "p5_g26_evidence": {
+            "wp_a_passed": failed_gate is None and status == "passed",
+            "wp_b_passed": failed_gate is None and status == "passed",
+            "has_zone_selection_evidence": True,
+        },
+        "gates": gates,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_p5_g27_selected_zone_crop_soak_json(
+    path: Path,
+    *,
+    status: str = "passed",
+    failed_gate: str | None = None,
+    omit_gate: str | None = None,
+    include_real_renderer_bridge: bool = True,
+    failed_bridge_gate: str | None = None,
+) -> None:
+    gate_names = sorted(audit.P5_G27_REQUIRED_GATES)
+    bridge_gate_names = sorted(audit.P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATES)
+    gates = [
+        {
+            "name": name,
+            "domain": "unit",
+            "passed": name != failed_gate,
+            "observed": 0,
+            "threshold": 0,
+            "actual": 0,
+            "target": 0,
+            "op": "==",
+            "required": True,
+            "detail": "",
+        }
+        for name in gate_names
+        if name != omit_gate
+    ]
+    if include_real_renderer_bridge:
+        gates.extend(
+            {
+                "name": name,
+                "domain": "unit",
+                "passed": name != failed_bridge_gate,
+                "observed": 0,
+                "threshold": 0,
+                "actual": 0,
+                "target": 0,
+                "op": "==",
+                "required": True,
+                "detail": "",
+            }
+            for name in bridge_gate_names
+        )
+    payload = {
+        "schema_version": "workbench-gui-hotpath-benchmark/v1",
+        "benchmark_id": "p5_g27_selected_zone_crop_soak",
+        "profile": "selected_zone_crop_first_lifecycle",
+        "status": status,
+        "p5_g27_required_gate_names": gate_names,
+        "p5_g27_contract": {
+            "crop_first_result_visible": failed_gate is None and status == "passed",
+            "crop_visible_before_vector_focus": failed_gate is None and status == "passed",
+            "crop_visible_p95_ms": 20.0,
+            "vector_failure_does_not_clear_background": failed_gate is None and status == "passed",
+            "has_selected_zone_crop_first_evidence": True,
+            "worker_cleanup_ok": True,
+            "blank_selected_zone_count": 0,
+            "stale_result_visible_count": 0,
+            "cancel_without_visible_regression_count": 0,
+            "timeout_count": 0,
+            "fallback_missing_reason_count": 0,
+            "orphan_worker_count": 0,
+        },
+        "p5_g27_evidence": {
+            "crop_first_result_visible": failed_gate is None and status == "passed",
+            "crop_visible_before_vector_focus": failed_gate is None and status == "passed",
+            "vector_failure_does_not_clear_background": failed_gate is None and status == "passed",
+            "has_selected_zone_crop_first_evidence": True,
+            "worker_cleanup_ok": True,
+        },
+        "gates": gates,
+    }
+    if include_real_renderer_bridge:
+        payload["p5_g27_real_renderer_bridge_required_gate_names"] = bridge_gate_names
+        payload["p5_g27_real_renderer_bridge"] = {
+            "bridge_present": True,
+            "benchmark_id": "p5_g16_real_corpus_replay",
+            "profile": "real_corpus_artifact_replay",
+            "status": "passed",
+            "p5_g16_passed": failed_bridge_gate is None,
+            "real_renderer_quality_passed": failed_bridge_gate is None,
+            "validation_summary_sha256": "0" * 64,
+            "viewer_root_present": True,
+            "zone_render_artifact_count": 1,
+            "blank_zone_output_count": 0,
+            "missing_zone_image_count": 0,
+            "fallback_missing_reason_count": 0,
+            "stale_result_visible_count": 0,
+            "timeout_count": 0,
+            "cancel_count": 0,
+        }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -1312,6 +1545,202 @@ def test_customer_grade_audit_rejects_failed_p5_g22_actual_gui_soak_gate(
     assert "required gates failed: p5_g22_blank_view_count" in check["detail"]
 
 
+def test_customer_grade_audit_requires_p5_g26_selection_latency_soak_by_default(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    (pdf_dir / "p5_g26_selection_latency_soak.json").unlink()
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g26_selection_latency_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "artifact missing" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_failed_p5_g26_selection_latency_gate(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g26_selection_latency_soak_json(
+        pdf_dir / "p5_g26_selection_latency_soak.json",
+        failed_gate="p5_g26_zone_selection_p95_ms",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g26_selection_latency_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "required gates failed: p5_g26_zone_selection_p95_ms" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_missing_p5_g26_required_gate(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g26_selection_latency_soak_json(
+        pdf_dir / "p5_g26_selection_latency_soak.json",
+        omit_gate="p5_g26_zone_selection_telemetry_count",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g26_selection_latency_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "required gates missing: p5_g26_zone_selection_telemetry_count" in check["detail"]
+
+
+def test_customer_grade_audit_requires_p5_g27_selected_zone_crop_soak_by_default(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    (pdf_dir / "p5_g27_selected_zone_crop_soak.json").unlink()
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g27_selected_zone_crop_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "artifact missing" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_failed_p5_g27_selected_zone_crop_gate(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g27_selected_zone_crop_soak_json(
+        pdf_dir / "p5_g27_selected_zone_crop_soak.json",
+        failed_gate="p5_g27_crop_visible_before_vector_focus",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g27_selected_zone_crop_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "required gates failed: p5_g27_crop_visible_before_vector_focus" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_missing_p5_g27_required_gate(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g27_selected_zone_crop_soak_json(
+        pdf_dir / "p5_g27_selected_zone_crop_soak.json",
+        omit_gate="p5_g27_crop_visible_before_vector_focus",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g27_selected_zone_crop_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "required gates missing: p5_g27_crop_visible_before_vector_focus" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_p5_g27_without_real_renderer_bridge(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g27_selected_zone_crop_soak_json(
+        pdf_dir / "p5_g27_selected_zone_crop_soak.json",
+        include_real_renderer_bridge=False,
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g27_selected_zone_crop_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "p5_g27_real_renderer_bridge missing" in check["detail"]
+    assert "real renderer bridge gates missing" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_failed_p5_g27_real_renderer_bridge(
+    tmp_path: Path,
+) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    _write_p5_g27_selected_zone_crop_soak_json(
+        pdf_dir / "p5_g27_selected_zone_crop_soak.json",
+        failed_bridge_gate="p5_g27_real_renderer_bridge_p5_g16_passed",
+    )
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g27_selected_zone_crop_soak")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "p5_g27_real_renderer_bridge.p5_g16_passed must be true" in check["detail"]
+    assert "real renderer bridge gates failed" in check["detail"]
+
+
 def test_customer_grade_audit_rejects_p5_g22_missing_shared_summaries(
     tmp_path: Path,
 ) -> None:
@@ -1392,6 +1821,48 @@ def test_customer_grade_audit_rejects_visual_asset_manifest_policy_violation(tmp
     assert report["status"] == "failed"
     assert check["passed"] is False
     assert "nonblank_probe_status must be passed" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_missing_visual_asset_probe_artifact(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    probe_path = pdf_dir / "viewer" / "visual_assets" / "S21-0001" / "after" / "source_pdf" / "nonblank_probe.json"
+    probe_path.unlink()
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g24_visual_asset_policy")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "nonblank probe artifact not found" in check["detail"]
+
+
+def test_customer_grade_audit_rejects_visual_asset_probe_target_hash_mismatch(tmp_path: Path) -> None:
+    cad_dir, pdf_dir, blocked_dir, release_manifest, customer_manifest = (
+        _complete_customer_audit_fixture(tmp_path)
+    )
+    target_path = pdf_dir / "viewer" / "images" / "S21-0001_after.png"
+    target_path.write_bytes(b"changed target bytes")
+
+    report = audit.run_audit(
+        result_dirs=[cad_dir, pdf_dir, blocked_dir],
+        release_manifest=release_manifest,
+        customer_evidence_manifest=customer_manifest,
+        min_total_pairs=20,
+        evidence_level="customer_grade",
+    )
+
+    check = _check_by_name(report, "p5_g24_visual_asset_policy")
+    assert report["status"] == "failed"
+    assert check["passed"] is False
+    assert "probe_target_hash does not match target file" in check["detail"]
 
 
 def test_customer_grade_audit_requires_runtime_budget_by_default(tmp_path: Path) -> None:

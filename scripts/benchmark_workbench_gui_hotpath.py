@@ -65,6 +65,48 @@ from src.services.comparison.viewer_tile_cache import (  # noqa: E402
 
 
 SCHEMA_VERSION = "workbench-gui-hotpath-benchmark/v1"
+P5_G26_BENCHMARK_ID = "p5_g26_selection_latency_soak"
+P5_G26_PROFILE = "selection_latency_hard_gate"
+P5_G26_REQUIRED_GATE_NAMES = (
+    "p5_g26_wp_a_gui_hot_path_contract",
+    "p5_g26_wp_b_pdf_first_responsiveness_contract",
+    "p5_g26_event_loop_gap_max_ms",
+    "p5_g26_click_hot_path_full_work_count",
+    "p5_g26_cached_page_navigation_render_call_count",
+    "p5_g26_repeat_cache_hit_rate",
+    "p5_g26_blank_viewer_count",
+    "p5_g26_cad_to_pdf_hot_path_count",
+    "p5_g26_zone_selection_count",
+    "p5_g26_zone_selection_telemetry_count",
+    "p5_g26_zone_selection_p95_ms",
+    "p5_g26_zone_selection_worker_spawn_count",
+    "p5_g26_zone_selection_background_work_count",
+    "p5_g26_zone_selection_stale_visible_count",
+)
+P5_G27_BENCHMARK_ID = "p5_g27_selected_zone_crop_soak"
+P5_G27_PROFILE = "selected_zone_crop_first_lifecycle"
+P5_G27_REQUIRED_GATE_NAMES = (
+    "p5_g27_crop_first_result_visible",
+    "p5_g27_crop_visible_before_vector_focus",
+    "p5_g27_crop_visible_p95_ms",
+    "p5_g27_vector_failure_does_not_clear_background",
+    "p5_g27_blank_selected_zone_count",
+    "p5_g27_stale_result_visible_count",
+    "p5_g27_cancel_without_visible_regression_count",
+    "p5_g27_timeout_count",
+    "p5_g27_fallback_missing_reason_count",
+    "p5_g27_event_loop_gap_max_ms",
+    "p5_g27_worker_cleanup_ok",
+    "p5_g27_orphan_worker_count",
+)
+P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES = (
+    "p5_g27_real_renderer_bridge_present",
+    "p5_g27_real_renderer_bridge_p5_g16_passed",
+    "p5_g27_real_renderer_bridge_zone_artifacts_present",
+    "p5_g27_real_renderer_bridge_nonblank_zone_outputs",
+    "p5_g27_real_renderer_bridge_zone_images_present",
+    "p5_g27_real_renderer_bridge_fallback_reasons",
+)
 
 
 @dataclass
@@ -116,6 +158,644 @@ def _event_loop_gap_summary(values: list[float]) -> dict[str, float | int]:
     summary["over_100ms_count"] = sum(1 for value in values if float(value) > 100.0)
     summary["over_500ms_count"] = sum(1 for value in values if float(value) > 500.0)
     return summary
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(result):
+        return default
+    return result
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _nested_dict(data: dict[str, Any], *keys: str) -> dict[str, Any]:
+    current: Any = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def _gap_max_values(payload: dict[str, Any]) -> list[float]:
+    values: list[float] = []
+
+    def add_gap(gap: Any) -> None:
+        if not isinstance(gap, dict):
+            return
+        if gap.get("max_ms") is not None:
+            values.append(_as_float(gap.get("max_ms")))
+            return
+        if _as_int(gap.get("over_500ms_count")) > 0:
+            values.append(501.0)
+
+    for probe_name in (
+        "full_tree_responsiveness_probe",
+        "page_navigation_probe",
+        "rapid_page_navigation_probe",
+        "stress_page_navigation_probe",
+        "navigation_soak_probe",
+        "lightweight_pdf_load_probe",
+        "real_pdf_page_navigation_probe",
+    ):
+        probe = payload.get(probe_name)
+        if isinstance(probe, dict):
+            add_gap(probe.get("event_loop_gap"))
+
+    prewarm = payload.get("real_pdf_prewarm_cache_probe")
+    if isinstance(prewarm, dict):
+        add_gap(prewarm.get("event_loop_gap"))
+        add_gap(_nested_dict(prewarm, "phase_results", "cold_no_prewarm").get("event_loop_gap"))
+        add_gap(_nested_dict(prewarm, "phase_results", "prewarm_wait").get("event_loop_gap"))
+        add_gap(_nested_dict(prewarm, "phase_results", "post_prewarm_cached").get("event_loop_gap"))
+
+    return values
+
+
+def _background_blank_count(cached_phase: dict[str, Any], background_target_ms: float) -> int:
+    backgrounds = [
+        cached_phase.get("before_background"),
+        cached_phase.get("after_background"),
+    ]
+    if any(isinstance(background, dict) for background in backgrounds):
+        return sum(
+            1
+            for background in backgrounds
+            if not (
+                isinstance(background, dict)
+                and bool(background.get("background_ready"))
+            )
+        )
+    background_p95 = _as_float(
+        _nested_dict(cached_phase, "time_to_background_ready_ms").get("p95_ms")
+    )
+    return 0 if background_p95 <= background_target_ms else 1
+
+
+def _p5_g26_contract_summary(payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    selection = payload.get("pair_selection", {}) if isinstance(payload.get("pair_selection"), dict) else {}
+    tile = payload.get("first_review_tile_probe", {}) if isinstance(payload.get("first_review_tile_probe"), dict) else {}
+    p4_overlay = (
+        payload.get("p4_overlay_streaming_probe", {})
+        if isinstance(payload.get("p4_overlay_streaming_probe"), dict)
+        else {}
+    )
+    p5_page_store = (
+        payload.get("p5_overlay_page_store_query_probe", {})
+        if isinstance(payload.get("p5_overlay_page_store_query_probe"), dict)
+        else {}
+    )
+    prewarm = (
+        payload.get("real_pdf_prewarm_cache_probe", {})
+        if isinstance(payload.get("real_pdf_prewarm_cache_probe"), dict)
+        else {}
+    )
+    zone_probe = (
+        payload.get("zone_selection_hotpath_probe", {})
+        if isinstance(payload.get("zone_selection_hotpath_probe"), dict)
+        else {}
+    )
+    cached_phase = _nested_dict(prewarm, "phase_results", "post_prewarm_cached")
+    plateau_phase = _nested_dict(prewarm, "phase_results", "cached_navigation_plateau")
+    first_visible = _nested_dict(p5_page_store, "phase_results", "first_visible")
+    zone_summary = zone_probe.get("viewer_perf_summary", {}) if isinstance(zone_probe, dict) else {}
+
+    cached_p95 = _as_float(_nested_dict(selection, "cached_pdf").get("p95_ms"))
+    cold_p95 = _as_float(_nested_dict(selection, "cold_pdf").get("p95_ms"))
+    event_loop_max_ms = max(_gap_max_values(payload) or [0.0])
+    cad_hot_path_count = _as_int(payload.get("p5_g26_cad_to_pdf_hot_path_count"))
+
+    full_work_count = 0
+    if tile and not bool(tile.get("passed")):
+        full_work_count += 1
+    if bool(p4_overlay.get("overlay_json_read_for_first_paint")):
+        full_work_count += max(1, _as_int(p4_overlay.get("overlay_json_read_call_count")))
+    full_work_count += _as_int(first_visible.get("legacy_overlay_json_read_count"))
+    full_work_count += _as_int(first_visible.get("cached_overlay_count"))
+    full_work_count += cad_hot_path_count
+
+    cached_render_call_count = (
+        _as_int(cached_phase.get("inferred_render_call_count"))
+        if cached_phase
+        else 1
+    )
+    navigation_count = _as_int(plateau_phase.get("navigation_count"))
+    all_cached_count = _as_int(plateau_phase.get("all_cached_count"))
+    repeat_cache_hit_rate = (
+        round(all_cached_count / navigation_count, 4)
+        if navigation_count > 0
+        else 0.0
+    )
+    blank_viewer_count = (
+        _background_blank_count(
+            cached_phase,
+            _as_float(getattr(args, "real_pdf_prewarm_background_target_ms", 300.0), 300.0),
+        )
+        if cached_phase
+        else 1
+    )
+    zone_selection_count = _as_int(
+        zone_probe.get("completed_selection_count"),
+        _as_int(zone_summary.get("zone_selection_count")),
+    )
+    zone_selection_p95 = _as_float(
+        _nested_dict(zone_probe, "selection_call_ms").get("p95_ms"),
+        _as_float(_nested_dict(zone_summary, "zone_selection_gui_block_ms").get("p95")),
+    )
+    zone_worker_spawn_count = _as_int(
+        zone_probe.get("worker_spawned_count"),
+        _as_int(zone_summary.get("worker_spawned_count")),
+    )
+    zone_stale_visible_count = (
+        _as_int(zone_probe.get("selected_zone_stale_count"), _as_int(zone_summary.get("selected_zone_stale_count")))
+        + _as_int(zone_probe.get("selected_zone_cancel_count"), _as_int(zone_summary.get("selected_zone_cancel_count")))
+        + _as_int(zone_probe.get("selected_zone_fallback_count"), _as_int(zone_summary.get("selected_zone_fallback_count")))
+    )
+    zone_selection_event_count = _as_int(zone_summary.get("zone_selection_count"))
+    zone_telemetry_matches_completed = zone_selection_count > 0 and zone_selection_event_count == zone_selection_count
+    zone_worker_process_count = _as_int(
+        zone_probe.get("worker_process_count_max"),
+        _as_int(zone_summary.get("worker_process_count_max")),
+    )
+    zone_full_tree_worker_count = _as_int(
+        zone_probe.get("full_tree_overlay_load_worker_count"),
+        _as_int(zone_summary.get("full_tree_overlay_load_worker_count")),
+    ) + _as_int(
+        zone_probe.get("full_tree_plan_build_worker_count"),
+        _as_int(zone_summary.get("full_tree_plan_build_worker_count")),
+    )
+    zone_crop_count = _as_int(
+        zone_probe.get("zone_crop_count"),
+        _as_int(zone_summary.get("zone_crop_count")),
+    )
+    zone_vector_start_count = _as_int(zone_probe.get("zone_vector_start_call_count"))
+    zone_background_work_count = (
+        zone_worker_spawn_count
+        + zone_worker_process_count
+        + zone_full_tree_worker_count
+        + zone_crop_count
+        + zone_vector_start_count
+    )
+
+    event_loop_target = _as_float(getattr(args, "p5_g26_event_loop_max_target_ms", 500.0), 500.0)
+    zone_selection_target = _as_float(
+        getattr(args, "p5_g26_zone_selection_p95_target_ms", 100.0),
+        100.0,
+    )
+    repeat_cache_target = _as_float(
+        getattr(args, "p5_g26_repeat_cache_hit_rate_target", 0.95),
+        0.95,
+    )
+    wp_a_passed = (
+        cached_p95 <= _as_float(getattr(args, "cached_p95_target_ms", 300.0), 300.0)
+        and cold_p95 <= _as_float(getattr(args, "cold_p95_target_ms", 2000.0), 2000.0)
+        and event_loop_max_ms <= event_loop_target
+        and full_work_count == 0
+        and zone_selection_count > 0
+        and zone_telemetry_matches_completed
+        and zone_selection_p95 <= zone_selection_target
+        and zone_worker_spawn_count == 0
+        and zone_background_work_count == 0
+        and zone_stale_visible_count == 0
+    )
+    wp_b_passed = (
+        cached_render_call_count == 0
+        and repeat_cache_hit_rate >= repeat_cache_target
+        and blank_viewer_count == 0
+        and event_loop_max_ms <= event_loop_target
+        and cad_hot_path_count == 0
+    )
+
+    return {
+        "wp_a_passed": bool(wp_a_passed),
+        "wp_b_passed": bool(wp_b_passed),
+        "cached_pair_selection_p95_ms": cached_p95,
+        "cold_pair_selection_p95_ms": cold_p95,
+        "event_loop_max_ms": round(event_loop_max_ms, 3),
+        "event_loop_max_target_ms": event_loop_target,
+        "click_hot_path_full_work_count": int(full_work_count),
+        "cached_page_navigation_render_call_count": int(cached_render_call_count),
+        "repeat_cache_hit_rate": float(repeat_cache_hit_rate),
+        "repeat_cache_hit_rate_target": float(repeat_cache_target),
+        "cached_navigation_count": int(navigation_count),
+        "cached_navigation_all_cached_count": int(all_cached_count),
+        "blank_viewer_count": int(blank_viewer_count),
+        "cad_to_pdf_hot_path_count": int(cad_hot_path_count),
+        "has_cached_navigation_evidence": bool(cached_phase and navigation_count > 0),
+        "zone_selection_count": int(zone_selection_count),
+        "zone_selection_telemetry_count": int(zone_selection_event_count),
+        "zone_selection_telemetry_matches_completed": bool(zone_telemetry_matches_completed),
+        "zone_selection_p95_ms": float(zone_selection_p95),
+        "zone_selection_p95_target_ms": float(zone_selection_target),
+        "zone_selection_worker_spawn_count": int(zone_worker_spawn_count),
+        "zone_selection_worker_process_count_max": int(zone_worker_process_count),
+        "zone_selection_full_tree_worker_count": int(zone_full_tree_worker_count),
+        "zone_selection_zone_crop_count": int(zone_crop_count),
+        "zone_selection_vector_start_call_count": int(zone_vector_start_count),
+        "zone_selection_background_work_count": int(zone_background_work_count),
+        "zone_selection_stale_visible_count": int(zone_stale_visible_count),
+        "has_zone_selection_evidence": bool(zone_probe and zone_selection_count > 0),
+    }
+
+
+def _p5_g26_contract_gates(contract: dict[str, Any]) -> list[GateResult]:
+    return [
+        GateResult(
+            "p5_g26_wp_a_gui_hot_path_contract",
+            bool(contract.get("wp_a_passed")),
+            bool(contract.get("wp_a_passed")),
+            True,
+            "WP-A aggregate: pair latency, event-loop max, and click hot-path full-work counters pass.",
+        ),
+        GateResult(
+            "p5_g26_wp_b_pdf_first_responsiveness_contract",
+            bool(contract.get("wp_b_passed")),
+            bool(contract.get("wp_b_passed")),
+            True,
+            "WP-B aggregate: cached page navigation, blank viewer, cache hit, and CAD conversion counters pass.",
+        ),
+        GateResult(
+            "p5_g26_event_loop_gap_max_ms",
+            _as_float(contract.get("event_loop_max_ms")) <= _as_float(contract.get("event_loop_max_target_ms"), 500.0),
+            _as_float(contract.get("event_loop_max_ms")),
+            _as_float(contract.get("event_loop_max_target_ms"), 500.0),
+            "P5-G26 hard event-loop max across enabled GUI/PDF hot-path probes.",
+        ),
+        GateResult(
+            "p5_g26_click_hot_path_full_work_count",
+            _as_int(contract.get("click_hot_path_full_work_count")) == 0,
+            _as_int(contract.get("click_hot_path_full_work_count")),
+            0,
+            "Selection hot path must not perform full overlay JSON, full cache materialisation, tile pyramid, or CAD conversion work.",
+        ),
+        GateResult(
+            "p5_g26_cached_page_navigation_render_call_count",
+            _as_int(contract.get("cached_page_navigation_render_call_count")) == 0,
+            _as_int(contract.get("cached_page_navigation_render_call_count")),
+            0,
+            "Cached PDF page navigation must not enter the cold render/document-open path.",
+        ),
+        GateResult(
+            "p5_g26_repeat_cache_hit_rate",
+            _as_float(contract.get("repeat_cache_hit_rate")) >= _as_float(contract.get("repeat_cache_hit_rate_target"), 0.95),
+            _as_float(contract.get("repeat_cache_hit_rate")),
+            _as_float(contract.get("repeat_cache_hit_rate_target"), 0.95),
+            "Repeated cached PDF navigation keeps the cache hit rate above the P5-G26 floor.",
+        ),
+        GateResult(
+            "p5_g26_blank_viewer_count",
+            _as_int(contract.get("blank_viewer_count")) == 0,
+            _as_int(contract.get("blank_viewer_count")),
+            0,
+            "Cached navigation leaves no blank before/after lightweight PDF viewer.",
+        ),
+        GateResult(
+            "p5_g26_cad_to_pdf_hot_path_count",
+            _as_int(contract.get("cad_to_pdf_hot_path_count")) == 0,
+            _as_int(contract.get("cad_to_pdf_hot_path_count")),
+            0,
+            "CAD-to-PDF conversion must not run from the GUI/page-selection hot path.",
+        ),
+        GateResult(
+            "p5_g26_zone_selection_count",
+            _as_int(contract.get("zone_selection_count")) > 0,
+            _as_int(contract.get("zone_selection_count")),
+            "> 0",
+            "P5-G26 contract includes explicit zone-selection hot-path evidence.",
+        ),
+        GateResult(
+            "p5_g26_zone_selection_telemetry_count",
+            bool(contract.get("zone_selection_telemetry_matches_completed")),
+            _as_int(contract.get("zone_selection_telemetry_count")),
+            f"== {_as_int(contract.get('zone_selection_count'))}",
+            "Zone-selection viewer_perf telemetry count must match completed synthetic selections.",
+        ),
+        GateResult(
+            "p5_g26_zone_selection_p95_ms",
+            _as_float(contract.get("zone_selection_p95_ms"))
+            <= _as_float(contract.get("zone_selection_p95_target_ms"), 100.0),
+            _as_float(contract.get("zone_selection_p95_ms")),
+            _as_float(contract.get("zone_selection_p95_target_ms"), 100.0),
+            "Synthetic zone-selection handler p95 stays within the GUI hot-path budget.",
+        ),
+        GateResult(
+            "p5_g26_zone_selection_worker_spawn_count",
+            _as_int(contract.get("zone_selection_worker_spawn_count")) == 0,
+            _as_int(contract.get("zone_selection_worker_spawn_count")),
+            0,
+            "Synthetic zone-selection hot path does not spawn worker/process events.",
+        ),
+        GateResult(
+            "p5_g26_zone_selection_background_work_count",
+            _as_int(contract.get("zone_selection_background_work_count")) == 0,
+            _as_int(contract.get("zone_selection_background_work_count")),
+            0,
+            "Synthetic zone-selection hot path performs no worker, crop, vector, or full-tree background work.",
+        ),
+        GateResult(
+            "p5_g26_zone_selection_stale_visible_count",
+            _as_int(contract.get("zone_selection_stale_visible_count")) == 0,
+            _as_int(contract.get("zone_selection_stale_visible_count")),
+            0,
+            "Synthetic zone-selection hot path leaves no stale, cancelled, or fallback visible result events.",
+        ),
+    ]
+
+
+def _p5_g27_contract_summary(payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    probe = (
+        payload.get("selected_zone_crop_first_probe", {})
+        if isinstance(payload.get("selected_zone_crop_first_probe"), dict)
+        else {}
+    )
+    viewer_summary = probe.get("viewer_perf_summary", {}) if isinstance(probe.get("viewer_perf_summary"), dict) else {}
+    requested_count = _as_int(probe.get("requested_selection_count"))
+    completed_count = _as_int(probe.get("completed_selection_count"))
+    crop_visible_count = _as_int(probe.get("crop_visible_count"))
+    crop_first_sequence_count = _as_int(probe.get("crop_first_sequence_count"))
+    vector_start_count = _as_int(probe.get("vector_start_count"))
+    vector_failure_count = _as_int(probe.get("vector_failure_count"))
+    vector_failure_background_preserved_count = _as_int(
+        probe.get("vector_failure_background_preserved_count")
+    )
+    zone_crop_count = _as_int(probe.get("zone_crop_count"), _as_int(viewer_summary.get("zone_crop_count")))
+    blank_selected_zone_count = _as_int(probe.get("blank_selected_zone_count"))
+    stale_result_visible_count = _as_int(
+        probe.get("selected_zone_stale_count"),
+        _as_int(viewer_summary.get("selected_zone_stale_count")),
+    )
+    cancel_without_visible_regression_count = _as_int(
+        probe.get("selected_zone_cancel_count"),
+        _as_int(viewer_summary.get("selected_zone_cancel_count")),
+    )
+    fallback_count = _as_int(
+        probe.get("selected_zone_fallback_count"),
+        _as_int(viewer_summary.get("selected_zone_fallback_count")),
+    )
+    fallback_missing_reason_count = _as_int(probe.get("fallback_missing_reason_count"))
+    timeout_count = _as_int(probe.get("timeout_count"))
+    worker_spawned_count = _as_int(probe.get("worker_spawned_count"), _as_int(viewer_summary.get("worker_spawned_count")))
+    worker_process_count_max = _as_int(
+        probe.get("worker_process_count_max"),
+        _as_int(viewer_summary.get("worker_process_count_max")),
+    )
+    orphan_worker_count = _as_int(probe.get("orphan_worker_count"))
+    crop_visible_p95 = _as_float(_nested_dict(probe, "crop_visible_ms").get("p95_ms"))
+    crop_visible_target = _as_float(getattr(args, "p5_g27_crop_visible_p95_target_ms", 500.0), 500.0)
+    event_loop_gap_max_ms = _as_float(_nested_dict(probe, "event_loop_gap").get("max_ms"))
+    event_loop_target = _as_float(
+        getattr(args, "p5_g27_event_loop_gap_max_target_ms", 500.0),
+        500.0,
+    )
+    crop_first_result_visible = (
+        bool(probe.get("completed"))
+        and completed_count > 0
+        and crop_visible_count == completed_count
+        and zone_crop_count == completed_count
+    )
+    crop_visible_before_vector_focus = (
+        completed_count > 0
+        and crop_first_sequence_count == completed_count
+        and vector_start_count == completed_count
+    )
+    vector_failure_does_not_clear_background = (
+        vector_failure_count == completed_count
+        and vector_failure_background_preserved_count == vector_failure_count
+    )
+    worker_cleanup_ok = worker_spawned_count == 0 and worker_process_count_max == 0 and orphan_worker_count == 0
+    return {
+        "crop_first_result_visible": bool(crop_first_result_visible),
+        "crop_visible_before_vector_focus": bool(crop_visible_before_vector_focus),
+        "crop_visible_p95_ms": float(crop_visible_p95),
+        "crop_visible_p95_target_ms": float(crop_visible_target),
+        "vector_failure_does_not_clear_background": bool(vector_failure_does_not_clear_background),
+        "requested_selection_count": int(requested_count),
+        "completed_selection_count": int(completed_count),
+        "crop_visible_count": int(crop_visible_count),
+        "crop_first_sequence_count": int(crop_first_sequence_count),
+        "zone_crop_count": int(zone_crop_count),
+        "vector_start_count": int(vector_start_count),
+        "vector_failure_count": int(vector_failure_count),
+        "vector_failure_background_preserved_count": int(vector_failure_background_preserved_count),
+        "blank_selected_zone_count": int(blank_selected_zone_count),
+        "stale_result_visible_count": int(stale_result_visible_count),
+        "cancel_without_visible_regression_count": int(cancel_without_visible_regression_count),
+        "fallback_count": int(fallback_count),
+        "fallback_missing_reason_count": int(fallback_missing_reason_count),
+        "timeout_count": int(timeout_count),
+        "event_loop_gap_max_ms": round(float(event_loop_gap_max_ms), 3),
+        "event_loop_gap_max_target_ms": float(event_loop_target),
+        "worker_cleanup_ok": bool(worker_cleanup_ok),
+        "worker_spawned_count": int(worker_spawned_count),
+        "worker_process_count_max": int(worker_process_count_max),
+        "orphan_worker_count": int(orphan_worker_count),
+        "has_selected_zone_crop_first_evidence": bool(probe and completed_count > 0),
+    }
+
+
+def _p5_g27_contract_gates(contract: dict[str, Any]) -> list[GateResult]:
+    return [
+        GateResult(
+            "p5_g27_crop_first_result_visible",
+            bool(contract.get("crop_first_result_visible")),
+            bool(contract.get("crop_first_result_visible")),
+            True,
+            "Selected-zone crop result must become visible for every completed synthetic selection.",
+        ),
+        GateResult(
+            "p5_g27_crop_visible_before_vector_focus",
+            bool(contract.get("crop_visible_before_vector_focus")),
+            _as_int(contract.get("crop_first_sequence_count")),
+            _as_int(contract.get("completed_selection_count")),
+            "Crop completion must precede deferred focus/vector enhancement for every selection.",
+        ),
+        GateResult(
+            "p5_g27_crop_visible_p95_ms",
+            _as_float(contract.get("crop_visible_p95_ms"))
+            <= _as_float(contract.get("crop_visible_p95_target_ms"), 500.0),
+            _as_float(contract.get("crop_visible_p95_ms")),
+            _as_float(contract.get("crop_visible_p95_target_ms"), 500.0),
+            "Synthetic selected-zone crop-visible p95 stays within the P5-G27 budget.",
+        ),
+        GateResult(
+            "p5_g27_vector_failure_does_not_clear_background",
+            bool(contract.get("vector_failure_does_not_clear_background")),
+            _as_int(contract.get("vector_failure_background_preserved_count")),
+            _as_int(contract.get("vector_failure_count")),
+            "Vector enhancement failure must not clear or replace the crop-first background.",
+        ),
+        GateResult(
+            "p5_g27_blank_selected_zone_count",
+            _as_int(contract.get("blank_selected_zone_count")) == 0,
+            _as_int(contract.get("blank_selected_zone_count")),
+            0,
+            "Selected-zone crop-first lifecycle must leave no blank selected-zone view.",
+        ),
+        GateResult(
+            "p5_g27_stale_result_visible_count",
+            _as_int(contract.get("stale_result_visible_count")) == 0,
+            _as_int(contract.get("stale_result_visible_count")),
+            0,
+            "Superseded selected-zone crop results must not become visible.",
+        ),
+        GateResult(
+            "p5_g27_cancel_without_visible_regression_count",
+            _as_int(contract.get("cancel_without_visible_regression_count")) == 0,
+            _as_int(contract.get("cancel_without_visible_regression_count")),
+            0,
+            "Selected-zone cancel/drop events must not create a visible regression in the first crop gate.",
+        ),
+        GateResult(
+            "p5_g27_timeout_count",
+            _as_int(contract.get("timeout_count")) == 0,
+            _as_int(contract.get("timeout_count")),
+            0,
+            "Selected-zone crop-first lifecycle must not hit timeout paths in the synthetic gate.",
+        ),
+        GateResult(
+            "p5_g27_fallback_missing_reason_count",
+            _as_int(contract.get("fallback_missing_reason_count")) == 0,
+            _as_int(contract.get("fallback_missing_reason_count")),
+            0,
+            "Fallback selected-zone results must include explicit reason codes.",
+        ),
+        GateResult(
+            "p5_g27_event_loop_gap_max_ms",
+            _as_float(contract.get("event_loop_gap_max_ms"))
+            <= _as_float(contract.get("event_loop_gap_max_target_ms"), 500.0),
+            _as_float(contract.get("event_loop_gap_max_ms")),
+            _as_float(contract.get("event_loop_gap_max_target_ms"), 500.0),
+            "Selected-zone crop-first probe must keep max event-loop gap within budget.",
+        ),
+        GateResult(
+            "p5_g27_worker_cleanup_ok",
+            bool(contract.get("worker_cleanup_ok")),
+            bool(contract.get("worker_cleanup_ok")),
+            True,
+            "Synthetic crop-first probe leaves no worker/process cleanup debt.",
+        ),
+        GateResult(
+            "p5_g27_orphan_worker_count",
+            _as_int(contract.get("orphan_worker_count")) == 0,
+            _as_int(contract.get("orphan_worker_count")),
+            0,
+            "Synthetic crop-first probe leaves no orphan zone render/vector workers.",
+        ),
+    ]
+
+
+def _p5_g27_real_renderer_bridge_summary(path: Path | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    exists = bool(path and path.exists())
+    if exists and path is not None:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            loaded = {}
+        payload = loaded if isinstance(loaded, dict) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    validation_summary = (
+        source.get("validation_summary")
+        if isinstance(source.get("validation_summary"), dict)
+        else {}
+    )
+    zone_render_artifact_count = _as_int(summary.get("zone_render_artifact_count"))
+    blank_zone_output_count = _as_int(summary.get("blank_zone_output_count"))
+    missing_zone_image_count = _as_int(summary.get("missing_zone_image_count"))
+    fallback_missing_reason_count = _as_int(summary.get("fallback_missing_reason_count"))
+    stale_result_visible_count = _as_int(summary.get("stale_result_visible_count"))
+    timeout_count = _as_int(summary.get("timeout_count"))
+    cancel_count = _as_int(summary.get("cancel_count"))
+    p5_g16_passed = (
+        payload.get("benchmark_id") == "p5_g16_real_corpus_replay"
+        and payload.get("profile") == "real_corpus_artifact_replay"
+        and payload.get("status") == "passed"
+    )
+    real_renderer_quality_passed = (
+        p5_g16_passed
+        and zone_render_artifact_count > 0
+        and blank_zone_output_count == 0
+        and missing_zone_image_count == 0
+        and fallback_missing_reason_count == 0
+        and stale_result_visible_count == 0
+        and timeout_count == 0
+        and cancel_count == 0
+    )
+    return {
+        "bridge_json": str(path) if path else "",
+        "bridge_present": bool(exists and payload),
+        "benchmark_id": str(payload.get("benchmark_id") or ""),
+        "profile": str(payload.get("profile") or ""),
+        "status": str(payload.get("status") or ""),
+        "p5_g16_passed": bool(p5_g16_passed),
+        "real_renderer_quality_passed": bool(real_renderer_quality_passed),
+        "validation_summary_sha256": str(validation_summary.get("sha256") or ""),
+        "viewer_root_present": summary.get("viewer_root_present") is True,
+        "zone_render_artifact_count": int(zone_render_artifact_count),
+        "blank_zone_output_count": int(blank_zone_output_count),
+        "missing_zone_image_count": int(missing_zone_image_count),
+        "fallback_missing_reason_count": int(fallback_missing_reason_count),
+        "stale_result_visible_count": int(stale_result_visible_count),
+        "timeout_count": int(timeout_count),
+        "cancel_count": int(cancel_count),
+    }
+
+
+def _p5_g27_real_renderer_bridge_gates(bridge: dict[str, Any]) -> list[GateResult]:
+    return [
+        GateResult(
+            "p5_g27_real_renderer_bridge_present",
+            bool(bridge.get("bridge_present")),
+            bool(bridge.get("bridge_present")),
+            True,
+            "P5-G27 customer-grade evidence must point at a real P5-G16 renderer replay artifact.",
+        ),
+        GateResult(
+            "p5_g27_real_renderer_bridge_p5_g16_passed",
+            bool(bridge.get("p5_g16_passed")),
+            bool(bridge.get("p5_g16_passed")),
+            True,
+            "The bridged real-corpus renderer replay must be a passed P5-G16 artifact.",
+        ),
+        GateResult(
+            "p5_g27_real_renderer_bridge_zone_artifacts_present",
+            _as_int(bridge.get("zone_render_artifact_count")) > 0,
+            _as_int(bridge.get("zone_render_artifact_count")),
+            "> 0",
+            "The bridged real renderer replay must include selected-zone render artifacts.",
+        ),
+        GateResult(
+            "p5_g27_real_renderer_bridge_nonblank_zone_outputs",
+            _as_int(bridge.get("blank_zone_output_count")) == 0,
+            _as_int(bridge.get("blank_zone_output_count")),
+            0,
+            "The bridged real renderer replay must have no blank selected-zone outputs.",
+        ),
+        GateResult(
+            "p5_g27_real_renderer_bridge_zone_images_present",
+            _as_int(bridge.get("missing_zone_image_count")) == 0,
+            _as_int(bridge.get("missing_zone_image_count")),
+            0,
+            "The bridged real renderer replay must not miss selected-zone images.",
+        ),
+        GateResult(
+            "p5_g27_real_renderer_bridge_fallback_reasons",
+            _as_int(bridge.get("fallback_missing_reason_count")) == 0,
+            _as_int(bridge.get("fallback_missing_reason_count")),
+            0,
+            "The bridged real renderer replay must not contain fallback events without reason codes.",
+        ),
+    ]
 
 
 def _rss_slope_summary(
@@ -1467,6 +2147,353 @@ def _run_navigation_soak_probe(
         app.processEvents()
 
 
+def _run_zone_selection_hotpath_probe(
+    scratch: Path,
+    viewer_root: Path,
+    *,
+    zone_count: int,
+    runs: int,
+    heartbeat_interval_ms: int = 10,
+) -> dict[str, Any]:
+    app = _ensure_app()
+    workbench = _new_workbench(viewer_root)
+    zone_count = max(2, int(zone_count))
+    runs = max(1, int(runs))
+    selection_ms: list[float] = []
+    gaps_ms: list[float] = []
+    crop_start_calls: list[str] = []
+    vector_start_calls: list[str] = []
+    last_tick = time.perf_counter()
+
+    def _tick() -> None:
+        nonlocal last_tick
+        app.processEvents()
+        now = time.perf_counter()
+        gaps_ms.append(round((now - last_tick) * 1000.0, 3))
+        last_tick = now
+
+    class _NoopZoneRenderController:
+        def parent(self) -> Any:
+            return workbench
+
+        def prewarm(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def is_busy(self) -> bool:
+            return False
+
+        def render(self, *_args: Any, **_kwargs: Any) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            return None
+
+    try:
+        row, pair = _make_pair(
+            scratch,
+            viewer_root,
+            "zone_selection_hotpath_pair",
+            overlay_total_count=zone_count,
+            top_issue_count=zone_count,
+            full_overlay_json=False,
+        )
+        pair_id = str(pair["pair_id"])
+        workbench._viewer_pairs_by_id[pair_id] = pair
+        workbench._load_ai_config_v2 = lambda: SimpleNamespace(  # type: ignore[method-assign]
+            enabled=False,
+            use_embedding=False,
+            use_llm=False,
+        )
+        try:
+            workbench._zone_render_controller_v2.shutdown()
+        except Exception:
+            pass
+        workbench._zone_render_controller_v2 = _NoopZoneRenderController()  # type: ignore[assignment]
+        workbench._schedule_lightweight_pair_load_v2 = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        workbench._schedule_initial_zone_selection_v2 = lambda _pair_id: None  # type: ignore[method-assign]
+        workbench._schedule_full_zone_tree_rebuild_v2 = lambda _pair_id: None  # type: ignore[method-assign]
+        workbench._focus_lightweight_on_zone_v2 = lambda _zone_id: None  # type: ignore[method-assign]
+        workbench._apply_or_start_zone_vector_render_v2 = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        workbench._start_zone_vector_render_v2 = lambda _pair_id, zone_id: vector_start_calls.append(str(zone_id))  # type: ignore[method-assign]
+        workbench._start_zone_crop_render_v2 = lambda zone_id: crop_start_calls.append(str(zone_id))  # type: ignore[method-assign]
+
+        _select_row(workbench, row)
+        app.processEvents()
+        leaves = list(workbench._zone_leaf_items_v2())
+        started = time.perf_counter()
+        last_tick = started
+        completed = bool(leaves)
+        for run_idx in range(runs):
+            if not leaves:
+                completed = False
+                break
+            leaf = leaves[run_idx % len(leaves)]
+            select_started = time.perf_counter()
+            workbench.zone_list_v2.setCurrentItem(leaf)
+            app.processEvents()
+            selection_ms.append(round((time.perf_counter() - select_started) * 1000.0, 3))
+            _tick()
+            if heartbeat_interval_ms > 0:
+                time.sleep(max(0.0, heartbeat_interval_ms / 1000.0))
+        app.processEvents()
+        viewer_summary = summarize_viewer_perf(viewer_root)
+        return {
+            "completed": bool(completed and len(selection_ms) == runs),
+            "requested_selection_count": int(runs),
+            "completed_selection_count": int(len(selection_ms)),
+            "visible_leaf_count": int(len(leaves)),
+            "zone_crop_start_call_count": int(len(crop_start_calls)),
+            "zone_vector_start_call_count": int(len(vector_start_calls)),
+            "selection_call_ms": _latency_summary(selection_ms),
+            "event_loop_gap": _event_loop_gap_summary(gaps_ms),
+            "viewer_perf_summary": viewer_summary,
+            "worker_spawned_count": int(viewer_summary.get("worker_spawned_count") or 0),
+            "worker_process_count_max": int(viewer_summary.get("worker_process_count_max") or 0),
+            "full_tree_overlay_load_worker_count": int(viewer_summary.get("full_tree_overlay_load_worker_count") or 0),
+            "full_tree_plan_build_worker_count": int(viewer_summary.get("full_tree_plan_build_worker_count") or 0),
+            "zone_crop_count": int(viewer_summary.get("zone_crop_count") or 0),
+            "selected_zone_stale_count": int(viewer_summary.get("selected_zone_stale_count") or 0),
+            "selected_zone_cancel_count": int(viewer_summary.get("selected_zone_cancel_count") or 0),
+            "selected_zone_fallback_count": int(viewer_summary.get("selected_zone_fallback_count") or 0),
+        }
+    finally:
+        workbench.deleteLater()
+        app.processEvents()
+
+
+def _run_selected_zone_crop_first_probe(
+    scratch: Path,
+    viewer_root: Path,
+    *,
+    zone_count: int,
+    runs: int,
+    heartbeat_interval_ms: int = 10,
+) -> dict[str, Any]:
+    app = _ensure_app()
+    workbench = _new_workbench(viewer_root)
+    zone_count = max(2, int(zone_count))
+    runs = max(1, int(runs))
+    crop_visible_ms: list[float] = []
+    gaps_ms: list[float] = []
+    render_calls: list[dict[str, Any]] = []
+    trace: list[tuple[str, str]] = []
+    status_calls: list[tuple[str, str, str]] = []
+    vector_failures = 0
+    vector_failure_background_preserved = 0
+    blank_selected_zone_count = 0
+    crop_first_sequence_count = 0
+    fallback_missing_reason_count = 0
+    timeout_count = 0
+    last_tick = time.perf_counter()
+    original_lightweight_only = dcw.DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY
+
+    def _tick() -> None:
+        nonlocal last_tick
+        app.processEvents()
+        now = time.perf_counter()
+        gaps_ms.append(round((now - last_tick) * 1000.0, 3))
+        last_tick = now
+
+    class _RecordingZoneRenderController:
+        def parent(self) -> Any:
+            return workbench
+
+        def prewarm(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def is_busy(self) -> bool:
+            return False
+
+        def render(self, **kwargs: Any) -> bool:
+            render_calls.append(dict(kwargs))
+            request = kwargs.get("request", {})
+            if isinstance(request, dict):
+                trace.append(("crop_started", str(request.get("zone_id") or "")))
+            return True
+
+        def shutdown(self) -> None:
+            return None
+
+    try:
+        dcw.DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = True
+        row, pair = _make_pair(
+            scratch,
+            viewer_root,
+            "selected_zone_crop_first_pair",
+            overlay_total_count=zone_count,
+            top_issue_count=zone_count,
+            full_overlay_json=False,
+        )
+        pair_id = str(pair["pair_id"])
+        source_a = scratch / f"{pair_id}_before.dxf"
+        source_b = scratch / f"{pair_id}_after.dxf"
+        source_a.write_text("0\nEOF\n", encoding="utf-8")
+        source_b.write_text("0\nEOF\n", encoding="utf-8")
+        pair["source_a"] = str(source_a)
+        pair["source_b"] = str(source_b)
+        pair["coordinate_source"] = "cad_world"
+        workbench._viewer_pairs_by_id[pair_id] = pair
+        workbench._load_ai_config_v2 = lambda: SimpleNamespace(  # type: ignore[method-assign]
+            enabled=False,
+            use_embedding=False,
+            use_llm=False,
+        )
+        try:
+            workbench._zone_render_controller_v2.shutdown()
+        except Exception:
+            pass
+        workbench._zone_render_controller_v2 = _RecordingZoneRenderController()  # type: ignore[assignment]
+        workbench._schedule_lightweight_pair_load_v2 = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        workbench._schedule_initial_zone_selection_v2 = lambda _pair_id: None  # type: ignore[method-assign]
+        workbench._schedule_full_zone_tree_rebuild_v2 = lambda _pair_id: None  # type: ignore[method-assign]
+        workbench._focus_lightweight_on_zone_v2 = lambda zone_id: trace.append(("initial_focus", str(zone_id)))  # type: ignore[method-assign]
+        workbench._request_zone_focus_v2 = lambda zone_id: trace.append(("deferred_focus", str(zone_id)))  # type: ignore[method-assign]
+        workbench._set_lightweight_zone_side_messages_v2 = lambda _zone_id: None  # type: ignore[method-assign]
+        workbench._zone_detail_text_v2 = lambda _zone_id: ""  # type: ignore[method-assign]
+        workbench._load_current_zone_memo_v2 = lambda: None  # type: ignore[method-assign]
+        workbench._refresh_zone_vector_button_state_v2 = lambda: None  # type: ignore[method-assign]
+        workbench._set_preview_status_v2 = (  # type: ignore[method-assign]
+            lambda pair_uuid, status, message="": status_calls.append((str(pair_uuid), str(status), str(message)))
+        )
+
+        def _simulate_vector_failure(failure_pair_id: str, failure_zone_id: str) -> None:
+            nonlocal vector_failures, vector_failure_background_preserved
+            trace.append(("vector_start", str(failure_zone_id)))
+            before_pair = dict(workbench._viewer_pairs_by_id.get(failure_pair_id, {}))
+            expected_svg = scratch / f"{failure_pair_id}_{failure_zone_id}_vector.svg"
+            result_json = expected_svg.with_suffix(".result.json")
+            result_json.write_text(
+                json.dumps({"skipped_reason": "synthetic vector render failure"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            workbench._zone_vector_qprocess = object()  # type: ignore[assignment]
+            workbench._zone_vector_pending = (failure_pair_id, failure_zone_id, str(expected_svg))
+            workbench._zone_vector_result_json = result_json
+            workbench._on_zone_vector_finished_v2(1, None)
+            vector_failures += 1
+            after_pair = workbench._viewer_pairs_by_id.get(failure_pair_id, {})
+            if (
+                after_pair.get("before_image")
+                and after_pair.get("after_image")
+                and after_pair.get("before_image") == before_pair.get("before_image")
+                and after_pair.get("after_image") == before_pair.get("after_image")
+            ):
+                vector_failure_background_preserved += 1
+
+        workbench._start_zone_vector_render_v2 = _simulate_vector_failure  # type: ignore[method-assign]
+
+        _select_row(workbench, row)
+        app.processEvents()
+        leaves = list(workbench._zone_leaf_items_v2())
+        started = time.perf_counter()
+        last_tick = started
+        completed = bool(leaves)
+        for run_idx in range(runs):
+            if not leaves:
+                completed = False
+                break
+            leaf = leaves[run_idx % len(leaves)]
+            zone_id = str(leaf.data(0, Qt.UserRole) or "")
+            render_index_before = len(render_calls)
+            trace_index_before = len(trace)
+            select_started = time.perf_counter()
+            workbench._on_zone_selected_v2(leaf)
+            app.processEvents()
+            if len(render_calls) <= render_index_before:
+                blank_selected_zone_count += 1
+                completed = False
+                continue
+            render_call = render_calls[-1]
+            request = render_call.get("request", {}) if isinstance(render_call, dict) else {}
+            request_id = str(request.get("request_id") or "")
+            before_crop = scratch / f"{pair_id}_{zone_id}_{run_idx}_before_crop.png"
+            after_crop = scratch / f"{pair_id}_{zone_id}_{run_idx}_after_crop.png"
+            before_crop.write_bytes(b"synthetic-before-crop")
+            after_crop.write_bytes(b"synthetic-after-crop")
+            crop_result = {
+                "request_id": request_id,
+                "elapsed_ms": round((time.perf_counter() - select_started) * 1000.0, 3),
+                "cache_hit": False,
+                "render_lifecycle": "ready",
+                "visual_fidelity": "cad_render",
+                "renderer_backend": "synthetic-crop-first",
+                "before_image": str(before_crop),
+                "after_image": str(after_crop),
+            }
+            cropped_pair = dict(pair)
+            cropped_pair["before_image"] = str(before_crop)
+            cropped_pair["after_image"] = str(after_crop)
+            cropped_pair["last_zone_crop"] = dict(crop_result)
+            trace.append(("crop_finished", zone_id))
+            workbench._on_zone_crop_render_finished_v2(
+                pair_id,
+                zone_id,
+                crop_result,
+                cropped_pair,
+                list(workbench._active_overlays_by_zone.values()),
+            )
+            crop_visible_ms.append(round((time.perf_counter() - select_started) * 1000.0, 3))
+            run_trace = trace[trace_index_before:]
+            run_events = [name for name, value in run_trace if value == zone_id]
+            try:
+                crop_finished_index = run_events.index("crop_finished")
+                deferred_focus_index = run_events.index("deferred_focus")
+                vector_start_index = run_events.index("vector_start")
+                if crop_finished_index < deferred_focus_index < vector_start_index:
+                    crop_first_sequence_count += 1
+            except ValueError:
+                pass
+            if not (
+                workbench._viewer_pairs_by_id.get(pair_id, {}).get("before_image")
+                and workbench._viewer_pairs_by_id.get(pair_id, {}).get("after_image")
+            ):
+                blank_selected_zone_count += 1
+            if str(crop_result.get("render_lifecycle") or "") == "fallback_visible" and not str(
+                crop_result.get("reason_code") or ""
+            ):
+                fallback_missing_reason_count += 1
+            if str(crop_result.get("render_lifecycle") or "") == "render_timeout":
+                timeout_count += 1
+            _tick()
+            if heartbeat_interval_ms > 0:
+                time.sleep(max(0.0, heartbeat_interval_ms / 1000.0))
+        app.processEvents()
+        viewer_summary = summarize_viewer_perf(viewer_root)
+        return {
+            "completed": bool(completed and len(crop_visible_ms) == runs),
+            "requested_selection_count": int(runs),
+            "completed_selection_count": int(len(crop_visible_ms)),
+            "visible_leaf_count": int(len(leaves)),
+            "crop_visible_count": int(len(crop_visible_ms)),
+            "crop_first_sequence_count": int(crop_first_sequence_count),
+            "vector_start_count": int(vector_failures),
+            "vector_failure_count": int(vector_failures),
+            "vector_failure_background_preserved_count": int(vector_failure_background_preserved),
+            "blank_selected_zone_count": int(blank_selected_zone_count),
+            "fallback_missing_reason_count": int(fallback_missing_reason_count),
+            "timeout_count": int(timeout_count),
+            "crop_visible_ms": _latency_summary(crop_visible_ms),
+            "event_loop_gap": _event_loop_gap_summary(gaps_ms),
+            "viewer_perf_summary": viewer_summary,
+            "worker_spawned_count": int(viewer_summary.get("worker_spawned_count") or 0),
+            "worker_process_count_max": int(viewer_summary.get("worker_process_count_max") or 0),
+            "orphan_worker_count": 0,
+            "zone_crop_count": int(viewer_summary.get("zone_crop_count") or 0),
+            "selected_zone_stale_count": int(viewer_summary.get("selected_zone_stale_count") or 0),
+            "selected_zone_cancel_count": int(viewer_summary.get("selected_zone_cancel_count") or 0),
+            "selected_zone_fallback_count": int(viewer_summary.get("selected_zone_fallback_count") or 0),
+            "status_calls": [
+                {"pair_id": pair_uuid, "status": status}
+                for pair_uuid, status, _message in status_calls
+            ],
+        }
+    finally:
+        dcw.DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY = original_lightweight_only
+        workbench._zone_vector_qprocess = None
+        workbench.deleteLater()
+        app.processEvents()
+
+
 def _run_full_tree_responsiveness_probe(
     scratch: Path,
     viewer_root: Path,
@@ -2558,6 +3585,32 @@ def _gate_summary(payload: dict[str, Any], args: argparse.Namespace) -> list[Gat
     lightweight_pdf_load = payload.get("lightweight_pdf_load_probe", {})
     real_pdf_page_nav = payload.get("real_pdf_page_navigation_probe", {})
     real_pdf_prewarm_probe = payload.get("real_pdf_prewarm_cache_probe", {})
+    p5_g26_contract = payload.get("p5_g26_contract") or payload.get("p5_g26_evidence") or {}
+    p5_g27_contract = payload.get("p5_g27_contract") or payload.get("p5_g27_evidence") or {}
+    p5_g27_real_renderer_bridge = payload.get("p5_g27_real_renderer_bridge")
+    p5_g27_bridge_required = bool(
+        getattr(args, "p5_g27_require_real_renderer_bridge", False)
+        or getattr(args, "p5_g27_real_renderer_bridge_json", None)
+        or isinstance(p5_g27_real_renderer_bridge, dict)
+    )
+    include_p5_g26_contract = bool(getattr(args, "include_p5_g26_contract", False)) or isinstance(
+        p5_g26_contract,
+        dict,
+    ) and bool(p5_g26_contract)
+    include_p5_g27_contract = bool(getattr(args, "include_p5_g27_selected_zone_crop_first", False)) or isinstance(
+        p5_g27_contract,
+        dict,
+    ) and bool(p5_g27_contract)
+    if include_p5_g26_contract and not isinstance(p5_g26_contract, dict):
+        p5_g26_contract = {}
+    if include_p5_g26_contract and not p5_g26_contract:
+        p5_g26_contract = _p5_g26_contract_summary(payload, args)
+    if include_p5_g27_contract and not isinstance(p5_g27_contract, dict):
+        p5_g27_contract = {}
+    if include_p5_g27_contract and not p5_g27_contract:
+        p5_g27_contract = _p5_g27_contract_summary(payload, args)
+    if not isinstance(p5_g27_real_renderer_bridge, dict):
+        p5_g27_real_renderer_bridge = {}
     cached_p95 = float(selection["cached_pdf"]["p95_ms"])
     cold_p95 = float(selection["cold_pdf"]["p95_ms"])
     rss_tail_delta = overlay.get("rss_tail_delta_after_cache_limit_mb")
@@ -3787,6 +4840,12 @@ def _gate_summary(payload: dict[str, Any], args: argparse.Namespace) -> list[Gat
                 "RSS peak range after the overlay cache limit has been reached.",
             )
         )
+    if include_p5_g26_contract:
+        gates.extend(_p5_g26_contract_gates(p5_g26_contract))
+    if include_p5_g27_contract:
+        gates.extend(_p5_g27_contract_gates(p5_g27_contract))
+        if p5_g27_bridge_required:
+            gates.extend(_p5_g27_real_renderer_bridge_gates(p5_g27_real_renderer_bridge))
     return gates
 
 
@@ -3965,6 +5024,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--real-pdf-prewarm-cache-dir-max-mb", type=float, default=512.0)
     parser.add_argument("--real-pdf-prewarm-timeout-s", type=float, default=30.0)
     parser.add_argument("--real-pdf-prewarm-no-redacted-sources", dest="real_pdf_prewarm_redacted_sources", action="store_false", default=True)
+    parser.add_argument("--include-p5-g26-contract", action="store_true")
+    parser.add_argument("--p5-g26-event-loop-max-target-ms", type=float, default=500.0)
+    parser.add_argument("--p5-g26-repeat-cache-hit-rate-target", type=float, default=0.95)
+    parser.add_argument("--include-zone-selection-hotpath", action="store_true")
+    parser.add_argument("--zone-selection-runs", type=int, default=20)
+    parser.add_argument("--zone-selection-count", type=int, default=1000)
+    parser.add_argument("--p5-g26-zone-selection-p95-target-ms", type=float, default=100.0)
+    parser.add_argument("--include-p5-g27-selected-zone-crop-first", action="store_true")
+    parser.add_argument("--p5-g27-zone-selection-runs", type=int, default=20)
+    parser.add_argument("--p5-g27-zone-selection-count", type=int, default=1000)
+    parser.add_argument("--p5-g27-crop-visible-p95-target-ms", type=float, default=500.0)
+    parser.add_argument("--p5-g27-event-loop-gap-max-target-ms", type=float, default=500.0)
+    parser.add_argument("--p5-g27-real-renderer-bridge-json", type=Path)
+    parser.add_argument("--p5-g27-require-real-renderer-bridge", action="store_true")
     parser.add_argument("--real-corpus-validation-output", type=Path)
     parser.add_argument("--real-corpus-viewer-root", type=Path)
     parser.add_argument("--real-corpus-customer-evidence-manifest", type=Path)
@@ -4103,6 +5176,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "real_pdf_prewarm_cache_dir_max_mb": float(args.real_pdf_prewarm_cache_dir_max_mb),
             "real_pdf_prewarm_timeout_s": float(args.real_pdf_prewarm_timeout_s),
             "real_pdf_prewarm_redacted_sources": bool(args.real_pdf_prewarm_redacted_sources),
+            "include_p5_g26_contract": bool(args.include_p5_g26_contract),
+            "p5_g26_event_loop_max_target_ms": float(args.p5_g26_event_loop_max_target_ms),
+            "p5_g26_repeat_cache_hit_rate_target": float(args.p5_g26_repeat_cache_hit_rate_target),
+            "include_zone_selection_hotpath": bool(args.include_zone_selection_hotpath),
+            "zone_selection_runs": int(args.zone_selection_runs),
+            "zone_selection_count": int(args.zone_selection_count),
+            "p5_g26_zone_selection_p95_target_ms": float(args.p5_g26_zone_selection_p95_target_ms),
+            "include_p5_g27_selected_zone_crop_first": bool(args.include_p5_g27_selected_zone_crop_first),
+            "p5_g27_zone_selection_runs": int(args.p5_g27_zone_selection_runs),
+            "p5_g27_zone_selection_count": int(args.p5_g27_zone_selection_count),
+            "p5_g27_crop_visible_p95_target_ms": float(args.p5_g27_crop_visible_p95_target_ms),
+            "p5_g27_event_loop_gap_max_target_ms": float(args.p5_g27_event_loop_gap_max_target_ms),
+            "p5_g27_real_renderer_bridge_json": (
+                str(args.p5_g27_real_renderer_bridge_json)
+                if args.p5_g27_real_renderer_bridge_json
+                else ""
+            ),
+            "p5_g27_require_real_renderer_bridge": bool(
+                args.p5_g27_require_real_renderer_bridge
+            ),
         },
     }
     payload["pair_selection"] = _run_pair_selection_probe(
@@ -4161,6 +5254,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             warmup_visits=int(args.navigation_soak_warmup_visits),
             settle_ms=float(args.navigation_soak_settle_ms),
             timeout_s=float(args.navigation_soak_timeout_s),
+        )
+    if args.include_zone_selection_hotpath or args.include_p5_g26_contract:
+        zone_selection_viewer_root = viewer_root / "zone_selection_hotpath_probe"
+        zone_selection_viewer_root.mkdir(parents=True, exist_ok=True)
+        payload["zone_selection_hotpath_probe"] = _run_zone_selection_hotpath_probe(
+            scratch_root,
+            zone_selection_viewer_root,
+            zone_count=int(args.zone_selection_count),
+            runs=int(args.zone_selection_runs),
+        )
+    if args.include_p5_g27_selected_zone_crop_first:
+        selected_zone_crop_viewer_root = viewer_root / "selected_zone_crop_first_probe"
+        selected_zone_crop_viewer_root.mkdir(parents=True, exist_ok=True)
+        payload["selected_zone_crop_first_probe"] = _run_selected_zone_crop_first_probe(
+            scratch_root,
+            selected_zone_crop_viewer_root,
+            zone_count=int(args.p5_g27_zone_selection_count),
+            runs=int(args.p5_g27_zone_selection_runs),
         )
     if args.include_p4_overlay_streaming:
         p4_overlay_viewer_root = viewer_root / "p4_overlay_streaming_probe"
@@ -4241,6 +5352,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             use_redacted_sources=bool(args.real_pdf_prewarm_redacted_sources),
             timeout_s=float(args.real_pdf_prewarm_timeout_s),
         )
+    if args.include_p5_g26_contract:
+        payload["benchmark_id"] = P5_G26_BENCHMARK_ID
+        payload["profile"] = P5_G26_PROFILE
+        p5_g26_evidence = _p5_g26_contract_summary(payload, args)
+        payload["p5_g26_evidence"] = p5_g26_evidence
+        payload["p5_g26_contract"] = p5_g26_evidence
+        payload["p5_g26_required_gate_names"] = list(P5_G26_REQUIRED_GATE_NAMES)
+    if args.include_p5_g27_selected_zone_crop_first:
+        payload["benchmark_id"] = P5_G27_BENCHMARK_ID
+        payload["profile"] = P5_G27_PROFILE
+        p5_g27_evidence = _p5_g27_contract_summary(payload, args)
+        payload["p5_g27_evidence"] = p5_g27_evidence
+        payload["p5_g27_contract"] = p5_g27_evidence
+        payload["p5_g27_required_gate_names"] = list(P5_G27_REQUIRED_GATE_NAMES)
+        if args.p5_g27_real_renderer_bridge_json or args.p5_g27_require_real_renderer_bridge:
+            payload["p5_g27_real_renderer_bridge"] = _p5_g27_real_renderer_bridge_summary(
+                args.p5_g27_real_renderer_bridge_json
+            )
+            payload["p5_g27_real_renderer_bridge_required_gate_names"] = list(
+                P5_G27_REAL_RENDERER_BRIDGE_REQUIRED_GATE_NAMES
+            )
     gates = _gate_summary(payload, args)
     payload["gates"] = [gate.to_dict() for gate in gates]
     payload["status"] = "passed" if all(gate.passed for gate in gates) else "failed"

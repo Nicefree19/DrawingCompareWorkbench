@@ -24,6 +24,7 @@ def test_audit_passes_closeout_dry_run_readiness(tmp_path: Path, monkeypatch) ->
     assert checks["final_audit_results_dir_purity"]["passed"] is True
     assert checks["proof_and_corpus_routing"]["passed"] is True
     assert checks["p5_g16_replay_routing"]["passed"] is True
+    assert checks["p5_g27_selected_zone_crop_routing"]["passed"] is True
     assert checks["tile_cache_env_isolation"]["passed"] is True
 
 
@@ -145,6 +146,66 @@ def test_audit_rejects_standard_and_proof_dir_overlap(
     assert "standard_result_dirs and proof dirs overlap" in check["detail"]
 
 
+def test_audit_validates_explicit_p5_g27_selected_zone_crop_routing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        include_p5_g27=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    expected = plan["p5_g27_selected_zone_crop_jsons"]
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "passed"
+    assert checks["p5_g27_selected_zone_crop_routing"]["passed"] is True
+    assert checks["p5_g27_selected_zone_crop_routing"]["evidence"] == expected
+
+
+def test_audit_rejects_mismatched_p5_g27_selected_zone_crop_routing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    readiness_json, plan_json = _write_closeout_readiness_packet(
+        tmp_path,
+        monkeypatch,
+        include_p5_g27=True,
+    )
+    plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    final_step = next(
+        step for step in plan["steps"] if step["name"] == "final_customer_grade_audit"
+    )
+    flag_index = final_step["command"].index("--p5-g27-selected-zone-crop-json")
+    final_step["command"][flag_index + 1] = str(tmp_path / "wrong_p5_g27.json")
+    plan["invariants"]["final_audit_p5_g27_selected_zone_crop_jsons_equal_plan"] = False
+    plan_json.write_text(json.dumps(plan), encoding="utf-8")
+
+    report = audit.run_audit(
+        readiness_json=readiness_json,
+        plan_json=plan_json,
+        require_ready=True,
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert report["status"] == "failed"
+    assert checks["p5_g27_selected_zone_crop_routing"]["passed"] is False
+    assert "final audit --p5-g27-selected-zone-crop-json values must equal" in checks[
+        "p5_g27_selected_zone_crop_routing"
+    ]["detail"]
+    assert checks["plan_invariants"]["passed"] is False
+    assert "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan" in checks[
+        "plan_invariants"
+    ]["detail"]
+
+
 def test_audit_rejects_mismatched_tile_cache_env_on_generated_proof_step(
     tmp_path: Path,
     monkeypatch,
@@ -209,6 +270,7 @@ def _write_closeout_readiness_packet(
     monkeypatch,
     *,
     generated_proof: bool = False,
+    include_p5_g27: bool = False,
 ) -> tuple[Path, Path]:
     source = _write_source_checkout(tmp_path / "source")
     standard_dir = tmp_path / "standard_validation"
@@ -246,6 +308,10 @@ def _write_closeout_readiness_packet(
         argv.extend(["--p5-g7-proof-validation-manifest", str(proof_manifest)])
     else:
         argv.extend(["--p5-g7-tile-eviction-proof-dir", str(proof_dir)])
+    if include_p5_g27:
+        p5_g27 = tmp_path / "p5_g27_selected_zone_crop_soak.json"
+        p5_g27.write_text("{}", encoding="utf-8")
+        argv.extend(["--p5-g27-selected-zone-crop-json", str(p5_g27)])
     assert closeout.main(argv) == 0
     return readiness_json, plan_json
 

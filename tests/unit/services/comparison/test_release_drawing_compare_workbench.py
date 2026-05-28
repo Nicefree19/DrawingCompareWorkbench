@@ -476,6 +476,7 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     large_dwg_probe = tmp_path / "large_dwg_probe.json"
     p5_g16 = tmp_path / "p5_g16_real_corpus_replay.json"
     p5_g22 = tmp_path / "p5_g22_actual_gui_soak.json"
+    p5_g27 = tmp_path / "p5_g27_selected_zone_crop_soak.json"
     release_manifest = out_dir / "release_manifest.json"
     audit_json = out_dir / "mvp_exit_audit.json"
     old_dir.mkdir()
@@ -487,6 +488,7 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     large_dwg_probe.write_text("{}", encoding="utf-8")
     p5_g16.write_text("{}", encoding="utf-8")
     p5_g22.write_text("{}", encoding="utf-8")
+    p5_g27.write_text("{}", encoding="utf-8")
 
     args = release.parse_args(
         [
@@ -505,6 +507,8 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
             str(p5_g16),
             "--p5-g22-gui-soak-json",
             str(p5_g22),
+            "--p5-g27-selected-zone-crop-json",
+            str(p5_g27),
             "--require-large-dwg-probe",
             "--require-p5-g3-tile-eviction",
             "--p5-g3-min-tile-evicted-pairs",
@@ -542,10 +546,42 @@ def test_release_mvp_exit_audit_command_uses_customer_manifest_and_extra_dirs(tm
     assert "--require-p5-g3-realset-gate" in command
     assert command[command.index("--p5-g16-benchmark-json") + 1] == str(p5_g16.resolve())
     assert command[command.index("--p5-g22-gui-soak-json") + 1] == str(p5_g22.resolve())
+    assert command[command.index("--p5-g27-selected-zone-crop-json") + 1] == str(p5_g27.resolve())
     assert "--require-p5-g3-tile-eviction" in command
     assert command[command.index("--p5-g3-min-tile-evicted-pairs") + 1] == "2"
     assert command[command.index("--p5-g3-min-tile-evicted-bytes") + 1] == "4096"
     assert command[command.index("--p5-g6-tile-cache-mb") + 1] == "0.25"
+
+
+def test_release_accepts_p5_g27_selected_zone_crop_soak_alias(tmp_path: Path) -> None:
+    out_dir = tmp_path / "release"
+    p5_g27 = tmp_path / "p5_g27_selected_zone_crop_soak.json"
+    p5_g27.write_text("{}", encoding="utf-8")
+
+    args = release.parse_args(
+        [
+            "--out",
+            str(out_dir),
+            "--skip-realset",
+            "--p5-g27-selected-zone-crop-soak",
+            str(p5_g27),
+        ]
+    )
+
+    assert args.p5_g27_selected_zone_crop_json == [p5_g27]
+
+
+def test_release_rejects_missing_p5_g27_selected_zone_crop_json(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        release.parse_args(
+            [
+                "--out",
+                str(tmp_path / "release"),
+                "--skip-realset",
+                "--p5-g27-selected-zone-crop-json",
+                str(tmp_path / "missing_p5_g27.json"),
+            ]
+        )
 
 
 def test_release_mvp_exit_audit_sees_customer_package_audit_artifact(tmp_path: Path, monkeypatch) -> None:
@@ -642,10 +678,15 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "--p5-g22-gui-soak-json" in readme
     assert "p5_g16_real_corpus_replay.json" in readme
     assert "p5_g22_actual_gui_soak.json" in readme
+    assert "--p5-g27-selected-zone-crop-json <p5_g27_selected_zone_crop_soak.json>" in readme
+    assert "p5_g27_selected_zone_crop_soak.json" in readme
+    assert "p5_g27_real_renderer_bridge" in readme
+    assert "nonblank real selected-zone render artifacts" in readme
     assert "routing_expectations.p5_g16_real_corpus_replay_generation_enabled" in readme
     assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in readme
     assert "plan.invariants.final_audit_p5_g16_benchmark_jsons_equal_plan=true" in readme
     assert "plan.invariants.final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in readme
+    assert "plan.invariants.final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in readme
     assert "--dry-run --plan-json <closeout_plan.json> --readiness-json <closeout_readiness.json>" in readme
     assert "--require-ready --out <closeout_readiness_audit.json>" in readme
     assert "closeout_readiness_audit.json" in readme
@@ -766,6 +807,11 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "P5-G22 actual GUI soak passes" in prompt_checklist
     assert "p5_g22_actual_gui_soak.json" in prompt_checklist
     assert "final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in prompt_checklist
+    assert "P5-G27 selected-zone crop-first soak passes" in prompt_checklist
+    assert "p5_g27_selected_zone_crop_soak.json" in prompt_checklist
+    assert "p5_g27_real_renderer_bridge" in prompt_checklist
+    assert "real selected-zone render artifacts are nonblank/present" in prompt_checklist
+    assert "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in prompt_checklist
     assert "closeout_readiness.json" in prompt_checklist
     assert "closeout_readiness_audit.json" in prompt_checklist
     assert "preflight.issue_count=0" in prompt_checklist
@@ -797,6 +843,11 @@ def test_release_templates_include_mvp_exit_audit_tool(tmp_path: Path) -> None:
     assert "p5_g22_actual_gui_soak.json" in closeout_packet
     assert "routing_expectations.p5_g22_actual_gui_soak_generation_enabled" in closeout_packet
     assert "final_audit_p5_g22_gui_soak_jsons_equal_plan=true" in closeout_packet
+    assert "p5_g27_selected_zone_crop_soak.json" in closeout_packet
+    assert "supplied P5-G27 crop-first JSON is not routed" in closeout_packet
+    assert "p5_g27_real_renderer_bridge" in closeout_packet
+    assert "crop-first lifecycle safety to real nonblank selected-zone render artifacts" in closeout_packet
+    assert "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan=true" in closeout_packet
     assert "closeout_readiness_audit.json" in closeout_packet
     assert "closeout_readiness.json" in closeout_packet
     assert "status=preflight_failed" in closeout_packet
@@ -908,8 +959,10 @@ def test_release_manifest_lists_operator_checklist_template(tmp_path: Path, monk
     old_dir = tmp_path / "old"
     new_dir = tmp_path / "new"
     out_dir = tmp_path / "release"
+    p5_g27 = tmp_path / "p5_g27_selected_zone_crop_soak.json"
     old_dir.mkdir()
     new_dir.mkdir()
+    p5_g27.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(release, "_oda_preflight", lambda python: {"status": "skipped"})
     monkeypatch.setattr(release, "_run_step", lambda *args, **kwargs: 0)
 
@@ -926,12 +979,18 @@ def test_release_manifest_lists_operator_checklist_template(tmp_path: Path, monk
             "--skip-build",
             "--skip-workbench-acceptance",
             "--skip-packaged-launch-smoke",
+            "--p5-g27-selected-zone-crop-json",
+            str(p5_g27),
         ]
     )
 
     assert code == 0
     manifest = json.loads((out_dir / "release_manifest.json").read_text(encoding="utf-8"))
     assert "cli_runner" not in manifest["artifacts"]
+    assert manifest["artifacts"]["p5_g27_selected_zone_crop_json"] == str(p5_g27.resolve())
+    assert manifest["artifacts"]["p5_g27_selected_zone_crop_jsons"] == [
+        str(p5_g27.resolve())
+    ]
     checklist = Path(manifest["artifacts"]["operator_dry_run_checklist_template"])
     assert checklist.name == "operator_dry_run_checklist_template.md"
     assert checklist.exists()

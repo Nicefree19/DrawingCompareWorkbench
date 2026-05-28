@@ -186,6 +186,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--p5-g22-zone-render-wait-ms", type=float, default=250.0)
     parser.add_argument("--p5-g22-min-page-navigation-count", type=int, default=0)
     parser.add_argument(
+        "--p5-g27-selected-zone-crop-json",
+        "--p5-g27-selected-zone-crop-soak",
+        dest="p5_g27_selected_zone_crop_json",
+        type=Path,
+        action="append",
+        default=[],
+        help="Existing P5-G27 selected-zone crop-first JSON to forward to manifest preparation and final audit.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate inputs and print/write the command plan without running subprocesses.",
@@ -309,6 +318,9 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
     p5_g22_gui_soak_jsons = _unique_paths(
         [*[path.resolve() for path in args.p5_g22_gui_soak_json], *generated_p5_g22_gui_soak_jsons]
     )
+    p5_g27_selected_zone_crop_jsons = _unique_paths(
+        [path.resolve() for path in args.p5_g27_selected_zone_crop_json]
+    )
 
     inventory_json = (args.inventory_json or out_dir / "inventory.json").resolve()
     audit_json = (args.audit_json or out_dir / "mvp_exit_audit.json").resolve()
@@ -324,6 +336,7 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         generated_p5_g16_benchmark_jsons=generated_p5_g16_benchmark_jsons,
         p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
         generated_p5_g22_gui_soak_jsons=generated_p5_g22_gui_soak_jsons,
+        p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
         inventory_json=inventory_json,
         audit_json=audit_json,
         failure_json=failure_json,
@@ -352,6 +365,9 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
             "p5_g7_tile_eviction_proof_dirs": [str(path) for path in proof_dirs],
             "p5_g16_benchmark_jsons": [str(path) for path in p5_g16_benchmark_jsons],
             "p5_g22_gui_soak_jsons": [str(path) for path in p5_g22_gui_soak_jsons],
+            "p5_g27_selected_zone_crop_jsons": [
+                str(path) for path in p5_g27_selected_zone_crop_jsons
+            ],
             "inventory_json": str(inventory_json),
             "customer_evidence_manifest": str(args.customer_evidence_manifest.resolve()),
             "audit_json": str(audit_json),
@@ -396,6 +412,9 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         "p5_g7_tile_eviction_proof_dirs": [str(path) for path in proof_dirs],
         "p5_g16_benchmark_jsons": [str(path) for path in p5_g16_benchmark_jsons],
         "p5_g22_gui_soak_jsons": [str(path) for path in p5_g22_gui_soak_jsons],
+        "p5_g27_selected_zone_crop_jsons": [
+            str(path) for path in p5_g27_selected_zone_crop_jsons
+        ],
         "inventory_json": str(inventory_json),
         "customer_evidence_manifest": str(args.customer_evidence_manifest.resolve()),
         "audit_json": str(audit_json),
@@ -488,6 +507,8 @@ def _preflight_issues(
         _require_file(issues, "--p5-g16-benchmark-json", path)
     for path in args.p5_g22_gui_soak_json:
         _require_file(issues, "--p5-g22-gui-soak-json", path)
+    for path in args.p5_g27_selected_zone_crop_json:
+        _require_file(issues, "--p5-g27-selected-zone-crop-json", path)
     for path in args.standard_results_dir:
         _require_validation_output(issues, "--standard-results-dir", path)
         if _is_forced_tile_eviction_output(path):
@@ -553,6 +574,9 @@ def _build_readiness_report(
             ),
             "p5_g16_benchmark_jsons": _path_strings(args.p5_g16_benchmark_json),
             "p5_g22_gui_soak_jsons": _path_strings(args.p5_g22_gui_soak_json),
+            "p5_g27_selected_zone_crop_jsons": _path_strings(
+                args.p5_g27_selected_zone_crop_json
+            ),
             "release_manifest": str(args.release_manifest.resolve()),
             "large_dwg_probe": str(args.large_dwg_probe.resolve()),
             "review_ground_truth": str(args.review_ground_truth.resolve()),
@@ -599,6 +623,7 @@ def _build_readiness_report(
             "p5_g22_timeout_s": args.p5_g22_timeout_s,
             "p5_g22_zone_render_wait_ms": args.p5_g22_zone_render_wait_ms,
             "p5_g22_min_page_navigation_count": args.p5_g22_min_page_navigation_count,
+            "p5_g27_selected_zone_crop_json_count": len(args.p5_g27_selected_zone_crop_json),
         },
         "plan": _readiness_plan_summary(plan),
     }
@@ -849,6 +874,7 @@ def _build_command_plan(
     generated_p5_g16_benchmark_jsons: Sequence[Path],
     p5_g22_gui_soak_jsons: Sequence[Path],
     generated_p5_g22_gui_soak_jsons: Sequence[Path],
+    p5_g27_selected_zone_crop_jsons: Sequence[Path],
     inventory_json: Path,
     audit_json: Path,
     failure_json: Path,
@@ -881,6 +907,7 @@ def _build_command_plan(
                 proof_dirs=proof_dirs,
                 p5_g16_benchmark_jsons=p5_g16_benchmark_jsons,
                 p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
+                p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
             ),
         },
         *[
@@ -924,6 +951,7 @@ def _build_command_plan(
                 standard_result_dirs=standard_result_dirs,
                 p5_g16_benchmark_jsons=p5_g16_benchmark_jsons,
                 p5_g22_gui_soak_jsons=p5_g22_gui_soak_jsons,
+                p5_g27_selected_zone_crop_jsons=p5_g27_selected_zone_crop_jsons,
                 audit_json=audit_json,
             ),
         },
@@ -941,6 +969,9 @@ def _build_command_plan(
         "p5_g22_gui_soak_jsons": [str(path) for path in p5_g22_gui_soak_jsons],
         "generated_p5_g22_gui_soak_jsons": [
             str(path) for path in generated_p5_g22_gui_soak_jsons
+        ],
+        "p5_g27_selected_zone_crop_jsons": [
+            str(path) for path in p5_g27_selected_zone_crop_jsons
         ],
         "inventory_json": str(inventory_json),
         "customer_evidence_manifest": str(args.customer_evidence_manifest.resolve()),
@@ -963,6 +994,11 @@ def _build_command_plan(
                 "--p5-g22-gui-soak-json",
             )
             == [str(path) for path in p5_g22_gui_soak_jsons],
+            "final_audit_p5_g27_selected_zone_crop_jsons_equal_plan": _values_after(
+                steps[-1]["command"],
+                "--p5-g27-selected-zone-crop-json",
+            )
+            == [str(path) for path in p5_g27_selected_zone_crop_jsons],
         },
         "steps": steps,
     }
@@ -1096,6 +1132,7 @@ def _prepare_command(
     proof_dirs: Sequence[Path],
     p5_g16_benchmark_jsons: Sequence[Path],
     p5_g22_gui_soak_jsons: Sequence[Path],
+    p5_g27_selected_zone_crop_jsons: Sequence[Path],
 ) -> list[str]:
     command = [
         args.python,
@@ -1149,6 +1186,8 @@ def _prepare_command(
         command.extend(["--p5-g16-benchmark-json", str(benchmark_json)])
     for soak_json in p5_g22_gui_soak_jsons:
         command.extend(["--p5-g22-gui-soak-json", str(soak_json)])
+    for crop_json in p5_g27_selected_zone_crop_jsons:
+        command.extend(["--p5-g27-selected-zone-crop-json", str(crop_json)])
     for release_manifest in args.p5_g7_tile_eviction_release_manifest:
         command.extend(["--p5-g7-tile-eviction-release-manifest", str(release_manifest)])
     if args.operator_screenshots_dir:
@@ -1170,6 +1209,7 @@ def _audit_command(
     standard_result_dirs: Sequence[Path],
     p5_g16_benchmark_jsons: Sequence[Path],
     p5_g22_gui_soak_jsons: Sequence[Path],
+    p5_g27_selected_zone_crop_jsons: Sequence[Path],
     audit_json: Path,
 ) -> list[str]:
     command = [
@@ -1204,6 +1244,8 @@ def _audit_command(
         command.extend(["--p5-g16-benchmark-json", str(benchmark_json)])
     for soak_json in p5_g22_gui_soak_jsons:
         command.extend(["--p5-g22-gui-soak-json", str(soak_json)])
+    for crop_json in p5_g27_selected_zone_crop_jsons:
+        command.extend(["--p5-g27-selected-zone-crop-json", str(crop_json)])
     if args.strict_zone_render_budget:
         command.append("--strict-zone-render-budget")
     return command
@@ -1322,6 +1364,10 @@ def _command_context(command: Sequence[str]) -> dict[str, Any]:
         "validation_summary": _values_after(command, "--validation-summary"),
         "p5_g16_benchmark_json": _values_after(command, "--p5-g16-benchmark-json"),
         "p5_g22_gui_soak_json": _values_after(command, "--p5-g22-gui-soak-json"),
+        "p5_g27_selected_zone_crop_json": _values_after(
+            command,
+            "--p5-g27-selected-zone-crop-json",
+        ),
     }
 
 
