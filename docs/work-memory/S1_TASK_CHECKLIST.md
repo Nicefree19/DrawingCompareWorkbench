@@ -29,16 +29,18 @@
 - [x] commit
 - [x] 사용자 검증 요청 → 사용자 옵션 4 (task_checklist 업데이트 후 모두 commit) 승인
 
-### S1.2 — silent fallback 정밀 inventory
-- [ ] Read `src/services/comparison/zone_vector_renderer.py` (전체)
-- [ ] Read `src/gui/lightweight_viewport.py` (전체)
-- [ ] Read `src/services/comparison/ai_classifier/embedding_classifier.py`
-- [ ] Grep 추가 fallback 패턴 (`fallback`, `recover`, `using cached`, `unavailable`)
-- [ ] Write `docs/work-memory/S1_silent_fallback_inventory.md`
-  - [ ] 7개 후보 각각 파일/라인/현재 동작/이미 가시화 여부
-  - [ ] 작업 대상 N개 / 스킵 M개 결론
-- [ ] commit "S1.2: inventory silent fallback points"
-- [ ] 사용자 검증 요청
+### S1.2 — silent fallback 정밀 inventory ✅ 완료 (2026-05-28)
+- [x] Read `src/services/comparison/zone_vector_renderer.py` (핵심 영역 130-220, 620-660)
+- [x] Read `src/gui/lightweight_viewport.py` (핵심 영역 65-115, 585-615)
+- [x] Read `src/services/comparison/ai_classifier/embedding_classifier.py` (핵심 영역 410-500)
+- [x] Grep 추가 fallback 패턴 — DWG_UNSUPPORTED_VERSION이 dwg_importer.py:54에 정식 enum으로 존재함을 발견
+- [x] Write `docs/work-memory/S1_SILENT_FALLBACK_INVENTORY.md`
+  - [x] 7개 후보 (확장 8개) 모두 파일/라인/현재 동작 정리
+  - [x] 작업 대상 7개 (Option A, zone crop 제외) / 후속 1개 (Point 7)
+  - [x] enum 확장 결정 사항 정리 (Option A 권장: `dwg_vector_normalise_failed` 추가)
+  - [x] 기존 `DwgFailureCode`와 `skipped_reason` 필드 연동 기회 발견
+- [x] commit (다음 단계)
+- [x] 사용자 검증 요청 ← 다음 응답에서
 
 ### S1.3 — 발신 통합 (N개 지점)
 S1.2 결과에 따라 결정. 각 지점마다:
