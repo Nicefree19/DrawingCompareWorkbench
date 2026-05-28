@@ -105,14 +105,29 @@ S1.2 inventory 결과: 7개 지점 작업 (Point 7 zone crop stale 제외 — �
 - [x] commit per sub-slice (S1.3.1~5 모두 별도 commit)
 - [x] 사용자 검증 요청 (각 sub-slice 종료 시)
 
-### S1.4 — FailureBadge GUI 위젯
-- [ ] Read 기존 GUI 위젯 패턴 (`src/gui/region_match_dialog.py` 참고)
-- [ ] Write `src/gui/failure_badge.py` (~200줄)
-- [ ] Write `tests/unit/gui/test_failure_badge.py` (~120줄, 오프스크린 Qt)
-- [ ] Run pytest
-- [ ] git diff --stat (monolith 0줄 확인)
-- [ ] commit "S1.4: add FailureBadge widget"
-- [ ] 사용자 검증 요청
+### S1.4 — FailureBadge GUI 위젯 ✅ 완료 (2026-05-28)
+- [x] Read 기존 GUI 위젯 패턴 (정보 — lightweight_viewport.py, region_match_dialog.py)
+- [x] Write `src/gui/failure_badge.py` (235줄)
+  - [x] `FailureBadge(QWidget)`: 색상 칩 + 클릭 시 상세 다이얼로그
+  - [x] `set_failure_codes(codes)`, `clear()`, `failure_codes()` public API
+  - [x] `codesChanged` Signal (workbench telemetry용, 동일 codes는 재발신 안 함)
+  - [x] `_SEVERITY_PALETTE`: info(회색 #6B7280), warn(앰버 #F59E0B), error(빨강 #DC2626)
+  - [x] `HIDDEN_CODES` 필터링 — `("ok",)` 입력 시 자동 숨김
+  - [x] `_show_details()`: 한국어 다이얼로그 (severity별 메시지 + 조치 + 코드 ID)
+- [x] Write `tests/unit/gui/test_failure_badge.py` (282줄, 14 테스트)
+  - [x] 기본 hidden 상태, 빈/ok-only 입력 hidden
+  - [x] info/warn/error 각 severity palette 확인
+  - [x] mixed severity → highest 색상 선택
+  - [x] count 라벨 + 한국어 검증
+  - [x] tooltip 한국어 검증
+  - [x] clear() 동작
+  - [x] codesChanged signal 발신/비발신 (동일 입력 dedupe)
+  - [x] _show_details 모달 mock으로 한국어 본문 검증
+- [x] Run pytest: **14 passed in 2.47s**
+- [x] cad_policy_gate: passed
+- [x] git diff --stat (monolith 0줄 확인) → 0줄
+- [x] commit
+- [x] 사용자 검증 요청 ← 다음 응답에서
 
 ### S1.5 — once_per_session_logger helper
 - [ ] Write `src/utils/once_per_session_logger.py` (~50줄)
