@@ -236,3 +236,79 @@ def test_failure_badge_show_details_silent_when_no_codes(
     badge._show_details()
 
     assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# S1.6 — collect_viewport_failure_codes helper
+# ---------------------------------------------------------------------------
+
+
+class _FakeViewportWithCodes:
+    """Test double: a viewport-like object that exposes render_failure_codes."""
+
+    def __init__(self, codes) -> None:
+        self._codes = tuple(codes)
+
+    def render_failure_codes(self):
+        return self._codes
+
+
+class _FakeViewportWithoutMethod:
+    """Test double: stands in for QtQuickUnavailableLightweightViewport."""
+
+
+def test_collect_viewport_failure_codes_aggregates_multiple_viewports() -> None:
+    """S1.6: helper concatenates codes from every viewport, in order."""
+    from src.gui.failure_badge import collect_viewport_failure_codes
+
+    a = _FakeViewportWithCodes(["dwg_unsupported_version"])
+    b = _FakeViewportWithCodes(["backend_fallback_canvas_skeleton", "vector_draw_failed"])
+    result = collect_viewport_failure_codes(a, b)
+
+    assert result == (
+        "dwg_unsupported_version",
+        "backend_fallback_canvas_skeleton",
+        "vector_draw_failed",
+    )
+
+
+def test_collect_viewport_failure_codes_treats_missing_method_as_qquickwidget_fallback() -> None:
+    """S1.6: viewport without render_failure_codes() → backend_fallback_qquickwidget.
+
+    Matches the QtQuickUnavailableLightweightViewport scenario where Qt
+    Quick itself is missing and the workbench fell back to the
+    compatibility viewport.
+    """
+    from src.gui.failure_badge import collect_viewport_failure_codes
+
+    a = _FakeViewportWithCodes(["vector_draw_failed"])
+    b = _FakeViewportWithoutMethod()
+    result = collect_viewport_failure_codes(a, b)
+
+    assert "vector_draw_failed" in result
+    assert "backend_fallback_qquickwidget" in result
+    assert len(result) == 2
+
+
+def test_collect_viewport_failure_codes_empty_args_returns_empty_tuple() -> None:
+    """S1.6: zero viewports → empty tuple (no badge will render)."""
+    from src.gui.failure_badge import collect_viewport_failure_codes
+
+    assert collect_viewport_failure_codes() == ()
+
+
+def test_collect_viewport_failure_codes_integrates_with_real_lightweight_viewport() -> None:
+    """S1.6: integration — real LightweightDrawingViewport works with the helper.
+
+    In the unit-test environment QSGLineItem is unavailable, so the
+    real viewport reports at least one code which the helper must
+    propagate.
+    """
+    _ensure_app()
+    from src.gui.lightweight_viewport import LightweightDrawingViewport
+    from src.gui.failure_badge import collect_viewport_failure_codes
+
+    vp = LightweightDrawingViewport()
+    codes = collect_viewport_failure_codes(vp)
+
+    assert "backend_fallback_canvas_skeleton" in codes

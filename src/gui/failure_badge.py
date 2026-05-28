@@ -228,4 +228,35 @@ class FailureBadge(QWidget):
         return super().eventFilter(watched, event)
 
 
-__all__ = ["FailureBadge"]
+def collect_viewport_failure_codes(*viewports) -> Tuple[RenderFailureCode, ...]:
+    """Aggregate ``render_failure_codes()`` output from one or more viewports.
+
+    S1.6: used by the workbench monolith to wire viewport-side failure
+    codes into a single ``FailureBadge`` with one call. Viewport
+    instances without the ``render_failure_codes()`` method (e.g. the
+    ``QtQuickUnavailableLightweightViewport`` fallback used when Qt
+    Quick is unavailable) are treated as emitting
+    ``"backend_fallback_qquickwidget"`` so the badge still surfaces
+    the most degraded case.
+
+    Args:
+        *viewports: any number of viewport-like objects. Each is
+            expected to expose a ``render_failure_codes()`` method
+            returning a tuple of ``RenderFailureCode`` values; objects
+            without the method are treated as the QQuickWidget fallback.
+
+    Returns:
+        A flat tuple of every code across all viewports, in order.
+    """
+
+    collected: list[RenderFailureCode] = []
+    for viewport in viewports:
+        getter = getattr(viewport, "render_failure_codes", None)
+        if callable(getter):
+            collected.extend(getter())
+        else:
+            collected.append("backend_fallback_qquickwidget")
+    return tuple(collected)
+
+
+__all__ = ["FailureBadge", "collect_viewport_failure_codes"]

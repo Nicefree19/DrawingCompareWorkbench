@@ -5629,6 +5629,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             lambda cx, cy, upp: self._on_lightweight_camera_changed_v2("after", cx, cy, upp)
         )
         after_layout.addWidget(self.preview_after_lightweight_v2)
+        from src.gui.failure_badge import FailureBadge, collect_viewport_failure_codes
+        self.failure_badge = FailureBadge(self)
+        self.statusBar().addPermanentWidget(self.failure_badge)
+        self.failure_badge.set_failure_codes(collect_viewport_failure_codes(self.preview_before_lightweight_v2, self.preview_after_lightweight_v2))
 
         views.addWidget(before_box)
         views.addWidget(after_box)
