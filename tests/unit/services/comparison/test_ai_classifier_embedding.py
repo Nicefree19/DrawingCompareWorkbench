@@ -670,3 +670,91 @@ def test_zone_evidence_text_returns_empty_for_blank_zone() -> None:
 
     assert _zone_evidence_text({}) == ""
     assert _zone_evidence_text({"zone_id": "z1"}) == ""
+
+
+# ---------------------------------------------------------------------------
+# S1.3.5 — failure_code surfaced by EmbeddingClassifierDispatcher
+# ---------------------------------------------------------------------------
+
+
+def test_failure_code_is_ok_before_prepare_runs(toy_config) -> None:
+    """S1.3.5: a fresh dispatcher reports failure_code() == 'ok'.
+
+    No prepare() call has run yet, so the silent-fallback path can't
+    have triggered. The badge (S1.4) should show nothing.
+    """
+    from src.services.comparison.ai_classifier import get_embedding_dispatcher
+
+    dispatcher = get_embedding_dispatcher(toy_config)
+    assert dispatcher.failure_code() == "ok"
+
+
+def test_failure_code_stays_ok_after_successful_prepare(toy_config) -> None:
+    """S1.3.5: a successful prepare() leaves failure_code at 'ok'.
+
+    Only BackendUnavailableError should trip the flag — other paths
+    keep AI classification fully operational.
+    """
+    from src.services.comparison.ai_classifier import get_embedding_dispatcher
+
+    dispatcher = get_embedding_dispatcher(toy_config)
+    dispatcher.prepare()
+    assert dispatcher.is_ready()
+    assert dispatcher.failure_code() == "ok"
+
+
+def test_failure_code_set_when_backend_unavailable(tmp_path) -> None:
+    """S1.3.5: BackendUnavailableError sets failure_code to
+    ``ai_heuristic_fallback`` so the GUI badge can show the user that
+    AI classification has degraded to heuristic-only.
+    """
+    from src.services.comparison.ai_classifier import (
+        AiClassifierConfig,
+        get_embedding_dispatcher,
+    )
+    from src.services.comparison.ai_classifier.backends import (
+        BackendUnavailableError,
+    )
+
+    cfg = AiClassifierConfig(
+        enabled=True,
+        use_embedding=True,
+        embedding_backend_id="auto",
+        embedding_backend_fallbacks=["not_registered_backend"],
+        cache_dir=str(tmp_path / "cache"),
+    )
+    dispatcher = get_embedding_dispatcher(cfg)
+
+    with pytest.raises(BackendUnavailableError):
+        dispatcher.prepare()
+
+    assert dispatcher.failure_code() == "ai_heuristic_fallback"
+    # last_error remains the existing diagnostic channel — not regressed.
+    assert dispatcher.last_error() is not None
+
+
+def test_failure_code_set_via_prepare_async_route(tmp_path) -> None:
+    """S1.3.5: prepare_async() routes through prepare(), so the
+    failure_code is set even when warmup runs on a background thread.
+    Complements ``test_prepare_async_backend_unavailable_logs_fallback_warning``
+    by asserting the new dispatcher.failure_code() contract alongside
+    the existing log behaviour.
+    """
+    from src.services.comparison.ai_classifier import (
+        AiClassifierConfig,
+        get_embedding_dispatcher,
+    )
+
+    cfg = AiClassifierConfig(
+        enabled=True,
+        use_embedding=True,
+        embedding_backend_id="auto",
+        embedding_backend_fallbacks=["not_registered_backend"],
+        cache_dir=str(tmp_path / "cache"),
+    )
+    dispatcher = get_embedding_dispatcher(cfg)
+    worker = dispatcher.prepare_async()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert dispatcher.failure_code() == "ai_heuristic_fallback"

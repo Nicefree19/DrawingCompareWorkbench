@@ -90,12 +90,20 @@ S1.2 inventory 결과: 7개 지점 작업 (Point 7 zone crop stale 제외 — �
   - [x] pytest: **69 passed in 7.31s** (5 신규 + 64 회귀)
   - [x] cad_policy_gate: passed
   - [x] monolith 0줄
-- [ ] **S1.3.5** — Point 5 통합 (`embedding_classifier.py`)
-  - [ ] `EmbeddingClassifier`에 `failure_code` 속성 + getter
-  - [ ] L422, L484 양 지점에서 `ai_heuristic_fallback` 설정
-  - [ ] 단위 테스트
-- [ ] commit per sub-slice
-- [ ] 사용자 검증 요청 (각 sub-slice 종료 시)
+- [x] **S1.3.5** — Point 5 통합 (`embedding_classifier.py`) ✅ 완료 (2026-05-28)
+  - [x] `EmbeddingClassifierDispatcher`에 `_failure_code: RenderFailureCode = "ok"` 초기화 + `failure_code()` getter
+  - [x] **단일 지점 디자인**: `prepare()`의 except 블록에서 `isinstance(exc, BackendUnavailableError)` 시 발신 (caller 2개를 모두 cover)
+  - [x] 다른 exception (config error 등)은 failure_code 유지 ("ok") — AI 미배치와 다른 버그를 혼동하지 않음
+  - [x] 4 신규 테스트:
+    - failure_code_is_ok_before_prepare_runs (fresh dispatcher 기본값)
+    - failure_code_stays_ok_after_successful_prepare (정상 성공 케이스)
+    - failure_code_set_when_backend_unavailable (sync prepare 직접 호출)
+    - failure_code_set_via_prepare_async_route (background thread 경유)
+  - [x] pytest: **53 passed in 2.40s** (4 신규 + 49 회귀)
+  - [x] cad_policy_gate: passed
+  - [x] monolith 0줄
+- [x] commit per sub-slice (S1.3.1~5 모두 별도 commit)
+- [x] 사용자 검증 요청 (각 sub-slice 종료 시)
 
 ### S1.4 — FailureBadge GUI 위젯
 - [ ] Read 기존 GUI 위젯 패턴 (`src/gui/region_match_dialog.py` 참고)

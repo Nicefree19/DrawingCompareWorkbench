@@ -86,6 +86,7 @@ from .backends import (
     EmbeddingBackend,
     get_backend,
 )
+from ..render_failure_codes import RenderFailureCode
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,12 @@ class EmbeddingClassifierDispatcher:
         self._prepare_lock = threading.Lock()
         self._last_error: Optional[BaseException] = None
         self._prepare_ms: Optional[float] = None
+        # S1.3.5: silent-fallback code surfaced by prepare(). Stays "ok"
+        # until a BackendUnavailableError makes the dispatcher abstain
+        # and the caller (workbench) falls back to heuristic-only
+        # classification. The GUI badge (S1.4) reads failure_code() to
+        # show ℹ️ "AI 임베딩 모델이 없어 휴리스틱 분류로 동작 중".
+        self._failure_code: RenderFailureCode = "ok"
 
     # ---- Lifecycle ------------------------------------------------------
 
@@ -232,6 +239,13 @@ class EmbeddingClassifierDispatcher:
             except BaseException as exc:  # noqa: BLE001
                 self._last_error = exc
                 self._prepared = False
+                # S1.3.5: a BackendUnavailableError means the embedding
+                # path can't run and the workbench will fall back to
+                # heuristic-only classification. Other exceptions stay
+                # "ok" because they indicate a different bug we don't
+                # want to mislabel as the AI-missing fallback.
+                if isinstance(exc, BackendUnavailableError):
+                    self._failure_code = "ai_heuristic_fallback"
                 raise
             finally:
                 self._prepare_ms = (time.perf_counter() - t0) * 1000.0
@@ -431,6 +445,21 @@ class EmbeddingClassifierDispatcher:
 
     def last_error(self) -> Optional[BaseException]:
         return self._last_error
+
+    def failure_code(self) -> RenderFailureCode:
+        """Return the silent-fallback code surfaced by ``prepare()``.
+
+        S1.3.5: returns ``"ai_heuristic_fallback"`` after a
+        ``BackendUnavailableError`` makes the dispatcher abstain;
+        otherwise ``"ok"``. The GUI badge (S1.4) reads this to show
+        ℹ️ "AI 임베딩 모델이 없어 휴리스틱 분류로 동작 중".
+
+        Other exception types from ``prepare()`` keep the code at
+        ``"ok"`` because they indicate a different bug (e.g. config
+        error) that should not masquerade as the AI-missing path.
+        """
+
+        return self._failure_code
 
     def prepare_ms(self) -> Optional[float]:
         return self._prepare_ms
