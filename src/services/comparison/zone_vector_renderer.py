@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from .dxf_read import read_dxf_document_result
+from .render_failure_codes import RenderFailureCode
 from .source_signature import source_cache_filename
 
 logger = logging.getLogger(__name__)
@@ -92,8 +93,16 @@ def resolve_dxf_path(
     source_path: Path,
     *,
     cache_dir: Optional[Path] = None,
+    failure_codes: Optional[list] = None,
 ) -> Path:
     """Return a DXF path usable by ``ezdxf.readfile``.
+
+    S1.3.2: when ``failure_codes`` is a list, the function appends
+    ``"dwg_using_cached_dxf"`` (info) for normal cache reuse and
+    ``"dwg_vector_normalise_failed"`` (warn) when the live conversion
+    failed and a stale cache was substituted. The caller is responsible
+    for forwarding these codes into ``ZoneVectorRenderResult.failure_codes``
+    so the GUI badge can surface them.
 
     The call site may pass a raw DWG path.  DWG inputs are normalized through
     the ODA-free CanonicalDrawing import pipeline and exported to a temporary
@@ -136,6 +145,8 @@ def resolve_dxf_path(
 
     shared_cached = _exact_dwg_differ_cache(src, cache_dir)
     if shared_cached is not None:
+        if failure_codes is not None:
+            failure_codes.append("dwg_using_cached_dxf")
         logger.info("Reusing shared DWG DXF cache for %s -> %s", src.name, shared_cached)
         return shared_cached
 
@@ -149,6 +160,8 @@ def resolve_dxf_path(
     )
     cached = cache_dir / cache_key
     if cached.exists() and cached.stat().st_size > 0:
+        if failure_codes is not None:
+            failure_codes.append("dwg_using_cached_dxf")
         logger.info("Reusing cached DXF for %s -> %s", src.name, cached)
         return cached
 
@@ -188,6 +201,8 @@ def resolve_dxf_path(
                     exc_info=True,
                 )
         if fallback is not None:
+            if failure_codes is not None:
+                failure_codes.append("dwg_vector_normalise_failed")
             logger.warning(
                 "DWG vector normalisation failed for %s; using cached DXF %s: %s",
                 src.name,
@@ -376,7 +391,13 @@ def _append_safe_mleader_primitives(entity, scratch_msp) -> int:
 
 @dataclass(frozen=True)
 class ZoneVectorRenderResult:
-    """Outcome of one zone SVG render — surfaced back to the GUI."""
+    """Outcome of one zone SVG render — surfaced back to the GUI.
+
+    S1.3.2: ``failure_codes`` carries RenderFailureCode values accumulated
+    during the render — DWG cache reuse, vector normalisation fallback,
+    SVG draw failure, truncation, etc. The GUI badge (S1.4) reads this
+    tuple to colour itself by the highest severity.
+    """
 
     svg_path: str
     entity_count: int
@@ -384,6 +405,7 @@ class ZoneVectorRenderResult:
     world_bbox: Tuple[float, float, float, float]
     truncated: bool = False
     skipped_reason: str = ""
+    failure_codes: Tuple[RenderFailureCode, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -393,6 +415,7 @@ class ZoneVectorRenderResult:
             "world_bbox": list(self.world_bbox),
             "truncated": self.truncated,
             "skipped_reason": self.skipped_reason,
+            "failure_codes": list(self.failure_codes),
         }
 
 
@@ -436,6 +459,7 @@ def render_zone_svg(
             elapsed_ms=0.0,
             world_bbox=zone_world_bbox,
             skipped_reason=f"SVG renderer dependencies missing: {_IMPORT_ERROR}",
+            failure_codes=("vector_draw_failed",),
         )
 
     dxf_path = Path(dxf_path)
@@ -446,6 +470,7 @@ def render_zone_svg(
             elapsed_ms=0.0,
             world_bbox=zone_world_bbox,
             skipped_reason=f"DXF source not found: {dxf_path}",
+            failure_codes=("vector_draw_failed",),
         )
 
     # Phase G2.7-COORDFIX — PDF inputs are NOT vector-DXF and must take
@@ -468,8 +493,11 @@ def render_zone_svg(
         )
 
     # DWG inputs are resolved to a cached canonical DXF debug export first.
+    # S1.3.2: resolve_dxf_path appends DWG-cache-related codes to
+    # ``collected_codes`` so we can forward them into the result.
+    collected_codes: list[RenderFailureCode] = []
     try:
-        dxf_path = resolve_dxf_path(dxf_path)
+        dxf_path = resolve_dxf_path(dxf_path, failure_codes=collected_codes)
     except (FileNotFoundError, OSError) as exc:
         return ZoneVectorRenderResult(
             svg_path="",
@@ -477,6 +505,7 @@ def render_zone_svg(
             elapsed_ms=0.0,
             world_bbox=zone_world_bbox,
             skipped_reason=f"DWG normalisation failed: {exc}",
+            failure_codes=tuple(collected_codes) + ("vector_draw_failed",),
         )
 
     start = time.perf_counter()
@@ -495,6 +524,7 @@ def render_zone_svg(
             elapsed_ms=(time.perf_counter() - start) * 1000.0,
             world_bbox=zone_world_bbox,
             skipped_reason=f"ezdxf.readfile failed: {exc}",
+            failure_codes=tuple(collected_codes) + ("vector_draw_failed",),
         )
     msp = doc.modelspace()
     scratch_doc = ezdxf.new("R2010")
@@ -649,6 +679,7 @@ def render_zone_svg(
                 f"SVG draw failed: {type(exc).__name__}: {exc}. "
                 "The raster/background viewer should remain available."
             ),
+            failure_codes=tuple(collected_codes) + ("vector_draw_failed",),
         )
 
     if accepted_count[0] == 0:
@@ -664,6 +695,9 @@ def render_zone_svg(
             elapsed_ms=elapsed_ms,
             world_bbox=padded,
             skipped_reason=_empty_zone_reason(skipped_fragile_count[0]),
+            # S1.3.2: no-content is a normal outcome, not a failure — only
+            # forward DWG-cache codes accumulated by resolve_dxf_path.
+            failure_codes=tuple(collected_codes),
         )
 
     # Page sizing. We size the Page to match the zone bbox aspect so
@@ -713,6 +747,11 @@ def render_zone_svg(
         elapsed_ms,
         output_svg.name,
     )
+    # S1.3.2: success path — forward DWG-cache codes and add
+    # vector_draw_partial when the entity cap truncated the output.
+    success_codes = tuple(collected_codes)
+    if truncated[0]:
+        success_codes = success_codes + ("vector_draw_partial",)
     return ZoneVectorRenderResult(
         svg_path=str(output_svg),
         entity_count=accepted_count[0],
@@ -720,6 +759,7 @@ def render_zone_svg(
         world_bbox=padded,
         truncated=truncated[0],
         skipped_reason=_fragile_skip_reason(skipped_fragile_count[0]),
+        failure_codes=success_codes,
     )
 
 

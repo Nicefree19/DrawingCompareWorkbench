@@ -414,3 +414,173 @@ def test_padding_includes_neighbor_entities(quadrant_dxf: Path, tmp_path: Path) 
     assert with_pad.entity_count >= no_pad.entity_count
     # With huge padding the result must capture multiple entities.
     assert with_pad.entity_count >= 3
+
+
+# ---------------------------------------------------------------------------
+# S1.3.2 — Silent fallback visibility
+# ---------------------------------------------------------------------------
+
+
+def test_zone_vector_render_result_default_failure_codes_is_empty() -> None:
+    """S1.3.2 backward compat: omitting failure_codes yields an empty tuple."""
+
+    result = ZoneVectorRenderResult(
+        svg_path="/tmp/test.svg",
+        entity_count=5,
+        elapsed_ms=10.0,
+        world_bbox=(0.0, 0.0, 100.0, 100.0),
+    )
+    assert result.failure_codes == ()
+
+
+def test_zone_vector_render_result_to_dict_exposes_failure_codes_as_list() -> None:
+    """S1.3.2: serialised payload includes failure_codes as a JSON-friendly list."""
+
+    result = ZoneVectorRenderResult(
+        svg_path="",
+        entity_count=0,
+        elapsed_ms=5.0,
+        world_bbox=(0.0, 0.0, 50.0, 50.0),
+        failure_codes=("dwg_using_cached_dxf", "vector_draw_partial"),
+    )
+
+    payload = result.to_dict()
+
+    assert payload["failure_codes"] == ["dwg_using_cached_dxf", "vector_draw_partial"]
+
+
+def test_resolve_dxf_path_appends_dwg_vector_normalise_failed_on_fallback(
+    tmp_path: Path,
+) -> None:
+    """S1.3.2 Point 6b: same-stem cache fallback after normalisation failure
+    appends ``dwg_vector_normalise_failed`` (warn).
+
+    A ``detail.previous.dxf`` next to an unsupported DWG is only reached
+    via the ``_cached_dxf_fallback`` path that runs **after** the live
+    canonical import has failed — semantically a degraded reuse, not a
+    normal cache hit.
+    """
+
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1032 unsupported native fixture")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    cached = cache_dir / "detail.previous.dxf"
+    cached.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+
+    collected: list = []
+    resolved = resolve_dxf_path(source, cache_dir=cache_dir, failure_codes=collected)
+
+    assert resolved == cached
+    assert "dwg_vector_normalise_failed" in collected
+    # Point 6a code must NOT appear — this is the warn variant, not the
+    # info-level normal-cache-reuse path.
+    assert "dwg_using_cached_dxf" not in collected
+
+
+def test_resolve_dxf_path_appends_dwg_using_cached_dxf_on_shared_cache(
+    tmp_path: Path,
+) -> None:
+    """S1.3.2 Point 6a: shared DwgDiffer cache reuse also appends the code."""
+
+    from src.services.comparison.dwg_differ import DwgDiffer
+
+    source = tmp_path / "shared_detail.dwg"
+    source.write_bytes(b"AC1032 shared cache fixture")
+    cache_dir = tmp_path / "cache"
+    differ = DwgDiffer(
+        config={
+            "use_canonical_pipeline": False,
+            "use_legacy_ezdxf_pipeline": True,
+        },
+        dxf_cache_dir=cache_dir,
+    )
+    cached = differ._dxf_cache_path(source)
+    cached.parent.mkdir(parents=True)
+    cached.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+
+    collected: list = []
+    resolved = resolve_dxf_path(source, cache_dir=cache_dir, failure_codes=collected)
+
+    assert resolved == cached
+    assert collected == ["dwg_using_cached_dxf"]
+
+
+def test_resolve_dxf_path_does_not_append_when_failure_codes_is_none(
+    tmp_path: Path,
+) -> None:
+    """S1.3.2 backward compat: omitting the optional list is a no-op."""
+
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1032 unsupported native fixture")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    cached = cache_dir / "detail.previous.dxf"
+    cached.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+
+    # Existing callers pass no failure_codes — must keep working.
+    resolved = resolve_dxf_path(source, cache_dir=cache_dir)
+
+    assert resolved == cached
+
+
+def test_render_zone_svg_emits_vector_draw_failed_when_dxf_missing(
+    tmp_path: Path,
+) -> None:
+    """S1.3.2 Point 1: missing source DXF produces vector_draw_failed."""
+
+    result = render_zone_svg(
+        dxf_path=tmp_path / "does_not_exist.dxf",
+        zone_world_bbox=(0.0, 0.0, 100.0, 100.0),
+        output_svg=tmp_path / "out.svg",
+    )
+
+    assert result.svg_path == ""
+    assert "vector_draw_failed" in result.failure_codes
+
+
+def test_render_zone_svg_emits_vector_draw_failed_on_frontend_crash(
+    quadrant_dxf: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1.3.2 Point 1: SVG draw exception emits vector_draw_failed.
+
+    Complements ``test_render_zone_svg_returns_failure_when_frontend_crashes``
+    by asserting the new failure_codes field is populated alongside
+    skipped_reason.
+    """
+
+    from src.services.comparison import zone_vector_renderer
+
+    def raise_render_error(self, *args, **kwargs) -> None:
+        raise RuntimeError("bad cad entity")
+
+    monkeypatch.setattr(
+        zone_vector_renderer.Frontend,
+        "draw_entities",
+        raise_render_error,
+    )
+
+    result = render_zone_svg(
+        quadrant_dxf,
+        zone_world_bbox=(0, 0, 200, 200),
+        output_svg=tmp_path / "crash.svg",
+    )
+
+    assert result.svg_path == ""
+    assert "vector_draw_failed" in result.failure_codes
+
+
+def test_render_zone_svg_success_has_no_failure_codes_for_dxf_input(
+    quadrant_dxf: Path, tmp_path: Path,
+) -> None:
+    """S1.3.2: a clean DXF render emits no codes (no DWG cache, no failure)."""
+
+    result = render_zone_svg(
+        quadrant_dxf,
+        zone_world_bbox=(0, 0, 200, 200),
+        output_svg=tmp_path / "clean.svg",
+    )
+
+    # The rendered SVG should exist and no fallback should have triggered.
+    assert result.svg_path != ""
+    assert result.failure_codes == ()

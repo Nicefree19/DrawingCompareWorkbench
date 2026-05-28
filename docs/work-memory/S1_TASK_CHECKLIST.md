@@ -52,12 +52,21 @@ S1.2 inventory 결과: 7개 지점 작업 (Point 7 zone crop stale 제외 — �
   - [x] cad_policy_gate: passed
   - [x] monolith: **0줄 변경**
   - [x] commit
-- [ ] **S1.3.2** — Point 1, 6a, 6b 통합 (`zone_vector_renderer.py`)
-  - [ ] `ZoneVectorRenderResult`에 `failure_code: RenderFailureCode = "ok"` 필드 추가
-  - [ ] Point 1 (line 631-652): `vector_draw_failed` 설정 + 부분 성공 시 `vector_draw_partial`
-  - [ ] Point 6a (line 139, 152, 173): `dwg_using_cached_dxf` 발신
-  - [ ] Point 6b (line 191-197): `dwg_vector_normalise_failed` 발신
-  - [ ] 신규 또는 기존 테스트에 발신 검증 추가
+- [x] **S1.3.2** — Point 1, 6a, 6b 통합 (`zone_vector_renderer.py`) ✅ 완료 (2026-05-28)
+  - [x] `ZoneVectorRenderResult`에 `failure_codes: Tuple[RenderFailureCode, ...] = ()` 필드 추가 (단일 값 대신 누적 가능한 tuple)
+  - [x] `to_dict()` 업데이트 (failure_codes를 JSON-friendly list로 노출)
+  - [x] `resolve_dxf_path()`에 optional `failure_codes: list` 파라미터 추가 (backward compat)
+  - [x] Point 1 (line 631+): `vector_draw_failed` 설정 (exception 시)
+  - [x] Point 1 부분 성공 (truncated[0]): `vector_draw_partial` 설정
+  - [x] Point 6a shared cache (line 139): `dwg_using_cached_dxf` append (severity=info)
+  - [x] Point 6a preview cache (line 152): `dwg_using_cached_dxf` append
+  - [x] Point 6b fallback after failure (line 192): `dwg_vector_normalise_failed` append (severity=warn)
+  - [x] render_zone_svg의 모든 return 지점(7개) failure_codes 전달
+  - [x] 8개 신규 테스트 추가 (default empty, to_dict, 6a shared, 6b fallback, backward compat, dxf missing, frontend crash, clean success)
+  - [x] pytest: **49 passed in 2.61s** (test_zone_vector_renderer 25 + test_render_failure_codes 24)
+  - [x] cad_policy_gate: passed
+  - [x] monolith 0줄
+  - [x] **발견**: 같은 stem `.previous.dxf` 파일은 normal cache hit(6a)가 아닌 fallback(6b) 경로 (테스트 작성 중 발견)
 - [ ] **S1.3.3** — Point 2 통합 (`dwg_importer.py` + `import_pipeline.py`)
   - [ ] `DwgFailureCode` → `RenderFailureCode` mapping 함수 추가
   - [ ] `ImportPipelineResult`에 `render_failure_code` 필드 추가 (선택)
