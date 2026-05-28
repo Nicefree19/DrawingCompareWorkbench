@@ -129,12 +129,25 @@ S1.2 inventory 결과: 7개 지점 작업 (Point 7 zone crop stale 제외 — �
 - [x] commit
 - [x] 사용자 검증 요청 ← 다음 응답에서
 
-### S1.5 — once_per_session_logger helper
-- [ ] Write `src/utils/once_per_session_logger.py` (~50줄)
-- [ ] Write `tests/unit/utils/test_once_per_session_logger.py` (~40줄)
-- [ ] Run pytest
-- [ ] commit "S1.5: add once_per_session_logger helper"
-- [ ] 사용자 검증 요청
+### S1.5 — once_per_session_logger helper ✅ 완료 (2026-05-28)
+- [x] Write `src/utils/once_per_session_logger.py` (94줄)
+  - [x] `log_once(logger, level, key, message, *args, **kwargs) -> bool` — 첫 호출은 level, 이후는 DEBUG `[throttled:<key>]`
+  - [x] `reset_once_per_session_state()` — 테스트 격리용
+  - [x] Thread-safe (module-level Lock)
+  - [x] 빈/invalid key는 throttle 안 함 (defensive)
+- [x] Write `tests/unit/utils/__init__.py` (빈 파일, 디렉토리 신설)
+- [x] Write `tests/unit/utils/test_once_per_session_logger.py` (~150줄, 7 테스트)
+  - [x] first_call_logs_at_requested_level
+  - [x] second_call_with_same_key_is_demoted_to_debug
+  - [x] different_keys_each_emit_at_requested_level
+  - [x] reset_state_allows_first_call_again
+  - [x] empty_or_invalid_key_falls_through (defensive 검증)
+  - [x] log_once_is_thread_safe (20 threads race condition)
+  - [x] args_are_formatted_into_message (%-style format pass-through)
+- [x] Run pytest: **7 passed in 0.33s**
+- [x] cad_policy_gate: passed
+- [x] monolith 0줄
+- [x] commit + push (다음)
 
 ### S1.6 — monolith 통합 + smoke
 - [ ] Read `src/gui/drawing_compare_workbench.py`의 `DrawingCompareWorkbenchV2.__init__` 영역
