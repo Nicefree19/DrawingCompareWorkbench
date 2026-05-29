@@ -26,14 +26,16 @@ it imports in microseconds and is safe in worker subprocesses + tests.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from .transform import (
     Bbox,
+    COORD_CAD_WCS_MM,
     PixelSize,
     TransformQuality,
     cad_world_to_image_pixels_bbox,
     normalise_bbox,
+    normalize_coordinate_space,
 )
 
 #: Relative aspect-ratio difference below which alignment is "exact".
@@ -183,8 +185,51 @@ def align_cad_to_pdf(
     )
 
 
+def build_display_overlays(
+    change_zones: Sequence[dict],
+    alignment: CadPdfAlignment,
+) -> List[dict]:
+    """Map DWG diff change-zone bboxes to display (image-pixel) overlays.
+
+    ADR-003 H4 (pure helper). Each input zone dict is expected to carry a
+    ``"bbox"`` and optional ``"bbox_coordinate_space"`` (defaults to
+    cad_wcs_mm). For CAD-space zones, the bbox is mapped to image pixels
+    via ``alignment`` and attached as ``"display_bbox"`` +
+    ``"display_overlay_space"`` (``"image_pixels_tl"``). All original keys
+    are preserved.
+
+    Zones that cannot be mapped — non-CAD coordinate space, a
+    ``relative_only`` alignment, or an unparseable bbox — get
+    ``display_bbox=None`` and ``display_overlay_space=""`` so the viewer
+    falls back to relative pins for those entries instead of drawing at a
+    wrong location.
+
+    Pipeline wiring (calling this from ``build_change_zones`` / the viewer
+    package emit path) is deferred to H4-wiring + H5, where the DWG+PDF
+    pairing supplies the PDF page pixel size needed to build the
+    alignment. This keeps the pure transform testable on its own.
+    """
+
+    out: List[dict] = []
+    for zone in change_zones:
+        if not isinstance(zone, dict):
+            continue
+        space = zone.get("bbox_coordinate_space") or COORD_CAD_WCS_MM
+        display_bbox: Optional[Bbox] = None
+        if normalize_coordinate_space(space) == COORD_CAD_WCS_MM:
+            display_bbox = alignment.map_cad_bbox(zone.get("bbox"))
+        entry = dict(zone)
+        entry["display_bbox"] = list(display_bbox) if display_bbox else None
+        entry["display_overlay_space"] = (
+            "image_pixels_tl" if display_bbox else ""
+        )
+        out.append(entry)
+    return out
+
+
 __all__ = [
     "CadPdfAlignment",
     "align_cad_to_pdf",
+    "build_display_overlays",
     "DEFAULT_ASPECT_TOLERANCE",
 ]

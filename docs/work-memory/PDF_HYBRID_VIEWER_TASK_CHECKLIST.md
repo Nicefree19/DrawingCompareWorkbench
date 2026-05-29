@@ -38,10 +38,18 @@
 - [x] commit + push
 
 ## H4 — DWG diff bbox를 표시 좌표로 emit
-- [ ] Edit change_zones.py / zone_render_service.py — H2 정합으로 좌표 변환 emit
-- [ ] display_overlay_space 기록 (H3)
-- [ ] Write 테스트 + 전체 회귀 (pytest tests/unit -q, 회귀 0)
-- [ ] commit + 사용자 검증
+### H4-헬퍼 (순수) ✅ 완료 (2026-05-29)
+- [x] `cad_pdf_alignment.build_display_overlays(change_zones, alignment)` — CAD zone → display_bbox(image_pixels_tl), non-CAD/relative_only/unparseable → None
+- [x] 원본 키/순서 보존, non-dict 스킵
+- [x] Write 테스트 5개 (CAD 매핑, non-CAD 스킵, relative_only None, 메타/순서 보존, 빈 입력)
+- [x] pytest: cad_pdf_alignment 15 passed
+- [x] **전체 회귀: 3326 passed, 2 skipped (0 regression)**
+- [x] cad_policy_gate passed, monolith 0줄
+- [x] commit + push
+### H4-wiring (파이프라인 통합) ⏸ H5와 함께 (열린질문 의존)
+- [ ] change_zones.py / zone_render_service.py / viewer emit 경로에 build_display_overlays 연결
+- [ ] alignment는 H5 페어링이 PDF 페이지 크기 공급 시 생성
+- [ ] 이유: emit wiring은 DWG+PDF 데이터 흐름 필요 → 멀티시트/동일성(§8) 답 후
 
 ## H5 — DWG + PDF 페어링 (🔴 열린질문 의존)
 - [ ] **사용자 확인**: 멀티시트(§8-1) + 동일성 보장(§8-5) 실무 워크플로우

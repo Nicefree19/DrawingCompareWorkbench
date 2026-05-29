@@ -6,6 +6,7 @@ from __future__ import annotations
 from src.services.comparison.cad_pdf_alignment import (
     CadPdfAlignment,
     align_cad_to_pdf,
+    build_display_overlays,
 )
 
 # A3 landscape frame (420 x 297 mm) and an aspect-matched pixel page.
@@ -120,3 +121,62 @@ def test_to_dict_round_trips_fields() -> None:
     ):
         assert key in d
     assert d["quality"] == "exact"
+
+
+# ---------------------------------------------------------------------------
+# ADR-003 H4 (pure helper) — build_display_overlays
+# ---------------------------------------------------------------------------
+
+
+def test_build_display_overlays_maps_cad_zone() -> None:
+    """H4: a CAD-space change zone gets a display_bbox in image pixels."""
+    al = align_cad_to_pdf(A3_FRAME, A3_PAGE_MATCHED)
+    zones = [{"zone_id": "z1", "bbox": [210.0, 148.5, 210.0, 148.5]}]
+    out = build_display_overlays(zones, al)
+    assert len(out) == 1
+    assert out[0]["zone_id"] == "z1"  # original keys preserved
+    assert out[0]["display_overlay_space"] == "image_pixels_tl"
+    db = out[0]["display_bbox"]
+    assert db is not None
+    cx = (db[0] + db[2]) / 2
+    assert abs(cx - 420.0) < 1.0  # frame centre -> page pixel centre
+
+
+def test_build_display_overlays_skips_non_cad_space() -> None:
+    """H4: a zone already in image_pixels is not re-mapped."""
+    al = align_cad_to_pdf(A3_FRAME, A3_PAGE_MATCHED)
+    zones = [
+        {"zone_id": "px", "bbox": [1, 1, 2, 2], "bbox_coordinate_space": "image_pixels"}
+    ]
+    out = build_display_overlays(zones, al)
+    assert out[0]["display_bbox"] is None
+    assert out[0]["display_overlay_space"] == ""
+
+
+def test_build_display_overlays_relative_only_yields_none() -> None:
+    """H4: relative_only alignment -> every zone display_bbox is None."""
+    al = align_cad_to_pdf((0, 0, 0, 0), A3_PAGE_MATCHED)  # degenerate -> relative_only
+    zones = [{"zone_id": "z1", "bbox": [10, 10, 20, 20]}]
+    out = build_display_overlays(zones, al)
+    assert out[0]["display_bbox"] is None
+    assert out[0]["display_overlay_space"] == ""
+
+
+def test_build_display_overlays_preserves_metadata_and_order() -> None:
+    """H4: original keys + order preserved; non-dict entries skipped."""
+    al = align_cad_to_pdf(A3_FRAME, A3_PAGE_MATCHED)
+    zones = [
+        {"zone_id": "a", "bbox": [0, 0, 10, 10], "category": "beam", "reason_ko": "변경"},
+        "not-a-dict",  # skipped
+        {"zone_id": "b", "bbox": [400, 280, 410, 290]},
+    ]
+    out = build_display_overlays(zones, al)
+    assert [o["zone_id"] for o in out] == ["a", "b"]
+    assert out[0]["category"] == "beam"
+    assert out[0]["reason_ko"] == "변경"
+
+
+def test_build_display_overlays_empty_input() -> None:
+    """H4: empty input -> empty output."""
+    al = align_cad_to_pdf(A3_FRAME, A3_PAGE_MATCHED)
+    assert build_display_overlays([], al) == []
