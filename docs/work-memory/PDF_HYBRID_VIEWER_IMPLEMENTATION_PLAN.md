@@ -60,12 +60,37 @@ DWG entity diff(검출, 요소 단위 의미)를 **사용자 PDF(표시, 600dpi 
 - **monolith**: 0줄
 - **의존**: H1, H2, H3
 
-### H5 — DWG + PDF 페어링 (열린질문 의존, 마지막)
-- **변경**: `drawing_batch.py` `are_compatible` 확장 (현재 mixed pair 차단 L792)
-  - DWG 쌍(검출) + PDF 쌍(표시)을 "같은 도면"으로 묶기
-- **DoD**: DWG+PDF 입력 → 하이브리드 비교 결과
-- **monolith**: 0줄
-- **의존**: 🔴 열린질문 §8-1(멀티시트), §8-5(동일성 보장) — **사용자 실무 워크플로우 확인 필요**
+### H5 — DWG↔PDF 자동 페어링 + 멀티시트 + emit wiring (재계획 2026-05-29)
+
+**사용자 결정**: 멀티시트 **둘 다**(1장 + 도면집), 페어링 = **도면번호/도곽 자동 대조**.
+
+**자산 조사 결과 (Explore, 2026-05-29)**: 빌딩블록 대부분 존재 — reuse 높음.
+
+재활용 as-is:
+- `pair_identity.py` — pair UUID/label (candidate_pair_uuid/label)
+- `drawing_id_pattern.py` — 도면번호 regex `[A-Z]{1,4}[0-9]{2}[-_. ]+[0-9]{3,5}[A-Z]?` + 정규화 매칭 (extract_drawing_number, S20-0002 등)
+- `page_matcher.py` — Hungarian 5-signal (35% 도면번호, 25% title, 20% visual, 15% text, 5% dim) — descriptor만 있으면 DWG↔PDF도 동작
+- `ocr_extractor.py` + `paddle_ocr_backend.py` — PaddleOCR (이미지 PDF 도면번호 읽기, opt-in)
+
+light glue:
+- `page_descriptor.py` — DWG descriptor 빌더로 적응 (build_per_page_descriptors)
+- `sheet_region_detector._extract_drawing_number` (L1431) / `_normalize_drawing_number` (L1456)
+- `drawing_batch._collect_entity_points` (L2605) — DWG world extents bbox (H2 cad_frame_bbox)
+
+genuinely missing (신규):
+- 멀티시트 DWG↔PDF 페어링 오케스트레이터
+- DWG→image 렌더 page descriptor
+- PDF 이미지 → 도면번호 OCR 복원 (ocr_extractor + drawing_id_pattern glue)
+
+**sub-슬라이스 (의존순, 각 별도 슬라이스로 H1~H4처럼)**:
+- **H5a** — DWG page descriptor 빌더: DXF render + 도면번호(sheet_region_detector/OCR) + 도곽 bbox(_collect_entity_points) + page_size → `page_descriptor.PerPageDescriptor`. reuse: sheet_region_detector, drawing_id_pattern, drawing_batch extents
+- **H5b** — DWG↔PDF 페어링 오케스트레이터: `page_matcher` 재활용해 도면번호+도곽 매칭. PDF 도면번호는 `ocr_extractor`로. 멀티시트(page_matcher Hungarian) + 단일(직결). **신규 모듈** `cad_pdf_pairing.py`
+- **H5c** — 페어링 결과 → H2 `align_cad_to_pdf`로 alignment 생성 (자동 도곽 fit; aspect 불일치 시 estimated + S1 배지)
+- **H5d** — H4-wiring: `build_display_overlays` → viewer manifest emit (`display_overlay_space`). emit 경로(change_zones/viewer_package) 최소 침습 연결
+
+- **DoD**: DWG 쌍 + PDF(1장 or 도면집) → 자동 페어링 → DWG diff가 매칭된 PDF 페이지 위 정확한 위치 오버레이 (실측 3PG1 검증)
+- **monolith**: 0줄 (오케스트레이터 신규 모듈, emit는 기존 서비스 경로)
+- 참고: Explore가 제안한 "4-point 수동 캘리브레이션"은 H2 자동 도곽 fit으로 대체. estimated 품질일 때의 수동 보정 fallback은 후순위(H5e+)로 보류.
 
 ## 4. 실행 순서
 ```
