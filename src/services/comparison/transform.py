@@ -486,6 +486,95 @@ def union_bboxes(*bboxes: Bbox) -> Bbox:
     return (x_min, y_min, x_max, y_max)
 
 
+# ---------------------------------------------------------------------------
+# ADR-003 H1 — CAD world (mm) <-> PDF display image-pixel mapping
+# ---------------------------------------------------------------------------
+#
+# The PDF-first hybrid viewer (ADR-003) detects differences in CAD entity
+# space (cad_wcs_mm) but displays them over a rendered PDF page in image
+# pixels. transform.py already had image_pixels <-> pdf_page_points and
+# world -> pixel (fit_world_to_pixels), but NO direct cad_wcs_mm ->
+# image_pixels helper for overlaying DWG diff bboxes on a PDF render.
+# These two functions close that gap by fitting the DWG drawing frame
+# into the PDF page pixel canvas and reusing the resulting affine.
+
+
+def cad_world_to_image_pixels_bbox(
+    bbox: object,
+    *,
+    cad_frame_bbox: object,
+    pixel_size: PixelSize,
+    padding_px: int | Tuple[int, int] = 0,
+) -> Optional[Bbox]:
+    """Map a CAD-world (cad_wcs_mm) bbox into PDF image-pixel space.
+
+    The DWG drawing frame ``cad_frame_bbox`` (the page outline / 도곽 in
+    cad_wcs_mm) is fitted into the PDF page pixel canvas ``pixel_size``
+    via :func:`fit_world_to_pixels`; the resulting world->pixel affine is
+    then applied to ``bbox``. Y is flipped (CAD Y-up -> image Y-down) by
+    the fit, matching ``image_pixels_tl`` convention.
+
+    Args:
+        bbox: a CAD-world bbox (dict or 4-list) to map, e.g. a DWG diff
+            change-zone bbox in cad_wcs_mm.
+        cad_frame_bbox: the DWG drawing-frame bbox in cad_wcs_mm. Both the
+            DWG frame and the PDF page must represent the same plotted
+            area (ADR-003 alignment assumption).
+        pixel_size: ``(w, h)`` of the rendered PDF page in pixels.
+        padding_px: symmetric margin reserved by the fit (matches the
+            fit used to render the PDF background, if any).
+
+    Returns:
+        The bbox in image_pixels_tl space, or ``None`` for unparseable or
+        degenerate input (collapsed frame) so callers fall back to
+        ``relative_only`` instead of drawing at a wrong location.
+    """
+
+    coords = normalise_bbox(bbox)
+    frame = normalise_bbox(cad_frame_bbox)
+    if coords is None or frame is None:
+        return None
+    params = fit_world_to_pixels(
+        frame,
+        pixel_size,
+        padding_px=padding_px,
+        coordinate_space=COORD_CAD_WCS_MM,
+    )
+    if params.scale == DEGENERATE_SCALE:
+        return None
+    return transform_bbox(params.world_to_pixel, coords)
+
+
+def image_pixels_to_cad_world_bbox(
+    bbox: object,
+    *,
+    cad_frame_bbox: object,
+    pixel_size: PixelSize,
+    padding_px: int | Tuple[int, int] = 0,
+) -> Optional[Bbox]:
+    """Inverse of :func:`cad_world_to_image_pixels_bbox`.
+
+    Maps an image-pixel bbox back to cad_wcs_mm using the same frame fit.
+    Used for round-trip verification and reverse hit-testing (a click on
+    a PDF pixel -> which CAD-world region). Returns ``None`` on
+    unparseable or degenerate input.
+    """
+
+    coords = normalise_bbox(bbox)
+    frame = normalise_bbox(cad_frame_bbox)
+    if coords is None or frame is None:
+        return None
+    params = fit_world_to_pixels(
+        frame,
+        pixel_size,
+        padding_px=padding_px,
+        coordinate_space=COORD_CAD_WCS_MM,
+    )
+    if params.scale == DEGENERATE_SCALE:
+        return None
+    return transform_bbox(params.pixel_to_world, coords)
+
+
 @dataclass(frozen=True)
 class SharedCamera:
     """World-space camera shared between before/after viewports.
@@ -565,4 +654,6 @@ __all__ = [
     "pixel_to_world",
     "expand_bbox",
     "union_bboxes",
+    "cad_world_to_image_pixels_bbox",
+    "image_pixels_to_cad_world_bbox",
 ]

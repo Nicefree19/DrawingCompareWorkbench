@@ -9,12 +9,15 @@
 - [x] ADR-003 Accepted + commit (62295ad)
 - [x] 구현 계획(Layer 0) 작성
 
-## H1 — cad_wcs_mm → image_pixels/pdf_page_points 변환 (정초)
-- [ ] Read transform.py 변환 함수 패턴 재확인 (`fit_world_to_pixels`, `*_to_image_pixels_bbox`)
-- [ ] Write transform.py 신규 함수 `cad_world_to_image_pixels_bbox` (도곽 affine 기반)
-- [ ] Write 테스트: round-trip (cad→pixel→cad 오차 <0.01), Y축 flip, 원점, degenerate
-- [ ] pytest + cad_policy_gate + monolith 0줄
-- [ ] commit + 사용자 검증
+## H1 — cad_wcs_mm → image_pixels/pdf_page_points 변환 (정초) ✅ 완료 (2026-05-29)
+- [x] Read transform.py 변환 함수 패턴 재확인 (`fit_world_to_pixels`, `*_to_image_pixels_bbox`)
+- [x] Write transform.py 신규 함수 `cad_world_to_image_pixels_bbox` + 역 `image_pixels_to_cad_world_bbox` (도곽 affine 기반, +91줄)
+- [x] __all__ 등록
+- [x] Write 테스트 (9개): round-trip 오차<0.01, Y축 flip, 도곽→전체페이지, 알려진 점 스케일, degenerate→None, unparseable→None, dict form, padding inset, offset frame(실 S20-0002 extents) round-trip
+- [x] pytest: **H1 9 passed + 회귀 33 passed (test_transform/test_cad_pdf_tile_transform)**
+- [x] cad_policy_gate: passed
+- [x] monolith 0줄 (transform.py +91만)
+- [x] commit + push
 
 ## H3 — manifest display_overlay_space 필드
 - [ ] Read viewer_manifest_v3.py 스키마
