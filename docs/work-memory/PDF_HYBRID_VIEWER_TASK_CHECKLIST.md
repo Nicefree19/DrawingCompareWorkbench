@@ -28,12 +28,14 @@
 - [x] monolith 0줄
 - [x] commit + push
 
-## H2 — DWG 도곽 ↔ PDF 페이지 정합
-- [ ] Write `src/services/comparison/cad_pdf_alignment.py` (도곽 검출 + fit affine)
-- [ ] transform_quality (exact/estimated/relative_only) 적용
-- [ ] Write 테스트 + 실측 PDF(01.3PG1) 정합 오차 측정 (<5px @150dpi)
-- [ ] pytest + gate + monolith 0줄
-- [ ] commit + 사용자 검증
+## H2 — DWG 도곽 ↔ PDF 페이지 정합 ✅ 완료 (2026-05-29)
+- [x] Write `src/services/comparison/cad_pdf_alignment.py` (신규, transform.py만 의존)
+- [x] `align_cad_to_pdf()` + `CadPdfAlignment` (map_cad_bbox/map_cad_bboxes/is_usable/to_dict)
+- [x] transform_quality: aspect 일치<2%→exact / 불일치→estimated(§8-6 plot drift) / degenerate→relative_only
+- [x] Write 테스트 10개: aspect match/mismatch, degenerate frame/page, unparseable, map H1 위임, 순서/None 필터, relative_only 거부, 실 S20 extents, to_dict
+- [x] pytest: **10 passed**, cad_policy_gate passed, monolith 0줄
+- [-] 실측 PDF 정합 오차 <5px: **H4/end-to-end로 연기** (DWG+PDF 쌍 필요 — 현재 PDF만 있고 대응 DWG 도곽 없음). round-trip+aspect로 대체 검증
+- [x] commit + push
 
 ## H4 — DWG diff bbox를 표시 좌표로 emit
 - [ ] Edit change_zones.py / zone_render_service.py — H2 정합으로 좌표 변환 emit
