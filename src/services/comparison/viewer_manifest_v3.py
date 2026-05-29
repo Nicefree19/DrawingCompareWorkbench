@@ -411,6 +411,14 @@ class ViewerManifestV3:
     alignment_before_to_shared: Affine6 = IDENTITY_AFFINE
     alignment_after_to_shared: Affine6 = IDENTITY_AFFINE
     overlay_space: OverlaySpace = "world"
+    # ADR-003 H3 — display overlay coordinate space when it differs from
+    # the detection space. Empty = same as overlay_space/coordinate_space
+    # (legacy, unchanged behaviour). Set to e.g. "image_pixels_tl" for the
+    # PDF-first hybrid viewer, where DWG diffs (detected in cad_wcs_mm) are
+    # overlaid on a rendered PDF page in image pixels. This lets the
+    # detection space and the display space differ without forcing a new
+    # source_kind (ADR-003 §3, the "less invasive" option).
+    display_overlay_space: str = ""
     default_focus_padding_world: float = 1500.0
     before_scene_pack: Optional[ScenePackRef] = None
     after_scene_pack: Optional[ScenePackRef] = None
@@ -435,6 +443,12 @@ class ViewerManifestV3:
             raise ManifestV3ValidationError(
                 f"Unknown current_render_mode: {self.current_render_mode!r}"
             )
+        # ADR-003 H3 — normalise display_overlay_space when set; empty
+        # stays empty (means "use detection space", legacy behaviour).
+        if self.display_overlay_space:
+            self.display_overlay_space = normalize_coordinate_space(
+                self.display_overlay_space
+            )
         if not self.created_at_utc:
             self.created_at_utc = datetime.now(timezone.utc).isoformat()
 
@@ -455,6 +469,7 @@ class ViewerManifestV3:
             "alignment_before_to_shared": list(self.alignment_before_to_shared),
             "alignment_after_to_shared": list(self.alignment_after_to_shared),
             "overlay_space": self.overlay_space,
+            "display_overlay_space": self.display_overlay_space,
             "default_focus_padding_world": float(self.default_focus_padding_world),
             "before_scene_pack": self.before_scene_pack.to_dict() if self.before_scene_pack else None,
             "after_scene_pack": self.after_scene_pack.to_dict() if self.after_scene_pack else None,
@@ -502,6 +517,7 @@ class ViewerManifestV3:
                 data.get("alignment_after_to_shared", IDENTITY_AFFINE)
             ),
             overlay_space=data.get("overlay_space", "world"),
+            display_overlay_space=str(data.get("display_overlay_space", "")),
             default_focus_padding_world=float(
                 data.get("default_focus_padding_world", 1500.0)
             ),

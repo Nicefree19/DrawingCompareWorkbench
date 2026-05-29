@@ -269,3 +269,60 @@ def test_renderer_capabilities_dict_preserved(tmp_path: Path) -> None:
     assert loaded.renderer_capabilities["viewer_engine"] == "lightweight"
     assert loaded.renderer_capabilities["scene_pack_built"] is False
     assert loaded.renderer_capabilities["tile_size"] == 512
+
+
+# ---------------------------------------------------------------------------
+# ADR-003 H3 — display_overlay_space field
+# ---------------------------------------------------------------------------
+
+
+def test_display_overlay_space_defaults_empty(tmp_path: Path) -> None:
+    """H3: default is empty string (means 'use detection space', legacy)."""
+    m = ViewerManifestV3(
+        pair_uuid="p", package_version="v3", source_kind="normalized_dxf"
+    )
+    assert m.display_overlay_space == ""
+    path = tmp_path / "manifest.json"
+    write_manifest_v3(path, m)
+    loaded = load_manifest_v3(path)
+    assert loaded.display_overlay_space == ""
+
+
+def test_display_overlay_space_round_trip(tmp_path: Path) -> None:
+    """H3: a hybrid manifest carries image_pixels_tl display space through
+    write/load (DWG detected in cad_wcs_mm, displayed on a PDF page)."""
+    m = ViewerManifestV3(
+        pair_uuid="p",
+        package_version="v3",
+        source_kind="mixed",
+        display_overlay_space="image_pixels_tl",
+    )
+    assert m.display_overlay_space == "image_pixels_tl"
+    path = tmp_path / "manifest.json"
+    write_manifest_v3(path, m)
+    loaded = load_manifest_v3(path)
+    assert loaded.display_overlay_space == "image_pixels_tl"
+
+
+def test_display_overlay_space_normalised_on_construction() -> None:
+    """H3: legacy coordinate aliases are normalised (pdf_points ->
+    pdf_page_points_bl) so the manifest stores the canonical token."""
+    m = ViewerManifestV3(
+        pair_uuid="p",
+        package_version="v3",
+        source_kind="mixed",
+        display_overlay_space="pdf_points",
+    )
+    assert m.display_overlay_space == "pdf_page_points_bl"
+
+
+def test_display_overlay_space_backward_compat_missing_field() -> None:
+    """H3: a v3 dict WITHOUT display_overlay_space (older package) loads as
+    empty string — no crash, legacy behaviour preserved."""
+    m = ViewerManifestV3(
+        pair_uuid="p", package_version="v3", source_kind="normalized_dxf"
+    )
+    d = m.to_dict()
+    del d["display_overlay_space"]
+    loaded = ViewerManifestV3.from_dict(d)
+    assert loaded.display_overlay_space == ""

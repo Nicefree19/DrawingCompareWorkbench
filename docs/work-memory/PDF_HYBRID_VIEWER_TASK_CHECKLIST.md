@@ -19,12 +19,14 @@
 - [x] monolith 0줄 (transform.py +91만)
 - [x] commit + push
 
-## H3 — manifest display_overlay_space 필드
-- [ ] Read viewer_manifest_v3.py 스키마
-- [ ] Write `display_overlay_space` 필드 (검출공간≠표시공간, 하위호환 default)
-- [ ] Write 테스트: round-trip, 필드 없을 때 기존 동작
-- [ ] pytest + gate + monolith 0줄
-- [ ] commit + 사용자 검증
+## H3 — manifest display_overlay_space 필드 ✅ 완료 (2026-05-29)
+- [x] Read viewer_manifest_v3.py 스키마 (ViewerManifestV3 dataclass L397)
+- [x] `display_overlay_space: str = ""` 필드 + __post_init__ normalize + to_dict + from_dict (+16줄)
+- [x] Write 테스트 4개: default empty round-trip, image_pixels_tl round-trip, 정규화(pdf_points→pdf_page_points_bl), 하위호환(필드 없는 dict→"")
+- [x] pytest: **22 passed (4 신규 + 18 회귀)**
+- [x] cad_policy_gate: passed
+- [x] monolith 0줄
+- [x] commit + push
 
 ## H2 — DWG 도곽 ↔ PDF 페이지 정합
 - [ ] Write `src/services/comparison/cad_pdf_alignment.py` (도곽 검출 + fit affine)
