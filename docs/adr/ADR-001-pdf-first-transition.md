@@ -201,9 +201,10 @@ Decision Maker:   nicefree19@gmail.com (rubber-stamp), Claude (초안 정리)
 - WORKLOG의 PDF-first R1~R6 + P0~P5-G30 작업 전체
 
 ### 6.2 후속 ADR (추정, 작성 시점 확정)
-- **ADR-002**: PySide6.QtPdf LGPLv3 법무 검토 결과 (별도 트랙)
-- **ADR-003**: AC1015 외 DWG의 사용자 안내 UX 정책 (S1 silent fallback 가시화와 연동)
-- **ADR-004**: PyMuPDF의 comparison-internal 사용 범위 확정 (display 누출 방지 가드 포함)
+- **ADR-002**: PySide6.QtPdf LGPLv3 법무 검토 결과 (별도 트랙, 미작성)
+- **ADR-003**: PDF-first 하이브리드 뷰어 — CAD entity diff(검출) + PDF(표시) (2026-05-29 Accepted) ✅
+- **ADR-004**: AC1015 외 DWG의 사용자 안내 UX 정책 (S1 silent fallback 가시화와 연동)
+- **ADR-005**: PyMuPDF의 comparison-internal 사용 범위 확정 (display 누출 방지 가드 포함)
 
 ### 6.3 회고 일정
 - **2026-08-31** — 옵션 D 변형이 사용자 통증 5건을 얼마나 해결했는지 1차 회고
