@@ -36,7 +36,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -420,6 +420,61 @@ def build_per_page_descriptors(pdf_path: Path) -> List[PerPageDescriptor]:
     return results
 
 
+def build_dwg_page_descriptor(
+    source_path: object,
+    *,
+    texts: Sequence[str],
+    frame_bbox: Tuple[float, float, float, float],
+    page_index: int = 0,
+    title_texts: Optional[Sequence[str]] = None,
+) -> PerPageDescriptor:
+    """Build a PerPageDescriptor for a DWG drawing (ADR-003 H5a).
+
+    Unlike :func:`build_per_page_descriptor` (which opens a PDF via
+    PyMuPDF), this takes already-extracted DWG entity ``texts`` + world
+    ``frame_bbox`` so it stays pure (no ezdxf / render / I/O) and is
+    unit-testable on its own. The resulting descriptor feeds
+    ``page_matcher.match_pdf_pages`` to pair DWG drawings against PDF
+    pages by drawing_number + frame size.
+
+    Populated signals:
+      - ``drawing_number`` — drawing_id_pattern regex over joined texts
+      - ``page_size``      — frame width/height from ``frame_bbox``
+      - ``title_text`` (+ normalised) — from ``title_texts`` or all texts
+
+    Deliberately left empty — the matcher treats an empty field as
+    neutral (0.5; see page_matcher ``_hash_similarity`` L111/133):
+      - ``visual_hash``    — a DWG render and an image PDF do not share a
+        perceptual hash; blank avoids a misleading mismatch.
+      - ``full_text_hash`` — DWG entity text vs PDF OCR text are not
+        byte-comparable; blank keeps the text signal neutral so
+        drawing_number (35% weight) + dimension carry the pairing,
+        matching the user's "drawing-number / frame" requirement.
+
+    ``source_path`` is stored in the (PDF-named) ``pdf_path`` field purely
+    as a stable identifier; the matcher never re-opens it, it only
+    compares descriptor fields.
+    """
+
+    joined = " ".join(t for t in texts if t)
+    title_source = title_texts if title_texts is not None else texts
+    title_joined = " ".join(t for t in title_source if t)
+    x0, y0, x1, y1 = frame_bbox
+    width = max(0.0, float(x1) - float(x0))
+    height = max(0.0, float(y1) - float(y0))
+    title_text = title_joined[:2000]
+    return PerPageDescriptor(
+        pdf_path=str(source_path),
+        page_index=int(page_index),
+        page_size=(width, height),
+        drawing_number=extract_drawing_number(joined),
+        title_text=title_text,
+        title_text_normalised=normalise_text(title_text),
+        full_text_hash="",
+        visual_hash="",
+    )
+
+
 __all__ = [
     "PROJECT_DRAWING_NUMBER_PATTERN",
     "TITLE_BLOCK_LEFT_RATIO",
@@ -434,4 +489,5 @@ __all__ = [
     "hash_text",
     "build_per_page_descriptor",
     "build_per_page_descriptors",
+    "build_dwg_page_descriptor",
 ]

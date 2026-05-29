@@ -54,10 +54,15 @@
 ## H5 — DWG↔PDF 자동 페어링 + 멀티시트 + emit wiring
 - [x] **사용자 확인** (2026-05-29): 멀티시트 둘 다, 도면번호/도곽 자동 대조
 - [x] **자산 조사** (Explore): reuse 높음 — pair_identity/drawing_id_pattern/page_matcher/ocr_extractor as-is, sheet_region_detector/page_descriptor/drawing_batch extents glue
-### H5a — DWG page descriptor 빌더
-- [ ] DXF render + 도면번호(sheet_region_detector/OCR) + 도곽 bbox(_collect_entity_points L2605) + page_size → PerPageDescriptor
-- [ ] reuse: sheet_region_detector._extract_drawing_number, drawing_id_pattern, drawing_batch extents
-- [ ] 테스트 + commit
+### H5a — DWG page descriptor 빌더 ✅ 완료 (2026-05-29)
+- [x] `page_descriptor.build_dwg_page_descriptor(source_path, *, texts, frame_bbox, page_index, title_texts)` — **순수 함수** (render/ezdxf 없이 texts+frame_bbox 입력, caller가 추출)
+- [x] drawing_number(drawing_id_pattern) + page_size(frame w/h) + title_text 채움
+- [x] visual_hash/full_text_hash **빈 채로** (matcher neutral 0.5 — DWG render vs 이미지 PDF 비교 무의미)
+- [x] **matcher 비재open 검증**: match_pdf_pages는 descriptor 필드만 비교 (path 재open 안 함)
+- [x] 테스트 9개 (drawing_number/page_size/hash빈/source_path/빈texts/title override/타입 + **통합 2개**: same번호→matched, diff번호→not auto)
+- [x] pytest: 9 passed, 회귀(page_descriptor+page_matcher) 53 passed, gate pass, monolith 0줄
+- [x] 발견: DWG↔PDF는 visual neutral이라 same번호도 REVIEW_REQUIRED(is_matched True, auto 아님) — 사용자 검토 유도, 안전
+- [x] commit + push
 ### H5b — DWG↔PDF 페어링 오케스트레이터 (신규 cad_pdf_pairing.py)
 - [ ] page_matcher 재활용 도면번호+도곽 매칭; PDF 도면번호는 ocr_extractor
 - [ ] 멀티시트(Hungarian) + 단일(직결)
