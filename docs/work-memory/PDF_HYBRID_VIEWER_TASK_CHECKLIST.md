@@ -63,13 +63,18 @@
 - [x] pytest: 9 passed, 회귀(page_descriptor+page_matcher) 53 passed, gate pass, monolith 0줄
 - [x] 발견: DWG↔PDF는 visual neutral이라 same번호도 REVIEW_REQUIRED(is_matched True, auto 아님) — 사용자 검토 유도, 안전
 - [x] commit + push
-### H5b — DWG↔PDF 페어링 오케스트레이터 (신규 cad_pdf_pairing.py)
-- [ ] page_matcher 재활용 도면번호+도곽 매칭; PDF 도면번호는 ocr_extractor
-- [ ] 멀티시트(Hungarian) + 단일(직결)
-- [ ] 테스트 + commit
-### H5c — 페어링 → H2 alignment 생성
-- [ ] 매칭 쌍 → align_cad_to_pdf (자동 도곽 fit, estimated→S1 배지)
-- [ ] 테스트 + commit
+### H5b — DWG↔PDF 페어링 오케스트레이터 ✅ 완료 (2026-05-29)
+- [x] 신규 `cad_pdf_pairing.py` — `pair_dwg_to_pdf(dwg_desc, pdf_desc)` → `CadPdfPairingResult`
+- [x] match_pdf_pages 위임 (단일+멀티시트 N×M), index → source-aware `CadPdfPair` (경로+도면번호+status+score)
+- [x] unmatched DWG/PDF 보고. 순수 (OCR PDF descriptor 빌드는 H5d caller)
+- [x] 테스트 7개 (단일, 도면집, page-index 복원, unmatched, status/score, 빈, to_dict)
+- [x] commit
+### H5c — 페어링 → H2 alignment 생성 ✅ 완료 (2026-05-29)
+- [x] `build_pair_alignments(pairs, cad_frames, pdf_pixel_sizes)` → `[PairedAlignment]` (페어별 align_cad_to_pdf)
+- [x] aspect 불일치 → quality=estimated (S1 배지), frame/size 누락 → 스킵
+- [x] 테스트 3개 (페어별 alignment, 누락 스킵, aspect mismatch estimated)
+- [x] pytest 10 passed (cad_pdf_pairing 전체), **전체 회귀 3345 passed (0 regression)**, gate pass, monolith 0줄
+- [x] commit
 ### H5d — H4-wiring (emit)
 - [ ] build_display_overlays → viewer manifest emit (display_overlay_space), 최소 침습
 - [ ] 실측 3PG1 end-to-end 검증 + 전체 회귀
