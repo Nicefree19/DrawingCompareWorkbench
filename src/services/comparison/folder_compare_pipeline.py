@@ -42,7 +42,10 @@ from .drawing_batch import (
     match_drawing_sets,
     scan_drawing_inputs,
 )
-from .dwg_dxf_fallback import resolve_dwg_dxf_fallback_pair
+from .dwg_dxf_fallback import (
+    fallback_review_notice,
+    resolve_dwg_dxf_fallback_pair,
+)
 from .confirmed_cloud_export import export_selected_cloud_marks
 from .export_profiles import (
     apply_export_profile_to_file,
@@ -697,6 +700,15 @@ class FolderComparePipeline:
                 # noise_filter_config.json via the dialog.
                 zone_options=zone_options,
             )
+            review_project_options = {
+                "ux": "ko-simple-v2",
+                "cloud_export_mode": "selected",
+                "export_preview": True,
+                "max_preview_pairs": self.request.max_preview_pairs,
+            }
+            fallback_notice = fallback_review_notice(fallback_resolution)
+            if fallback_notice:
+                review_project_options["input_resolution"] = fallback_notice
             self._emit(progress_callback, "review_project", 90, "검토 프로젝트 저장 중")
             write_review_project(
                 review_project_path,
@@ -707,12 +719,7 @@ class FolderComparePipeline:
                 artifact_dir=artifact_dir,
                 review_state_path=review_state_path,
                 preview_manifest_path=preview_package.manifest_path,
-                options={
-                    "ux": "ko-simple-v2",
-                    "cloud_export_mode": "selected",
-                    "export_preview": True,
-                    "max_preview_pairs": self.request.max_preview_pairs,
-                },
+                options=review_project_options,
                 export_profile=export_profile,
             )
             update_artifact_manifest(

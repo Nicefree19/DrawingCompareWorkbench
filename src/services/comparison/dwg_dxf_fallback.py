@@ -43,6 +43,26 @@ class DwgDxfFallbackResolution:
         }
 
 
+def fallback_review_notice(resolution: DwgDxfFallbackResolution) -> dict[str, Any]:
+    if not resolution.used:
+        return {}
+    diagnostics = resolution.diagnostics if isinstance(resolution.diagnostics, dict) else {}
+    return {
+        "mode": "converted_dxf_fallback",
+        "message": (
+            "Original DWG inputs are unsupported by the native adapter, "
+            "so this run compared converted DXF inputs instead."
+        ),
+        "reason": resolution.reason,
+        "fallback_kind": diagnostics.get("fallback_kind", ""),
+        "source_a": str(resolution.source_a),
+        "source_b": str(resolution.source_b),
+        "effective_source_a": str(resolution.effective_source_a),
+        "effective_source_b": str(resolution.effective_source_b),
+        "dwg_versions": diagnostics.get("dwg_versions", {}),
+    }
+
+
 def resolve_dwg_dxf_fallback_pair(
     source_a: Union[str, Path],
     source_b: Union[str, Path],
@@ -236,6 +256,8 @@ def _folder_dxf_pair_candidates(original_a: Path, original_b: Path) -> Iterable[
             before_files = _candidate_dxf_files(before_dir)
             after_files = _candidate_dxf_files(after_dir)
             if not before_files or not after_files:
+                continue
+            if len(before_files) != len(after_files):
                 continue
             counts = {"before_dxf_count": len(before_files), "after_dxf_count": len(after_files)}
             yield (

@@ -65,6 +65,62 @@ def _load_qt_and_workbench():
     return QApplication, DrawingCompareWorkbenchV2, FolderComparePipeline, FolderCompareRunRequest
 
 
+def _read_manifest_inputs(results_dir: Path) -> dict[str, object]:
+    manifest_path = results_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    inputs = payload.get("inputs")
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def _descriptor_root(descriptors: object) -> str:
+    paths: list[Path] = []
+    for descriptor in descriptors or []:
+        value = getattr(descriptor, "path", "")
+        if not value:
+            continue
+        try:
+            paths.append(Path(str(value)).resolve())
+        except Exception:
+            continue
+    if not paths:
+        return ""
+    if len(paths) == 1:
+        return str(paths[0])
+    try:
+        return str(Path(os.path.commonpath([str(path.parent) for path in paths])).resolve())
+    except Exception:
+        return str(paths[0].parent)
+
+
+def _manifest_fallback_fields(results_dir: Path, result: object | None = None) -> dict[str, object]:
+    inputs = _read_manifest_inputs(results_dir)
+    fallback = inputs.get("dwg_dxf_fallback")
+    if not isinstance(fallback, dict):
+        fallback = {}
+    diagnostics = fallback.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    effective_a = str(inputs.get("effective_source_a") or "")
+    effective_b = str(inputs.get("effective_source_b") or "")
+    if result is not None:
+        if not effective_a or "<redacted>" in effective_a:
+            effective_a = _descriptor_root(getattr(result, "descriptors_a", [])) or effective_a
+        if not effective_b or "<redacted>" in effective_b:
+            effective_b = _descriptor_root(getattr(result, "descriptors_b", [])) or effective_b
+    return {
+        "effective_source_a": effective_a,
+        "effective_source_b": effective_b,
+        "fallback_used": bool(fallback.get("used")),
+        "fallback_reason": str(fallback.get("reason") or ""),
+        "fallback_kind": str(diagnostics.get("fallback_kind") or ""),
+    }
+
+
 def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
     _configure_qt_platform(bool(args.show))
     try:
@@ -105,6 +161,7 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
             "screenshots": [],
             "error_type": exc.__class__.__name__,
             "error": str(exc),
+            **_manifest_fallback_fields(results_dir),
         }
         preflight_path = results_dir / "preflight_report.json"
         if preflight_path.exists():
@@ -147,6 +204,7 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
         "status_label": workbench.lbl_status_v2.text(),
         "queue_label": workbench.lbl_review_queue_v2.text(),
         "viewer_perf_label": workbench.lbl_viewer_perf_v2.text(),
+        **_manifest_fallback_fields(results_dir, result),
     }
     summary_path = out_root / "direct_compare_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
