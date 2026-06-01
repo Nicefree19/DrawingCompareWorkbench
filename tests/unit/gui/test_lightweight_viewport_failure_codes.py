@@ -12,6 +12,8 @@ import os
 # Run in offscreen mode so tests work without a real display.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import logging
+
 import pytest
 
 
@@ -70,6 +72,43 @@ def test_lightweight_viewport_canvas_skeleton_code_present_in_test_env() -> None
     viewport = LightweightDrawingViewport()
 
     assert "backend_fallback_canvas_skeleton" in viewport.render_failure_codes()
+
+
+def test_qsg_unavailable_log_is_throttled_after_first_viewport(caplog) -> None:
+    """S1.5 residual: QSG fallback logs once at INFO, then DEBUG."""
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.gui.lightweight_viewport import LightweightDrawingViewport
+    from src.utils.once_per_session_logger import reset_once_per_session_state
+
+    reset_once_per_session_state()
+    caplog.set_level(logging.DEBUG, logger="src.gui.lightweight_viewport")
+
+    _ = QApplication.instance() or QApplication([])
+    first = LightweightDrawingViewport()
+    second = LightweightDrawingViewport()
+
+    assert "backend_fallback_canvas_skeleton" in first.render_failure_codes()
+    assert "backend_fallback_canvas_skeleton" in second.render_failure_codes()
+
+    qsg_records = [
+        record
+        for record in caplog.records
+        if "QSGLineItem unavailable" in record.message
+    ]
+    info_records = [record for record in qsg_records if record.levelno == logging.INFO]
+    debug_records = [
+        record
+        for record in qsg_records
+        if record.levelno == logging.DEBUG
+        and "[throttled:lightweight_viewport.qsg_line_item_unavailable]" in record.message
+    ]
+
+    assert len(info_records) == 1
+    assert len(debug_records) == 1
+
+    reset_once_per_session_state()
 
 
 def test_lightweight_viewport_qquickwidget_fallback_surfaces_code(

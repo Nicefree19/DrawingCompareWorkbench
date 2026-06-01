@@ -103,6 +103,7 @@ smoke_v*_playwright.js
 !docs/structural_evidence_fixture_matrix_v0_1.json
 !tests/data/comparison/cad_samples/golden-results.json
 !tests/data/comparison/real_world/*.json
+!tests/data/multi_sheet/multi_sheet_ground_truth.json
 *.pdf
 *.pptx
 *.zip
@@ -138,6 +139,7 @@ ai_models/*.pkl
 
 # 보고서 및 임시 파일
 *_REPORT.md
+!docs/collab/CODEX_S1_S2_COMPLETION_REPORT.md
 *_SUMMARY.md
 *_GUIDE.md
 *_PLAN.md

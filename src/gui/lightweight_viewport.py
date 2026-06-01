@@ -42,6 +42,7 @@ from src.services.comparison.transform import (
     normalise_bbox as _normalise_bbox_contract,
 )
 from src.services.comparison.viewer_manifest_v3 import ScenePackRef
+from src.utils.once_per_session_logger import log_once
 
 logger = logging.getLogger(__name__)
 
@@ -605,7 +606,10 @@ class LightweightDrawingViewport(QWidget):
             register_qml_type()
             self._qsg_available = True
         except Exception as exc:  # noqa: BLE001
-            logger.info(
+            log_once(
+                logger,
+                logging.INFO,
+                "lightweight_viewport.qsg_line_item_unavailable",
                 "QSGLineItem unavailable (%s); using Canvas skeleton", exc
             )
             self._qsg_available = False

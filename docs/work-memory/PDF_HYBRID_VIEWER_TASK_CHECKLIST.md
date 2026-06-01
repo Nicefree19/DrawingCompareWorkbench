@@ -76,14 +76,15 @@
 - [x] pytest 10 passed (cad_pdf_pairing 전체), **전체 회귀 3345 passed (0 regression)**, gate pass, monolith 0줄
 - [x] commit
 ### H5d — H4-wiring (emit)
-- [ ] build_display_overlays → viewer manifest emit (display_overlay_space), 최소 침습
-- [ ] 실측 3PG1 end-to-end 검증 + 전체 회귀
+- [x] build_display_overlays → viewer manifest emit (display_overlay_space), 최소 침습
+- [x] Synthetic CAD pair + sidecar PDF viewer-package regression: `coordinate_source=cad_world`, `visual_fidelity=pdf_render`, `display_overlay_space=image_pixels_tl`, `transform_quality=exact`
+- [ ] 실측 3PG1 end-to-end 검증 + 전체 회귀 (real 3PG1 fixture not present in this run)
 - [ ] commit + 사용자 검증
 
 ## Post
-- [ ] Write PDF_HYBRID_VIEWER_COMPLETION_REPORT.md
+- [x] Write PDF_HYBRID_VIEWER_COMPLETION_REPORT.md
 - [ ] 실측 PDF로 end-to-end (DWG diff → PDF 오버레이) 검증
-- [ ] Memory 업데이트
+- [x] Memory 업데이트
 
 ## Abort Triggers
 - monolith 추가 필요 → 중단, 사용자 확인
