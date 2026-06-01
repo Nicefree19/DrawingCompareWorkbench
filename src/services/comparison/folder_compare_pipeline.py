@@ -42,6 +42,7 @@ from .drawing_batch import (
     match_drawing_sets,
     scan_drawing_inputs,
 )
+from .dwg_dxf_fallback import resolve_dwg_dxf_fallback_pair
 from .confirmed_cloud_export import export_selected_cloud_marks
 from .export_profiles import (
     apply_export_profile_to_file,
@@ -319,10 +320,24 @@ class FolderComparePipeline:
                 logger.debug("Could not reset perf_events log", exc_info=True)
             dxf_cache_dir.mkdir(parents=True, exist_ok=True)
             compare_state_dir.mkdir(parents=True, exist_ok=True)
+            fallback_resolution = resolve_dwg_dxf_fallback_pair(
+                self.request.source_a,
+                self.request.source_b,
+            )
+            source_a_input = fallback_resolution.effective_source_a
+            source_b_input = fallback_resolution.effective_source_b
+            if fallback_resolution.used:
+                logger.info(
+                    "Using converted DXF fallback for unsupported DWG pair: %s -> %s, %s -> %s",
+                    fallback_resolution.source_a,
+                    source_a_input,
+                    fallback_resolution.source_b,
+                    source_b_input,
+                )
             preflight_started = time.perf_counter()
             preflight = run_preflight(
-                source_a=self.request.source_a,
-                source_b=self.request.source_b,
+                source_a=source_a_input,
+                source_b=source_b_input,
                 output_dir=output_dir,
                 dxf_cache_dir=dxf_cache_dir,
                 compare_state_dir=compare_state_dir,
@@ -334,6 +349,9 @@ class FolderComparePipeline:
                 inputs={
                     "source_a": self.request.source_a,
                     "source_b": self.request.source_b,
+                    "effective_source_a": source_a_input,
+                    "effective_source_b": source_b_input,
+                    "dwg_dxf_fallback": fallback_resolution.to_dict(),
                     "recursive": self.request.recursive,
                     "fast_first_review": fast_first_review,
                     "auto_fast_first_review": self.request.auto_fast_first_review,
@@ -351,6 +369,12 @@ class FolderComparePipeline:
                 },
                 preflight=preflight.to_dict(),
             )
+            if fallback_resolution.used:
+                run_manifest.stage(
+                    "dwg_dxf_fallback",
+                    "completed",
+                    **fallback_resolution.to_dict(),
+                )
             run_manifest.stage("preflight", "completed", preflight_status=preflight.status)
             perf_writer.stage_event(
                 "preflight",
@@ -377,10 +401,10 @@ class FolderComparePipeline:
                 enable_cache=self.request.enable_descriptor_cache,
                 dxf_cache_dir=dxf_cache_dir,
             )
-            descriptors_a = scan_drawing_inputs(self.request.source_a, options=scan_options)
+            descriptors_a = scan_drawing_inputs(source_a_input, options=scan_options)
             self._emit(progress_callback, "scan", 18, "변경 전 도면 확인 완료")
             self._check_cancelled(is_cancelled)
-            descriptors_b = scan_drawing_inputs(self.request.source_b, options=scan_options)
+            descriptors_b = scan_drawing_inputs(source_b_input, options=scan_options)
             run_manifest.stage(active_stage, "completed", a_count=len(descriptors_a), b_count=len(descriptors_b))
             perf_writer.stage_event(
                 active_stage,
@@ -400,8 +424,8 @@ class FolderComparePipeline:
             self._emit(progress_callback, "match", 28, "도면 번호로 자동 매칭 중")
             self._check_cancelled(is_cancelled)
             candidates = _explicit_file_pair_candidates(
-                self.request.source_a,
-                self.request.source_b,
+                source_a_input,
+                source_b_input,
                 descriptors_a,
                 descriptors_b,
             )
@@ -676,8 +700,8 @@ class FolderComparePipeline:
             self._emit(progress_callback, "review_project", 90, "검토 프로젝트 저장 중")
             write_review_project(
                 review_project_path,
-                source_a=self.request.source_a,
-                source_b=self.request.source_b,
+                source_a=source_a_input,
+                source_b=source_b_input,
                 dxf_cache_dir=dxf_cache_dir,
                 compare_state_dir=compare_state_dir,
                 artifact_dir=artifact_dir,
