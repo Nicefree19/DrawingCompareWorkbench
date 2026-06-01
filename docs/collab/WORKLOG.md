@@ -125,3 +125,4 @@
 - 2026-06-01 Codex: Added a fast FolderComparePipeline regression that verifies unsupported DWG folder inputs are resolved to converted DXF directories before preflight/scan, and that fallback provenance reaches run_manifest and review_project input-resolution metadata.
 - 2026-06-01 Codex: Added direct Workbench compare summary helper regressions so redacted sharable manifests still report effective fallback paths from result descriptors, and missing/unredacted manifests keep stable summary defaults.
 - 2026-06-01 Codex: Accepted ADR-004 and linked it from CAD format policy, keeping AC1018+ DWG support on the user-provided converted-DXF workflow until version-specific native reader gates are approved.
+- 2026-06-01 Codex: Updated PR #4 for the AC1032 fallback scope, added the release packet with GUI exposure decision, and started ADR-004 Phase 0 with a DWG corpus inventory script plus real `D:\도면 비교` inventory evidence.
