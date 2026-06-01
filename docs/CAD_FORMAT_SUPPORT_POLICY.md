@@ -101,6 +101,9 @@ Post-ODA release rule:
   user-facing status clearly marks partial/unsupported imports.
 - Any future direct DWG support beyond AC1015 must have a documented license
   basis, conformance test set, and legal sign-off before release.
+- ADR-004 is the accepted roadmap for AC1032/all-version native DWG support:
+  current AC1018+ workflow remains user-provided DXF, with converted-DXF
+  fallback allowed only when provenance is visible in run artifacts.
 
 ## Format Pairing Policy
 

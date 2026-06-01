@@ -76,14 +76,22 @@
 - [x] pytest 10 passed (cad_pdf_pairing 전체), **전체 회귀 3345 passed (0 regression)**, gate pass, monolith 0줄
 - [x] commit
 ### H5d — H4-wiring (emit)
-- [ ] build_display_overlays → viewer manifest emit (display_overlay_space), 최소 침습
-- [ ] 실측 3PG1 end-to-end 검증 + 전체 회귀
+- [x] build_display_overlays → viewer manifest emit (display_overlay_space), 최소 침습
+- [x] Synthetic CAD pair + sidecar PDF viewer-package regression: `coordinate_source=cad_world`, `visual_fidelity=pdf_render`, `display_overlay_space=image_pixels_tl`, `transform_quality=exact`
+- [ ] 실측 3PG1 end-to-end 검증 + 전체 회귀 (real 3PG1 fixture not present in this run)
 - [ ] commit + 사용자 검증
 
 ## Post
-- [ ] Write PDF_HYBRID_VIEWER_COMPLETION_REPORT.md
+- [x] Write PDF_HYBRID_VIEWER_COMPLETION_REPORT.md
 - [ ] 실측 PDF로 end-to-end (DWG diff → PDF 오버레이) 검증
-- [ ] Memory 업데이트
+- [x] Memory 업데이트
+
+## 2026-06-01 Codex Verification Addendum
+- [x] H5d disk sidecar probe: `out/h5d_sidecar_probe/h5d_sidecar_probe_summary.json` passed with `pdf_render`, `image_pixels_tl`, `transform_quality=exact`, and emitted display bboxes.
+- [x] Viewer package regression: `python -m pytest tests/unit/services/comparison/test_viewer_package.py -q` -> 23 passed.
+- [x] Direct Workbench compare script produced screenshots and one expected 5-sheet change at `out/direct_compare_script_5sheets`.
+- [x] S2 actual region scoring: `out/direct_compare_script_5sheets/sheet_match_metrics_region.json` passed with precision/recall/F1 1.0 and false_match_count 0.
+- [ ] Customer-grade 3PG1 CAD/PDF sidecar overlay-error evidence remains pending; no exact real sidecar fixture was available in this run.
 
 ## Abort Triggers
 - monolith 추가 필요 → 중단, 사용자 확인

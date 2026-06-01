@@ -343,6 +343,72 @@ def test_viewer_package_writes_sidecar_pdf_visual_asset_manifests_for_cad_pair(t
     assert "source_pdf" not in pair["visual_assets"]["before"]
 
 
+def test_viewer_package_hybrid_cad_pair_renders_sidecar_pdf_and_display_overlays(tmp_path: Path) -> None:
+    fitz = pytest.importorskip("fitz")
+    artifact_dir = _write_base_artifacts(tmp_path, source_a="before.dwg", source_b="after.dwg")
+    before_sidecar = artifact_dir / "before_visual.pdf"
+    after_sidecar = artifact_dir / "after_visual.pdf"
+    for path, label in ((before_sidecar, "BEFORE"), (after_sidecar, "AFTER")):
+        doc = fitz.open()
+        page = doc.new_page(width=420, height=297)
+        page.insert_text(fitz.Point(40, 80), label)
+        doc.save(path)
+        doc.close()
+
+    manifest_path = artifact_dir / "artifact_manifest.json"
+    artifact_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_manifest["items"][0].update(
+        {
+            "before_sidecar_pdf": before_sidecar.name,
+            "after_sidecar_pdf": after_sidecar.name,
+            "cad_frame_bbox": [0, 0, 420, 297],
+        }
+    )
+    manifest_path.write_text(json.dumps(artifact_manifest, ensure_ascii=False), encoding="utf-8")
+
+    package = export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="top-issues",
+        preview_dpi=72,
+        preview_max_edge_px=1000,
+        build_lod_tiles=False,
+    )
+
+    assert package.rendered_pair_count == 1
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair = manifest["pairs"][0]
+    assert pair["source_a"].endswith("before.dwg")
+    assert pair["coordinate_source"] == "cad_world"
+    assert pair["visual_fidelity"] == "pdf_render"
+    assert pair["display_overlay_space"] == "image_pixels_tl"
+    assert pair["transform_quality"] == "exact"
+    assert pair["after_sidecar_pdf"].endswith("S21-0001_after_sidecar.pdf")
+    assert pair["page_pdf"].endswith("S21-0001_after_sidecar.pdf")
+    assert Path(pair["after_image"]).exists()
+    assert pair["after_transform"]["coordinate_space"] == "cad_wcs_mm"
+    assert pair["after_transform"]["display_coordinate_space"] == "image_pixels_tl"
+    assert pair["after_transform"]["cad_pdf_alignment"]["quality"] == "exact"
+
+    overlay_payload = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
+    assert overlay_payload["coordinate_source"] == "cad_world"
+    assert overlay_payload["display_overlay_space"] == "image_pixels_tl"
+    overlay = overlay_payload["overlays"][0]
+    assert overlay["zone_id"] == "C-001"
+    assert overlay["display_overlay_space"] == "image_pixels_tl"
+    assert overlay["transform_quality"] == "exact"
+    assert overlay["display_bbox"] == pytest.approx([0.0, 197.0, 100.0, 297.0], abs=1.0)
+    assert overlay["after_bbox_px"] == pytest.approx(
+        {"x": 0.0, "y": 197.0, "width": 100.0, "height": 100.0},
+        abs=1.0,
+    )
+
+    v3_manifest = json.loads((tmp_path / "viewer" / "viewer_manifest_v3.json").read_text(encoding="utf-8"))
+    assert v3_manifest["source_kind"] == "normalized_dxf"
+    assert v3_manifest["display_overlay_space"] == "image_pixels_tl"
+
+
 def test_viewer_package_ignores_env_cad_visual_backend_for_metadata_only_default(
     tmp_path: Path,
     monkeypatch,

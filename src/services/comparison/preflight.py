@@ -92,6 +92,7 @@ def run_preflight(
     checks.extend(_long_path_checks([source_a_path, source_b_path, output_path, cache_path, state_path], allow_long_path_warning))
     checks.append(_rtree_check())
     checks.append(_oda_check())
+    checks.append(_dwg_version_support_check([source_a_path, source_b_path]))
     checks.append(_pymupdf_check())
     checks.append(_pdf_support_check([source_a_path, source_b_path]))
     checks.append(_font_check())
@@ -190,6 +191,90 @@ def _oda_check() -> PreflightCheck:
         )
     except Exception as exc:
         return PreflightCheck("oda_converter", "warning", f"could not check legacy ODA fallback: {exc}")
+
+
+def _dwg_version_support_check(paths: Iterable[Path]) -> PreflightCheck:
+    samples = list(_iter_dwg_paths(paths, limit=10))
+    if not samples:
+        return PreflightCheck("dwg_version_support", "ok", "no DWG inputs detected", {"required": False})
+    try:
+        from .dwg_importer import DwgVersionDetector
+    except Exception as exc:
+        return PreflightCheck(
+            "dwg_version_support",
+            "warning",
+            f"could not check DWG versions: {exc}",
+            {"required": True, "sample_count": len(samples)},
+        )
+
+    supported: list[dict[str, Any]] = []
+    unsupported: list[dict[str, Any]] = []
+    unreadable: list[dict[str, str]] = []
+    for path in samples:
+        try:
+            version = DwgVersionDetector.detect_file(path)
+        except Exception as exc:
+            unreadable.append({"path": str(path), "error": str(exc)})
+            continue
+        item = {"path": str(path), **version.to_dict()}
+        if version.supported:
+            supported.append(item)
+        else:
+            unsupported.append(item)
+
+    details = {
+        "required": True,
+        "sample_count": len(samples),
+        "supported_versions": sorted(DwgVersionDetector.SUPPORTED_CODES),
+        "supported": supported,
+        "unsupported": unsupported,
+        "unreadable": unreadable,
+        "note": "Compare converted DXF files or provide DWG versions supported by the native adapter.",
+    }
+    if unsupported:
+        codes = sorted({item.get("code", "") for item in unsupported if item.get("code")})
+        return PreflightCheck(
+            "dwg_version_support",
+            "error",
+            "DWG input version is unsupported by the native adapter: "
+            f"{', '.join(codes)}. Compare converted DXF files or supported AC1015 DWG files.",
+            details,
+        )
+    if unreadable:
+        return PreflightCheck(
+            "dwg_version_support",
+            "error",
+            "DWG input version could not be detected; compare converted DXF files or repair the DWG source.",
+            details,
+        )
+    return PreflightCheck(
+        "dwg_version_support",
+        "ok",
+        "DWG inputs use supported native adapter versions",
+        details,
+    )
+
+
+def _iter_dwg_paths(paths: Iterable[Path], *, limit: int) -> Iterable[Path]:
+    emitted = 0
+    for path in paths:
+        if not path.exists():
+            continue
+        if path.is_file() and path.suffix.lower() == ".dwg":
+            yield path
+            emitted += 1
+            if emitted >= limit:
+                return
+        elif path.is_dir():
+            try:
+                iterator = path.rglob("*.dwg")
+                for child in iterator:
+                    yield child
+                    emitted += 1
+                    if emitted >= limit:
+                        return
+            except Exception:
+                continue
 
 
 def _pymupdf_check() -> PreflightCheck:

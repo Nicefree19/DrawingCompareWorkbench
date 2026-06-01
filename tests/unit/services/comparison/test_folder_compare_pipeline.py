@@ -22,6 +22,7 @@ from src.services.comparison.drawing_batch import (
     MatchStatus,
     parse_filename_identity,
 )
+from src.services.comparison.preflight import PreflightCheck, PreflightResult
 
 
 def _descriptor(path: Path, kind: DrawingKind = DrawingKind.CAD) -> DrawingFileDescriptor:
@@ -265,6 +266,142 @@ def test_folder_compare_pipeline_runs_all_outputs_without_input_cache(tmp_path, 
     )
     assert str((tmp_path / "cache").resolve()) not in render_result_text
     assert pipeline.audit_sharable_paths(Path(result.output_dir)) == []
+
+
+def test_folder_compare_pipeline_uses_converted_dxf_fallback_for_unsupported_dwg_folder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "detail.dwg").write_bytes(b"AC1032" + b"\0" * 32)
+    (work_dir / "detail_r1.dwg").write_bytes(b"AC1032" + b"\0" * 32)
+    before_dir = work_dir / "dxf_registered" / "before"
+    after_dir = work_dir / "dxf_registered" / "after"
+    before_dir.mkdir(parents=True)
+    after_dir.mkdir(parents=True)
+    before_dxf = before_dir / "detail.dxf"
+    after_dxf = after_dir / "detail_r1.dxf"
+    before_dxf.write_text("0\nEOF\n", encoding="utf-8")
+    after_dxf.write_text("0\nEOF\n", encoding="utf-8")
+
+    desc_a = _descriptor(before_dxf)
+    desc_b = _descriptor(after_dxf)
+    candidate = MatchCandidate(desc_a, desc_b, score=0.95, status=MatchStatus.AUTO_CONFIRMED)
+    captured: dict[str, list[str] | dict[str, object]] = {
+        "preflight_sources": [],
+        "scan_sources": [],
+    }
+
+    def fake_preflight(**kwargs):
+        captured["preflight_sources"] = [str(kwargs["source_a"]), str(kwargs["source_b"])]
+        return PreflightResult(
+            generated_at=datetime.now().isoformat(),
+            status="passed",
+            checks=[PreflightCheck("source_a", "ok", "ok"), PreflightCheck("source_b", "ok", "ok")],
+        )
+
+    def fake_scan(source, options):
+        captured["scan_sources"].append(str(source))
+        if Path(source) == before_dir.resolve():
+            return [desc_a]
+        if Path(source) == after_dir.resolve():
+            return [desc_b]
+        return []
+
+    class FakeJob:
+        def __init__(self, candidates, options):
+            self.candidates = candidates
+
+        def run(self, progress_callback=None, is_cancelled=None):
+            summary = BatchCompareSummary(started_at=datetime.now(), requested_pairs=1)
+            summary.items.append(BatchCompareItemResult(candidate=candidate, status="completed"))
+            summary.finished_at = datetime.now()
+            return summary
+
+    def fake_artifacts(summary, output_dir, **kwargs):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            output_paths={"artifact_manifest_json": str(Path(output_dir) / "artifact_manifest.json")},
+            raw_change_count=33,
+            zone_count=7,
+            cloud_region_count=0,
+            cloud_omitted_zone_count=0,
+            to_dict=lambda: {"raw_change_count": 33, "zone_count": 7},
+        )
+
+    def fake_preview(summary, output_dir, **kwargs):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        manifest = Path(output_dir) / "preview_manifest.json"
+        manifest.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(
+            manifest_path=str(manifest),
+            artifacts=[],
+            preview_count=0,
+            to_dict=lambda: {"preview_count": 0},
+        )
+
+    def fake_executive(output_dir, **kwargs):
+        html = Path(output_dir) / "executive_review.html"
+        dashboard = Path(output_dir) / "review_dashboard.json"
+        brief = Path(output_dir) / "drawing_change_brief.csv"
+        html.write_text("<html></html>", encoding="utf-8")
+        dashboard.write_text("{}", encoding="utf-8")
+        brief.write_text("", encoding="utf-8")
+        return SimpleNamespace(
+            output_paths={
+                "executive_review_html": str(html),
+                "drawing_change_brief_csv": str(brief),
+                "review_dashboard_json": str(dashboard),
+            },
+            to_dict=lambda: {"output_paths": {"executive_review_html": str(html)}},
+        )
+
+    def fake_viewer(artifact_dir, output_dir, **kwargs):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        manifest = Path(output_dir) / "viewer_manifest.json"
+        manifest.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(
+            output_paths={"viewer_manifest_json": str(manifest)},
+            pair_count=1,
+            overlay_count=0,
+            to_dict=lambda: {"viewer_manifest_json": str(manifest)},
+        )
+
+    monkeypatch.setattr(pipeline, "run_preflight", fake_preflight)
+    monkeypatch.setattr(pipeline, "scan_drawing_inputs", fake_scan)
+    monkeypatch.setattr(pipeline, "match_drawing_sets", lambda a, b, options: [candidate])
+    monkeypatch.setattr(pipeline, "BatchCompareJob", FakeJob)
+    monkeypatch.setattr(pipeline, "export_change_artifacts", fake_artifacts)
+    monkeypatch.setattr(pipeline, "export_preview_artifacts", fake_preview)
+    monkeypatch.setattr(pipeline, "export_executive_review_from_artifacts", fake_executive)
+    monkeypatch.setattr(pipeline, "export_viewer_package", fake_viewer)
+    monkeypatch.setattr(pipeline, "_export_region_aware_artifacts", lambda **kwargs: {})
+
+    request = pipeline.FolderCompareRunRequest(
+        work_dir,
+        work_dir,
+        tmp_path / "out",
+        export_profile="internal",
+    )
+    result = pipeline.FolderComparePipeline(request).run()
+
+    assert result.compare_summary.completed_pairs == 1
+    assert captured["preflight_sources"] == [str(before_dir.resolve()), str(after_dir.resolve())]
+    assert captured["scan_sources"] == [str(before_dir.resolve()), str(after_dir.resolve())]
+
+    manifest = json.loads(Path(result.run_manifest_path).read_text(encoding="utf-8"))
+    fallback = manifest["inputs"]["dwg_dxf_fallback"]
+    assert fallback["used"] is True
+    assert fallback["reason"] == "unsupported_dwg_folder_with_converted_dxf_dirs"
+    assert manifest["inputs"]["effective_source_a"] == str(before_dir.resolve())
+    assert manifest["inputs"]["effective_source_b"] == str(after_dir.resolve())
+    assert manifest["stages"]["dwg_dxf_fallback"]["status"] == "completed"
+
+    review_project = json.loads(Path(result.review_project_path).read_text(encoding="utf-8"))
+    input_resolution = review_project["options"]["input_resolution"]
+    assert input_resolution["mode"] == "converted_dxf_fallback"
+    assert input_resolution["reason"] == "unsupported_dwg_folder_with_converted_dxf_dirs"
 
 
 def test_auto_structural_cloud_export_uses_review_queue_and_separate_folder(tmp_path) -> None:

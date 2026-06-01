@@ -1,0 +1,411 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "fixture_count": 3,
+  "fixtures": [
+    {
+      "name": "2sheets_clear",
+      "before_path": "2sheets_clear.dxf",
+      "after_path": "2sheets_clear_after.dxf",
+      "synthetic": true,
+      "before_sheets": [
+        {
+          "id": "clear-01",
+          "drawing_number": "S22-0001",
+          "title": "LEVEL 1 FRAMING",
+          "texts": [
+            "S22-0001",
+            "LEVEL 1 FRAMING"
+          ],
+          "frame_bbox": [
+            0.0,
+            0.0,
+            420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "clear-02",
+          "drawing_number": "S22-0002",
+          "title": "LEVEL 2 FRAMING",
+          "texts": [
+            "S22-0002",
+            "LEVEL 2 FRAMING"
+          ],
+          "frame_bbox": [
+            500.0,
+            0.0,
+            920.0,
+            297.0
+          ],
+          "manual_required": false
+        }
+      ],
+      "after_sheets": [
+        {
+          "id": "clear-01",
+          "drawing_number": "S22-0001",
+          "title": "LEVEL 1 FRAMING",
+          "texts": [
+            "S22-0001",
+            "LEVEL 1 FRAMING"
+          ],
+          "frame_bbox": [
+            0.0,
+            0.0,
+            420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "clear-02",
+          "drawing_number": "S22-0002",
+          "title": "LEVEL 2 FRAMING",
+          "texts": [
+            "S22-0002",
+            "LEVEL 2 FRAMING"
+          ],
+          "frame_bbox": [
+            500.0,
+            0.0,
+            920.0,
+            297.0
+          ],
+          "manual_required": false
+        }
+      ],
+      "ground_truth": [
+        {
+          "before_id": "clear-01",
+          "after_id": "clear-01",
+          "manual_required": false
+        },
+        {
+          "before_id": "clear-02",
+          "after_id": "clear-02",
+          "manual_required": false
+        }
+      ]
+    },
+    {
+      "name": "3sheets_ambiguous",
+      "before_path": "3sheets_ambiguous.dxf",
+      "after_path": "3sheets_ambiguous_after.dxf",
+      "synthetic": true,
+      "before_sheets": [
+        {
+          "id": "amb-01",
+          "drawing_number": "S23-0001",
+          "title": "LEVEL 1 FRAMING",
+          "texts": [
+            "S23-0001",
+            "LEVEL 1 FRAMING"
+          ],
+          "frame_bbox": [
+            0.0,
+            0.0,
+            420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "amb-02",
+          "drawing_number": "",
+          "title": "TYPICAL DETAIL",
+          "texts": [
+            "TYPICAL DETAIL"
+          ],
+          "frame_bbox": [
+            500.0,
+            0.0,
+            920.0,
+            297.0
+          ],
+          "manual_required": true
+        },
+        {
+          "id": "amb-03",
+          "drawing_number": "S23-0003",
+          "title": "ROOF FRAMING",
+          "texts": [
+            "S23-0003",
+            "ROOF FRAMING"
+          ],
+          "frame_bbox": [
+            1000.0,
+            0.0,
+            1420.0,
+            297.0
+          ],
+          "manual_required": false
+        }
+      ],
+      "after_sheets": [
+        {
+          "id": "amb-01",
+          "drawing_number": "S23-0001",
+          "title": "LEVEL 1 FRAMING",
+          "texts": [
+            "S23-0001",
+            "LEVEL 1 FRAMING"
+          ],
+          "frame_bbox": [
+            0.0,
+            0.0,
+            420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "amb-02",
+          "drawing_number": "",
+          "title": "TYPICAL DETAIL",
+          "texts": [
+            "TYPICAL DETAIL"
+          ],
+          "frame_bbox": [
+            500.0,
+            0.0,
+            920.0,
+            297.0
+          ],
+          "manual_required": true
+        },
+        {
+          "id": "amb-03",
+          "drawing_number": "S23-0003",
+          "title": "ROOF FRAMING",
+          "texts": [
+            "S23-0003",
+            "ROOF FRAMING"
+          ],
+          "frame_bbox": [
+            1000.0,
+            0.0,
+            1420.0,
+            297.0
+          ],
+          "manual_required": false
+        }
+      ],
+      "ground_truth": [
+        {
+          "before_id": "amb-01",
+          "after_id": "amb-01",
+          "manual_required": false
+        },
+        {
+          "before_id": "amb-02",
+          "after_id": "amb-02",
+          "manual_required": true
+        },
+        {
+          "before_id": "amb-03",
+          "after_id": "amb-03",
+          "manual_required": false
+        }
+      ]
+    },
+    {
+      "name": "5sheets_one_renamed",
+      "before_path": "5sheets_one_renamed.dxf",
+      "after_path": "5sheets_one_renamed_after.dxf",
+      "synthetic": true,
+      "before_sheets": [
+        {
+          "id": "rename-01",
+          "drawing_number": "S25-0001",
+          "title": "LEVEL 1 FRAMING",
+          "texts": [
+            "S25-0001",
+            "LEVEL 1 FRAMING"
+          ],
+          "frame_bbox": [
+            0.0,
+            0.0,
+            420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-02",
+          "drawing_number": "S25-0002",
+          "title": "LEVEL 2 FRAMING",
+          "texts": [
+            "S25-0002",
+            "LEVEL 2 FRAMING"
+          ],
+          "frame_bbox": [
+            500.0,
+            0.0,
+            920.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-03",
+          "drawing_number": "S25-0003",
+          "title": "LEVEL 3 FRAMING",
+          "texts": [
+            "S25-0003",
+            "LEVEL 3 FRAMING"
+          ],
+          "frame_bbox": [
+            1000.0,
+            0.0,
+            1420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-04",
+          "drawing_number": "S25-0004",
+          "title": "ROOF FRAMING",
+          "texts": [
+            "S25-0004",
+            "ROOF FRAMING"
+          ],
+          "frame_bbox": [
+            1500.0,
+            0.0,
+            1920.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-05",
+          "drawing_number": "S25-0005",
+          "title": "STAIR DETAIL",
+          "texts": [
+            "S25-0005",
+            "STAIR DETAIL"
+          ],
+          "frame_bbox": [
+            2000.0,
+            0.0,
+            2420.0,
+            297.0
+          ],
+          "manual_required": true
+        }
+      ],
+      "after_sheets": [
+        {
+          "id": "rename-01",
+          "drawing_number": "S25-0001",
+          "title": "LEVEL 1 FRAMING",
+          "texts": [
+            "S25-0001",
+            "LEVEL 1 FRAMING"
+          ],
+          "frame_bbox": [
+            0.0,
+            0.0,
+            420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-02",
+          "drawing_number": "S25-0002",
+          "title": "LEVEL 2 FRAMING",
+          "texts": [
+            "S25-0002",
+            "LEVEL 2 FRAMING"
+          ],
+          "frame_bbox": [
+            500.0,
+            0.0,
+            920.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-03",
+          "drawing_number": "S25-0003",
+          "title": "LEVEL 3 FRAMING",
+          "texts": [
+            "S25-0003",
+            "LEVEL 3 FRAMING"
+          ],
+          "frame_bbox": [
+            1000.0,
+            0.0,
+            1420.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-04",
+          "drawing_number": "S25-0004",
+          "title": "ROOF FRAMING",
+          "texts": [
+            "S25-0004",
+            "ROOF FRAMING"
+          ],
+          "frame_bbox": [
+            1500.0,
+            0.0,
+            1920.0,
+            297.0
+          ],
+          "manual_required": false
+        },
+        {
+          "id": "rename-05",
+          "drawing_number": "S25-0005R",
+          "title": "STAIR DETAIL",
+          "texts": [
+            "S25-0005R",
+            "STAIR DETAIL"
+          ],
+          "frame_bbox": [
+            2000.0,
+            0.0,
+            2420.0,
+            297.0
+          ],
+          "manual_required": true
+        }
+      ],
+      "ground_truth": [
+        {
+          "before_id": "rename-01",
+          "after_id": "rename-01",
+          "manual_required": false
+        },
+        {
+          "before_id": "rename-02",
+          "after_id": "rename-02",
+          "manual_required": false
+        },
+        {
+          "before_id": "rename-03",
+          "after_id": "rename-03",
+          "manual_required": false
+        },
+        {
+          "before_id": "rename-04",
+          "after_id": "rename-04",
+          "manual_required": false
+        },
+        {
+          "before_id": "rename-05",
+          "after_id": "rename-05",
+          "manual_required": true
+        }
+      ]
+    }
+  ]
+}

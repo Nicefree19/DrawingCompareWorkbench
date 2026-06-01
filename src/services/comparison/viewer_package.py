@@ -20,6 +20,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from .cad_pdf_alignment import CadPdfAlignment, align_cad_to_pdf, build_display_overlays
 from .cad_visual_backend import (
     CAD_VISUAL_BACKEND_DISABLED,
     CAD_VISUAL_BACKEND_UNAVAILABLE,
@@ -37,6 +38,7 @@ from .transform import (
     SOURCE_TRUTH_PDF_VISUAL,
     Y_AXIS_DOWN,
     Y_AXIS_UP,
+    normalise_bbox,
     normalize_coordinate_space,
 )
 from .viewer_manifest_v2 import (
@@ -376,6 +378,16 @@ def export_viewer_package(
         source_b = _source_path_for_pair(rows, pair_artifact, "b")
         sidecar_pdf_a = _sidecar_pdf_path_for_pair(rows, pair_artifact, "a", artifact_root=artifact_root)
         sidecar_pdf_b = _sidecar_pdf_path_for_pair(rows, pair_artifact, "b", artifact_root=artifact_root)
+        is_pdf_pair = _is_pdf_path(source_a) and _is_pdf_path(source_b)
+        is_hybrid_pdf_visual_pair = (
+            not is_pdf_pair
+            and _is_cad_path(source_a)
+            and _is_cad_path(source_b)
+            and sidecar_pdf_a is not None
+            and sidecar_pdf_b is not None
+        )
+        visual_source_a = sidecar_pdf_a if is_hybrid_pdf_visual_pair else source_a
+        visual_source_b = sidecar_pdf_b if is_hybrid_pdf_visual_pair else source_b
         preview_entry = preview_by_pair.get(pair_id, {})
 
         # Phase H integration — pick the per-side PDF page indices for
@@ -397,7 +409,11 @@ def export_viewer_package(
             max_viewer_pages=options.max_viewer_pages,
         )
 
-        background = _reuse_preview_background(preview_entry)
+        background = (
+            _empty_background()
+            if is_hybrid_pdf_visual_pair
+            else _reuse_preview_background(preview_entry)
+        )
         render_status = background["render_status"]
         if render_decision == "render":
             render_slots_used += 1
@@ -407,8 +423,8 @@ def export_viewer_package(
                 render_started = perf_counter()
                 rendered = _render_pair_backgrounds_with_timeout(
                     pair_id=pair_id,
-                    source_a=source_a,
-                    source_b=source_b,
+                    source_a=visual_source_a,
+                    source_b=visual_source_b,
                     image_dir=image_dir,
                     dxf_cache_dir=dxf_cache_root,
                     dpi=options.preview_dpi,
@@ -445,16 +461,53 @@ def export_viewer_package(
         before_image = background.get("before_image") or ""
         after_image = background.get("after_image") or ""
         background_type = "png" if after_image else "none"
-        is_pdf_pair = bool(
-            source_a
-            and source_b
-            and source_a.suffix.lower() in PDF_EXTENSIONS
-            and source_b.suffix.lower() in PDF_EXTENSIONS
+        hybrid_before_alignment: Optional[CadPdfAlignment] = None
+        hybrid_after_alignment: Optional[CadPdfAlignment] = None
+        if is_hybrid_pdf_visual_pair:
+            hybrid_before_alignment = _cad_pdf_alignment_for_pair_side(
+                rows=rows,
+                artifact=pair_artifact,
+                side="a",
+                pdf_transform=before_transform,
+            )
+            hybrid_after_alignment = _cad_pdf_alignment_for_pair_side(
+                rows=rows,
+                artifact=pair_artifact,
+                side="b",
+                pdf_transform=after_transform,
+            )
+            before_transform = _hybrid_cad_pdf_transform(
+                before_transform,
+                hybrid_before_alignment,
+            )
+            after_transform = _hybrid_cad_pdf_transform(
+                after_transform,
+                hybrid_after_alignment,
+            )
+        has_pdf_visual_background = is_pdf_pair or is_hybrid_pdf_visual_pair
+        pdf_page_size = (
+            _pdf_page_size_from_transforms(after_transform, before_transform)
+            if has_pdf_visual_background
+            else None
         )
-        pdf_page_size = _pdf_page_size_from_transforms(after_transform, before_transform) if is_pdf_pair else None
         coordinate_source = "image_pixels" if is_pdf_pair else "cad_world"
-        visual_fidelity = "pdf_render" if is_pdf_pair else ("cad_render" if background_type == "png" else "relative_overlay")
+        visual_fidelity = (
+            "pdf_render"
+            if has_pdf_visual_background and background_type == "png"
+            else ("cad_render" if background_type == "png" else "relative_overlay")
+        )
         render_lifecycle = "ready" if background_type == "png" else ("idle" if is_pdf_pair else "queued")
+        display_overlay_space = (
+            COORD_IMAGE_PIXELS_TL
+            if is_hybrid_pdf_visual_pair
+            and hybrid_after_alignment is not None
+            and hybrid_after_alignment.is_usable
+            else ""
+        )
+        hybrid_transform_quality = _hybrid_transform_quality(
+            hybrid_before_alignment,
+            hybrid_after_alignment,
+        )
         cad_visual_conversion = _cad_visual_conversion_provenance_for_pair(
             pair_id=pair_id,
             source_a=source_a,
@@ -474,10 +527,18 @@ def export_viewer_package(
         # convert px → pt before plotting cloud markers. Without these
         # fields, ``convert_bbox_to_world_space`` skips the conversion and
         # the markers float at world coords ~6× outside the page bounds.
-        pair_pdf_dpi = _pdf_dpi_from_zone_rows(rows) if is_pdf_pair else 0.0
+        pair_pdf_dpi = (
+            _pdf_dpi_from_zone_rows(rows)
+            if is_pdf_pair
+            else (
+                _pdf_dpi_from_transforms(after_transform, before_transform)
+                if is_hybrid_pdf_visual_pair
+                else 0.0
+            )
+        )
         rendered_background_signature = _rendered_background_signature(
-            source_a=source_a,
-            source_b=source_b,
+            source_a=visual_source_a if is_hybrid_pdf_visual_pair else source_a,
+            source_b=visual_source_b if is_hybrid_pdf_visual_pair else source_b,
             before_image=before_image,
             after_image=after_image,
             before_transform=before_transform,
@@ -494,8 +555,9 @@ def export_viewer_package(
             priority_by_key=priority_by_key,
             max_records=options.max_overlay_records_per_pair,
         )
-        overlays = [
-            _overlay_from_zone_row(
+        overlays: List[Dict[str, Any]] = []
+        for row in overlay_rows:
+            overlay = _overlay_from_zone_row(
                 row,
                 pair_extents[pair_id],
                 priority_by_key.get((pair_id, str(row.get("zone_id", "")))),
@@ -505,8 +567,15 @@ def export_viewer_package(
                 bbox_coordinate_space=(coordinate_source if is_pdf_pair else ""),
                 pdf_dpi=pair_pdf_dpi,
             )
-            for row in overlay_rows
-        ]
+            if is_hybrid_pdf_visual_pair:
+                _apply_hybrid_display_overlay(
+                    overlay,
+                    row,
+                    before_alignment=hybrid_before_alignment,
+                    after_alignment=hybrid_after_alignment,
+                    transform_quality=hybrid_transform_quality,
+                )
+            overlays.append(overlay)
         overlays = _sort_overlays(overlays)
         overlay_page_summary = write_overlay_page_store(
             pair_id=pair_id,
@@ -555,6 +624,8 @@ def export_viewer_package(
             side="after_sidecar",
         )
         page_path = after_page_path or before_page_path
+        if not page_path and is_hybrid_pdf_visual_pair:
+            page_path = after_sidecar_page_path or before_sidecar_page_path
         if before_page_path or after_page_path or before_sidecar_page_path or after_sidecar_page_path:
             page_count += 1
         visual_assets, pair_visual_asset_paths = _write_pair_visual_asset_manifests(
@@ -663,11 +734,13 @@ def export_viewer_package(
             "coordinate_source": coordinate_source,
             "visual_fidelity": visual_fidelity,
             "render_lifecycle": render_lifecycle,
-            "pdf_page": primary_page_a if is_pdf_pair else None,
-            "page_a": primary_page_a if is_pdf_pair else None,
-            "page_b": primary_page_b if is_pdf_pair else None,
+            "pdf_page": primary_page_a if has_pdf_visual_background else None,
+            "page_a": primary_page_a if has_pdf_visual_background else None,
+            "page_b": primary_page_b if has_pdf_visual_background else None,
             "pdf_page_size": pdf_page_size,
-            "compare_pdf_dpi": pair_pdf_dpi if is_pdf_pair else None,
+            "compare_pdf_dpi": pair_pdf_dpi if has_pdf_visual_background else None,
+            "display_overlay_space": display_overlay_space,
+            "transform_quality": hybrid_transform_quality if is_hybrid_pdf_visual_pair else "",
             "viewer_coordinate_space": "pixel" if after_transform else "unit_page",
             "before_transform": before_transform,
             "after_transform": after_transform,
@@ -692,7 +765,7 @@ def export_viewer_package(
         if options.export_marked_pdf:
             marked_pdf_path, marked_pdf_status, pdf_warning = _export_marked_pdf_for_pair(
                 pair_id=pair_id,
-                source_b=source_b,
+                source_b=sidecar_pdf_b if is_hybrid_pdf_visual_pair else source_b,
                 after_image=after_image,
                 overlays=_marked_pdf_overlays(overlays, options.marked_pdf_mode, selected_keys),
                 marked_pdf_dir=marked_pdf_dir,
@@ -719,14 +792,16 @@ def export_viewer_package(
             # for background rendering. Same value as `pdf_page` for
             # back-compat; new consumers (G2.7 lightweight viewer)
             # prefer page_a/page_b explicitly.
-            "pdf_page": primary_page_a if is_pdf_pair else None,
-            "page_a": primary_page_a if is_pdf_pair else None,
-            "page_b": primary_page_b if is_pdf_pair else None,
+            "pdf_page": primary_page_a if has_pdf_visual_background else None,
+            "page_a": primary_page_a if has_pdf_visual_background else None,
+            "page_b": primary_page_b if has_pdf_visual_background else None,
             # Multi-page navigation — empty list when N <= 1 so the GUI
             # decides cheaply whether to show the navigator widget.
-            "page_match_pairs": all_page_pairs if is_pdf_pair else [],
+            "page_match_pairs": all_page_pairs if has_pdf_visual_background else [],
             "pdf_page_size": pdf_page_size,
-            "compare_pdf_dpi": pair_pdf_dpi if is_pdf_pair else None,
+            "compare_pdf_dpi": pair_pdf_dpi if has_pdf_visual_background else None,
+            "display_overlay_space": display_overlay_space,
+            "transform_quality": hybrid_transform_quality if is_hybrid_pdf_visual_pair else "",
             "before_transform": before_transform,
             "after_transform": after_transform,
             "before_image": before_image,
@@ -1058,6 +1133,14 @@ def _group_zones(zones: Iterable[Dict[str, str]]) -> Dict[str, List[Dict[str, st
         pair_id = str(row.get("pair_id") or row.get("drawing_number") or row.get("file_id") or "unknown")
         grouped.setdefault(pair_id, []).append(row)
     return grouped
+
+
+def _is_pdf_path(path: Optional[Path]) -> bool:
+    return bool(path and path.suffix.lower() in PDF_EXTENSIONS)
+
+
+def _is_cad_path(path: Optional[Path]) -> bool:
+    return bool(path and path.suffix.lower() in CAD_EXTENSIONS)
 
 
 def _source_path_for_pair(rows: Sequence[Dict[str, str]], artifact: Dict[str, Any], side: str) -> Optional[Path]:
@@ -1839,6 +1922,23 @@ def _pdf_dpi_from_zone_rows(rows: Sequence[Dict[str, Any]]) -> float:
     return 0.0
 
 
+def _pdf_dpi_from_transforms(
+    after_transform: Optional[Dict[str, Any]],
+    before_transform: Optional[Dict[str, Any]],
+) -> float:
+    for transform in (after_transform, before_transform):
+        if not isinstance(transform, dict):
+            continue
+        for key in ("effective_dpi", "pdf_dpi", "dpi", "requested_dpi"):
+            try:
+                value = float(transform.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return 0.0
+
+
 def _row_metadata_sources(row: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     yield row
     metadata = row.get("metadata")
@@ -1981,6 +2081,190 @@ def _bbox_from_zone_row(row: Dict[str, Any], *, old: bool = False) -> Optional[T
         )
     except (TypeError, ValueError):
         return None
+
+
+def _cad_frame_bbox_for_pair_side(
+    *,
+    rows: Sequence[Dict[str, str]],
+    artifact: Dict[str, Any],
+    side: str,
+) -> Optional[Tuple[float, float, float, float]]:
+    side_keys = (
+        (
+            "cad_frame_bbox_a",
+            "before_cad_frame_bbox",
+            "dwg_frame_bbox_a",
+            "before_dwg_frame_bbox",
+            "source_a_frame_bbox",
+            "frame_bbox_a",
+        )
+        if side == "a"
+        else (
+            "cad_frame_bbox_b",
+            "after_cad_frame_bbox",
+            "dwg_frame_bbox_b",
+            "after_dwg_frame_bbox",
+            "source_b_frame_bbox",
+            "frame_bbox_b",
+        )
+    )
+    common_keys = (
+        "cad_frame_bbox",
+        "dwg_frame_bbox",
+        "drawing_frame_bbox",
+        "frame_bbox",
+        "cad_world_bbox",
+        "world_bbox",
+    )
+    for container in (artifact, *rows):
+        if not isinstance(container, dict):
+            continue
+        for key in (*side_keys, *common_keys):
+            raw = container.get(key)
+            bbox = normalise_bbox(raw)
+            if bbox is None:
+                bbox = _parse_bbox(raw)
+            if bbox is not None:
+                return bbox
+    return None
+
+
+def _pixel_size_from_transform(transform: Optional[Dict[str, Any]]) -> Tuple[int, int]:
+    if not isinstance(transform, dict):
+        return (0, 0)
+    try:
+        width = int(float(transform.get("img_width") or transform.get("width") or transform.get("max_x") or 0))
+        height = int(float(transform.get("img_height") or transform.get("height") or transform.get("max_y") or 0))
+    except (TypeError, ValueError):
+        return (0, 0)
+    return (width, height) if width > 0 and height > 0 else (0, 0)
+
+
+def _cad_pdf_alignment_for_pair_side(
+    *,
+    rows: Sequence[Dict[str, str]],
+    artifact: Dict[str, Any],
+    side: str,
+    pdf_transform: Optional[Dict[str, Any]],
+) -> Optional[CadPdfAlignment]:
+    frame = _cad_frame_bbox_for_pair_side(rows=rows, artifact=artifact, side=side)
+    pixel_size = _pixel_size_from_transform(pdf_transform)
+    if frame is None or pixel_size == (0, 0):
+        return None
+    return align_cad_to_pdf(frame, pixel_size)
+
+
+def _hybrid_cad_pdf_transform(
+    pdf_transform: Optional[Dict[str, Any]],
+    alignment: Optional[CadPdfAlignment],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(pdf_transform, dict):
+        return None
+    if alignment is None or not alignment.is_usable:
+        return dict(pdf_transform)
+    x0, y0, x1, y1 = alignment.cad_frame_bbox
+    width, height = alignment.pdf_pixel_size
+    cad_w = max(x1 - x0, 1e-9)
+    cad_h = max(y1 - y0, 1e-9)
+    out = dict(pdf_transform)
+    out.update(
+        {
+            "min_x": float(x0),
+            "min_y": float(y0),
+            "max_x": float(x1),
+            "max_y": float(y1),
+            "img_width": int(width),
+            "img_height": int(height),
+            "scale_x": float(width) / cad_w,
+            "scale_y": float(height) / cad_h,
+            "coordinate_space": COORD_CAD_WCS_MM,
+            "display_coordinate_space": COORD_IMAGE_PIXELS_TL,
+            "transform_quality": alignment.quality,
+            "cad_pdf_alignment": alignment.to_dict(),
+        }
+    )
+    return out
+
+
+def _hybrid_transform_quality(
+    before_alignment: Optional[CadPdfAlignment],
+    after_alignment: Optional[CadPdfAlignment],
+) -> str:
+    qualities = [
+        alignment.quality
+        for alignment in (before_alignment, after_alignment)
+        if alignment is not None
+    ]
+    if not qualities:
+        return "relative_only"
+    if "relative_only" in qualities:
+        return "relative_only"
+    if "estimated" in qualities:
+        return "estimated"
+    return "exact"
+
+
+def _image_bbox_to_rect(bbox: object) -> Optional[Dict[str, float]]:
+    coords = normalise_bbox(bbox)
+    if coords is None:
+        coords = _parse_bbox(bbox)
+    if coords is None:
+        return None
+    x0, y0, x1, y1 = coords
+    left = min(float(x0), float(x1))
+    top = min(float(y0), float(y1))
+    right = max(float(x0), float(x1))
+    bottom = max(float(y0), float(y1))
+    return {
+        "x": left,
+        "y": top,
+        "width": max(1.0, right - left),
+        "height": max(1.0, bottom - top),
+    }
+
+
+def _mapped_display_bbox(
+    bbox: object,
+    alignment: Optional[CadPdfAlignment],
+) -> Optional[Tuple[float, float, float, float]]:
+    if alignment is None or not alignment.is_usable:
+        return None
+    mapped = build_display_overlays(
+        [{"bbox": bbox, "bbox_coordinate_space": COORD_CAD_WCS_MM}],
+        alignment,
+    )
+    if not mapped:
+        return None
+    return normalise_bbox(mapped[0].get("display_bbox"))
+
+
+def _apply_hybrid_display_overlay(
+    overlay: Dict[str, Any],
+    row: Dict[str, Any],
+    *,
+    before_alignment: Optional[CadPdfAlignment],
+    after_alignment: Optional[CadPdfAlignment],
+    transform_quality: str,
+) -> None:
+    after_display_bbox = _mapped_display_bbox(
+        _bbox_from_zone_row(row),
+        after_alignment,
+    )
+    before_display_bbox = _mapped_display_bbox(
+        _bbox_from_zone_row(row, old=True) or _bbox_from_zone_row(row),
+        before_alignment,
+    )
+    if after_display_bbox is not None:
+        overlay["display_bbox"] = list(after_display_bbox)
+        overlay["display_overlay_space"] = COORD_IMAGE_PIXELS_TL
+        overlay["after_bbox_px"] = _image_bbox_to_rect(after_display_bbox)
+    else:
+        overlay["display_bbox"] = None
+        overlay["display_overlay_space"] = ""
+    if before_display_bbox is not None:
+        overlay["before_display_bbox"] = list(before_display_bbox)
+        overlay["before_bbox_px"] = _image_bbox_to_rect(before_display_bbox)
+    overlay["transform_quality"] = transform_quality
 
 
 def _first_list_value(value: Any) -> str:
@@ -2208,6 +2492,17 @@ def _reuse_preview_background(preview: Dict[str, Any]) -> Dict[str, Any]:
         "before_transform": before_transform,
         "after_transform": after_transform,
         "render_status": "preview_reused" if after_image and after_transform else "lazy_not_rendered",
+        "warnings": [],
+    }
+
+
+def _empty_background() -> Dict[str, Any]:
+    return {
+        "before_image": "",
+        "after_image": "",
+        "before_transform": None,
+        "after_transform": None,
+        "render_status": "lazy_not_rendered",
         "warnings": [],
     }
 
@@ -3280,6 +3575,12 @@ def _build_v3_manifest_from_v1(
         source_kind == "normalized_dxf"
         and any(p.get("after_transform") for p in pairs_v1)
     ) else "relative_only"
+    display_overlay_space = ""
+    for pair in pairs_v1:
+        value = str(pair.get("display_overlay_space") or "")
+        if value:
+            display_overlay_space = normalize_coordinate_space(value)
+            break
 
     return ViewerManifestV3(
         pair_uuid=str(v1_manifest.get("pair_uuid") or "viewer-package"),
@@ -3297,4 +3598,5 @@ def _build_v3_manifest_from_v1(
         zone_requests=[],
         evidence=[],
         current_render_mode=_v3_initial_render_mode(pairs_v1),  # type: ignore[arg-type]
+        display_overlay_space=display_overlay_space,
     )
