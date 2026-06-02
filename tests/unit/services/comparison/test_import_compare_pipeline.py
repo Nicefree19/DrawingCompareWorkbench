@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from src.services.comparison.dwg_backend import DWG_BACKEND_ENV
 from src.services.comparison.dwg_importer import DwgFailureCode, DwgJsonFixtureAdapter
 from src.services.comparison.cad_stability import CadStabilityLimits
 from src.services.comparison.dwg_differ import DwgDiffer
@@ -281,6 +282,49 @@ def test_compare_pipeline_user_converter_mode_uses_converted_dxf_pair(tmp_path: 
     assert payload["warnings"][-1]["code"] == "DWG_CONVERTED_DXF_FALLBACK"
     comparison_result = result.to_comparison_result()
     assert comparison_result.metadata["dwg_dxf_fallback"]["used"] is True
+
+
+def test_compare_pipeline_env_user_converter_mode_uses_converted_dxf_pair(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(DWG_BACKEND_ENV, "user_converter")
+    source_a = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1024")
+    source_b = _write_dwg_fixture(tmp_path / "detail_r1.dwg", version="AC1024")
+    before_dir = tmp_path / "dxf_registered" / "before"
+    after_dir = tmp_path / "dxf_registered" / "after"
+    before_dir.mkdir(parents=True)
+    after_dir.mkdir(parents=True)
+    fallback_a = _write_two_layer_dxf(before_dir / "detail.dxf", ignored_line_end_x=100)
+    fallback_b = _write_two_layer_dxf(after_dir / "detail_r1.dxf", ignored_line_end_x=120)
+
+    result = ComparePipeline().compare(source_a, source_b)
+
+    assert result.status == CadPipelineStatus.OK
+    assert result.input_resolution["used"] is True
+    assert result.input_resolution["diagnostics"]["dwg_versions"]["a"]["code"] == "AC1024"
+    assert result.imports["a"].source_path == str(fallback_a.resolve())
+    assert result.imports["b"].source_path == str(fallback_b.resolve())
+
+
+def test_dwg_differ_user_converter_mode_uses_converted_dxf_pair(tmp_path: Path) -> None:
+    source_a = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1027")
+    source_b = _write_dwg_fixture(tmp_path / "detail_r3.dwg", version="AC1027")
+    before_dir = tmp_path / "dxf_registered" / "before"
+    after_dir = tmp_path / "dxf_registered" / "after"
+    before_dir.mkdir(parents=True)
+    after_dir.mkdir(parents=True)
+    fallback_a = _write_two_layer_dxf(before_dir / "detail.dxf", ignored_line_end_x=100)
+    fallback_b = _write_two_layer_dxf(after_dir / "detail_r3.dxf", ignored_line_end_x=120)
+
+    result = DwgDiffer(config={"dwg_backend_mode": "user_converter"}).compare(source_a, source_b)
+
+    assert result.metadata["pipeline_status"] == CadPipelineStatus.OK
+    assert result.metadata["dwg_dxf_fallback"]["used"] is True
+    assert result.metadata["dwg_dxf_fallback"]["diagnostics"]["dwg_versions"]["a"]["code"] == "AC1027"
+    assert result.metadata["imports"]["a"]["source_path"] == str(fallback_a.resolve())
+    assert result.metadata["imports"]["b"]["source_path"] == str(fallback_b.resolve())
+    assert any("DWG_CONVERTED_DXF_FALLBACK" in warning for warning in result.warnings)
 
 
 def test_compare_pipeline_default_does_not_auto_use_converted_dxf_pair(tmp_path: Path) -> None:

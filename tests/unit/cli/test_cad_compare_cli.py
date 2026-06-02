@@ -52,3 +52,42 @@ def test_file_compare_cli_reports_unsupported_dwg_version(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "status=failed" in output
     assert "COMPARE_IMPORT_FAILED" in output
+
+
+def test_file_compare_cli_user_converter_backend_uses_registered_dxf(tmp_path, capsys):
+    before = tmp_path / "detail.dwg"
+    after = tmp_path / "detail_r1.dwg"
+    before.write_bytes(b"AC1032" + b"\0" * 32)
+    after.write_bytes(b"AC1032" + b"\0" * 32)
+
+    before_dir = tmp_path / "dxf_registered" / "before"
+    after_dir = tmp_path / "dxf_registered" / "after"
+    before_dir.mkdir(parents=True)
+    after_dir.mkdir(parents=True)
+    fallback_a = before_dir / "detail.dxf"
+    fallback_b = after_dir / "detail_r1.dxf"
+    fallback_a.write_text((CAD_SAMPLES / "simple_base.dxf").read_text(encoding="utf-8"), encoding="utf-8")
+    fallback_b.write_text((CAD_SAMPLES / "simple_modified.dxf").read_text(encoding="utf-8"), encoding="utf-8")
+    output = tmp_path / "result.json"
+
+    exit_code = main(
+        [
+            "file",
+            str(before),
+            str(after),
+            "--dwg-backend",
+            "user_converter",
+            "--output",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    metadata = payload["result"]["metadata"]
+    assert exit_code == 0
+    assert payload["status"] in {"ok", "partial"}
+    assert metadata["dwg_dxf_fallback"]["used"] is True
+    assert metadata["dwg_dxf_fallback"]["diagnostics"]["dwg_versions"]["a"]["code"] == "AC1032"
+    assert metadata["imports"]["a"]["source_path"] == str(fallback_a.resolve())
+    assert metadata["imports"]["b"]["source_path"] == str(fallback_b.resolve())
+    assert "status=" in capsys.readouterr().out

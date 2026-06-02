@@ -545,6 +545,7 @@ class DwgDiffer:
                 max_dxf_tokens=int(self.config.get("max_dxf_tokens", 2_500_000)),
                 max_block_depth=int(self.config.get("max_block_depth", 4)),
             )
+        dwg_backend_mode = self.config.get("dwg_backend_mode") or self.config.get("dwg_backend")
         tolerance = CompareTolerance(
             position_tolerance_mm=float(sensitivity.position_threshold),
             bbox_tolerance_mm=float(sensitivity.position_threshold),
@@ -554,6 +555,7 @@ class DwgDiffer:
         return ComparePipelineOptions(
             import_options=ImportPipelineOptions(
                 expand_blocks=bool(self._comparison_config.expand_blocks),
+                dwg_backend_mode=dwg_backend_mode,
                 allow_oda_fallback=self._allow_oda_fallback,
                 oda_converter_path=self.config.get("oda_converter_path"),
                 stability_limits=stability_limits,

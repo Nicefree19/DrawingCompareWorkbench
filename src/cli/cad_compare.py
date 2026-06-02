@@ -52,6 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Layer to exclude. May be supplied multiple times.",
     )
     file_parser.add_argument(
+        "--dwg-backend",
+        default=None,
+        help=(
+            "DWG backend mode for file compare. Use 'user_converter' to compare "
+            "unsupported DWG inputs through nearby user-provided converted DXFs."
+        ),
+    )
+    file_parser.add_argument(
         "--fail-on-change",
         action="store_true",
         help="Return exit code 1 when differences are detected.",
@@ -115,7 +123,10 @@ def _run_file_compare(args: argparse.Namespace) -> int:
 
     from src.services.comparison.dwg_differ import DwgDiffer
 
-    differ = DwgDiffer(config={"use_canonical_pipeline": True, "allow_oda_fallback": False})
+    differ_config = {"use_canonical_pipeline": True, "allow_oda_fallback": False}
+    if args.dwg_backend:
+        differ_config["dwg_backend_mode"] = args.dwg_backend
+    differ = DwgDiffer(config=differ_config)
     result = differ.compare(
         args.source_a,
         args.source_b,

@@ -10,6 +10,7 @@ explicitly enables the isolated fallback option.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import time
@@ -36,6 +37,7 @@ from .dwg_importer import (
     DwgVersionDetector,
 )
 from .dwg_backend import (
+    DWG_BACKEND_ENV,
     DWG_BACKEND_USER_CONVERTER,
     create_dwg_backend_selection,
     normalize_dwg_backend_mode,
@@ -748,9 +750,12 @@ def _dwg_adapter_supports_version(
 def _uses_user_converter_backend(options: ImportPipelineOptions) -> bool:
     if options.dwg_adapter is not None:
         return False
-    if not options.dwg_backend_mode:
+    backend_mode = options.dwg_backend_mode
+    if backend_mode is None:
+        backend_mode = os.environ.get(DWG_BACKEND_ENV)
+    if not backend_mode:
         return False
-    return normalize_dwg_backend_mode(options.dwg_backend_mode) == DWG_BACKEND_USER_CONVERTER
+    return normalize_dwg_backend_mode(backend_mode) == DWG_BACKEND_USER_CONVERTER
 
 
 def _effective_stability_limits(options: ImportPipelineOptions) -> CadStabilityLimits:
