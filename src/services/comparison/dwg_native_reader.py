@@ -27,6 +27,9 @@ class DwgNativeAc1015Adapter(DwgImporterAdapter):
     name = "native-ac1015"
     version = "0.1"
     license_id = "INTERNAL"
+    backend_mode = "cleanroom_native"
+    implementation_status = "ac1015_preview"
+    approval_required = False
 
     def __init__(self, fallback_adapter: Optional[DwgImporterAdapter] = None):
         self.fallback_adapter = fallback_adapter

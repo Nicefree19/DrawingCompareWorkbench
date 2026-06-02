@@ -13,7 +13,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -35,6 +35,12 @@ from .dwg_importer import (
     DwgImporterAdapter,
     DwgVersionDetector,
 )
+from .dwg_backend import (
+    DWG_BACKEND_USER_CONVERTER,
+    create_dwg_backend_selection,
+    normalize_dwg_backend_mode,
+)
+from .dwg_dxf_fallback import resolve_dwg_dxf_fallback_pair
 from .dxf_importer import DxfImporter, DxfImportLimitError, DxfParseError
 
 
@@ -60,6 +66,9 @@ class CadPipelineErrorCode:
     TOKEN_LIMIT_EXCEEDED = CadLimitCode.TOKEN_LIMIT_EXCEEDED
 
 
+USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS = 12_000_000
+
+
 @dataclass(frozen=True)
 class ImportPipelineOptions:
     """Options for selecting importers and normalizing CanonicalDrawing."""
@@ -68,6 +77,7 @@ class ImportPipelineOptions:
     normalize: bool = True
     normalization_options: NormalizationOptions = field(default_factory=NormalizationOptions)
     dwg_adapter: Optional[DwgImporterAdapter] = None
+    dwg_backend_mode: Optional[str] = None
     allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL")
     allow_oda_fallback: bool = False
     oda_converter_path: Optional[str] = None
@@ -147,6 +157,7 @@ class ComparePipelineResult:
     error_code: Optional[str] = None
     message: str = ""
     warnings: List[Dict[str, Any]] = field(default_factory=list)
+    input_resolution: Dict[str, Any] = field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -171,6 +182,7 @@ class ComparePipelineResult:
             "summary": self.diff.summary if self.diff else None,
             "diff": self.diff.to_dict() if self.diff else None,
             "warnings": self.warnings,
+            "input_resolution": self.input_resolution,
             "elapsed_ms": self.elapsed_ms,
             "partial_imports": [
                 key for key, value in self.imports.items()
@@ -198,6 +210,8 @@ class ComparePipelineResult:
                 key: value.to_dict()
                 for key, value in self.imports.items()
             },
+            "input_resolution": self.input_resolution,
+            "dwg_dxf_fallback": self.input_resolution,
             "diff_summary": self.diff.summary if self.diff else None,
         }
         return result
@@ -228,6 +242,7 @@ class ImportPipeline:
                 supported = _dwg_adapter_supports_version(
                     self.options.dwg_adapter,
                     version_info,
+                    backend_mode=self.options.dwg_backend_mode,
                 )
                 version = version_info.to_dict()
                 return {
@@ -276,7 +291,7 @@ class ImportPipeline:
 
     def _import_dxf(self, path: Path) -> ImportPipelineResult:
         try:
-            limits = self.options.stability_limits
+            limits = _effective_stability_limits(self.options)
             importer = DxfImporter(
                 expand_blocks=self.options.expand_blocks,
                 max_block_depth=limits.max_block_depth,
@@ -320,11 +335,13 @@ class ImportPipeline:
         except Exception:
             version = None
 
+        limits = _effective_stability_limits(self.options)
         importer = DwgImporter(
             adapter=self.options.dwg_adapter,
+            backend_mode=self.options.dwg_backend_mode,
             allowed_license_ids=self.options.allowed_dwg_license_ids,
-            max_entities=self.options.stability_limits.max_entities,
-            timeout_seconds=self.options.stability_limits.import_timeout_seconds,
+            max_entities=limits.max_entities,
+            timeout_seconds=limits.import_timeout_seconds,
             cancel_callback=self.options.cancel_callback,
         )
         canonical = importer.import_file(path)
@@ -458,14 +475,36 @@ class ComparePipeline:
         started = time.perf_counter()
         source_a = Path(source_a)
         source_b = Path(source_b)
+        effective_source_a = source_a
+        effective_source_b = source_b
+        input_resolution: Dict[str, Any] = {}
+        input_resolution_warning: Optional[Dict[str, Any]] = None
+
+        if _uses_user_converter_backend(self.options.import_options):
+            resolution = resolve_dwg_dxf_fallback_pair(source_a, source_b)
+            input_resolution = resolution.to_dict()
+            effective_source_a = resolution.effective_source_a
+            effective_source_b = resolution.effective_source_b
+            if resolution.used:
+                input_resolution_warning = {
+                    "code": "DWG_CONVERTED_DXF_FALLBACK",
+                    "severity": "info",
+                    "message": (
+                        "Original DWG inputs were compared through user-provided "
+                        "converted DXF files."
+                    ),
+                    "details": input_resolution,
+                }
         imports = {
-            "a": self.import_pipeline.import_file(source_a),
-            "b": self.import_pipeline.import_file(source_b),
+            "a": self.import_pipeline.import_file(effective_source_a),
+            "b": self.import_pipeline.import_file(effective_source_b),
         }
         warnings = [
             *imports["a"].warnings,
             *imports["b"].warnings,
         ]
+        if input_resolution_warning is not None:
+            warnings.append(input_resolution_warning)
 
         if self.options.require_same_format_family and imports["a"].source_format != imports["b"].source_format:
             return self._failed_compare(
@@ -476,6 +515,7 @@ class ComparePipeline:
                 "CAD compare requires matching source formats.",
                 warnings,
                 started,
+                input_resolution=input_resolution,
             )
 
         failed = {key: value for key, value in imports.items() if value.is_failed}
@@ -492,6 +532,7 @@ class ComparePipeline:
                 f"CAD compare import failed: {failed_codes}",
                 warnings,
                 started,
+                input_resolution=input_resolution,
             )
 
         old_drawing = _filter_drawing_layers(
@@ -518,6 +559,7 @@ class ComparePipeline:
                 f"CAD compare failed: {exc}",
                 warnings,
                 started,
+                input_resolution=input_resolution,
             )
 
         status = (
@@ -534,6 +576,7 @@ class ComparePipeline:
             error_code=None,
             message=_compare_status_message(status, imports),
             warnings=warnings,
+            input_resolution=input_resolution,
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
         )
 
@@ -546,6 +589,8 @@ class ComparePipeline:
         message: str,
         warnings: List[Dict[str, Any]],
         started: float,
+        *,
+        input_resolution: Optional[Dict[str, Any]] = None,
     ) -> ComparePipelineResult:
         return ComparePipelineResult(
             source_a=str(source_a),
@@ -556,6 +601,7 @@ class ComparePipeline:
             error_code=error_code,
             message=message,
             warnings=warnings,
+            input_resolution=input_resolution or {},
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
         )
 
@@ -689,7 +735,30 @@ def _detect_dxf_version(path: Path) -> Optional[Dict[str, Any]]:
 def _dwg_adapter_supports_version(
     adapter: Optional[DwgImporterAdapter],
     version_info: Any,
+    *,
+    backend_mode: Optional[str] = None,
 ) -> bool:
     if adapter is not None:
         return bool(adapter.supports_version(version_info))
+    if backend_mode is not None:
+        return bool(create_dwg_backend_selection(backend_mode).adapter.supports_version(version_info))
     return bool(getattr(version_info, "supported", False))
+
+
+def _uses_user_converter_backend(options: ImportPipelineOptions) -> bool:
+    if options.dwg_adapter is not None:
+        return False
+    if not options.dwg_backend_mode:
+        return False
+    return normalize_dwg_backend_mode(options.dwg_backend_mode) == DWG_BACKEND_USER_CONVERTER
+
+
+def _effective_stability_limits(options: ImportPipelineOptions) -> CadStabilityLimits:
+    limits = options.stability_limits
+    default_tokens = CadStabilityLimits().max_dxf_tokens
+    if (
+        _uses_user_converter_backend(options)
+        and limits.max_dxf_tokens == default_tokens
+    ):
+        return replace(limits, max_dxf_tokens=USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS)
+    return limits

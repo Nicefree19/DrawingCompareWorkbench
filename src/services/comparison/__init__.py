@@ -62,6 +62,12 @@ from .dwg_importer import (
     DwgVersionDetector,
     DwgVersionInfo,
 )
+from .dwg_backend import (
+    DwgBackendSelection,
+    create_dwg_backend_adapter,
+    create_dwg_backend_selection,
+    normalize_dwg_backend_mode,
+)
 from .dwg_binary_reader import DwgBinaryReadError, DwgBinaryReader, DwgHandleRef
 from .dwg_native_reader import DwgNativeAc1015Adapter
 from .dwg_object_decoder import DwgMvpObjectType, DwgObjectDecodeError, DwgObjectDecoder
@@ -297,6 +303,10 @@ __all__ = [
     "DwgImporter",
     "DwgImporterAdapter",
     "DwgJsonFixtureAdapter",
+    "DwgBackendSelection",
+    "create_dwg_backend_adapter",
+    "create_dwg_backend_selection",
+    "normalize_dwg_backend_mode",
     "DwgBinaryReadError",
     "DwgBinaryReader",
     "DwgHandleRef",

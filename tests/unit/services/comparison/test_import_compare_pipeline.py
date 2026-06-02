@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.services.comparison.dwg_importer import DwgFailureCode, DwgJsonFixtureAdapter
+from src.services.comparison.cad_stability import CadStabilityLimits
 from src.services.comparison.dwg_differ import DwgDiffer
 from src.services.comparison.comparison_config import ComparisonConfig
 from src.services.comparison.drawing_compare_engine import CompareTolerance, DrawingCompareOptions
@@ -15,6 +16,8 @@ from src.services.comparison.import_pipeline import (
     ComparePipelineOptions,
     ImportPipeline,
     ImportPipelineOptions,
+    USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS,
+    _effective_stability_limits,
 )
 
 
@@ -220,6 +223,83 @@ def test_import_pipeline_uses_injected_dwg_adapter_version_capability(tmp_path: 
     assert selection["version"]["supported"] is False
     assert result.status == CadPipelineStatus.OK
     assert result.import_report["adapter"]["name"] == "planned-version-fixture"
+
+
+def test_import_pipeline_explicit_backend_mode_uses_fail_closed_placeholder(tmp_path: Path) -> None:
+    path = _write_dwg_fixture(tmp_path / "planned.dwg", version="AC1032")
+    pipeline = ImportPipeline(ImportPipelineOptions(dwg_backend_mode="commercial_sdk"))
+
+    selection = pipeline.select_importer(path)
+    result = pipeline.import_file(path)
+
+    assert selection["supported"] is False
+    assert selection["error_code"] == DwgFailureCode.UNSUPPORTED_VERSION
+    assert result.status == CadPipelineStatus.FAILED
+    assert result.import_report["adapter"]["name"] == "commercial-sdk-placeholder"
+    assert result.import_report["adapter"]["backend_mode"] == "commercial_sdk"
+    assert result.import_report["adapter"]["approval_required"] is True
+
+
+def test_user_converter_mode_raises_default_dxf_token_budget_only_for_default_limits() -> None:
+    default_options = ImportPipelineOptions(dwg_backend_mode="user_converter")
+    native_options = ImportPipelineOptions()
+    custom_options = ImportPipelineOptions(
+        dwg_backend_mode="user_converter",
+        stability_limits=CadStabilityLimits(max_dxf_tokens=3_000_000),
+    )
+
+    assert _effective_stability_limits(default_options).max_dxf_tokens == USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS
+    assert _effective_stability_limits(native_options).max_dxf_tokens == CadStabilityLimits().max_dxf_tokens
+    assert _effective_stability_limits(custom_options).max_dxf_tokens == 3_000_000
+
+
+def test_compare_pipeline_user_converter_mode_uses_converted_dxf_pair(tmp_path: Path) -> None:
+    source_a = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    source_b = _write_dwg_fixture(tmp_path / "detail_r1.dwg", version="AC1032")
+    before_dir = tmp_path / "dxf_registered" / "before"
+    after_dir = tmp_path / "dxf_registered" / "after"
+    before_dir.mkdir(parents=True)
+    after_dir.mkdir(parents=True)
+    fallback_a = _write_two_layer_dxf(before_dir / "detail.dxf", ignored_line_end_x=100)
+    fallback_b = _write_two_layer_dxf(after_dir / "detail_r1.dxf", ignored_line_end_x=120)
+
+    result = ComparePipeline(
+        ComparePipelineOptions(
+            import_options=ImportPipelineOptions(dwg_backend_mode="user_converter")
+        )
+    ).compare(source_a, source_b)
+    payload = result.to_dict()
+
+    assert result.status == CadPipelineStatus.OK
+    assert result.error_code is None
+    assert result.imports["a"].source_path == str(fallback_a.resolve())
+    assert result.imports["b"].source_path == str(fallback_b.resolve())
+    assert result.imports["a"].source_format == "dxf"
+    assert result.input_resolution["used"] is True
+    assert result.input_resolution["reason"] == "unsupported_dwg_version_with_converted_dxf"
+    assert payload["input_resolution"]["effective_source_a"] == str(fallback_a.resolve())
+    assert payload["warnings"][-1]["code"] == "DWG_CONVERTED_DXF_FALLBACK"
+    comparison_result = result.to_comparison_result()
+    assert comparison_result.metadata["dwg_dxf_fallback"]["used"] is True
+
+
+def test_compare_pipeline_default_does_not_auto_use_converted_dxf_pair(tmp_path: Path) -> None:
+    source_a = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    source_b = _write_dwg_fixture(tmp_path / "detail_r1.dwg", version="AC1032")
+    before_dir = tmp_path / "dxf_registered" / "before"
+    after_dir = tmp_path / "dxf_registered" / "after"
+    before_dir.mkdir(parents=True)
+    after_dir.mkdir(parents=True)
+    _write_two_layer_dxf(before_dir / "detail.dxf", ignored_line_end_x=100)
+    _write_two_layer_dxf(after_dir / "detail_r1.dxf", ignored_line_end_x=120)
+
+    result = ComparePipeline().compare(source_a, source_b)
+
+    assert result.status == CadPipelineStatus.FAILED
+    assert result.error_code == CadPipelineErrorCode.COMPARE_IMPORT_FAILED
+    assert result.input_resolution == {}
+    assert result.imports["a"].source_format == "dwg"
+    assert result.imports["a"].error_code == DwgFailureCode.UNSUPPORTED_VERSION
 
 
 def test_compare_pipeline_surfaces_import_side_failure(tmp_path: Path) -> None:

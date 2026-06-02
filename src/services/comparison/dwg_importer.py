@@ -8,8 +8,9 @@ stable boundary we need before adopting any permissively licensed reader:
   inputs with explicit error codes.
 * Map an adapter-provided 2D DWG model into CanonicalDrawing.
 
-Adapters must be injected.  The bundled fixture adapter is intentionally small
-and exists for tests/samples; production adapters must pass the same contract.
+Adapters can be injected directly or selected through the DWG backend boundary.
+The bundled fixture adapter is intentionally small and exists for tests/samples;
+production adapters must pass the same contract.
 """
 from __future__ import annotations
 
@@ -177,6 +178,9 @@ class DwgImporterAdapter:
     name = "base"
     version = "0"
     license_id = "MIT"
+    backend_mode = "custom_adapter"
+    implementation_status = "custom"
+    approval_required = False
 
     def is_available(self) -> bool:
         return False
@@ -203,6 +207,9 @@ class DwgJsonFixtureAdapter(DwgImporterAdapter):
     name = "json-fixture"
     version = "1"
     license_id = "MIT"
+    backend_mode = "json_fixture"
+    implementation_status = "fixture"
+    approval_required = False
     MARKER = b"\nCANONICAL_DWG_FIXTURE_V1\n"
 
     def is_available(self) -> bool:
@@ -238,16 +245,20 @@ class DwgImporter:
         self,
         adapter: Optional[DwgImporterAdapter] = None,
         *,
+        backend_mode: Optional[str] = None,
         allowed_license_ids: Sequence[str] = DEFAULT_ALLOWED_LICENSES,
         max_entities: int = 0,
         timeout_seconds: Optional[float] = None,
         cancel_callback: Optional[CancelCallback] = None,
     ):
+        backend_selection = None
         if adapter is None:
-            from .dwg_native_reader import DwgNativeAc1015Adapter
+            from .dwg_backend import create_dwg_backend_selection
 
-            adapter = DwgNativeAc1015Adapter(fallback_adapter=DwgJsonFixtureAdapter())
+            backend_selection = create_dwg_backend_selection(backend_mode)
+            adapter = backend_selection.adapter
         self.adapter = adapter
+        self.backend_selection = backend_selection
         self.allowed_license_ids = tuple(allowed_license_ids)
         self.max_entities = max(0, int(max_entities or 0))
         self.timeout_seconds = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
@@ -271,6 +282,8 @@ class DwgImporter:
                         "dwg_version": version.to_dict(),
                         "adapter": self.adapter.name,
                         "adapter_version": self.adapter.version,
+                        "backend_mode": getattr(self.adapter, "backend_mode", None),
+                        "implementation_status": getattr(self.adapter, "implementation_status", None),
                     },
                 )
             if self.adapter.license_id not in self.allowed_license_ids:
@@ -280,6 +293,7 @@ class DwgImporter:
                     details={
                         "adapter": self.adapter.name,
                         "license_id": self.adapter.license_id,
+                        "backend_mode": getattr(self.adapter, "backend_mode", None),
                         "allowed_license_ids": list(self.allowed_license_ids),
                     },
                 )
@@ -412,11 +426,7 @@ class DwgImporter:
                 "unsupported_entities": unsupported_reports,
                 "error_code": None,
                 "dwg_version": version.to_dict(),
-                "adapter": {
-                    "name": self.adapter.name,
-                    "version": self.adapter.version,
-                    "license_id": self.adapter.license_id,
-                },
+                "adapter": self._adapter_report(),
                 "stats": {
                     "raw_entity_count": len(drawing.model_space)
                     + sum(len(block.entities) for block in drawing.blocks),
@@ -629,6 +639,19 @@ class DwgImporter:
             if value is not None
         }
 
+    def _adapter_report(self) -> Dict[str, Any]:
+        report = {
+            "name": self.adapter.name,
+            "version": self.adapter.version,
+            "license_id": self.adapter.license_id,
+            "backend_mode": getattr(self.adapter, "backend_mode", self.adapter.name),
+            "implementation_status": getattr(self.adapter, "implementation_status", "custom"),
+            "approval_required": bool(getattr(self.adapter, "approval_required", False)),
+        }
+        if self.backend_selection is not None:
+            report["selection"] = self.backend_selection.to_dict()
+        return report
+
     def _failed_document(
         self,
         *,
@@ -690,11 +713,7 @@ class DwgImporter:
                 "unsupported_entities": [],
                 "error_code": error_code,
                 "dwg_version": version_info,
-                "adapter": {
-                    "name": self.adapter.name,
-                    "version": self.adapter.version,
-                    "license_id": self.adapter.license_id,
-                },
+                "adapter": self._adapter_report(),
                 "stats": {
                     "raw_entity_count": 0,
                     "canonical_entity_count": 0,

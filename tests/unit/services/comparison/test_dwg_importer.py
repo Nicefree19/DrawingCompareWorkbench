@@ -13,6 +13,14 @@ from src.services.comparison.dwg_importer import (
     DwgJsonFixtureAdapter,
     DwgVersionDetector,
 )
+from src.services.comparison.dwg_backend import (
+    DWG_BACKEND_CLEANROOM_NATIVE,
+    DWG_BACKEND_COMMERCIAL_SDK,
+    DWG_BACKEND_DISABLED,
+    DWG_BACKEND_USER_CONVERTER,
+    create_dwg_backend_selection,
+    normalize_dwg_backend_mode,
+)
 
 
 def _schema() -> dict:
@@ -173,6 +181,38 @@ def test_fixture_adapter_imports_dwg_sample_to_canonical_drawing(tmp_path: Path)
     assert insert["geometry"]["block_name"] == "B1"
 
 
+def test_default_backend_selection_uses_cleanroom_ac1015_preview() -> None:
+    selection = create_dwg_backend_selection()
+
+    assert selection.mode == DWG_BACKEND_CLEANROOM_NATIVE
+    assert selection.source == "default"
+    assert selection.implementation_status == "ac1015_preview"
+    assert selection.adapter.supports_version(DwgVersionDetector.detect_bytes(b"AC1015")) is True
+    assert selection.adapter.supports_version(DwgVersionDetector.detect_bytes(b"AC1032")) is False
+
+
+def test_backend_mode_aliases_are_normalized() -> None:
+    assert normalize_dwg_backend_mode("native") == DWG_BACKEND_CLEANROOM_NATIVE
+    assert normalize_dwg_backend_mode("commercial-sdk") == DWG_BACKEND_COMMERCIAL_SDK
+    assert normalize_dwg_backend_mode("converter") == DWG_BACKEND_USER_CONVERTER
+    assert normalize_dwg_backend_mode("off") == DWG_BACKEND_DISABLED
+
+
+def test_importer_records_selected_backend_metadata(tmp_path: Path) -> None:
+    path = _write_fixture(tmp_path / "sample.dwg", version="AC1015")
+
+    doc = DwgImporter(backend_mode="cleanroom_native").import_file(path)
+
+    _validate_schema(doc)
+    assert doc["import_report"]["status"] == "ok"
+    assert doc["drawing"]["importer"]["backend"] == "native-ac1015"
+    adapter_report = doc["import_report"]["adapter"]
+    assert adapter_report["backend_mode"] == DWG_BACKEND_CLEANROOM_NATIVE
+    assert adapter_report["implementation_status"] == "ac1015_preview"
+    assert adapter_report["approval_required"] is False
+    assert adapter_report["selection"]["mode"] == DWG_BACKEND_CLEANROOM_NATIVE
+
+
 def test_unsupported_entity_is_partial_with_warning(tmp_path: Path) -> None:
     path = _write_fixture(
         tmp_path / "unsupported.dwg",
@@ -219,6 +259,33 @@ def test_injected_adapter_can_claim_a_planned_version_without_changing_default_p
     assert doc["drawing"]["importer"]["backend"] == "planned-version-fixture"
     assert doc["import_report"]["status"] == "ok"
     assert doc["import_report"]["error_code"] is None
+
+
+def test_placeholder_backends_do_not_claim_planned_dwg_versions(tmp_path: Path) -> None:
+    path = _write_fixture(tmp_path / "planned.dwg", version="AC1032")
+
+    for mode in (DWG_BACKEND_COMMERCIAL_SDK, DWG_BACKEND_USER_CONVERTER):
+        selection = create_dwg_backend_selection(mode)
+        assert selection.adapter.supports_version(DwgVersionDetector.detect_bytes(b"AC1032")) is False
+
+        doc = DwgImporter(backend_mode=mode).import_file(path)
+
+        _validate_schema(doc)
+        assert doc["import_report"]["status"] == "failed"
+        assert doc["import_report"]["error_code"] == DwgFailureCode.UNSUPPORTED_VERSION
+        assert doc["import_report"]["adapter"]["backend_mode"] == mode
+        assert doc["import_report"]["adapter"]["approval_required"] is True
+
+
+def test_disabled_backend_fails_closed_for_supported_header(tmp_path: Path) -> None:
+    path = _write_fixture(tmp_path / "sample.dwg", version="AC1015")
+
+    doc = DwgImporter(backend_mode=DWG_BACKEND_DISABLED).import_file(path)
+
+    _validate_schema(doc)
+    assert doc["import_report"]["status"] == "failed"
+    assert doc["import_report"]["error_code"] == DwgFailureCode.UNSUPPORTED_VERSION
+    assert doc["import_report"]["adapter"]["backend_mode"] == DWG_BACKEND_DISABLED
 
 
 def test_importer_returns_failed_document_for_unsupported_corrupted_and_encrypted(tmp_path: Path) -> None:
