@@ -6,6 +6,7 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from src.services.comparison import drawing_normalizer as normalizer_module
 from src.services.comparison.drawing_normalizer import (
     DrawingNormalizer,
     NormalizationOptions,
@@ -158,6 +159,51 @@ def test_closed_polyline_start_and_direction_are_canonicalized() -> None:
     assert normalized_a["entities"][0]["hashes"]["geometry_hash"] == normalized_b["entities"][0]["hashes"]["geometry_hash"]
     assert report_a.normalized_polyline_count == 1
     assert report_b.normalized_polyline_count == 1
+
+
+def test_large_closed_polyline_canonicalization_uses_linear_rotation(monkeypatch) -> None:
+    original_rotate = normalizer_module._rotate
+    rotate_calls: list[int] = []
+
+    def counting_rotate(vertices, offset):  # noqa: ANN001
+        rotate_calls.append(offset)
+        return original_rotate(vertices, offset)
+
+    monkeypatch.setattr(normalizer_module, "_rotate", counting_rotate)
+    base_vertices = [
+        _vertex(float(index), float((index * 37) % 97))
+        for index in range(2048)
+    ]
+    rotated_vertices = base_vertices[731:] + base_vertices[:731]
+    polyline = {
+        "id": "polyline:large",
+        "type": "polyline",
+        "source": {"format": "test", "raw_type": "LWPOLYLINE"},
+        "layer_id": "layer:0",
+        "block_id": None,
+        "space": "model",
+        "layout_name": "Model",
+        "geometry": {
+            "type": "polyline",
+            "vertices": rotated_vertices,
+            "closed": True,
+            "polyline_kind": "lwpolyline",
+        },
+        "bbox": {},
+        "style": {},
+        "visible": True,
+        "metadata": {},
+        "hashes": {},
+    }
+
+    normalized, report = DrawingNormalizer(
+        NormalizationOptions(resolve_bylayer_byblock=False)
+    ).normalize(_drawing([polyline]))
+
+    vertices = normalized["entities"][0]["geometry"]["vertices"]
+    assert vertices[0]["point"] == _point(0, 0)
+    assert report.normalized_polyline_count == 1
+    assert len(rotate_calls) <= 2
 
 
 def test_bylayer_and_byblock_styles_are_resolved_to_effective_values() -> None:

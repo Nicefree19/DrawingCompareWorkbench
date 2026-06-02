@@ -403,13 +403,15 @@ class DrawingNormalizer:
 
         forward = [copy.deepcopy(vertex) for vertex in vertices]
         reverse = _reverse_closed_vertices(forward)
-        candidates = []
-        for sequence in (forward, reverse):
-            for offset in range(len(sequence)):
-                rotated = _rotate(sequence, offset)
-                candidates.append((_vertex_sequence_key(rotated), rotated))
-        candidates.sort(key=lambda item: item[0])
-        return copy.deepcopy(candidates[0][1])
+        forward_keys = _vertex_sequence_key(forward)
+        reverse_keys = _vertex_sequence_key(reverse)
+        forward_offset = _minimal_rotation_offset(forward_keys)
+        reverse_offset = _minimal_rotation_offset(reverse_keys)
+        forward_key = _rotate_key_sequence(forward_keys, forward_offset)
+        reverse_key = _rotate_key_sequence(reverse_keys, reverse_offset)
+        if reverse_key < forward_key:
+            return _rotate(reverse, reverse_offset)
+        return _rotate(forward, forward_offset)
 
     def _flatten_curve_entity(self, entity: Dict[str, Any]) -> bool:
         entity_type = str(entity.get("type") or "").lower()
@@ -800,6 +802,37 @@ def _stable_number(value: Any) -> Any:
 
 def _rotate(vertices: Sequence[Dict[str, Any]], offset: int) -> List[Dict[str, Any]]:
     return [copy.deepcopy(vertex) for vertex in list(vertices)[offset:] + list(vertices)[:offset]]
+
+
+def _rotate_key_sequence(keys: Tuple[Tuple[Any, ...], ...], offset: int) -> Tuple[Tuple[Any, ...], ...]:
+    if not keys or offset <= 0:
+        return keys
+    return keys[offset:] + keys[:offset]
+
+
+def _minimal_rotation_offset(keys: Tuple[Tuple[Any, ...], ...]) -> int:
+    count = len(keys)
+    if count <= 1:
+        return 0
+    left = 0
+    right = 1
+    matched = 0
+    while left < count and right < count and matched < count:
+        a_key = keys[(left + matched) % count]
+        b_key = keys[(right + matched) % count]
+        if a_key == b_key:
+            matched += 1
+            continue
+        if a_key > b_key:
+            left = left + matched + 1
+            if left <= right:
+                left = right + 1
+        else:
+            right = right + matched + 1
+            if right <= left:
+                right = left + 1
+        matched = 0
+    return min(left, right) % count
 
 
 def _reverse_closed_vertices(vertices: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
