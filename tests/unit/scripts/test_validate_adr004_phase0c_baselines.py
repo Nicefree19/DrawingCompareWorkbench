@@ -20,6 +20,25 @@ def _summary(path: Path, versions: list[dict]) -> Path:
     return path
 
 
+def _gap_evidence(path: Path) -> Path:
+    payload = {
+        "schema_version": "adr004-ac1018-ac1021-candidate-selection/v1",
+        "target_versions": ["AC1018"],
+        "summary": {
+            "version_counts": {"AC1018": 2},
+            "candidate_counts": {"AC1018": 0},
+        },
+        "classifications": {
+            "AC1018": {
+                "status": "missing_compare_candidate",
+                "reason": "no revision evidence",
+            }
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def _version(
     code: str,
     *,
@@ -130,3 +149,24 @@ def test_phase0c_render_markdown_includes_matrix(tmp_path: Path) -> None:
     assert "ADR-004 Phase 0-C Baseline Metrics" in markdown
     assert "compare_baseline_ready" in markdown
     assert "added 1" in markdown
+
+
+def test_phase0c_render_markdown_includes_gap_evidence(tmp_path: Path) -> None:
+    summary = _summary(
+        tmp_path / "summary.json",
+        [
+            _version(
+                "AC1018",
+                pair_kind="single_file_duplicated_import_baseline_small",
+                compare_status="partial",
+            )
+        ],
+    )
+    gap = _gap_evidence(tmp_path / "gap.json")
+
+    report = build_report([summary], target_versions=("AC1018",), gap_evidence_paths=[gap], root=Path.cwd())
+    markdown = render_markdown(report)
+
+    assert "## Gap Evidence" in markdown
+    assert "missing_compare_candidate" in markdown
+    assert "no revision evidence" in markdown

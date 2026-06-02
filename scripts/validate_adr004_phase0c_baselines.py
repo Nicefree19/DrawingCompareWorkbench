@@ -30,9 +30,11 @@ def build_report(
     summary_paths: Sequence[Path],
     *,
     target_versions: Sequence[str] = TARGET_DWG_CODES,
+    gap_evidence_paths: Sequence[Path] = (),
     root: Path = ROOT,
 ) -> dict[str, Any]:
     source_reports = [_load_source_report(path, root=root) for path in summary_paths]
+    gap_evidence = [_load_gap_evidence(path, root=root) for path in gap_evidence_paths]
     records_by_version = _records_by_version(source_reports, target_versions=target_versions)
     selected = {
         version: _select_best_record(records_by_version.get(version, []), version=version)
@@ -82,6 +84,7 @@ def build_report(
             "source_error_count": source_error_count,
         },
         "versions": selected,
+        "gap_evidence": gap_evidence,
     }
 
 
@@ -144,6 +147,34 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
         )
 
+    if report.get("gap_evidence"):
+        lines.extend(
+            [
+                "",
+                "## Gap Evidence",
+                "",
+                "| evidence | version | samples | candidates | classification | reason |",
+                "| --- | --- | ---: | ---: | --- | --- |",
+            ]
+        )
+        for evidence in report.get("gap_evidence") or []:
+            payload = evidence.get("payload") or {}
+            version_counts = (payload.get("summary") or {}).get("version_counts") or {}
+            candidate_counts = (payload.get("summary") or {}).get("candidate_counts") or {}
+            classifications = payload.get("classifications") or {}
+            for version in payload.get("target_versions") or []:
+                classification = classifications.get(version) or {}
+                lines.append(
+                    "| `{path}` | {version} | {samples} | {candidates} | {status} | {reason} |".format(
+                        path=_md_cell(str(evidence.get("path") or "")),
+                        version=version,
+                        samples=version_counts.get(version, 0),
+                        candidates=candidate_counts.get(version, 0),
+                        status=_md_cell(str(classification.get("status") or "")),
+                        reason=_md_cell(str(classification.get("reason") or "")),
+                    )
+                )
+
     lines.extend(
         [
             "",
@@ -159,6 +190,12 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 def _load_source_report(path: Path, *, root: Path) -> dict[str, Any]:
+    resolved = _resolve(root, path)
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    return {"path": str(resolved), "payload": payload}
+
+
+def _load_gap_evidence(path: Path, *, root: Path) -> dict[str, Any]:
     resolved = _resolve(root, path)
     payload = json.loads(resolved.read_text(encoding="utf-8"))
     return {"path": str(resolved), "payload": payload}
@@ -385,6 +422,7 @@ def _write_text(path: Path, content: str) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", action="append", type=Path, default=[])
+    parser.add_argument("--gap-evidence", action="append", type=Path, default=[])
     parser.add_argument("--out", type=Path, default=DEFAULT_JSON_REPORT)
     parser.add_argument("--report-md", type=Path, default=DEFAULT_MD_REPORT)
     args = parser.parse_args(argv)
@@ -392,7 +430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     summaries = args.summary or _existing_default_summaries(ROOT)
     if not summaries:
         parser.error("at least one --summary path is required when default summaries are absent")
-    report = build_report(summaries)
+    report = build_report(summaries, gap_evidence_paths=args.gap_evidence)
     out = _resolve(ROOT, args.out)
     report_md = _resolve(ROOT, args.report_md)
     _write_json(out, report)

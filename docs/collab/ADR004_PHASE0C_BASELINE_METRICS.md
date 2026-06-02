@@ -33,6 +33,13 @@ It is baseline evidence only and does not claim native AC1018+ DWG support.
 | AC1027 | compare_baseline_ready | compact_likely_revision_pair | 21988 / 48727 | ENTITY_APPROXIMATED, UNSUPPORTED_ENTITY, DWG_CONVERTED_DXF_FALLBACK | partial | added 26741, removed 2, modified 0, unchanged 21986, total_changes 26743 | 41.76s | `D:\00.Work_AI_Tool\DrawingCompareWorkbench\out\adr004_compact_compare_samples_20260602_131140\validation_summary.json` |
 | AC1032 | compare_baseline_ready | confirmed_revision_pair_existing_registered_dxf | 7197 / 7195 | ENTITY_APPROXIMATED, UNSUPPORTED_ENTITY, DWG_CONVERTED_DXF_FALLBACK | partial | added 37, removed 39, modified 207, unchanged 6951, total_changes 283 | 41.42s | `D:\00.Work_AI_Tool\DrawingCompareWorkbench\out\adr004_ac1032_registered_baseline_20260602_132007\validation_summary.json` |
 
+## Gap Evidence
+
+| evidence | version | samples | candidates | classification | reason |
+| --- | --- | ---: | ---: | --- | --- |
+| `D:\00.Work_AI_Tool\DrawingCompareWorkbench\out\adr004_ac1018_ac1021_candidate_selection_drivewide.json` | AC1018 | 7 | 0 | missing_compare_candidate | multiple samples exist, but no filename/path/revision evidence supports a real before-after pair |
+| `D:\00.Work_AI_Tool\DrawingCompareWorkbench\out\adr004_ac1018_ac1021_candidate_selection_drivewide.json` | AC1021 | 5 | 0 | missing_compare_candidate | multiple samples exist, but no filename/path/revision evidence supports a real before-after pair |
+
 ## Interpretation
 
 - `compare_baseline_ready` means a non-duplicated before/after pair compared successfully with status `ok` or `partial`.
