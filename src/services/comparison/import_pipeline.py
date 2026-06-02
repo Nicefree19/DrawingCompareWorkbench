@@ -10,6 +10,8 @@ explicitly enables the isolated fallback option.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -70,6 +72,9 @@ class CadPipelineErrorCode:
 
 
 USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS = 12_000_000
+ODA_FALLBACK_CACHE_NAMESPACE = "dwg-oda-fallback-v1"
+ODA_FALLBACK_DEFAULT_OUTPUT_VERSION = "ACAD2018"
+ODA_FALLBACK_DEFAULT_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,8 @@ class ImportPipelineOptions:
     allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL")
     allow_oda_fallback: bool = False
     oda_converter_path: Optional[str] = None
+    oda_conversion_timeout_seconds: Optional[float] = ODA_FALLBACK_DEFAULT_TIMEOUT_SECONDS
+    dwg_conversion_cache_dir: Optional[str | Path] = None
     stability_limits: CadStabilityLimits = field(default_factory=CadStabilityLimits)
     cancel_callback: Optional[CancelCallback] = None
 
@@ -364,35 +371,91 @@ class ImportPipeline:
         path: Path,
         version: Optional[Dict[str, Any]],
     ) -> ImportPipelineResult:
-        temp_dir: Optional[Path] = None
+        cache_details: Dict[str, Any] = {}
         try:
-            from .dwg_converter import DwgConverter
+            cached_dxf, metadata_path, cache_details = _oda_fallback_cache_paths(path, self.options)
+            cache_hit = cached_dxf.exists()
+            cache_details["hit"] = cache_hit
+            cache_details["metadata_path"] = str(metadata_path)
+            if not cache_hit:
+                from .dwg_converter import DwgConverter
 
-            temp_dir = Path(tempfile.mkdtemp(prefix="cad-oda-fallback-"))
-            converter = DwgConverter(self.options.oda_converter_path)
-            converted = converter.convert(path)
-            local_dxf = temp_dir / f"{path.stem}.fallback.dxf"
-            shutil.copy2(converted, local_dxf)
-            result = self._import_dxf(local_dxf)
+                converter_started = time.perf_counter()
+                converter = DwgConverter(self.options.oda_converter_path)
+                converted = converter.convert(
+                    path,
+                    output_version=ODA_FALLBACK_DEFAULT_OUTPUT_VERSION,
+                    timeout=_oda_conversion_timeout_seconds(self.options),
+                )
+                try:
+                    _copy_oda_converted_dxf_to_cache(converted, cached_dxf)
+                finally:
+                    _cleanup_oda_converter_output(converted, cached_dxf.parent)
+                cache_details["conversion_elapsed_ms"] = (time.perf_counter() - converter_started) * 1000.0
+                cache_details["converter_path"] = str(getattr(converter, "oda_path", "") or "")
+                _write_oda_cache_metadata(metadata_path, cache_details)
+
+            budget_failure = _oda_cached_dxf_budget_failure(cached_dxf, self.options)
+            if budget_failure is not None:
+                failed = self._failed(
+                    path,
+                    "dwg",
+                    "DwgImporter:oda-fallback",
+                    budget_failure["error_code"],
+                    budget_failure["message"],
+                    version=version,
+                    details={
+                        "fallback": {
+                            "oda_converter": True,
+                            "cache": cache_details,
+                        },
+                        **budget_failure["details"],
+                    },
+                )
+                failed.import_report.setdefault("fallback", {}).update(
+                    {
+                        "oda_converter": True,
+                        "cache": cache_details,
+                    }
+                )
+                return failed
+
+            result = self._import_dxf(cached_dxf)
             result.source_path = str(path)
             result.source_format = "dwg"
             result.importer = "DwgImporter:oda-fallback"
             result.version = version
             if result.import_report:
-                result.import_report.setdefault("fallback", {})["oda_converter"] = True
+                result.import_report.setdefault("fallback", {}).update(
+                    {
+                        "oda_converter": True,
+                        "cache": cache_details,
+                    }
+                )
             return result
         except Exception as exc:
-            return self._failed(
+            failed = self._failed(
                 path,
                 "dwg",
                 "DwgImporter:oda-fallback",
                 CadPipelineErrorCode.ODA_FALLBACK_FAILED,
                 f"ODA fallback failed: {exc}",
                 version=version,
+                details={
+                    "fallback": {
+                        "oda_converter": True,
+                        "cache": cache_details,
+                    },
+                    "exception_type": type(exc).__name__,
+                },
             )
-        finally:
-            if temp_dir is not None:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            failed.import_report.setdefault("fallback", {}).update(
+                {
+                    "oda_converter": True,
+                    "cache": cache_details,
+                }
+            )
+            return failed
 
     def _finalize(
         self,
@@ -609,6 +672,155 @@ class ComparePipeline:
         )
 
 
+def _oda_fallback_cache_paths(path: Path, options: ImportPipelineOptions) -> tuple[Path, Path, Dict[str, Any]]:
+    from .cache_paths import normalize_cache_dir
+    from .source_signature import build_source_signature, source_cache_filename
+
+    cache_root = (
+        Path(options.dwg_conversion_cache_dir)
+        if options.dwg_conversion_cache_dir
+        else normalize_cache_dir() / "oda_converter"
+    )
+    cache_root.mkdir(parents=True, exist_ok=True)
+    config_fingerprint = _oda_cache_config_fingerprint(options)
+    filename = source_cache_filename(
+        path,
+        namespace=ODA_FALLBACK_CACHE_NAMESPACE,
+        extension=".dxf",
+        importer_version=ODA_FALLBACK_CACHE_NAMESPACE,
+        render_backend_id=DWG_BACKEND_ODA_CONVERTER,
+        config_fingerprint=config_fingerprint,
+        include_sample_hash=False,
+        digest_length=24,
+    )
+    cached_dxf = cache_root / filename
+    metadata_path = cached_dxf.with_suffix(".json")
+    source_signature = build_source_signature(
+        path,
+        importer_version=ODA_FALLBACK_CACHE_NAMESPACE,
+        render_backend_id=DWG_BACKEND_ODA_CONVERTER,
+        config_fingerprint=config_fingerprint,
+        include_sample_hash=False,
+    )
+    details: Dict[str, Any] = {
+        "cache_namespace": ODA_FALLBACK_CACHE_NAMESPACE,
+        "cache_path": str(cached_dxf),
+        "converted_dxf_path": str(cached_dxf),
+        "cache_key": cached_dxf.stem,
+        "source_dwg": str(path),
+        "source_signature": source_signature,
+        "output_version": ODA_FALLBACK_DEFAULT_OUTPUT_VERSION,
+    }
+    return cached_dxf, metadata_path, details
+
+
+def _oda_cache_config_fingerprint(options: ImportPipelineOptions) -> str:
+    payload = {
+        "converter_path": str(options.oda_converter_path or ""),
+        "output_version": ODA_FALLBACK_DEFAULT_OUTPUT_VERSION,
+        "schema": ODA_FALLBACK_CACHE_NAMESPACE,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:24]
+
+
+def _oda_conversion_timeout_seconds(options: ImportPipelineOptions) -> int:
+    value = options.oda_conversion_timeout_seconds
+    if value is None or value <= 0:
+        return int(ODA_FALLBACK_DEFAULT_TIMEOUT_SECONDS)
+    return max(1, int(value))
+
+
+def _copy_oda_converted_dxf_to_cache(converted: str | Path, cached_dxf: Path) -> None:
+    cached_dxf.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cached_dxf.with_suffix(f"{cached_dxf.suffix}.tmp")
+    try:
+        shutil.copy2(converted, temp_path)
+        temp_path.replace(cached_dxf)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _write_oda_cache_metadata(metadata_path: Path, details: Dict[str, Any]) -> None:
+    payload = {
+        "schema": ODA_FALLBACK_CACHE_NAMESPACE,
+        "created_at_unix": time.time(),
+        **details,
+    }
+    temp_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        temp_path.replace(metadata_path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _cleanup_oda_converter_output(converted: str | Path, cache_dir: Path) -> None:
+    converted_path = Path(converted)
+    output_dir = converted_path.parent
+    if output_dir == cache_dir or not output_dir.name.startswith("dwg_out_"):
+        return
+    try:
+        output_dir.resolve().relative_to(Path(tempfile.gettempdir()).resolve())
+    except (OSError, ValueError):
+        return
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def _oda_cached_dxf_budget_failure(
+    cached_dxf: Path,
+    options: ImportPipelineOptions,
+) -> Optional[Dict[str, Any]]:
+    limits = _effective_stability_limits(options)
+    max_tokens = max(0, int(limits.max_dxf_tokens or 0))
+    if max_tokens <= 0:
+        return None
+    try:
+        estimated_tokens = _estimate_dxf_tokens_from_file(cached_dxf, stop_after=max_tokens + 1)
+    except OSError as exc:
+        return {
+            "error_code": CadPipelineErrorCode.READ_FAILED,
+            "message": f"Converted DXF read failed before import: {exc}",
+            "details": {"converted_dxf": str(cached_dxf)},
+        }
+    if estimated_tokens <= max_tokens:
+        return None
+    return {
+        "error_code": CadPipelineErrorCode.TOKEN_LIMIT_EXCEEDED,
+        "message": (
+            f"Converted DXF token budget exceeded before import: "
+            f"{estimated_tokens} > {max_tokens}"
+        ),
+        "details": {
+            "converted_dxf": str(cached_dxf),
+            "estimated_token_count": estimated_tokens,
+            "max_dxf_tokens": max_tokens,
+        },
+    }
+
+
+def _estimate_dxf_tokens_from_file(path: Path, *, stop_after: int) -> int:
+    line_count = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            line_count += chunk.count(b"\n")
+            if stop_after > 0 and (line_count // 2) > stop_after:
+                break
+    return max(0, line_count // 2)
+
+
 def _status_message(
     source_format: str,
     status: str,
@@ -752,10 +964,6 @@ def _uses_user_converter_backend(options: ImportPipelineOptions) -> bool:
     return _selected_dwg_backend_mode(options) == DWG_BACKEND_USER_CONVERTER
 
 
-def _uses_oda_converter_backend(options: ImportPipelineOptions) -> bool:
-    return _selected_dwg_backend_mode(options) == DWG_BACKEND_ODA_CONVERTER
-
-
 def _selected_dwg_backend_mode(options: ImportPipelineOptions) -> Optional[str]:
     if options.dwg_adapter is not None:
         return None
@@ -770,9 +978,6 @@ def _selected_dwg_backend_mode(options: ImportPipelineOptions) -> Optional[str]:
 def _effective_stability_limits(options: ImportPipelineOptions) -> CadStabilityLimits:
     limits = options.stability_limits
     default_tokens = CadStabilityLimits().max_dxf_tokens
-    if (
-        (_uses_user_converter_backend(options) or _uses_oda_converter_backend(options))
-        and limits.max_dxf_tokens == default_tokens
-    ):
+    if _uses_user_converter_backend(options) and limits.max_dxf_tokens == default_tokens:
         return replace(limits, max_dxf_tokens=USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS)
     return limits

@@ -66,6 +66,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional local converter executable path for the 'oda_converter' DWG backend mode.",
     )
     file_parser.add_argument(
+        "--oda-conversion-timeout",
+        type=float,
+        default=None,
+        help="Optional ODA conversion timeout in seconds for the 'oda_converter' DWG backend mode.",
+    )
+    file_parser.add_argument(
+        "--dwg-conversion-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional cache directory for ODA-converted DXF files.",
+    )
+    file_parser.add_argument(
+        "--import-timeout",
+        type=float,
+        default=None,
+        help="Optional CAD import timeout in seconds.",
+    )
+    file_parser.add_argument(
+        "--max-dxf-tokens",
+        type=int,
+        default=None,
+        help="Optional maximum DXF group-code token budget.",
+    )
+    file_parser.add_argument(
+        "--max-entities",
+        type=int,
+        default=None,
+        help="Optional maximum imported CAD entity budget.",
+    )
+    file_parser.add_argument(
         "--fail-on-change",
         action="store_true",
         help="Return exit code 1 when differences are detected.",
@@ -141,6 +171,16 @@ def _run_file_compare(args: argparse.Namespace) -> int:
             differ_config["allow_oda_fallback"] = True
     if args.oda_converter_path:
         differ_config["oda_converter_path"] = str(args.oda_converter_path)
+    if args.oda_conversion_timeout is not None:
+        differ_config["oda_conversion_timeout_seconds"] = args.oda_conversion_timeout
+    if args.dwg_conversion_cache_dir:
+        differ_config["dwg_conversion_cache_dir"] = str(args.dwg_conversion_cache_dir)
+    if args.import_timeout is not None:
+        differ_config["import_timeout_seconds"] = args.import_timeout
+    if args.max_dxf_tokens is not None:
+        differ_config["max_dxf_tokens"] = args.max_dxf_tokens
+    if args.max_entities is not None:
+        differ_config["max_entities"] = args.max_entities
     differ = DwgDiffer(config=differ_config)
     result = differ.compare(
         args.source_a,

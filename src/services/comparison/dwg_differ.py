@@ -553,7 +553,7 @@ class DwgDiffer:
         else:
             stability_limits = CadStabilityLimits(
                 import_timeout_seconds=self.config.get("import_timeout_seconds", 30.0),
-                max_entities=int(self._comparison_config.max_entities or 100_000),
+                max_entities=int(self.config.get("max_entities", self._comparison_config.max_entities or 100_000)),
                 max_dxf_tokens=int(self.config.get("max_dxf_tokens", 2_500_000)),
                 max_block_depth=int(self.config.get("max_block_depth", 4)),
             )
@@ -570,6 +570,8 @@ class DwgDiffer:
                 dwg_backend_mode=dwg_backend_mode,
                 allow_oda_fallback=self._allow_oda_fallback,
                 oda_converter_path=self.config.get("oda_converter_path"),
+                oda_conversion_timeout_seconds=self.config.get("oda_conversion_timeout_seconds"),
+                dwg_conversion_cache_dir=self.config.get("dwg_conversion_cache_dir"),
                 stability_limits=stability_limits,
                 cancel_callback=is_cancelled,
             ),

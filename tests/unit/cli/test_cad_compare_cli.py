@@ -97,6 +97,7 @@ def test_file_compare_cli_user_converter_backend_uses_registered_dxf(tmp_path, c
 
 def test_file_compare_cli_oda_backend_enables_converter_fallback(tmp_path, capsys):
     converter_path = tmp_path / "converter.exe"
+    cache_dir = tmp_path / "cache"
     converter_path.write_text("", encoding="utf-8")
     result = ComparisonResult(
         source_a=str(CAD_SAMPLES / "simple_base.dxf"),
@@ -116,6 +117,16 @@ def test_file_compare_cli_oda_backend_enables_converter_fallback(tmp_path, capsy
                 "oda_converter",
                 "--oda-converter-path",
                 str(converter_path),
+                "--oda-conversion-timeout",
+                "7",
+                "--dwg-conversion-cache-dir",
+                str(cache_dir),
+                "--import-timeout",
+                "11",
+                "--max-dxf-tokens",
+                "12345",
+                "--max-entities",
+                "678",
             ]
         )
 
@@ -124,4 +135,9 @@ def test_file_compare_cli_oda_backend_enables_converter_fallback(tmp_path, capsy
     assert config["dwg_backend_mode"] == "oda_converter"
     assert config["allow_oda_fallback"] is True
     assert config["oda_converter_path"] == str(converter_path)
+    assert config["oda_conversion_timeout_seconds"] == 7.0
+    assert config["dwg_conversion_cache_dir"] == str(cache_dir)
+    assert config["import_timeout_seconds"] == 11.0
+    assert config["max_dxf_tokens"] == 12345
+    assert config["max_entities"] == 678
     assert "file compare:" in capsys.readouterr().out

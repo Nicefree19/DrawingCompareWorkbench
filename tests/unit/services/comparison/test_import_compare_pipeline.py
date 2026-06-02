@@ -251,7 +251,7 @@ def test_user_converter_mode_raises_default_dxf_token_budget_only_for_default_li
     )
 
     assert _effective_stability_limits(default_options).max_dxf_tokens == USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS
-    assert _effective_stability_limits(oda_options).max_dxf_tokens == USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS
+    assert _effective_stability_limits(oda_options).max_dxf_tokens == CadStabilityLimits().max_dxf_tokens
     assert _effective_stability_limits(native_options).max_dxf_tokens == CadStabilityLimits().max_dxf_tokens
     assert _effective_stability_limits(custom_options).max_dxf_tokens == 3_000_000
 
@@ -412,8 +412,9 @@ def test_compare_pipeline_oda_backend_mode_converts_failed_dwg_imports(tmp_path:
     source_b = _write_dwg_fixture(tmp_path / "detail_r1.dwg", version="AC1032")
     converted_a = _write_two_layer_dxf(tmp_path / "converted_a.dxf", ignored_line_end_x=100)
     converted_b = _write_two_layer_dxf(tmp_path / "converted_b.dxf", ignored_line_end_x=120)
+    cache_dir = tmp_path / "cache"
 
-    def convert_side(path: Path) -> Path:
+    def convert_side(path: Path, *_args: object, **_kwargs: object) -> Path:
         return converted_a if Path(path).name == source_a.name else converted_b
 
     with patch("src.services.comparison.dwg_converter.DwgConverter") as converter_class:
@@ -423,6 +424,7 @@ def test_compare_pipeline_oda_backend_mode_converts_failed_dwg_imports(tmp_path:
                 import_options=ImportPipelineOptions(
                     dwg_backend_mode="oda_converter",
                     allow_oda_fallback=True,
+                    dwg_conversion_cache_dir=cache_dir,
                 )
             )
         ).compare(source_a, source_b)
@@ -435,16 +437,124 @@ def test_compare_pipeline_oda_backend_mode_converts_failed_dwg_imports(tmp_path:
     assert result.imports["a"].importer == "DwgImporter:oda-fallback"
     assert result.imports["b"].importer == "DwgImporter:oda-fallback"
     assert result.imports["a"].import_report["fallback"]["oda_converter"] is True
+    assert result.imports["a"].import_report["fallback"]["cache"]["hit"] is False
+    assert Path(result.imports["a"].import_report["fallback"]["cache"]["cache_path"]).exists()
     assert result.diff is not None
     assert result.diff.summary["total_changes"] >= 1
     assert converter_class.return_value.convert.call_count == 2
 
 
+def test_oda_fallback_reuses_cached_dxf_without_reconverting(tmp_path: Path) -> None:
+    source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    converted = _write_two_layer_dxf(tmp_path / "converted.dxf", ignored_line_end_x=100)
+    options = ImportPipelineOptions(
+        dwg_backend_mode="oda_converter",
+        allow_oda_fallback=True,
+        dwg_conversion_cache_dir=tmp_path / "cache",
+    )
+
+    with patch("src.services.comparison.dwg_converter.DwgConverter") as converter_class:
+        converter_class.return_value.convert.return_value = converted
+        first = ImportPipeline(options).import_file(source)
+        converter_class.return_value.convert.side_effect = AssertionError("must use cache")
+        second = ImportPipeline(options).import_file(source)
+
+    assert first.status == CadPipelineStatus.OK
+    assert second.status == CadPipelineStatus.OK
+    assert first.import_report["fallback"]["cache"]["hit"] is False
+    assert second.import_report["fallback"]["cache"]["hit"] is True
+    assert converter_class.return_value.convert.call_count == 1
+    assert first.import_report["fallback"]["cache"]["cache_path"] == second.import_report["fallback"]["cache"]["cache_path"]
+
+
+def test_oda_fallback_failure_keeps_cache_provenance(tmp_path: Path) -> None:
+    source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    options = ImportPipelineOptions(
+        dwg_backend_mode="oda_converter",
+        allow_oda_fallback=True,
+        dwg_conversion_cache_dir=tmp_path / "cache",
+        oda_conversion_timeout_seconds=1,
+    )
+
+    with patch("src.services.comparison.dwg_converter.DwgConverter") as converter_class:
+        converter_class.return_value.convert.side_effect = TimeoutError("conversion timeout")
+        result = ImportPipeline(options).import_file(source)
+
+    assert result.status == CadPipelineStatus.FAILED
+    assert result.error_code == CadPipelineErrorCode.ODA_FALLBACK_FAILED
+    assert result.import_report["fallback"]["oda_converter"] is True
+    assert result.import_report["fallback"]["cache"]["hit"] is False
+    assert result.warnings[0]["details"]["exception_type"] == "TimeoutError"
+
+
 def test_dwg_differ_oda_backend_mode_enables_legacy_fallback() -> None:
-    options = DwgDiffer(config={"dwg_backend_mode": "oda_converter"})._canonical_pipeline_options()
+    options = DwgDiffer(
+        config={
+            "dwg_backend_mode": "oda_converter",
+            "oda_conversion_timeout_seconds": 7,
+            "dwg_conversion_cache_dir": "custom-cache",
+            "import_timeout_seconds": 9,
+            "max_dxf_tokens": 1234,
+            "max_entities": 567,
+        }
+    )._canonical_pipeline_options()
 
     assert options.import_options.dwg_backend_mode == "oda_converter"
     assert options.import_options.allow_oda_fallback is True
+    assert options.import_options.oda_conversion_timeout_seconds == 7
+    assert options.import_options.dwg_conversion_cache_dir == "custom-cache"
+    assert options.import_options.stability_limits.import_timeout_seconds == 9
+    assert options.import_options.stability_limits.max_dxf_tokens == 1234
+    assert options.import_options.stability_limits.max_entities == 567
+
+
+def test_oda_fallback_prechecks_cached_dxf_token_budget(tmp_path: Path) -> None:
+    source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    converted = tmp_path / "too_large.dxf"
+    converted.write_text(
+        "\n".join(["0", "SECTION", "2", "ENTITIES"] + ["0", "LINE"] * 8 + ["0", "ENDSEC", "0", "EOF"]),
+        encoding="utf-8",
+    )
+
+    with patch("src.services.comparison.dwg_converter.DwgConverter") as converter_class:
+        converter_class.return_value.convert.return_value = converted
+        result = ImportPipeline(
+            ImportPipelineOptions(
+                dwg_backend_mode="oda_converter",
+                allow_oda_fallback=True,
+                dwg_conversion_cache_dir=tmp_path / "cache",
+                stability_limits=CadStabilityLimits(max_dxf_tokens=3),
+            )
+        ).import_file(source)
+
+    assert result.status == CadPipelineStatus.FAILED
+    assert result.error_code == CadPipelineErrorCode.TOKEN_LIMIT_EXCEEDED
+    assert result.import_report["fallback"]["cache"]["hit"] is False
+
+
+def test_oda_fallback_converted_dxf_import_timeout_keeps_provenance(tmp_path: Path) -> None:
+    source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    converted = _write_two_layer_dxf(tmp_path / "converted.dxf", ignored_line_end_x=100)
+
+    with patch("src.services.comparison.dwg_converter.DwgConverter") as converter_class:
+        converter_class.return_value.convert.return_value = converted
+        result = ImportPipeline(
+            ImportPipelineOptions(
+                dwg_backend_mode="oda_converter",
+                allow_oda_fallback=True,
+                dwg_conversion_cache_dir=tmp_path / "cache",
+                stability_limits=CadStabilityLimits(import_timeout_seconds=1e-30),
+            )
+        ).import_file(source)
+
+    cache = result.import_report["fallback"]["cache"]
+    assert result.status == CadPipelineStatus.FAILED
+    assert result.error_code == CadPipelineErrorCode.IMPORT_TIMEOUT
+    assert result.importer == "DwgImporter:oda-fallback"
+    assert result.source_path == str(source)
+    assert cache["hit"] is False
+    assert cache["converted_dxf_path"] == cache["cache_path"]
+    assert cache["source_dwg"] == str(source)
 
 
 def test_dwg_differ_default_uses_canonical_pipeline_without_oda_converter() -> None:
