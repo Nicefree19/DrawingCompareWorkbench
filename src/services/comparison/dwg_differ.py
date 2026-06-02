@@ -25,6 +25,7 @@ from .dxf_comparator import DxfChangeType, DxfComparator, DxfComparisonResult
 from .dxf_entity_extractor import DxfEntityExtractor
 from .dxf_read import read_dxf_document
 from .dwg_converter import DwgConverter, ODAConverterNotFoundError
+from .dwg_backend import DWG_BACKEND_ODA_CONVERTER, normalize_dwg_backend_mode
 from .import_pipeline import (
     ComparePipeline,
     ComparePipelineOptions,
@@ -45,6 +46,15 @@ try:
     EZDXF_AVAILABLE = True
 except ImportError:
     EZDXF_AVAILABLE = False
+
+
+def _is_oda_converter_backend(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return normalize_dwg_backend_mode(str(value)) == DWG_BACKEND_ODA_CONVERTER
+    except ValueError:
+        return False
 
 
 class DwgDiffer:
@@ -86,9 +96,11 @@ class DwgDiffer:
             self._use_canonical_pipeline = False
         else:
             self._use_canonical_pipeline = True
+        dwg_backend_mode = self.config.get("dwg_backend_mode") or self.config.get("dwg_backend")
         self._allow_oda_fallback = bool(
             self.config.get("allow_oda_fallback", False)
             or self.config.get("enable_oda_fallback", False)
+            or _is_oda_converter_backend(dwg_backend_mode)
         )
         cache_dir = dxf_cache_dir or self.config.get("dxf_cache_dir") or os.environ.get(
             "DRAWING_COMPARE_DXF_CACHE_DIR"

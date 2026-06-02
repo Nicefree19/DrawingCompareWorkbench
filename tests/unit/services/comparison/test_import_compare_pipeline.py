@@ -243,6 +243,7 @@ def test_import_pipeline_explicit_backend_mode_uses_fail_closed_placeholder(tmp_
 
 def test_user_converter_mode_raises_default_dxf_token_budget_only_for_default_limits() -> None:
     default_options = ImportPipelineOptions(dwg_backend_mode="user_converter")
+    oda_options = ImportPipelineOptions(dwg_backend_mode="oda_converter")
     native_options = ImportPipelineOptions()
     custom_options = ImportPipelineOptions(
         dwg_backend_mode="user_converter",
@@ -250,6 +251,7 @@ def test_user_converter_mode_raises_default_dxf_token_budget_only_for_default_li
     )
 
     assert _effective_stability_limits(default_options).max_dxf_tokens == USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS
+    assert _effective_stability_limits(oda_options).max_dxf_tokens == USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS
     assert _effective_stability_limits(native_options).max_dxf_tokens == CadStabilityLimits().max_dxf_tokens
     assert _effective_stability_limits(custom_options).max_dxf_tokens == 3_000_000
 
@@ -403,6 +405,46 @@ def test_oda_fallback_is_disabled_by_default_for_dwg_failures(tmp_path: Path) ->
     assert result.status == CadPipelineStatus.FAILED
     assert result.error_code == DwgFailureCode.UNSUPPORTED_VERSION
     assert result.importer == "DwgImporter"
+
+
+def test_compare_pipeline_oda_backend_mode_converts_failed_dwg_imports(tmp_path: Path) -> None:
+    source_a = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    source_b = _write_dwg_fixture(tmp_path / "detail_r1.dwg", version="AC1032")
+    converted_a = _write_two_layer_dxf(tmp_path / "converted_a.dxf", ignored_line_end_x=100)
+    converted_b = _write_two_layer_dxf(tmp_path / "converted_b.dxf", ignored_line_end_x=120)
+
+    def convert_side(path: Path) -> Path:
+        return converted_a if Path(path).name == source_a.name else converted_b
+
+    with patch("src.services.comparison.dwg_converter.DwgConverter") as converter_class:
+        converter_class.return_value.convert.side_effect = convert_side
+        result = ComparePipeline(
+            ComparePipelineOptions(
+                import_options=ImportPipelineOptions(
+                    dwg_backend_mode="oda_converter",
+                    allow_oda_fallback=True,
+                )
+            )
+        ).compare(source_a, source_b)
+
+    assert result.status == CadPipelineStatus.OK
+    assert result.error_code is None
+    assert result.imports["a"].source_path == str(source_a)
+    assert result.imports["b"].source_path == str(source_b)
+    assert result.imports["a"].source_format == "dwg"
+    assert result.imports["a"].importer == "DwgImporter:oda-fallback"
+    assert result.imports["b"].importer == "DwgImporter:oda-fallback"
+    assert result.imports["a"].import_report["fallback"]["oda_converter"] is True
+    assert result.diff is not None
+    assert result.diff.summary["total_changes"] >= 1
+    assert converter_class.return_value.convert.call_count == 2
+
+
+def test_dwg_differ_oda_backend_mode_enables_legacy_fallback() -> None:
+    options = DwgDiffer(config={"dwg_backend_mode": "oda_converter"})._canonical_pipeline_options()
+
+    assert options.import_options.dwg_backend_mode == "oda_converter"
+    assert options.import_options.allow_oda_fallback is True
 
 
 def test_dwg_differ_default_uses_canonical_pipeline_without_oda_converter() -> None:

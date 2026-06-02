@@ -38,6 +38,7 @@ from .dwg_importer import (
 )
 from .dwg_backend import (
     DWG_BACKEND_ENV,
+    DWG_BACKEND_ODA_CONVERTER,
     DWG_BACKEND_USER_CONVERTER,
     create_dwg_backend_selection,
     normalize_dwg_backend_mode,
@@ -748,21 +749,29 @@ def _dwg_adapter_supports_version(
 
 
 def _uses_user_converter_backend(options: ImportPipelineOptions) -> bool:
+    return _selected_dwg_backend_mode(options) == DWG_BACKEND_USER_CONVERTER
+
+
+def _uses_oda_converter_backend(options: ImportPipelineOptions) -> bool:
+    return _selected_dwg_backend_mode(options) == DWG_BACKEND_ODA_CONVERTER
+
+
+def _selected_dwg_backend_mode(options: ImportPipelineOptions) -> Optional[str]:
     if options.dwg_adapter is not None:
-        return False
+        return None
     backend_mode = options.dwg_backend_mode
     if backend_mode is None:
         backend_mode = os.environ.get(DWG_BACKEND_ENV)
     if not backend_mode:
-        return False
-    return normalize_dwg_backend_mode(backend_mode) == DWG_BACKEND_USER_CONVERTER
+        return None
+    return normalize_dwg_backend_mode(backend_mode)
 
 
 def _effective_stability_limits(options: ImportPipelineOptions) -> CadStabilityLimits:
     limits = options.stability_limits
     default_tokens = CadStabilityLimits().max_dxf_tokens
     if (
-        _uses_user_converter_backend(options)
+        (_uses_user_converter_backend(options) or _uses_oda_converter_backend(options))
         and limits.max_dxf_tokens == default_tokens
     ):
         return replace(limits, max_dxf_tokens=USER_CONVERTED_DXF_DEFAULT_MAX_TOKENS)

@@ -17,6 +17,7 @@ from src.services.comparison.dwg_backend import (
     DWG_BACKEND_CLEANROOM_NATIVE,
     DWG_BACKEND_COMMERCIAL_SDK,
     DWG_BACKEND_DISABLED,
+    DWG_BACKEND_ODA_CONVERTER,
     DWG_BACKEND_USER_CONVERTER,
     create_dwg_backend_selection,
     normalize_dwg_backend_mode,
@@ -195,6 +196,7 @@ def test_backend_mode_aliases_are_normalized() -> None:
     assert normalize_dwg_backend_mode("native") == DWG_BACKEND_CLEANROOM_NATIVE
     assert normalize_dwg_backend_mode("commercial-sdk") == DWG_BACKEND_COMMERCIAL_SDK
     assert normalize_dwg_backend_mode("converter") == DWG_BACKEND_USER_CONVERTER
+    assert normalize_dwg_backend_mode("oda-converter") == DWG_BACKEND_ODA_CONVERTER
     assert normalize_dwg_backend_mode("off") == DWG_BACKEND_DISABLED
 
 
@@ -264,7 +266,7 @@ def test_injected_adapter_can_claim_a_planned_version_without_changing_default_p
 def test_placeholder_backends_do_not_claim_planned_dwg_versions(tmp_path: Path) -> None:
     path = _write_fixture(tmp_path / "planned.dwg", version="AC1032")
 
-    for mode in (DWG_BACKEND_COMMERCIAL_SDK, DWG_BACKEND_USER_CONVERTER):
+    for mode in (DWG_BACKEND_COMMERCIAL_SDK, DWG_BACKEND_USER_CONVERTER, DWG_BACKEND_ODA_CONVERTER):
         selection = create_dwg_backend_selection(mode)
         assert selection.adapter.supports_version(DwgVersionDetector.detect_bytes(b"AC1032")) is False
 

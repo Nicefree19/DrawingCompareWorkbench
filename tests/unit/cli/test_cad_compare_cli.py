@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from src.cli.cad_compare import main
+from src.services.comparison.base import ComparisonResult
 from src.services.comparison.dwg_importer import DwgJsonFixtureAdapter
 
 
@@ -91,3 +93,35 @@ def test_file_compare_cli_user_converter_backend_uses_registered_dxf(tmp_path, c
     assert metadata["imports"]["a"]["source_path"] == str(fallback_a.resolve())
     assert metadata["imports"]["b"]["source_path"] == str(fallback_b.resolve())
     assert "status=" in capsys.readouterr().out
+
+
+def test_file_compare_cli_oda_backend_enables_converter_fallback(tmp_path, capsys):
+    converter_path = tmp_path / "converter.exe"
+    converter_path.write_text("", encoding="utf-8")
+    result = ComparisonResult(
+        source_a=str(CAD_SAMPLES / "simple_base.dxf"),
+        source_b=str(CAD_SAMPLES / "simple_modified.dxf"),
+    )
+    result.metadata = {"pipeline_status": "ok"}
+
+    with patch("src.services.comparison.dwg_differ.DwgDiffer") as differ_class:
+        differ_class.return_value.compare.return_value = result
+
+        exit_code = main(
+            [
+                "file",
+                str(CAD_SAMPLES / "simple_base.dxf"),
+                str(CAD_SAMPLES / "simple_modified.dxf"),
+                "--dwg-backend",
+                "oda_converter",
+                "--oda-converter-path",
+                str(converter_path),
+            ]
+        )
+
+    config = differ_class.call_args.kwargs["config"]
+    assert exit_code == 0
+    assert config["dwg_backend_mode"] == "oda_converter"
+    assert config["allow_oda_fallback"] is True
+    assert config["oda_converter_path"] == str(converter_path)
+    assert "file compare:" in capsys.readouterr().out

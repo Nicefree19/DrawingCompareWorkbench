@@ -27,6 +27,7 @@ DWG_BACKEND_CLEANROOM_NATIVE = "cleanroom_native"
 DWG_BACKEND_DISABLED = "disabled"
 DWG_BACKEND_COMMERCIAL_SDK = "commercial_sdk"
 DWG_BACKEND_USER_CONVERTER = "user_converter"
+DWG_BACKEND_ODA_CONVERTER = "oda_converter"
 
 _BACKEND_ALIASES = {
     "": DWG_BACKEND_CLEANROOM_NATIVE,
@@ -46,6 +47,11 @@ _BACKEND_ALIASES = {
     "converter": DWG_BACKEND_USER_CONVERTER,
     "user-converter": DWG_BACKEND_USER_CONVERTER,
     "user_converter": DWG_BACKEND_USER_CONVERTER,
+    "oda": DWG_BACKEND_ODA_CONVERTER,
+    "oda-converter": DWG_BACKEND_ODA_CONVERTER,
+    "oda_converter": DWG_BACKEND_ODA_CONVERTER,
+    "legacy-oda": DWG_BACKEND_ODA_CONVERTER,
+    "legacy_oda": DWG_BACKEND_ODA_CONVERTER,
 }
 
 
@@ -132,6 +138,18 @@ class UserConverterPlaceholderAdapter(_UnavailableBackendAdapter):
     unavailable_message = "User-provided DWG converter backend is not configured."
 
 
+class OdaConverterPlaceholderAdapter(_UnavailableBackendAdapter):
+    """Fail-closed placeholder for explicit local legacy converter mode."""
+
+    name = "oda-converter-placeholder"
+    version = "0"
+    license_id = "ODA-CONVERTER-LOCAL-OPT-IN"
+    backend_mode = DWG_BACKEND_ODA_CONVERTER
+    implementation_status = "local_opt_in_placeholder"
+    approval_required = True
+    unavailable_message = "Local legacy DWG converter fallback is not enabled."
+
+
 def normalize_dwg_backend_mode(value: Optional[str]) -> str:
     """Normalize a backend mode or alias into a stable backend id."""
 
@@ -177,6 +195,8 @@ def create_dwg_backend_selection(mode: Optional[str] = None) -> DwgBackendSelect
         adapter = CommercialSdkPlaceholderAdapter()
     elif normalized == DWG_BACKEND_USER_CONVERTER:
         adapter = UserConverterPlaceholderAdapter()
+    elif normalized == DWG_BACKEND_ODA_CONVERTER:
+        adapter = OdaConverterPlaceholderAdapter()
     else:  # pragma: no cover - normalize_dwg_backend_mode exhausts known values.
         raise ValueError(f"Unhandled DWG backend mode {normalized!r}.")
 
@@ -200,10 +220,12 @@ __all__ = [
     "DWG_BACKEND_COMMERCIAL_SDK",
     "DWG_BACKEND_DISABLED",
     "DWG_BACKEND_ENV",
+    "DWG_BACKEND_ODA_CONVERTER",
     "DWG_BACKEND_USER_CONVERTER",
     "CommercialSdkPlaceholderAdapter",
     "DisabledDwgBackendAdapter",
     "DwgBackendSelection",
+    "OdaConverterPlaceholderAdapter",
     "UserConverterPlaceholderAdapter",
     "create_dwg_backend_adapter",
     "create_dwg_backend_selection",

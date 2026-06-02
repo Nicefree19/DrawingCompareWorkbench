@@ -55,9 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--dwg-backend",
         default=None,
         help=(
-            "DWG backend mode for file compare. Use 'user_converter' to compare "
-            "unsupported DWG inputs through nearby user-provided converted DXFs."
+            "DWG backend mode for file compare. Use 'user_converter' for nearby "
+            "converted DXFs or 'oda_converter' for explicit local legacy fallback."
         ),
+    )
+    file_parser.add_argument(
+        "--oda-converter-path",
+        type=Path,
+        default=None,
+        help="Optional local converter executable path for the 'oda_converter' DWG backend mode.",
     )
     file_parser.add_argument(
         "--fail-on-change",
@@ -122,10 +128,19 @@ def _run_file_compare(args: argparse.Namespace) -> int:
     _require_existing_path(args.source_b, "source_b")
 
     from src.services.comparison.dwg_differ import DwgDiffer
+    from src.services.comparison.dwg_backend import (
+        DWG_BACKEND_ODA_CONVERTER,
+        normalize_dwg_backend_mode,
+    )
 
     differ_config = {"use_canonical_pipeline": True, "allow_oda_fallback": False}
     if args.dwg_backend:
-        differ_config["dwg_backend_mode"] = args.dwg_backend
+        backend_mode = normalize_dwg_backend_mode(args.dwg_backend)
+        differ_config["dwg_backend_mode"] = backend_mode
+        if backend_mode == DWG_BACKEND_ODA_CONVERTER:
+            differ_config["allow_oda_fallback"] = True
+    if args.oda_converter_path:
+        differ_config["oda_converter_path"] = str(args.oda_converter_path)
     differ = DwgDiffer(config=differ_config)
     result = differ.compare(
         args.source_a,
