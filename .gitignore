@@ -264,6 +264,7 @@ test_data/*.dxf
 
 # Agent cache
 .agent/
+.local/
 
 # Zone editor backups
 gui/zone_editor_backup_*/
