@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,10 +62,41 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     file_parser.add_argument(
+        "--dwg-allowed-license-id",
+        action="append",
+        default=None,
+        help=(
+            "Explicit DWG adapter license id allowlist entry. Repeat for approved "
+            "commercial SDK adapters; default is MIT and INTERNAL only."
+        ),
+    )
+    _add_commercial_bridge_options(file_parser)
+    file_parser.add_argument(
         "--oda-converter-path",
         type=Path,
         default=None,
         help="Optional local converter executable path for the 'oda_converter' DWG backend mode.",
+    )
+    file_parser.add_argument(
+        "--user-converter-path",
+        type=Path,
+        default=None,
+        help="Optional customer-provided converter executable path for the 'user_converter' DWG backend mode.",
+    )
+    file_parser.add_argument(
+        "--user-converter-arg",
+        action="append",
+        default=None,
+        help=(
+            "Argument template for --user-converter-path. May be repeated; "
+            "supports {input}, {output_dir}, {output}, and {stem}."
+        ),
+    )
+    file_parser.add_argument(
+        "--user-conversion-timeout",
+        type=float,
+        default=None,
+        help="Optional user converter timeout in seconds for the 'user_converter' DWG backend mode.",
     )
     file_parser.add_argument(
         "--oda-conversion-timeout",
@@ -134,6 +167,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prioritize first reviewable result over full heavy artifact export.",
     )
     folder_parser.add_argument(
+        "--dwg-backend",
+        default=None,
+        help="DWG backend mode for folder compare. Use 'user_converter' with a customer-provided converter.",
+    )
+    folder_parser.add_argument(
+        "--dwg-allowed-license-id",
+        action="append",
+        default=None,
+        help=(
+            "Explicit DWG adapter license id allowlist entry for folder compare. "
+            "Repeat for approved commercial SDK adapters; default is MIT and INTERNAL only."
+        ),
+    )
+    _add_commercial_bridge_options(folder_parser)
+    folder_parser.add_argument(
+        "--user-converter-path",
+        type=Path,
+        default=None,
+        help="Optional customer-provided converter executable path for the 'user_converter' DWG backend mode.",
+    )
+    folder_parser.add_argument(
+        "--user-converter-arg",
+        action="append",
+        default=None,
+        help=(
+            "Argument template for --user-converter-path. May be repeated; "
+            "supports {input}, {output_dir}, {output}, and {stem}."
+        ),
+    )
+    folder_parser.add_argument(
+        "--user-conversion-timeout",
+        type=float,
+        default=None,
+        help="Optional user converter timeout in seconds for the 'user_converter' DWG backend mode.",
+    )
+    folder_parser.add_argument(
+        "--dwg-conversion-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional cache directory for user-converted DXF files.",
+    )
+    folder_parser.add_argument(
         "--summary-json",
         type=Path,
         help="Optional compact run summary JSON path.",
@@ -153,6 +228,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
 
 
+def _add_commercial_bridge_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dwg-commercial-adapter-spec",
+        default=None,
+        help=(
+            "Explicit commercial DWG adapter factory spec, for example "
+            "src.services.comparison.commercial_dwg_json_adapter:create_adapter. "
+            "Only meaningful with --dwg-backend commercial_sdk."
+        ),
+    )
+    parser.add_argument(
+        "--dwg-bridge-command",
+        default=None,
+        help="Commercial DWG JSON bridge command. Only meaningful with --dwg-backend commercial_sdk.",
+    )
+    parser.add_argument(
+        "--dwg-bridge-args-json",
+        default=None,
+        help=(
+            "JSON array of commercial DWG bridge argument templates; supports "
+            "{input}, {acadver}, {version}, {stem}, {family}, and {release}."
+        ),
+    )
+    parser.add_argument(
+        "--dwg-bridge-license-id",
+        default=None,
+        help="Explicit approved license id reported by the commercial DWG JSON bridge.",
+    )
+    parser.add_argument(
+        "--dwg-bridge-supported-versions",
+        default=None,
+        help="Comma-separated ACxxxx versions supported by the commercial DWG JSON bridge.",
+    )
+    parser.add_argument(
+        "--dwg-bridge-timeout-seconds",
+        type=float,
+        default=None,
+        help="Timeout in seconds for each commercial DWG JSON bridge import.",
+    )
+
+
 def _run_file_compare(args: argparse.Namespace) -> int:
     _require_existing_path(args.source_a, "source_a")
     _require_existing_path(args.source_b, "source_b")
@@ -160,6 +276,7 @@ def _run_file_compare(args: argparse.Namespace) -> int:
     from src.services.comparison.dwg_differ import DwgDiffer
     from src.services.comparison.dwg_backend import (
         DWG_BACKEND_ODA_CONVERTER,
+        DWG_BACKEND_USER_CONVERTER,
         normalize_dwg_backend_mode,
     )
 
@@ -169,8 +286,16 @@ def _run_file_compare(args: argparse.Namespace) -> int:
         differ_config["dwg_backend_mode"] = backend_mode
         if backend_mode == DWG_BACKEND_ODA_CONVERTER:
             differ_config["allow_oda_fallback"] = True
+        if backend_mode == DWG_BACKEND_USER_CONVERTER and args.user_converter_path:
+            differ_config["user_converter_path"] = str(args.user_converter_path)
+    if args.dwg_allowed_license_id:
+        differ_config["allowed_dwg_license_ids"] = ["MIT", "INTERNAL", *args.dwg_allowed_license_id]
     if args.oda_converter_path:
         differ_config["oda_converter_path"] = str(args.oda_converter_path)
+    if args.user_converter_arg:
+        differ_config["user_conversion_args"] = list(args.user_converter_arg)
+    if args.user_conversion_timeout is not None:
+        differ_config["user_conversion_timeout_seconds"] = args.user_conversion_timeout
     if args.oda_conversion_timeout is not None:
         differ_config["oda_conversion_timeout_seconds"] = args.oda_conversion_timeout
     if args.dwg_conversion_cache_dir:
@@ -181,13 +306,45 @@ def _run_file_compare(args: argparse.Namespace) -> int:
         differ_config["max_dxf_tokens"] = args.max_dxf_tokens
     if args.max_entities is not None:
         differ_config["max_entities"] = args.max_entities
-    differ = DwgDiffer(config=differ_config)
-    result = differ.compare(
-        args.source_a,
-        args.source_b,
-        include_layers=args.include_layer,
-        exclude_layers=args.exclude_layer,
-    )
+    with _temporary_env(_dwg_commercial_env_updates(args)):
+        differ = DwgDiffer(config=differ_config)
+        result = differ.compare(
+            args.source_a,
+            args.source_b,
+            include_layers=args.include_layer,
+            exclude_layers=args.exclude_layer,
+        )
+        result = _maybe_legacy_fallback(
+            result,
+            args,
+            include_layers=args.include_layer,
+            exclude_layers=args.exclude_layer,
+        )
+    payload = {
+        "mode": "file",
+        "status": _comparison_status(result.metadata),
+        "source_a": str(args.source_a.resolve()),
+        "source_b": str(args.source_b.resolve()),
+        "result": result.to_dict(),
+    }
+    _write_json_if_requested(payload, args.output)
+    _emit_payload(payload, full_json=args.json)
+    if payload["status"] == "failed":
+        return 2
+    if args.fail_on_change and result.has_changes:
+        return 1
+    return 0
+
+
+def _maybe_legacy_fallback(
+    result: Any,
+    args: argparse.Namespace,
+    *,
+    include_layers: Sequence[str] | None,
+    exclude_layers: Sequence[str] | None,
+) -> Any:
+    from src.services.comparison.dwg_differ import DwgDiffer
+
     canonical_status = _comparison_status(result.metadata)
     if canonical_status == "failed":
         canonical_error_code = result.metadata.get("error_code")
@@ -202,8 +359,8 @@ def _run_file_compare(args: argparse.Namespace) -> int:
             ).compare(
                 args.source_a,
                 args.source_b,
-                include_layers=args.include_layer,
-                exclude_layers=args.exclude_layer,
+                include_layers=include_layers,
+                exclude_layers=exclude_layers,
             )
         except Exception:
             fallback_result = None
@@ -220,20 +377,7 @@ def _run_file_compare(args: argparse.Namespace) -> int:
                 f"Canonical CAD compare failed; used ezdxf fallback: {canonical_error_code}: {canonical_message}"
             )
             result = fallback_result
-    payload = {
-        "mode": "file",
-        "status": _comparison_status(result.metadata),
-        "source_a": str(args.source_a.resolve()),
-        "source_b": str(args.source_b.resolve()),
-        "result": result.to_dict(),
-    }
-    _write_json_if_requested(payload, args.output)
-    _emit_payload(payload, full_json=args.json)
-    if payload["status"] == "failed":
-        return 2
-    if args.fail_on_change and result.has_changes:
-        return 1
-    return 0
+    return result
 
 
 def _run_folder_compare(args: argparse.Namespace) -> int:
@@ -255,8 +399,15 @@ def _run_folder_compare(args: argparse.Namespace) -> int:
         enable_descriptor_cache=not bool(args.no_cache),
         max_workers=args.max_workers,
         fast_first_review=bool(args.fast_first_review),
+        dwg_backend_mode=args.dwg_backend,
+        allowed_dwg_license_ids=tuple(["MIT", "INTERNAL", *(args.dwg_allowed_license_id or [])]),
+        user_converter_path=args.user_converter_path,
+        user_conversion_args=tuple(args.user_converter_arg or ()),
+        user_conversion_timeout_seconds=args.user_conversion_timeout,
+        dwg_conversion_cache_dir=args.dwg_conversion_cache_dir,
     )
-    result = FolderComparePipeline(request).run(progress_callback=_print_progress)
+    with _temporary_env(_dwg_commercial_env_updates(args)):
+        result = FolderComparePipeline(request).run(progress_callback=_print_progress)
     payload = {
         "mode": "folder",
         "status": "ok",
@@ -286,6 +437,43 @@ def _comparison_status(metadata: dict[str, Any]) -> str:
     if metadata.get("error_code"):
         return "failed"
     return "ok"
+
+
+def _dwg_commercial_env_updates(args: argparse.Namespace) -> dict[str, str | None]:
+    from src.services.comparison.commercial_dwg_json_adapter import (
+        ARGS_JSON_ENV,
+        COMMAND_ENV,
+        LICENSE_ID_ENV,
+        SUPPORTED_VERSIONS_ENV,
+        TIMEOUT_SECONDS_ENV,
+    )
+    from src.services.comparison.dwg_backend import COMMERCIAL_SDK_ADAPTER_ENV
+
+    timeout = getattr(args, "dwg_bridge_timeout_seconds", None)
+    return {
+        COMMERCIAL_SDK_ADAPTER_ENV: getattr(args, "dwg_commercial_adapter_spec", None),
+        COMMAND_ENV: getattr(args, "dwg_bridge_command", None),
+        ARGS_JSON_ENV: getattr(args, "dwg_bridge_args_json", None),
+        LICENSE_ID_ENV: getattr(args, "dwg_bridge_license_id", None),
+        SUPPORTED_VERSIONS_ENV: getattr(args, "dwg_bridge_supported_versions", None),
+        TIMEOUT_SECONDS_ENV: str(timeout) if timeout is not None else None,
+    }
+
+
+@contextmanager
+def _temporary_env(updates: dict[str, str | None]) -> Iterator[None]:
+    old_values = {key: os.environ.get(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            if value is not None:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, old_value in old_values.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
 
 
 def _default_output_dir() -> Path:

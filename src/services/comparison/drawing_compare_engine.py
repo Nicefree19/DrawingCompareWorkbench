@@ -46,6 +46,7 @@ class DrawingCompareOptions:
     """Options for matching and result materialization."""
 
     tolerance: CompareTolerance = field(default_factory=CompareTolerance)
+    structural_position_tolerance_mm: Optional[float] = None
     search_radius_mm: float = 5.0
     match_threshold: float = 0.62
     spatial_cell_size_mm: Optional[float] = None
@@ -57,6 +58,7 @@ class DrawingCompareOptions:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "tolerance": self.tolerance.to_dict(),
+            "structural_position_tolerance_mm": self.structural_position_tolerance_mm,
             "search_radius_mm": self.search_radius_mm,
             "match_threshold": self.match_threshold,
             "spatial_cell_size_mm": self.spatial_cell_size_mm,
@@ -181,6 +183,8 @@ class GeometryDiff:
     ) -> None:
         self._compare_point("geometry.center", old_geom.get("center"), new_geom.get("center"), tolerance.position_tolerance_mm)
         self._compare_number("geometry.radius", old_geom.get("radius"), new_geom.get("radius"), tolerance.numeric_tolerance)
+        if old_geom.get("normal") is not None or new_geom.get("normal") is not None:
+            self._compare_vector("geometry.normal", old_geom.get("normal"), new_geom.get("normal"), tolerance.numeric_tolerance)
 
     def _compare_arc(
         self,
@@ -274,6 +278,18 @@ class GeometryDiff:
                 category="geometry",
             )
 
+    def _compare_vector(self, path: str, old: Any, new: Any, tolerance: float) -> None:
+        distance = _point_distance_3d(old, new)
+        if distance > tolerance:
+            self.add(
+                path,
+                _point3(old),
+                _point3(new),
+                delta=round(distance, 6) if math.isfinite(distance) else None,
+                tolerance=tolerance,
+                category="geometry",
+            )
+
     def _compare_number(self, path: str, old: Any, new: Any, tolerance: float) -> None:
         old_num = _float_or_none(old)
         new_num = _float_or_none(new)
@@ -349,13 +365,6 @@ class EntityMatcher:
         old_sorted = sorted(old_entities, key=_entity_sort_key)
         new_sorted = sorted(new_entities, key=_entity_sort_key)
         candidate_radius = self._candidate_radius()
-        index = _CanonicalSpatialIndex(
-            cell_size=self.options.spatial_cell_size_mm
-            or max(candidate_radius, 1.0),
-            max_cells_per_entity=self.options.max_spatial_cells_per_entity,
-        )
-        for entity in new_sorted:
-            index.insert(entity)
 
         candidate_by_pair: Dict[Tuple[str, str], MatchCandidate] = {}
         new_by_exact_hash: Dict[Tuple[str, str, str], Deque[Dict[str, Any]]] = defaultdict(deque)
@@ -381,14 +390,31 @@ class EntityMatcher:
             exact_used_old.add(old_id)
             exact_used_new.add(new_id)
 
+        index_by_type: Dict[str, _CanonicalSpatialIndex] = {}
+        for entity in new_sorted:
+            if str(entity.get("id") or "") in exact_used_new:
+                continue
+            entity_type = _entity_type_key(entity)
+            if not entity_type:
+                continue
+            index = index_by_type.get(entity_type)
+            if index is None:
+                index = _CanonicalSpatialIndex(
+                    cell_size=self.options.spatial_cell_size_mm
+                    or max(candidate_radius, 1.0),
+                    max_cells_per_entity=self.options.max_spatial_cells_per_entity,
+                )
+                index_by_type[entity_type] = index
+            index.insert(entity)
+
         for old_entity in old_sorted:
             old_id = str(old_entity.get("id") or "")
             if old_id in exact_used_old:
                 continue
+            index = index_by_type.get(_entity_type_key(old_entity))
+            if index is None:
+                continue
             for new_entity in index.query(old_entity, radius=candidate_radius):
-                new_id = str(new_entity.get("id") or "")
-                if new_id in exact_used_new:
-                    continue
                 candidate = self.score(old_entity, new_entity)
                 if candidate.score >= self.options.match_threshold:
                     candidate_by_pair[(candidate.old_entity_id, candidate.new_entity_id)] = candidate
@@ -561,9 +587,22 @@ class DrawingDiffResult:
     changes: List[DrawingDiffChange]
     match_candidates: List[MatchCandidate] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    summary_counts: Optional[Dict[str, int]] = None
 
     @property
     def summary(self) -> Dict[str, int]:
+        if self.summary_counts is not None:
+            counts = {
+                "added": int(self.summary_counts.get("added") or 0),
+                "removed": int(self.summary_counts.get("removed") or 0),
+                "modified": int(self.summary_counts.get("modified") or 0),
+                "unchanged": int(self.summary_counts.get("unchanged") or 0),
+            }
+            counts["total_changes"] = counts["added"] + counts["removed"] + counts["modified"]
+            counts["total_records"] = (
+                counts["added"] + counts["removed"] + counts["modified"] + counts["unchanged"]
+            )
+            return counts
         counts = {"added": 0, "removed": 0, "modified": 0, "unchanged": 0}
         for change in self.changes:
             counts[change.change_type] += 1
@@ -612,16 +651,21 @@ class DrawingCompareEngine:
         old_layers = _layers_by_id(old_drawing)
         new_layers = _layers_by_id(new_drawing)
         match_result = self.matcher.match(old_entities, new_entities)
+        global_translation = _dominant_translation(match_result.matches, self.options)
 
         changes: List[DrawingDiffChange] = []
+        summary_counts = {"added": 0, "removed": 0, "modified": 0, "unchanged": 0}
         for match in match_result.matches:
-            geometry_diff = GeometryDiff.compare(match.old_entity, match.new_entity, self.options.tolerance)
+            tolerance = _tolerance_for_match(match, self.options, old_layers, new_layers, global_translation)
+            geometry_diff = GeometryDiff.compare(match.old_entity, match.new_entity, tolerance)
             attribute_diffs = _attribute_diffs(match.old_entity, match.new_entity)
-            changed = geometry_diff.changed or bool(attribute_diffs)
+            style_only_diff = _is_style_only_diff(geometry_diff, attribute_diffs)
+            changed = (geometry_diff.changed or bool(attribute_diffs)) and not style_only_diff
             if changed:
                 change_type = "modified"
             else:
                 change_type = "unchanged"
+            summary_counts[change_type] += 1
             if change_type == "unchanged" and not self.options.include_unchanged:
                 continue
             changes.append(
@@ -629,15 +673,17 @@ class DrawingCompareEngine:
                     change_type,
                     match,
                     geometry_diff,
-                    attribute_diffs,
+                    [] if style_only_diff else attribute_diffs,
                     old_layers,
                     new_layers,
                 )
             )
 
         for entity in match_result.unmatched_old:
+            summary_counts["removed"] += 1
             changes.append(self._single_entity_change("removed", entity, old_layers))
         for entity in match_result.unmatched_new:
+            summary_counts["added"] += 1
             changes.append(self._single_entity_change("added", entity, new_layers))
 
         changes.sort(key=_change_sort_key)
@@ -651,6 +697,7 @@ class DrawingCompareEngine:
             options=self.options,
             changes=changes,
             match_candidates=match_result.candidates,
+            summary_counts=summary_counts,
         )
 
     def _matched_change(
@@ -719,9 +766,11 @@ class _CanonicalSpatialIndex:
         self.max_cells_per_entity = max(0, int(max_cells_per_entity or 0))
         self._buckets: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
         self._overflow: List[Dict[str, Any]] = []
+        self._entities: List[Dict[str, Any]] = []
 
     def insert(self, entity: Dict[str, Any]) -> None:
         bbox = _bbox2(entity.get("bbox"))
+        self._entities.append(entity)
         if self._cell_count_for_bbox(bbox) > self.max_cells_per_entity > 0:
             self._overflow.append(entity)
             return
@@ -740,14 +789,13 @@ class _CanonicalSpatialIndex:
                 seen.add(candidate_id)
                 candidates.append(candidate)
         if self._cell_count_for_bbox(query_bbox) > self.max_cells_per_entity > 0:
-            for bucket in self._buckets.values():
-                for candidate in bucket:
-                    candidate_id = str(candidate.get("id") or "")
-                    if candidate_id in seen:
-                        continue
-                    if _bbox_distance(query_bbox, _bbox2(candidate.get("bbox"))) <= radius:
-                        seen.add(candidate_id)
-                        candidates.append(candidate)
+            for candidate in self._entities:
+                candidate_id = str(candidate.get("id") or "")
+                if candidate_id in seen:
+                    continue
+                seen.add(candidate_id)
+                if _bbox_distance(query_bbox, _bbox2(candidate.get("bbox"))) <= radius:
+                    candidates.append(candidate)
             candidates.sort(key=_entity_sort_key)
             return candidates
         for cell in self._cells_for_bbox(query_bbox):
@@ -755,8 +803,8 @@ class _CanonicalSpatialIndex:
                 candidate_id = str(candidate.get("id") or "")
                 if candidate_id in seen:
                     continue
+                seen.add(candidate_id)
                 if _bbox_distance(query_bbox, _bbox2(candidate.get("bbox"))) <= radius:
-                    seen.add(candidate_id)
                     candidates.append(candidate)
         candidates.sort(key=_entity_sort_key)
         return candidates
@@ -785,6 +833,10 @@ def _attribute_diffs(old_entity: Dict[str, Any], new_entity: Dict[str, Any]) -> 
         diffs.append(FieldDiff("type", old_entity.get("type"), new_entity.get("type")))
     if old_entity.get("layer_id") != new_entity.get("layer_id"):
         diffs.append(FieldDiff("layer_id", old_entity.get("layer_id"), new_entity.get("layer_id")))
+    if old_entity.get("space") != new_entity.get("space"):
+        diffs.append(FieldDiff("space", old_entity.get("space"), new_entity.get("space")))
+    if old_entity.get("layout_name") != new_entity.get("layout_name"):
+        diffs.append(FieldDiff("layout_name", old_entity.get("layout_name"), new_entity.get("layout_name")))
     if _hash(old_entity, "semantic_hash") != _hash(new_entity, "semantic_hash"):
         diffs.append(FieldDiff("hashes.semantic_hash", _hash(old_entity, "semantic_hash"), _hash(new_entity, "semantic_hash")))
     old_style_hash = _hash(old_entity, "style_hash")
@@ -794,6 +846,93 @@ def _attribute_diffs(old_entity: Dict[str, Any], new_entity: Dict[str, Any]) -> 
     elif old_style_hash is None and new_style_hash is None and (old_entity.get("style") or {}) != (new_entity.get("style") or {}):
         diffs.append(FieldDiff("style", old_entity.get("style") or {}, new_entity.get("style") or {}))
     return diffs
+
+
+def _is_style_only_diff(geometry_diff: GeometryDiff, attribute_diffs: Sequence[FieldDiff]) -> bool:
+    if geometry_diff.changed or not attribute_diffs:
+        return False
+    return all(diff.path in {"hashes.style_hash", "style"} or diff.path.startswith("style.") for diff in attribute_diffs)
+
+
+def _tolerance_for_match(
+    match: EntityMatch,
+    options: DrawingCompareOptions,
+    old_layers: Dict[str, Dict[str, Any]],
+    new_layers: Dict[str, Dict[str, Any]],
+    global_translation: Optional[Tuple[float, float]] = None,
+) -> CompareTolerance:
+    structural_tolerance = options.structural_position_tolerance_mm
+    if structural_tolerance is None or structural_tolerance <= 0:
+        return options.tolerance
+    if not _is_structural_match(match, old_layers, new_layers):
+        return options.tolerance
+    if global_translation is not None and _matches_translation(match, global_translation, options.tolerance.position_tolerance_mm):
+        return options.tolerance
+    position = min(options.tolerance.position_tolerance_mm, float(structural_tolerance))
+    return CompareTolerance(
+        position_tolerance_mm=position,
+        bbox_tolerance_mm=min(options.tolerance.bbox_tolerance_mm, position),
+        numeric_tolerance=options.tolerance.numeric_tolerance,
+        angle_tolerance_deg=options.tolerance.angle_tolerance_deg,
+        text_case_sensitive=options.tolerance.text_case_sensitive,
+    )
+
+
+def _is_structural_match(
+    match: EntityMatch,
+    old_layers: Dict[str, Dict[str, Any]],
+    new_layers: Dict[str, Dict[str, Any]],
+) -> bool:
+    layer_names = [
+        _layer_name(match.old_entity.get("layer_id"), old_layers),
+        _layer_name(match.new_entity.get("layer_id"), new_layers),
+    ]
+    try:
+        from .structural_layer_patterns import any_structural_layer
+
+        return any_structural_layer([name for name in layer_names if name])
+    except Exception:
+        return any(str(name or "").upper().find(token) >= 0 for name in layer_names for token in ("BEAM", "COLUMN", "COL", "SLAB", "WALL"))
+
+
+def _dominant_translation(matches: Sequence[EntityMatch], options: DrawingCompareOptions) -> Optional[Tuple[float, float]]:
+    structural_tolerance = options.structural_position_tolerance_mm
+    if structural_tolerance is None or structural_tolerance <= 0 or len(matches) < 3:
+        return None
+    buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = defaultdict(list)
+    for match in matches:
+        translation = _match_translation(match)
+        if translation is None:
+            continue
+        dx, dy = translation
+        distance = math.hypot(dx, dy)
+        if distance <= structural_tolerance or distance > options.tolerance.position_tolerance_mm:
+            continue
+        buckets[(round(dx, 3), round(dy, 3))].append((dx, dy))
+    if not buckets:
+        return None
+    dominant = max(buckets.values(), key=len)
+    if len(dominant) < 3 or len(dominant) / max(len(matches), 1) < 0.5:
+        return None
+    return (
+        sum(dx for dx, _dy in dominant) / len(dominant),
+        sum(dy for _dx, dy in dominant) / len(dominant),
+    )
+
+
+def _matches_translation(match: EntityMatch, translation: Tuple[float, float], tolerance: float) -> bool:
+    candidate = _match_translation(match)
+    if candidate is None:
+        return False
+    return math.hypot(candidate[0] - translation[0], candidate[1] - translation[1]) <= max(0.001, tolerance / 10.0)
+
+
+def _match_translation(match: EntityMatch) -> Optional[Tuple[float, float]]:
+    old_centroid = _centroid(_bbox2(match.old_entity.get("bbox")))
+    new_centroid = _centroid(_bbox2(match.new_entity.get("bbox")))
+    if old_centroid is None or new_centroid is None:
+        return None
+    return (new_centroid["x"] - old_centroid["x"], new_centroid["y"] - old_centroid["y"])
 
 
 def _drawing_source(drawing: Dict[str, Any]) -> Dict[str, Any]:
@@ -822,6 +961,10 @@ def _layer_name(layer_id: Any, layers: Dict[str, Dict[str, Any]]) -> Optional[st
 
 def _layer_key(entity: Dict[str, Any]) -> str:
     return str(entity.get("layer_id") or "")
+
+
+def _entity_type_key(entity: Dict[str, Any]) -> str:
+    return str(entity.get("type") or "")
 
 
 def _hash(entity: Dict[str, Any], name: str) -> Optional[str]:
@@ -932,10 +1075,33 @@ def _point_distance_2d(a: Any, b: Any) -> float:
         return math.inf
 
 
+def _point_distance_3d(a: Any, b: Any) -> float:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return math.inf
+    try:
+        return math.sqrt(
+            (float(a.get("x", 0.0)) - float(b.get("x", 0.0))) ** 2
+            + (float(a.get("y", 0.0)) - float(b.get("y", 0.0))) ** 2
+            + (float(a.get("z", 0.0)) - float(b.get("z", 0.0))) ** 2
+        )
+    except Exception:
+        return math.inf
+
+
 def _point2(value: Any) -> Optional[Point2D]:
     if not isinstance(value, dict):
         return None
     return {"x": float(value.get("x", 0.0) or 0.0), "y": float(value.get("y", 0.0) or 0.0)}
+
+
+def _point3(value: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "x": float(value.get("x", 0.0) or 0.0),
+        "y": float(value.get("y", 0.0) or 0.0),
+        "z": float(value.get("z", 0.0) or 0.0),
+    }
 
 
 def _float_or_none(value: Any) -> Optional[float]:

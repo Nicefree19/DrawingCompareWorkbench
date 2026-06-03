@@ -75,6 +75,23 @@ def test_compare_failure_records_include_canonical_and_fallback_details(tmp_path
     assert records[0]["warnings"] == ["token limit"]
 
 
+def test_region_compare_source_keeps_commercial_sdk_dwg_on_canonical_path(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1032" + b"\0" * 32)
+
+    resolved, reason = pipeline._resolve_region_compare_source(
+        source,
+        tmp_path / "dxf-cache",
+        dwg_backend_mode="commercial_sdk",
+        allowed_dwg_license_ids=("MIT", "INTERNAL", "COMMERCIAL-APPROVED"),
+    )
+
+    assert resolved == source
+    assert reason == "commercial_sdk_canonical_dwg"
+
+
 def test_folder_compare_pipeline_runs_all_outputs_without_input_cache(tmp_path, monkeypatch) -> None:
     old_dir = tmp_path / "old"
     new_dir = tmp_path / "new"
@@ -295,6 +312,7 @@ def test_folder_compare_pipeline_uses_converted_dxf_fallback_for_unsupported_dwg
 
     def fake_preflight(**kwargs):
         captured["preflight_sources"] = [str(kwargs["source_a"]), str(kwargs["source_b"])]
+        captured["preflight_allowed_dwg_license_ids"] = tuple(kwargs.get("allowed_dwg_license_ids") or ())
         return PreflightResult(
             generated_at=datetime.now().isoformat(),
             status="passed",
@@ -312,6 +330,7 @@ def test_folder_compare_pipeline_uses_converted_dxf_fallback_for_unsupported_dwg
     class FakeJob:
         def __init__(self, candidates, options):
             self.candidates = candidates
+            captured["batch_options"] = options
 
         def run(self, progress_callback=None, is_cancelled=None):
             summary = BatchCompareSummary(started_at=datetime.now(), requested_pairs=1)
@@ -383,12 +402,26 @@ def test_folder_compare_pipeline_uses_converted_dxf_fallback_for_unsupported_dwg
         work_dir,
         tmp_path / "out",
         export_profile="internal",
+        dwg_backend_mode="user_converter",
+        allowed_dwg_license_ids=("MIT", "INTERNAL", "COMMERCIAL-APPROVED"),
+        user_converter_path=tmp_path / "customer-converter.exe",
+        user_conversion_args=("{input}", "{output_dir}"),
+        user_conversion_timeout_seconds=23,
+        dwg_conversion_cache_dir=tmp_path / "dwg-cache",
     )
     result = pipeline.FolderComparePipeline(request).run()
 
     assert result.compare_summary.completed_pairs == 1
     assert captured["preflight_sources"] == [str(before_dir.resolve()), str(after_dir.resolve())]
     assert captured["scan_sources"] == [str(before_dir.resolve()), str(after_dir.resolve())]
+    batch_options = captured["batch_options"]
+    assert batch_options.dwg_backend_mode == "user_converter"
+    assert batch_options.allowed_dwg_license_ids == ("MIT", "INTERNAL", "COMMERCIAL-APPROVED")
+    assert batch_options.user_converter_path == tmp_path / "customer-converter.exe"
+    assert batch_options.user_conversion_args == ("{input}", "{output_dir}")
+    assert batch_options.user_conversion_timeout_seconds == 23
+    assert batch_options.dwg_conversion_cache_dir == tmp_path / "dwg-cache"
+    assert captured["preflight_allowed_dwg_license_ids"] == ("MIT", "INTERNAL", "COMMERCIAL-APPROVED")
 
     manifest = json.loads(Path(result.run_manifest_path).read_text(encoding="utf-8"))
     fallback = manifest["inputs"]["dwg_dxf_fallback"]
@@ -396,6 +429,7 @@ def test_folder_compare_pipeline_uses_converted_dxf_fallback_for_unsupported_dwg
     assert fallback["reason"] == "unsupported_dwg_folder_with_converted_dxf_dirs"
     assert manifest["inputs"]["effective_source_a"] == str(before_dir.resolve())
     assert manifest["inputs"]["effective_source_b"] == str(after_dir.resolve())
+    assert manifest["inputs"]["allowed_dwg_license_ids"] == ["MIT", "INTERNAL", "COMMERCIAL-APPROVED"]
     assert manifest["stages"]["dwg_dxf_fallback"]["status"] == "completed"
 
     review_project = json.loads(Path(result.review_project_path).read_text(encoding="utf-8"))

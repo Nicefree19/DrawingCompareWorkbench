@@ -107,6 +107,13 @@
           "type": "number",
           "minimum": 0
         },
+        "structural_position_tolerance_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
         "match_threshold": {
           "type": "number",
           "minimum": 0,

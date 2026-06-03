@@ -287,7 +287,8 @@ class DxfEntityMapper:
         groups = _groups(record.pairs)
         center = _point(groups, 10, 20, 30)
         radius = max(0.0, _float(groups, 40, 0.0))
-        geometry = {"type": "circle", "center": center, "radius": radius}
+        normal = _point(groups, 210, 220, 230, default=(0.0, 0.0, 1.0))
+        geometry = {"type": "circle", "center": center, "radius": radius, "normal": normal}
         return self._common(record, context, "circle", geometry, _circle_bbox(center, radius, "exact"))
 
     def _map_arc(self, record: DxfRecord, context: MapperContext) -> Dict[str, Any]:

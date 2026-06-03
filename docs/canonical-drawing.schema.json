@@ -966,6 +966,9 @@
         "radius": {
           "type": "number",
           "exclusiveMinimum": 0
+        },
+        "normal": {
+          "$ref": "#/$defs/Point3D"
         }
       }
     },

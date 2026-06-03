@@ -34,6 +34,45 @@ def test_resolves_registered_dxf_pair_for_unsupported_dwg(tmp_path: Path) -> Non
     assert resolution.diagnostics["fallback_kind"] == "dxf_registered/before_after"
 
 
+def test_file_fallback_covers_known_major_and_future_acad_signatures(tmp_path: Path) -> None:
+    codes = (
+        "AC1009",
+        "AC1012",
+        "AC1014",
+        "AC1018",
+        "AC1021",
+        "AC1024",
+        "AC1027",
+        "AC1032",
+        "AC1040",
+    )
+    for code in codes:
+        case_dir = tmp_path / code
+        case_dir.mkdir()
+        source_a = case_dir / "detail.dwg"
+        source_b = case_dir / "detail_r1.dwg"
+        source_a.write_bytes(code.encode("ascii") + b"\0" * 32)
+        source_b.write_bytes(code.encode("ascii") + b"\0" * 32)
+
+        before_dir = case_dir / "dxf_registered" / "before"
+        after_dir = case_dir / "dxf_registered" / "after"
+        before_dir.mkdir(parents=True)
+        after_dir.mkdir(parents=True)
+        fallback_a = before_dir / "detail.dxf"
+        fallback_b = after_dir / "detail_r1.dxf"
+        fallback_a.write_text("0\nEOF\n", encoding="utf-8")
+        fallback_b.write_text("0\nEOF\n", encoding="utf-8")
+
+        resolution = resolve_dwg_dxf_fallback_pair(source_a, source_b)
+
+        assert resolution.used is True, code
+        assert resolution.reason == "unsupported_dwg_version_with_converted_dxf"
+        assert resolution.effective_source_a == fallback_a.resolve()
+        assert resolution.effective_source_b == fallback_b.resolve()
+        assert resolution.diagnostics["dwg_versions"]["a"]["code"] == code
+        assert resolution.diagnostics["dwg_versions"]["b"]["code"] == code
+
+
 def test_keeps_original_pair_when_no_converted_dxf_exists(tmp_path: Path) -> None:
     source_a = tmp_path / "old.dwg"
     source_b = tmp_path / "new.dwg"
@@ -90,6 +129,44 @@ def test_resolves_same_folder_selection_to_registered_before_after_dirs(tmp_path
     assert resolution.reason == "unsupported_dwg_folder_with_converted_dxf_dirs"
     assert resolution.effective_source_a == before_dir.resolve()
     assert resolution.effective_source_b == after_dir.resolve()
+
+
+def test_folder_fallback_covers_known_major_and_future_acad_signatures(tmp_path: Path) -> None:
+    codes = (
+        "AC1009",
+        "AC1012",
+        "AC1014",
+        "AC1018",
+        "AC1021",
+        "AC1024",
+        "AC1027",
+        "AC1032",
+        "AC1040",
+    )
+    for code in codes:
+        case_dir = tmp_path / code
+        case_dir.mkdir()
+        (case_dir / "detail.dwg").write_bytes(code.encode("ascii") + b"\0" * 32)
+        (case_dir / "detail_r1.dwg").write_bytes(code.encode("ascii") + b"\0" * 32)
+
+        before_dir = case_dir / "dxf_registered" / "before"
+        after_dir = case_dir / "dxf_registered" / "after"
+        before_dir.mkdir(parents=True)
+        after_dir.mkdir(parents=True)
+        (before_dir / "detail.dxf").write_text("0\nEOF\n", encoding="utf-8")
+        (after_dir / "detail_r1.dxf").write_text("0\nEOF\n", encoding="utf-8")
+
+        resolution = resolve_dwg_dxf_fallback_pair(case_dir, case_dir)
+
+        unsupported_codes = {
+            item.get("code")
+            for item in resolution.diagnostics["dwg_versions"]["unsupported"]
+        }
+        assert resolution.used is True, code
+        assert resolution.reason == "unsupported_dwg_folder_with_converted_dxf_dirs"
+        assert resolution.effective_source_a == before_dir.resolve()
+        assert resolution.effective_source_b == after_dir.resolve()
+        assert code in unsupported_codes
 
 
 def test_folder_fallback_prefers_registered_over_clean(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional, Union
+from typing import Any, Iterable, Optional, Sequence, Union
 
 
 @dataclass
@@ -60,6 +60,9 @@ def run_preflight(
     dxf_cache_dir: Optional[Union[str, Path]] = None,
     compare_state_dir: Optional[Union[str, Path]] = None,
     allow_long_path_warning: bool = False,
+    dwg_backend_mode: Optional[str] = None,
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL"),
+    user_converter_path: Optional[Union[str, Path]] = None,
 ) -> PreflightResult:
     """Run non-destructive checks and write-permission probes outside inputs."""
 
@@ -92,7 +95,19 @@ def run_preflight(
     checks.extend(_long_path_checks([source_a_path, source_b_path, output_path, cache_path, state_path], allow_long_path_warning))
     checks.append(_rtree_check())
     checks.append(_oda_check())
-    checks.append(_dwg_version_support_check([source_a_path, source_b_path]))
+    user_converter_check = _user_converter_check(dwg_backend_mode, user_converter_path)
+    commercial_sdk_check = _commercial_sdk_check(dwg_backend_mode, allowed_dwg_license_ids)
+    checks.append(user_converter_check)
+    checks.append(commercial_sdk_check)
+    checks.append(
+        _dwg_version_support_check(
+            [source_a_path, source_b_path],
+            user_converter_available=user_converter_check.status == "ok"
+            and _is_user_converter_backend(dwg_backend_mode),
+            commercial_sdk_available=commercial_sdk_check.status == "ok"
+            and _is_commercial_sdk_backend(dwg_backend_mode),
+        )
+    )
     checks.append(_pymupdf_check())
     checks.append(_pdf_support_check([source_a_path, source_b_path]))
     checks.append(_font_check())
@@ -193,7 +208,133 @@ def _oda_check() -> PreflightCheck:
         return PreflightCheck("oda_converter", "warning", f"could not check legacy ODA fallback: {exc}")
 
 
-def _dwg_version_support_check(paths: Iterable[Path]) -> PreflightCheck:
+def _user_converter_check(
+    dwg_backend_mode: Optional[str],
+    user_converter_path: Optional[Union[str, Path]],
+) -> PreflightCheck:
+    if not _is_user_converter_backend(dwg_backend_mode):
+        return PreflightCheck(
+            "user_converter",
+            "ok",
+            "explicit user_converter backend not selected",
+            {"required": False},
+        )
+    if not user_converter_path:
+        return PreflightCheck(
+            "user_converter",
+            "error",
+            "user_converter backend requires a customer-provided converter path",
+            {"required": True},
+        )
+    path = Path(user_converter_path).resolve()
+    if path.exists() and path.is_file():
+        return PreflightCheck(
+            "user_converter",
+            "ok",
+            "customer-provided user_converter executable is configured",
+            {"required": True, "path": str(path)},
+        )
+    return PreflightCheck(
+        "user_converter",
+        "error",
+        f"user_converter executable does not exist or is not a file: {path}",
+        {"required": True, "path": str(path)},
+    )
+
+
+def _is_user_converter_backend(dwg_backend_mode: Optional[str]) -> bool:
+    if not dwg_backend_mode:
+        return False
+    try:
+        from .dwg_backend import DWG_BACKEND_USER_CONVERTER, normalize_dwg_backend_mode
+
+        return normalize_dwg_backend_mode(str(dwg_backend_mode)) == DWG_BACKEND_USER_CONVERTER
+    except Exception:
+        return False
+
+
+def _commercial_sdk_check(
+    dwg_backend_mode: Optional[str],
+    allowed_dwg_license_ids: Sequence[str],
+) -> PreflightCheck:
+    if not _is_commercial_sdk_backend(dwg_backend_mode):
+        return PreflightCheck(
+            "commercial_dwg_sdk",
+            "ok",
+            "explicit commercial_sdk backend not selected",
+            {"required": False},
+        )
+    try:
+        from .dwg_backend import create_dwg_backend_selection
+
+        selection = create_dwg_backend_selection(dwg_backend_mode)
+        adapter = selection.adapter
+        license_id = str(getattr(adapter, "license_id", "") or "")
+        implementation_status = str(getattr(adapter, "implementation_status", "") or "")
+        allowed = tuple(allowed_dwg_license_ids or ())
+        details = {
+            "required": True,
+            "adapter": getattr(adapter, "name", ""),
+            "backend_mode": getattr(adapter, "backend_mode", ""),
+            "implementation_status": implementation_status,
+            "approval_required": bool(getattr(adapter, "approval_required", False)),
+            "license_id": license_id,
+            "allowed_license_ids": list(allowed),
+            "source": selection.source,
+        }
+        if implementation_status in {"", "placeholder", "plugin_load_failed"}:
+            return PreflightCheck(
+                "commercial_dwg_sdk",
+                "error",
+                "commercial_sdk backend requires an approved loaded adapter",
+                details,
+            )
+        if not license_id or license_id not in set(allowed):
+            return PreflightCheck(
+                "commercial_dwg_sdk",
+                "error",
+                "commercial_sdk backend license is not explicitly allowed",
+                details,
+            )
+        if not adapter.is_available():
+            return PreflightCheck(
+                "commercial_dwg_sdk",
+                "error",
+                "commercial_sdk backend adapter is not available",
+                details,
+            )
+        return PreflightCheck(
+            "commercial_dwg_sdk",
+            "ok",
+            "approved commercial_sdk backend adapter is configured",
+            details,
+        )
+    except Exception as exc:
+        return PreflightCheck(
+            "commercial_dwg_sdk",
+            "error",
+            f"commercial_sdk backend preflight failed: {exc}",
+            {"required": True},
+        )
+
+
+def _is_commercial_sdk_backend(dwg_backend_mode: Optional[str]) -> bool:
+    if not dwg_backend_mode:
+        return False
+    try:
+        from .dwg_backend import DWG_BACKEND_COMMERCIAL_SDK, normalize_dwg_backend_mode
+
+        return normalize_dwg_backend_mode(str(dwg_backend_mode)) == DWG_BACKEND_COMMERCIAL_SDK
+    except Exception:
+        return False
+
+
+def _dwg_version_support_check(
+    paths: Iterable[Path],
+    *,
+    user_converter_available: bool = False,
+    commercial_sdk_available: bool = False,
+) -> PreflightCheck:
     samples = list(_iter_dwg_paths(paths, limit=10))
     if not samples:
         return PreflightCheck("dwg_version_support", "ok", "no DWG inputs detected", {"required": False})
@@ -233,6 +374,22 @@ def _dwg_version_support_check(paths: Iterable[Path]) -> PreflightCheck:
     }
     if unsupported:
         codes = sorted({item.get("code", "") for item in unsupported if item.get("code")})
+        if user_converter_available:
+            return PreflightCheck(
+                "dwg_version_support",
+                "warning",
+                "DWG input version is unsupported by the native adapter, but explicit "
+                f"user_converter is configured for external conversion: {', '.join(codes)}.",
+                details,
+            )
+        if commercial_sdk_available:
+            return PreflightCheck(
+                "dwg_version_support",
+                "warning",
+                "DWG input version is unsupported by the native adapter, but explicit "
+                f"commercial_sdk is configured for approved import: {', '.join(codes)}.",
+                details,
+            )
         return PreflightCheck(
             "dwg_version_support",
             "error",

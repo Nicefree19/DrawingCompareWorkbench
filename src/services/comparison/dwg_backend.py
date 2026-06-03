@@ -6,6 +6,7 @@ unapproved commercial SDKs and user converters as fail-closed placeholders.
 """
 from __future__ import annotations
 
+import importlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from .dwg_importer import (
 
 
 DWG_BACKEND_ENV = "DRAWING_COMPARE_DWG_BACKEND"
+COMMERCIAL_SDK_ADAPTER_ENV = "DRAWING_COMPARE_COMMERCIAL_DWG_ADAPTER"
 
 DWG_BACKEND_CLEANROOM_NATIVE = "cleanroom_native"
 DWG_BACKEND_DISABLED = "disabled"
@@ -126,6 +128,18 @@ class CommercialSdkPlaceholderAdapter(_UnavailableBackendAdapter):
     unavailable_message = "Commercial DWG SDK backend is not approved or wired."
 
 
+class CommercialSdkLoadFailedAdapter(CommercialSdkPlaceholderAdapter):
+    """Fail-closed commercial SDK adapter when an explicit plugin cannot load."""
+
+    name = "commercial-sdk-load-failed"
+    implementation_status = "plugin_load_failed"
+
+    def __init__(self, spec: str, error: Exception):
+        self.spec = spec
+        self.error = error
+        self.unavailable_message = f"Commercial DWG SDK adapter {spec!r} could not be loaded: {error}"
+
+
 class UserConverterPlaceholderAdapter(_UnavailableBackendAdapter):
     """Fail-closed placeholder for a user-provided converter backend."""
 
@@ -192,7 +206,9 @@ def create_dwg_backend_selection(mode: Optional[str] = None) -> DwgBackendSelect
     if normalized == DWG_BACKEND_DISABLED:
         adapter = DisabledDwgBackendAdapter()
     elif normalized == DWG_BACKEND_COMMERCIAL_SDK:
-        adapter = CommercialSdkPlaceholderAdapter()
+        adapter = _create_commercial_sdk_adapter()
+        if os.environ.get(COMMERCIAL_SDK_ADAPTER_ENV):
+            source = f"{source}+{COMMERCIAL_SDK_ADAPTER_ENV}"
     elif normalized == DWG_BACKEND_USER_CONVERTER:
         adapter = UserConverterPlaceholderAdapter()
     elif normalized == DWG_BACKEND_ODA_CONVERTER:
@@ -215,7 +231,49 @@ def create_dwg_backend_adapter(mode: Optional[str] = None) -> DwgImporterAdapter
     return create_dwg_backend_selection(mode).adapter
 
 
+def _create_commercial_sdk_adapter() -> DwgImporterAdapter:
+    spec = (os.environ.get(COMMERCIAL_SDK_ADAPTER_ENV) or "").strip()
+    if not spec:
+        return CommercialSdkPlaceholderAdapter()
+    try:
+        return _load_adapter_from_spec(spec)
+    except Exception as exc:  # pragma: no cover - exercised through public selector.
+        return CommercialSdkLoadFailedAdapter(spec, exc)
+
+
+def _load_adapter_from_spec(spec: str) -> DwgImporterAdapter:
+    module_name, attr_name = _split_adapter_spec(spec)
+    module = importlib.import_module(module_name)
+    target = getattr(module, attr_name)
+    if isinstance(target, DwgImporterAdapter):
+        return target
+    if isinstance(target, type) and issubclass(target, DwgImporterAdapter):
+        adapter = target()
+    elif callable(target):
+        adapter = target()
+    else:
+        raise TypeError(f"{spec!r} is not a DWG adapter class, instance, or factory")
+    if not isinstance(adapter, DwgImporterAdapter):
+        raise TypeError(f"{spec!r} returned {type(adapter).__name__}, expected DwgImporterAdapter")
+    return adapter
+
+
+def _split_adapter_spec(spec: str) -> tuple[str, str]:
+    if ":" in spec:
+        module_name, attr_name = spec.split(":", 1)
+    else:
+        module_name, _, attr_name = spec.rpartition(".")
+    module_name = module_name.strip()
+    attr_name = attr_name.strip()
+    if not module_name or not attr_name:
+        raise ValueError(
+            f"Invalid commercial DWG adapter spec {spec!r}; expected 'module:factory' or 'module.AdapterClass'."
+        )
+    return module_name, attr_name
+
+
 __all__ = [
+    "COMMERCIAL_SDK_ADAPTER_ENV",
     "DWG_BACKEND_CLEANROOM_NATIVE",
     "DWG_BACKEND_COMMERCIAL_SDK",
     "DWG_BACKEND_DISABLED",
@@ -223,6 +281,7 @@ __all__ = [
     "DWG_BACKEND_ODA_CONVERTER",
     "DWG_BACKEND_USER_CONVERTER",
     "CommercialSdkPlaceholderAdapter",
+    "CommercialSdkLoadFailedAdapter",
     "DisabledDwgBackendAdapter",
     "DwgBackendSelection",
     "OdaConverterPlaceholderAdapter",

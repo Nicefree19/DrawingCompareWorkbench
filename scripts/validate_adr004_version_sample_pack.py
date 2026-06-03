@@ -70,24 +70,37 @@ def build_report(
     root: Path = ROOT,
     run_import: bool = True,
     run_compare: bool = True,
+    compare_source: str = "dwg",
+    dwg_backend_mode: str = "user_converter",
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL"),
     max_entities: int = DEFAULT_MAX_ENTITIES,
     max_dxf_tokens: int = DEFAULT_MAX_DXF_TOKENS,
     import_timeout_seconds: float = DEFAULT_IMPORT_TIMEOUT_SECONDS,
     compare_timeout_seconds: float = DEFAULT_COMPARE_TIMEOUT_SECONDS,
     skip_compare_over_dxf_mb: float = DEFAULT_SKIP_COMPARE_OVER_DXF_MB,
+    only_versions: set[str] | None = None,
 ) -> dict[str, Any]:
     sample_pack = _resolve(root, sample_pack)
     manifest_path, manifest = load_manifest(sample_pack, root=root)
     manifest_errors = validate_manifest(manifest)
+    requested_versions = {str(code).upper() for code in only_versions or set()}
+    versions = manifest.get("versions") or {}
+    for missing in sorted(requested_versions - {str(code).upper() for code in versions}):
+        manifest_errors.append(f"requested version not found in manifest: {missing}")
 
     version_records = []
-    for code, item in sorted((manifest.get("versions") or {}).items()):
+    for code, item in sorted(versions.items()):
+        if requested_versions and str(code).upper() not in requested_versions:
+            continue
         version_records.append(
             _version_record(
                 code,
                 item,
                 run_import=run_import,
                 run_compare=run_compare,
+                compare_source=compare_source,
+                dwg_backend_mode=dwg_backend_mode,
+                allowed_dwg_license_ids=allowed_dwg_license_ids,
                 max_entities=max_entities,
                 max_dxf_tokens=max_dxf_tokens,
                 import_timeout_seconds=import_timeout_seconds,
@@ -134,6 +147,9 @@ def build_report(
             "import_timeout_seconds": import_timeout_seconds,
             "compare_timeout_seconds": compare_timeout_seconds,
             "skip_compare_over_dxf_mb": skip_compare_over_dxf_mb,
+            "compare_source": compare_source,
+            "dwg_backend_mode": dwg_backend_mode,
+            "allowed_dwg_license_ids": list(allowed_dwg_license_ids),
         },
         "summary": {
             "version_count": len(version_records),
@@ -279,6 +295,9 @@ def _version_record(
     *,
     run_import: bool,
     run_compare: bool,
+    compare_source: str,
+    dwg_backend_mode: str,
+    allowed_dwg_license_ids: Sequence[str],
     max_entities: int,
     max_dxf_tokens: int,
     import_timeout_seconds: float,
@@ -308,6 +327,9 @@ def _version_record(
         outputs,
         dwg_inputs,
         run_compare=run_compare,
+        compare_source=compare_source,
+        dwg_backend_mode=dwg_backend_mode,
+        allowed_dwg_license_ids=allowed_dwg_license_ids,
         max_entities=max_entities,
         max_dxf_tokens=max_dxf_tokens,
         import_timeout_seconds=import_timeout_seconds,
@@ -408,6 +430,9 @@ def _run_compare_for_version(
     dwg_inputs: dict[str, dict[str, Any]],
     *,
     run_compare: bool,
+    compare_source: str,
+    dwg_backend_mode: str,
+    allowed_dwg_license_ids: Sequence[str],
     max_entities: int,
     max_dxf_tokens: int,
     import_timeout_seconds: float,
@@ -431,8 +456,12 @@ def _run_compare_for_version(
         }
     before_dwg = dwg_inputs["before"]
     after_dwg = dwg_inputs["after"]
-    source_a = Path(str(before_dwg["path"])) if before_dwg.get("exists") else Path(str(before_output["path"]))
-    source_b = Path(str(after_dwg["path"])) if after_dwg.get("exists") else Path(str(after_output["path"]))
+    if compare_source == "dxf":
+        source_a = Path(str(before_output["path"]))
+        source_b = Path(str(after_output["path"]))
+    else:
+        source_a = Path(str(before_dwg["path"])) if before_dwg.get("exists") else Path(str(before_output["path"]))
+        source_b = Path(str(after_dwg["path"])) if after_dwg.get("exists") else Path(str(after_output["path"]))
     return _run_compare_worker(
         source_a,
         source_b,
@@ -440,6 +469,8 @@ def _run_compare_for_version(
         max_dxf_tokens=max_dxf_tokens,
         import_timeout_seconds=import_timeout_seconds,
         compare_timeout_seconds=compare_timeout_seconds,
+        dwg_backend_mode=dwg_backend_mode,
+        allowed_dwg_license_ids=allowed_dwg_license_ids,
     )
 
 
@@ -475,7 +506,14 @@ def _run_compare_worker(
     max_dxf_tokens: int,
     import_timeout_seconds: float,
     compare_timeout_seconds: float,
+    dwg_backend_mode: str,
+    allowed_dwg_license_ids: Sequence[str],
 ) -> dict[str, Any]:
+    license_args = [
+        value
+        for license_id in allowed_dwg_license_ids
+        for value in ("--dwg-allowed-license-id", str(license_id))
+    ]
     return _run_worker(
         [
             "_compare_worker",
@@ -489,6 +527,9 @@ def _run_compare_worker(
             str(max_dxf_tokens),
             "--import-timeout-seconds",
             str(import_timeout_seconds),
+            "--dwg-backend",
+            dwg_backend_mode,
+            *license_args,
         ],
         timeout_seconds=compare_timeout_seconds,
     )
@@ -556,7 +597,7 @@ def _import_worker_main(argv: Sequence[str]) -> int:
             )
         )
     ).import_file(args.path)
-    print(json.dumps(_compact_import_result(result.to_dict()), ensure_ascii=False))
+    print(json.dumps(_compact_import_pipeline_result(result), ensure_ascii=False))
     return 0 if result.status in {"ok", "partial"} else 1
 
 
@@ -567,6 +608,8 @@ def _compare_worker_main(argv: Sequence[str]) -> int:
     parser.add_argument("--max-entities", type=int, required=True)
     parser.add_argument("--max-dxf-tokens", type=int, required=True)
     parser.add_argument("--import-timeout-seconds", type=float, required=True)
+    parser.add_argument("--dwg-backend", default="user_converter")
+    parser.add_argument("--dwg-allowed-license-id", action="append", default=None)
     args = parser.parse_args(argv)
 
     from src.services.comparison.cad_stability import CadStabilityLimits
@@ -575,21 +618,65 @@ def _compare_worker_main(argv: Sequence[str]) -> int:
         ComparePipelineOptions,
         ImportPipelineOptions,
     )
+    from src.services.comparison.dwg_backend import DWG_BACKEND_ODA_CONVERTER, normalize_dwg_backend_mode
+    from src.services.comparison.drawing_compare_engine import DrawingCompareOptions
 
+    dwg_backend_mode = normalize_dwg_backend_mode(args.dwg_backend)
     result = ComparePipeline(
         ComparePipelineOptions(
             import_options=ImportPipelineOptions(
-                dwg_backend_mode="user_converter",
+                dwg_backend_mode=dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(args.dwg_allowed_license_id or ("MIT", "INTERNAL")),
+                allow_oda_fallback=dwg_backend_mode == DWG_BACKEND_ODA_CONVERTER,
                 stability_limits=CadStabilityLimits(
                     import_timeout_seconds=args.import_timeout_seconds,
                     max_entities=args.max_entities,
                     max_dxf_tokens=args.max_dxf_tokens,
                 ),
-            )
+            ),
+            compare_options=DrawingCompareOptions(
+                include_unchanged=False,
+                include_entity_snapshots=False,
+            ),
         )
     ).compare(args.source_a, args.source_b)
-    print(json.dumps(_compact_compare_result(result.to_dict()), ensure_ascii=False))
+    print(json.dumps(_compact_compare_pipeline_result(result), ensure_ascii=False))
     return 0 if result.status in {"ok", "partial"} else 1
+
+
+def _compact_compare_pipeline_result(result: Any) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "error_code": result.error_code,
+        "message": result.message,
+        "summary": result.diff.summary if result.diff else None,
+        "elapsed_ms": result.elapsed_ms,
+        "partial_imports": [
+            key for key, value in result.imports.items()
+            if value.status == "partial"
+        ],
+        "input_resolution": result.input_resolution,
+        "warning_codes": _warning_codes(result.warnings),
+        "warning_count": len(result.warnings),
+        "imports": {
+            side: _compact_import_pipeline_result(import_result)
+            for side, import_result in result.imports.items()
+        },
+    }
+
+
+def _compact_import_pipeline_result(result: Any) -> dict[str, Any]:
+    compact = _compact_import_result(result.to_dict())
+    canonical = getattr(result, "canonical_drawing", None) or {}
+    metadata = canonical.get("metadata") or {}
+    adapter_metadata = metadata.get("adapter_metadata") or {}
+    import_report = canonical.get("import_report") or getattr(result, "import_report", None) or {}
+    compact["adapter"] = import_report.get("adapter") or {}
+    compact["adapter_metadata"] = adapter_metadata if isinstance(adapter_metadata, dict) else {}
+    fallback = import_report.get("fallback") or {}
+    if fallback:
+        compact["fallback"] = fallback
+    return compact
 
 
 def _compact_import_result(data: dict[str, Any]) -> dict[str, Any]:
@@ -740,6 +827,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--import-timeout-seconds", type=float, default=DEFAULT_IMPORT_TIMEOUT_SECONDS)
     parser.add_argument("--compare-timeout-seconds", type=float, default=DEFAULT_COMPARE_TIMEOUT_SECONDS)
     parser.add_argument("--skip-compare-over-dxf-mb", type=float, default=DEFAULT_SKIP_COMPARE_OVER_DXF_MB)
+    parser.add_argument(
+        "--compare-source",
+        choices=("dwg", "dxf"),
+        default="dwg",
+        help="Compare source files from converted DWGs or registered DXFs.",
+    )
+    parser.add_argument(
+        "--dwg-backend",
+        default="user_converter",
+        help=(
+            "DWG backend mode used by compare workers when --compare-source=dwg. "
+            "Use commercial_sdk only with an approved adapter and license allowlist."
+        ),
+    )
+    parser.add_argument(
+        "--dwg-allowed-license-id",
+        action="append",
+        default=None,
+        help=(
+            "Explicit DWG adapter license id allowlist entry for compare workers. "
+            "Repeat for approved commercial SDK adapters; default is MIT and INTERNAL."
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="append",
+        default=None,
+        help="Limit validation to one DWG header code. May be supplied multiple times.",
+    )
     parser.add_argument("--no-import", action="store_true")
     parser.add_argument("--no-compare", action="store_true")
     args = parser.parse_args(argv)
@@ -751,11 +867,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         sample_pack,
         run_import=not args.no_import,
         run_compare=not args.no_compare,
+        compare_source=args.compare_source,
+        dwg_backend_mode=args.dwg_backend,
+        allowed_dwg_license_ids=tuple(["MIT", "INTERNAL", *(args.dwg_allowed_license_id or [])]),
         max_entities=args.max_entities,
         max_dxf_tokens=args.max_dxf_tokens,
         import_timeout_seconds=args.import_timeout_seconds,
         compare_timeout_seconds=args.compare_timeout_seconds,
         skip_compare_over_dxf_mb=args.skip_compare_over_dxf_mb,
+        only_versions={str(code).upper() for code in args.version or []} or None,
     )
     _write_json(json_report, report)
     _write_text(md_report, render_markdown(report))

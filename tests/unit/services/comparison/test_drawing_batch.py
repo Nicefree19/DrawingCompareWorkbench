@@ -2,11 +2,15 @@
 """Tests for drawing batch scan/match orchestration."""
 
 from datetime import datetime
+import json
 from pathlib import Path
+import sys
 
 import pytest
 
 from src.services.comparison.base import ChangeRecord, ChangeType, ComparisonResult
+from src.services.comparison.dwg_backend import COMMERCIAL_SDK_ADAPTER_ENV
+from src.services.comparison.dwg_importer import DwgJsonFixtureAdapter
 from src.services.comparison.drawing_batch import (
     BatchCompareItemResult,
     BatchCompareJob,
@@ -20,6 +24,7 @@ from src.services.comparison.drawing_batch import (
     MatchStatus,
     MatchingOptions,
     apply_manual_matches,
+    build_drawing_descriptor,
     compare_pdf_documents,
     compare_candidate,
     confirmed_pair_uniqueness_violations,
@@ -352,6 +357,31 @@ def test_scan_folder_can_include_or_exclude_subfolders(tmp_path) -> None:
     assert [descriptor.name for descriptor in recursive] == ["A-100.dxf", "A-101.dxf"]
 
 
+def test_dwg_descriptor_uses_explicit_user_converter_without_oda_warning(tmp_path) -> None:
+    source = tmp_path / "S-100.dwg"
+    source.write_bytes(b"AC1032" + b"\0" * 32)
+    converter_script = (
+        "import pathlib, sys; "
+        "inp=pathlib.Path(sys.argv[1]); "
+        "out=pathlib.Path(sys.argv[2]) / (inp.stem + '.dxf'); "
+        "out.write_text('0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n8\\n0\\n10\\n0\\n20\\n0\\n30\\n0\\n11\\n100\\n21\\n0\\n31\\n0\\n0\\nENDSEC\\n0\\nEOF\\n', encoding='utf-8')"
+    )
+
+    descriptor = build_drawing_descriptor(
+        source,
+        options=DescriptorBuildOptions(
+            dwg_backend_mode="user_converter",
+            user_converter_path=sys.executable,
+            user_conversion_args=("-c", converter_script, "{input}", "{output_dir}"),
+            dwg_conversion_cache_dir=tmp_path / "dwg-cache",
+        ),
+    )
+
+    assert descriptor.warnings == tuple()
+    assert descriptor.entity_counts["LINE"] == 1
+    assert descriptor.bbox == (0.0, 0.0, 100.0, 0.0)
+
+
 def test_batch_job_runs_confirmed_pairs(monkeypatch) -> None:
     source_a = _descriptor("S-101.dwg")
     source_b = _descriptor("S-101_REV1.dwg")
@@ -489,6 +519,72 @@ def test_cad_batch_compare_uses_canonical_engine_by_default(monkeypatch) -> None
         "use_canonical_pipeline": True,
         "use_legacy_ezdxf_pipeline": False,
     }
+
+
+def test_cad_batch_compare_forwards_user_converter_backend_config(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDwgDiffer:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def compare(
+            self,
+            source_a,
+            source_b,
+            *,
+            progress_callback=None,
+            is_cancelled=None,
+        ) -> ComparisonResult:
+            return ComparisonResult(source_a=str(source_a), source_b=str(source_b))
+
+    monkeypatch.setattr("src.services.comparison.dwg_differ.DwgDiffer", FakeDwgDiffer)
+
+    compare_candidate(
+        _confirmed_candidate("S-101"),
+        BatchCompareOptions(
+            dwg_backend_mode="user_converter",
+            allowed_dwg_license_ids=("MIT", "INTERNAL", "COMMERCIAL-APPROVED"),
+            user_converter_path=tmp_path / "customer-converter.exe",
+            user_conversion_args=("{input}", "{output_dir}"),
+            user_conversion_timeout_seconds=17,
+            dwg_conversion_cache_dir=tmp_path / "dwg-cache",
+        ),
+    )
+
+    assert captured["config"] == {
+        "use_canonical_pipeline": True,
+        "use_legacy_ezdxf_pipeline": False,
+        "dwg_backend_mode": "user_converter",
+        "allowed_dwg_license_ids": ["MIT", "INTERNAL", "COMMERCIAL-APPROVED"],
+        "user_converter_path": str(tmp_path / "customer-converter.exe"),
+        "user_conversion_args": ["{input}", "{output_dir}"],
+        "user_conversion_timeout_seconds": 17,
+        "dwg_conversion_cache_dir": str(tmp_path / "dwg-cache"),
+    }
+
+
+def test_cad_descriptor_uses_approved_commercial_sdk_without_dxf_conversion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _write_commercial_plugin(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv(COMMERCIAL_SDK_ADAPTER_ENV, "batch_commercial_adapter:create_adapter")
+    source = _write_dwg_fixture(tmp_path / "S-201.dwg", version="AC1032")
+
+    descriptor = build_drawing_descriptor(
+        source,
+        options=DescriptorBuildOptions(
+            dwg_backend_mode="commercial_sdk",
+            allowed_dwg_license_ids=("MIT", "INTERNAL", "COMMERCIAL-APPROVED"),
+        ),
+    )
+
+    assert descriptor.entity_counts == {"line": 1, "text": 1}
+    assert descriptor.layers == ("0", "ANNO")
+    assert "GRID A" in descriptor.text_hints
+    assert descriptor.bbox == (0.0, 0.0, 100.0, 22.5)
 
 
 def test_cad_batch_compare_can_opt_into_legacy_ezdxf_engine(monkeypatch) -> None:
@@ -638,6 +734,67 @@ def test_legacy_ezdxf_fallback_available_accepts_same_stem_cache(tmp_path: Path)
     (cache_dir / "large_detail_R1.oldhash.dxf").write_text("0\nEOF\n", encoding="utf-8")
 
     assert _legacy_ezdxf_fallback_available(source_a, source_b, cache_dir) is True
+
+
+def _write_commercial_plugin(tmp_path: Path) -> None:
+    plugin = tmp_path / "batch_commercial_adapter.py"
+    plugin.write_text(
+        "\n".join(
+            [
+                "from src.services.comparison.dwg_backend import DWG_BACKEND_COMMERCIAL_SDK",
+                "from src.services.comparison.dwg_importer import DwgJsonFixtureAdapter",
+                "",
+                "class BatchCommercialAdapter(DwgJsonFixtureAdapter):",
+                "    name = 'batch-commercial-fixture'",
+                "    version = '2026.1'",
+                "    license_id = 'COMMERCIAL-APPROVED'",
+                "    backend_mode = DWG_BACKEND_COMMERCIAL_SDK",
+                "    implementation_status = 'approved_plugin'",
+                "    approval_required = True",
+                "",
+                "    def supports_version(self, version):",
+                "        return True",
+                "",
+                "def create_adapter():",
+                "    return BatchCommercialAdapter()",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_dwg_fixture(path: Path, *, version: str) -> Path:
+    payload = {
+        "layers": [{"name": "0"}, {"name": "ANNO"}],
+        "model_space": [
+            {
+                "type": "LINE",
+                "handle": "10",
+                "layer": "0",
+                "geometry": {
+                    "start": {"x": 0, "y": 0, "z": 0},
+                    "end": {"x": 100, "y": 0, "z": 0},
+                },
+            },
+            {
+                "type": "TEXT",
+                "handle": "11",
+                "layer": "ANNO",
+                "geometry": {
+                    "insert": {"x": 0, "y": 20, "z": 0},
+                    "height": 2.5,
+                    "text": "GRID A",
+                },
+            },
+        ],
+    }
+    path.write_bytes(
+        version.encode("ascii")
+        + DwgJsonFixtureAdapter.MARKER
+        + json.dumps(payload).encode("utf-8")
+    )
+    return path
 
 
 def test_pair_uuid_distinguishes_same_label_in_different_folders() -> None:

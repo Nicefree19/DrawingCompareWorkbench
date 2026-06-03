@@ -5,12 +5,14 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+import src.services.comparison.drawing_compare_engine as compare_engine
 from src.services.comparison.drawing_compare_engine import (
     CompareTolerance,
     DrawingCompareEngine,
     DrawingCompareOptions,
     EntityMatcher,
     GeometryDiff,
+    _CanonicalSpatialIndex,
     result_fingerprint,
 )
 from src.services.comparison.drawing_normalizer import DrawingNormalizer, NormalizationOptions
@@ -239,6 +241,26 @@ def test_engine_outputs_added_removed_modified_unchanged_for_ui_snapshot() -> No
     assert removed["bbox"] == removed["old_bbox"]
 
 
+def test_engine_suppresses_style_only_diffs_from_product_changes() -> None:
+    before_line = _line("line:before", 0, 0, 10, 0)
+    after_line = _line("line:after", 0, 0, 10, 0)
+    after_line["style"] = {**after_line["style"], "color": 8}
+    before = _drawing([before_line])
+    after = _drawing([after_line])
+
+    result = DrawingCompareEngine(DrawingCompareOptions(include_unchanged=False)).compare(before, after)
+
+    assert result.summary == {
+        "added": 0,
+        "removed": 0,
+        "modified": 0,
+        "unchanged": 1,
+        "total_changes": 0,
+        "total_records": 1,
+    }
+    assert result.to_dict()["changes"] == []
+
+
 def test_entity_matcher_uses_spatial_candidates_and_stable_score() -> None:
     old = [_line("old:near", 0, 0, 10, 0)]
     new = [
@@ -259,6 +281,52 @@ def test_entity_matcher_uses_spatial_candidates_and_stable_score() -> None:
     assert match.score > 0.7
 
 
+def test_entity_matcher_filters_spatial_index_by_type_before_scoring() -> None:
+    class CountingMatcher(EntityMatcher):
+        def __init__(self, options: DrawingCompareOptions) -> None:
+            super().__init__(options)
+            self.scored_pairs: list[tuple[str, str]] = []
+
+        def score(self, old_entity: dict, new_entity: dict):
+            self.scored_pairs.append((str(old_entity["id"]), str(new_entity["id"])))
+            return super().score(old_entity, new_entity)
+
+    before = _drawing([_line("old:line", 0, 0, 10, 0)])
+    after = _drawing(
+        [
+            *[_circle(f"new:circle:{index}", 5, 0, 5) for index in range(20)],
+            _line("new:line", 0.2, 0, 10.2, 0),
+        ]
+    )
+    matcher = CountingMatcher(DrawingCompareOptions(search_radius_mm=20.0, match_threshold=0.5))
+
+    result = matcher.match(before["entities"], after["entities"])
+
+    assert [(match.candidate.old_entity_id, match.candidate.new_entity_id) for match in result.matches] == [
+        ("old:line", "new:line")
+    ]
+    assert matcher.scored_pairs == [("old:line", "new:line")]
+
+
+def test_spatial_index_checks_multicell_candidate_once(monkeypatch) -> None:
+    index = _CanonicalSpatialIndex(cell_size=1.0, max_cells_per_entity=10)
+    index.insert(_line("new:wide", 0, 0, 2, 0))
+    calls = 0
+    original = compare_engine._bbox_distance
+
+    def counting_bbox_distance(a, b):
+        nonlocal calls
+        calls += 1
+        return original(a, b)
+
+    monkeypatch.setattr(compare_engine, "_bbox_distance", counting_bbox_distance)
+
+    result = index.query(_line("old:far", 100, 0, 120, 0), radius=1.0)
+
+    assert result == []
+    assert calls == 1
+
+
 def test_geometry_diff_algorithms_cover_supported_entity_types() -> None:
     tolerance = CompareTolerance(position_tolerance_mm=0.01, numeric_tolerance=0.001, angle_tolerance_deg=0.01)
     cases = [
@@ -274,6 +342,40 @@ def test_geometry_diff_algorithms_cover_supported_entity_types() -> None:
         diff = GeometryDiff.compare(old_entity, new_entity, tolerance)
         assert diff.changed, expected_path
         assert expected_path in [field.path for field in diff.fields]
+
+
+def test_circle_normal_flip_is_geometry_change() -> None:
+    old_circle = _circle("circle:old", 100, 200, 10)
+    new_circle = _circle("circle:new", 100, 200, 10)
+    old_circle["geometry"]["normal"] = _point(0, 0, 1)
+    new_circle["geometry"]["normal"] = _point(0, 0, -1)
+
+    result = DrawingCompareEngine(DrawingCompareOptions(include_unchanged=False)).compare(
+        _drawing([old_circle]),
+        _drawing([new_circle]),
+    )
+
+    assert result.summary["modified"] == 1
+    fields = result.to_dict()["changes"][0]["geometry_diff"]["fields"]
+    assert fields[0]["path"] == "geometry.normal"
+
+
+def test_layout_name_move_is_attribute_change() -> None:
+    old_circle = _circle("circle:old", 50, 50, 10)
+    new_circle = _circle("circle:new", 50, 50, 10)
+    old_circle["space"] = "paper"
+    old_circle["layout_name"] = "Layout1"
+    new_circle["space"] = "paper"
+    new_circle["layout_name"] = "DETAIL_VIEW"
+
+    result = DrawingCompareEngine(DrawingCompareOptions(include_unchanged=False)).compare(
+        _drawing([old_circle]),
+        _drawing([new_circle]),
+    )
+
+    assert result.summary["modified"] == 1
+    fields = result.to_dict()["changes"][0]["attribute_diffs"]
+    assert fields == [{"path": "layout_name", "old": "Layout1", "new": "DETAIL_VIEW"}]
 
 
 def test_tolerance_changes_output_and_fingerprint_is_reproducible() -> None:
@@ -297,6 +399,85 @@ def test_tolerance_changes_output_and_fingerprint_is_reproducible() -> None:
     assert strict.summary["modified"] == 1
     assert result_fingerprint(loose_1) == result_fingerprint(loose_2)
     assert result_fingerprint(loose_1) != result_fingerprint(strict)
+
+
+def test_structural_position_tolerance_detects_submillimeter_beam_shift() -> None:
+    before = _drawing([_line("line:a", 0, 0, 10, 0)])
+    after = _drawing([_line("line:b", 0, 0.5, 10, 0.5)])
+
+    default_tolerance = CompareTolerance(position_tolerance_mm=1.0, bbox_tolerance_mm=1.0)
+    options = DrawingCompareOptions(
+        tolerance=default_tolerance,
+        structural_position_tolerance_mm=0.1,
+        search_radius_mm=2.0,
+        include_unchanged=False,
+    )
+
+    result = DrawingCompareEngine(options).compare(before, after)
+
+    assert result.summary["modified"] == 1
+    change = result.to_dict()["changes"][0]
+    assert change["change_type"] == "modified"
+    assert change["geometry_diff"]["fields"][0]["tolerance"] == 0.1
+
+
+def test_structural_position_tolerance_keeps_global_micro_shift_suppressed() -> None:
+    before = _drawing(
+        [
+            _line("line:a", 0, 0, 10, 0),
+            _line("line:b", 0, 10, 10, 10),
+            _line("line:c", 0, 20, 10, 20),
+            _line("line:d", 0, 30, 10, 30),
+        ]
+    )
+    after = _drawing(
+        [
+            _line("line:a2", 0.5, 0.5, 10.5, 0.5),
+            _line("line:b2", 0.5, 10.5, 10.5, 10.5),
+            _line("line:c2", 0.5, 20.5, 10.5, 20.5),
+            _line("line:d2", 0.5, 30.5, 10.5, 30.5),
+        ]
+    )
+    options = DrawingCompareOptions(
+        tolerance=CompareTolerance(position_tolerance_mm=1.0, bbox_tolerance_mm=1.0),
+        structural_position_tolerance_mm=0.1,
+        search_radius_mm=2.0,
+        include_unchanged=False,
+    )
+
+    result = DrawingCompareEngine(options).compare(before, after)
+
+    assert result.summary["modified"] == 0
+    assert result.summary["unchanged"] == 4
+    assert result.to_dict()["changes"] == []
+
+
+def test_compact_mode_preserves_unchanged_summary_without_records() -> None:
+    before = _drawing([
+        _line("line:same:a", 0, 0, 10, 0),
+        _circle("circle:old", 100, 100, 10),
+    ])
+    after = _drawing([
+        _line("line:same:b", 0, 0, 10, 0),
+        _circle("circle:new", 100, 100, 12),
+    ])
+
+    result = DrawingCompareEngine(
+        DrawingCompareOptions(include_unchanged=False, include_entity_snapshots=False)
+    ).compare(before, after)
+
+    assert result.summary == {
+        "added": 0,
+        "removed": 0,
+        "modified": 1,
+        "unchanged": 1,
+        "total_changes": 1,
+        "total_records": 2,
+    }
+    payload = result.to_dict()
+    assert [change["change_type"] for change in payload["changes"]] == ["modified"]
+    assert payload["changes"][0]["old_entity"] is None
+    assert payload["changes"][0]["new_entity"] is None
 
 
 def test_result_converts_to_change_records_for_zone_pipeline() -> None:

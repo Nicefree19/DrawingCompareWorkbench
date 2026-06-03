@@ -38,6 +38,8 @@ from .drawing_batch import (
     MatchCandidate,
     MatchStatus,
     MatchingOptions,
+    _descriptor_uses_commercial_sdk,
+    _descriptor_user_converter_dxf,
     are_compatible,
     match_drawing_sets,
     scan_drawing_inputs,
@@ -168,6 +170,12 @@ class FolderCompareRunRequest:
     max_zone_tiles: int = 300
     cad_visual_backend: str = ""
     cad_visual_conversion_timeout_seconds: int = 180
+    dwg_backend_mode: Optional[str] = None
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL")
+    user_converter_path: Optional[Union[str, Path]] = None
+    user_conversion_args: Sequence[str] = tuple()
+    user_conversion_timeout_seconds: Optional[float] = None
+    dwg_conversion_cache_dir: Optional[Union[str, Path]] = None
     export_marked_pdf: bool = False
     marked_pdf_mode: str = "off"
     export_profile: str = "sharable"
@@ -345,6 +353,9 @@ class FolderComparePipeline:
                 dxf_cache_dir=dxf_cache_dir,
                 compare_state_dir=compare_state_dir,
                 allow_long_path_warning=self.request.allow_long_path_warning,
+                dwg_backend_mode=self.request.dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(self.request.allowed_dwg_license_ids or ()),
+                user_converter_path=self.request.user_converter_path,
             )
             preflight_path = output_dir / "preflight_report.json"
             _write_json_atomic(preflight_path, preflight.to_dict())
@@ -360,6 +371,8 @@ class FolderComparePipeline:
                     "auto_fast_first_review": self.request.auto_fast_first_review,
                     "fast_first_review_pair_threshold": self.request.fast_first_review_pair_threshold,
                     "fast_first_review_zone_threshold": self.request.fast_first_review_zone_threshold,
+                    "dwg_backend_mode": self.request.dwg_backend_mode,
+                    "allowed_dwg_license_ids": list(self.request.allowed_dwg_license_ids or ()),
                 },
                 paths={
                     "output_dir": output_dir,
@@ -403,6 +416,12 @@ class FolderComparePipeline:
                 use_ocr_fallback=self.request.use_ocr,
                 enable_cache=self.request.enable_descriptor_cache,
                 dxf_cache_dir=dxf_cache_dir,
+                dwg_backend_mode=self.request.dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(self.request.allowed_dwg_license_ids or ()),
+                user_converter_path=self.request.user_converter_path,
+                user_conversion_args=tuple(self.request.user_conversion_args or ()),
+                user_conversion_timeout_seconds=self.request.user_conversion_timeout_seconds,
+                dwg_conversion_cache_dir=self.request.dwg_conversion_cache_dir,
             )
             descriptors_a = scan_drawing_inputs(source_a_input, options=scan_options)
             self._emit(progress_callback, "scan", 18, "변경 전 도면 확인 완료")
@@ -559,6 +578,12 @@ class FolderComparePipeline:
                 # up the matching noise profile. Without this the O5
                 # combo box was a dead-end UX.
                 pdf_noise_filter_strength=noise_filter.noise_filter_strength,
+                dwg_backend_mode=self.request.dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(self.request.allowed_dwg_license_ids or ()),
+                user_converter_path=self.request.user_converter_path,
+                user_conversion_args=tuple(self.request.user_conversion_args or ()),
+                user_conversion_timeout_seconds=self.request.user_conversion_timeout_seconds,
+                dwg_conversion_cache_dir=self.request.dwg_conversion_cache_dir,
                 use_ocr_fallback=self.request.use_ocr,
                 # Phase O Commit 3 [RV-20260508-009] — INSERT block-
                 # internal text fingerprint propagation. GUI 의 정밀
@@ -631,6 +656,12 @@ class FolderComparePipeline:
                 artifact_package=artifact_package,
                 artifact_dir=artifact_dir,
                 dxf_cache_dir=dxf_cache_dir,
+                dwg_backend_mode=self.request.dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(self.request.allowed_dwg_license_ids or ()),
+                user_converter_path=self.request.user_converter_path,
+                user_conversion_args=tuple(self.request.user_conversion_args or ()),
+                user_conversion_timeout_seconds=self.request.user_conversion_timeout_seconds,
+                dwg_conversion_cache_dir=self.request.dwg_conversion_cache_dir,
             )
             artifact_package.output_paths.update(region_paths)
             run_manifest.stage(
@@ -1821,6 +1852,12 @@ def _export_region_aware_artifacts(
     artifact_package: Any,
     artifact_dir: Path,
     dxf_cache_dir: Path,
+    dwg_backend_mode: Optional[str] = None,
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL"),
+    user_converter_path: Optional[Union[str, Path]] = None,
+    user_conversion_args: Sequence[str] = tuple(),
+    user_conversion_timeout_seconds: Optional[float] = None,
+    dwg_conversion_cache_dir: Optional[Union[str, Path]] = None,
 ) -> dict[str, str]:
     """Write region-aware side-car summaries for multi-detail drawings.
 
@@ -1986,6 +2023,12 @@ def _export_region_aware_artifacts(
             region_compare_contexts = _attach_region_compare_sources(
                 pair_contexts,
                 dxf_cache_dir,
+                dwg_backend_mode=dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(allowed_dwg_license_ids or ()),
+                user_converter_path=user_converter_path,
+                user_conversion_args=tuple(user_conversion_args or ()),
+                user_conversion_timeout_seconds=user_conversion_timeout_seconds,
+                dwg_conversion_cache_dir=dwg_conversion_cache_dir,
             )
             dxf_extractor = DxfEntityExtractor()
             auto_region_payload = _build_auto_region_compare_payload(
@@ -2291,6 +2334,13 @@ def _build_auto_region_compare_payload(
 def _attach_region_compare_sources(
     pair_contexts: Sequence[Mapping[str, Any]],
     dxf_cache_dir: Path,
+    *,
+    dwg_backend_mode: Optional[str] = None,
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL"),
+    user_converter_path: Optional[Union[str, Path]] = None,
+    user_conversion_args: Sequence[str] = tuple(),
+    user_conversion_timeout_seconds: Optional[float] = None,
+    dwg_conversion_cache_dir: Optional[Union[str, Path]] = None,
 ) -> list[dict[str, Any]]:
     """Resolve DWG inputs to cached DXFs only after region-local compare is gated on."""
 
@@ -2301,10 +2351,22 @@ def _attach_region_compare_sources(
         region_compare_source_a, region_compare_source_a_reason = _resolve_region_compare_source(
             source_a,
             dxf_cache_dir,
+            dwg_backend_mode=dwg_backend_mode,
+            allowed_dwg_license_ids=tuple(allowed_dwg_license_ids or ()),
+            user_converter_path=user_converter_path,
+            user_conversion_args=tuple(user_conversion_args or ()),
+            user_conversion_timeout_seconds=user_conversion_timeout_seconds,
+            dwg_conversion_cache_dir=dwg_conversion_cache_dir,
         )
         region_compare_source_b, region_compare_source_b_reason = _resolve_region_compare_source(
             source_b,
             dxf_cache_dir,
+            dwg_backend_mode=dwg_backend_mode,
+            allowed_dwg_license_ids=tuple(allowed_dwg_license_ids or ()),
+            user_converter_path=user_converter_path,
+            user_conversion_args=tuple(user_conversion_args or ()),
+            user_conversion_timeout_seconds=user_conversion_timeout_seconds,
+            dwg_conversion_cache_dir=dwg_conversion_cache_dir,
         )
         enriched = dict(context)
         enriched.update(
@@ -2319,7 +2381,17 @@ def _attach_region_compare_sources(
     return resolved_contexts
 
 
-def _resolve_region_compare_source(source: Path, dxf_cache_dir: Path) -> tuple[Path, str]:
+def _resolve_region_compare_source(
+    source: Path,
+    dxf_cache_dir: Path,
+    *,
+    dwg_backend_mode: Optional[str] = None,
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL"),
+    user_converter_path: Optional[Union[str, Path]] = None,
+    user_conversion_args: Sequence[str] = tuple(),
+    user_conversion_timeout_seconds: Optional[float] = None,
+    dwg_conversion_cache_dir: Optional[Union[str, Path]] = None,
+) -> tuple[Path, str]:
     """Return a DXF source path suitable for region-local entity extraction."""
 
     source = Path(source)
@@ -2328,6 +2400,25 @@ def _resolve_region_compare_source(source: Path, dxf_cache_dir: Path) -> tuple[P
         return source, "direct_dxf"
     if suffix != ".dwg":
         return source, "unsupported_source_format"
+    user_converter_dxf = _descriptor_user_converter_dxf(
+        source,
+        DescriptorBuildOptions(
+            dwg_backend_mode=dwg_backend_mode,
+            allowed_dwg_license_ids=tuple(allowed_dwg_license_ids or ()),
+            user_converter_path=user_converter_path,
+            user_conversion_args=tuple(user_conversion_args or ()),
+            user_conversion_timeout_seconds=user_conversion_timeout_seconds,
+            dwg_conversion_cache_dir=dwg_conversion_cache_dir or dxf_cache_dir,
+        ),
+    )
+    if user_converter_dxf is not None:
+        return user_converter_dxf, "user_converter_cached_dxf"
+    descriptor_options = DescriptorBuildOptions(
+        dwg_backend_mode=dwg_backend_mode,
+        allowed_dwg_license_ids=tuple(allowed_dwg_license_ids or ()),
+    )
+    if _descriptor_uses_commercial_sdk(descriptor_options):
+        return source, "commercial_sdk_canonical_dwg"
     try:
         from .dwg_differ import DwgDiffer
 

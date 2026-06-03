@@ -25,7 +25,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 from .base import ChangeRecord, ChangeType, ComparisonResult
 from .comparison_config import ComparisonConfig
@@ -242,6 +242,12 @@ class DescriptorBuildOptions:
     pdf_text_pages: int = 3
     enable_cache: bool = True
     dxf_cache_dir: Optional[Union[str, Path]] = None
+    dwg_backend_mode: Optional[str] = None
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL")
+    user_converter_path: Optional[Union[str, Path]] = None
+    user_conversion_args: Sequence[str] = tuple()
+    user_conversion_timeout_seconds: Optional[float] = None
+    dwg_conversion_cache_dir: Optional[Union[str, Path]] = None
 
 
 @dataclass
@@ -297,6 +303,12 @@ class BatchCompareOptions:
     # CanonicalDrawing is the default CAD path. The legacy ezdxf/ODA path is
     # retained only for explicitly approved internal fallback runs.
     cad_compare_engine: Literal["canonical", "legacy_ezdxf"] = "canonical"
+    dwg_backend_mode: Optional[str] = None
+    allowed_dwg_license_ids: Sequence[str] = ("MIT", "INTERNAL")
+    user_converter_path: Optional[Union[str, Path]] = None
+    user_conversion_args: Sequence[str] = tuple()
+    user_conversion_timeout_seconds: Optional[float] = None
+    dwg_conversion_cache_dir: Optional[Union[str, Path]] = None
     # If the ODA-free canonical CAD importer cannot read a pair but a DXF is
     # already available (source DXF or persistent cache), retry with ezdxf.
     cad_legacy_fallback_on_failure: bool = True
@@ -578,6 +590,12 @@ def _descriptor_options_dict(options: DescriptorBuildOptions) -> Dict[str, Any]:
         "max_text_chars": int(options.max_text_chars),
         "max_cad_entities": int(options.max_cad_entities),
         "pdf_text_pages": int(options.pdf_text_pages),
+        "dwg_backend_mode": str(options.dwg_backend_mode or ""),
+        "allowed_dwg_license_ids": list(options.allowed_dwg_license_ids or ()),
+        "user_converter_path": str(options.user_converter_path or ""),
+        "user_conversion_args": list(options.user_conversion_args or ()),
+        "user_conversion_timeout_seconds": options.user_conversion_timeout_seconds,
+        "dwg_conversion_cache_dir": str(options.dwg_conversion_cache_dir or ""),
     }
 
 
@@ -1942,10 +1960,23 @@ def _cad_compare_config(options: BatchCompareOptions) -> Dict[str, Any]:
             "Unknown CAD compare engine %r; falling back to canonical",
             options.cad_compare_engine,
         )
-    return {
+    config: Dict[str, Any] = {
         "use_canonical_pipeline": True,
         "use_legacy_ezdxf_pipeline": False,
     }
+    if options.dwg_backend_mode:
+        config["dwg_backend_mode"] = options.dwg_backend_mode
+    if tuple(options.allowed_dwg_license_ids or ()) != ("MIT", "INTERNAL"):
+        config["allowed_dwg_license_ids"] = list(options.allowed_dwg_license_ids)
+    if options.user_converter_path:
+        config["user_converter_path"] = str(options.user_converter_path)
+    if options.user_conversion_args:
+        config["user_conversion_args"] = list(options.user_conversion_args)
+    if options.user_conversion_timeout_seconds is not None:
+        config["user_conversion_timeout_seconds"] = options.user_conversion_timeout_seconds
+    if options.dwg_conversion_cache_dir:
+        config["dwg_conversion_cache_dir"] = str(options.dwg_conversion_cache_dir)
+    return config
 
 
 def _comparison_result_failure_message(result: Optional[ComparisonResult]) -> str:
@@ -2481,22 +2512,31 @@ def _fill_cad_descriptor(
     descriptor: DrawingFileDescriptor,
     options: DescriptorBuildOptions,
 ) -> None:
-    try:
-        import ezdxf
-    except ImportError as exc:
-        descriptor.warnings = descriptor.warnings + ("ezdxf unavailable",)
-        raise exc
-
     source_path = descriptor.path_obj
     temp_differ = None
     dxf_path = source_path
     if source_path.suffix.lower() == ".dwg":
-        from .dwg_differ import DwgDiffer
+        dxf_path = _descriptor_user_converter_dxf(source_path, options)
+        if dxf_path is None:
+            canonical = _descriptor_canonical_dwg(source_path, options)
+            if canonical is not None:
+                _fill_cad_descriptor_from_canonical(
+                    descriptor,
+                    canonical,
+                    max_text_chars=options.max_text_chars,
+                )
+                return
+            from .dwg_differ import DwgDiffer
 
-        temp_differ = DwgDiffer(dxf_cache_dir=options.dxf_cache_dir)
-        dxf_path = temp_differ._ensure_dxf(source_path)
+            temp_differ = DwgDiffer(dxf_cache_dir=options.dxf_cache_dir)
+            dxf_path = temp_differ._ensure_dxf(source_path)
 
     try:
+        try:
+            import ezdxf
+        except ImportError as exc:
+            descriptor.warnings = descriptor.warnings + ("ezdxf unavailable",)
+            raise exc
         doc = read_dxf_document(dxf_path, ezdxf_module=ezdxf)
         descriptor.layers = tuple(sorted(layer.dxf.name for layer in doc.layers))
         descriptor.layouts = tuple(sorted(layout.name for layout in doc.layouts))
@@ -2533,6 +2573,160 @@ def _fill_cad_descriptor(
     finally:
         if temp_differ is not None:
             temp_differ._cleanup_temp()
+
+
+def _descriptor_canonical_dwg(
+    source_path: Path,
+    options: DescriptorBuildOptions,
+) -> Optional[dict[str, Any]]:
+    if not _descriptor_uses_commercial_sdk(options):
+        return None
+    try:
+        from .import_pipeline import ImportPipeline, ImportPipelineOptions
+
+        result = ImportPipeline(
+            ImportPipelineOptions(
+                expand_blocks=False,
+                normalize=False,
+                dwg_backend_mode=options.dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(options.allowed_dwg_license_ids or ("MIT", "INTERNAL")),
+            )
+        ).import_file(source_path)
+    except Exception as exc:
+        logger.debug("Canonical DWG descriptor import failed for %s: %s", source_path, exc)
+        return None
+    if result.status == "failed" or result.canonical_drawing is None:
+        return None
+    return result.canonical_drawing
+
+
+def _fill_cad_descriptor_from_canonical(
+    descriptor: DrawingFileDescriptor,
+    canonical: Mapping[str, Any],
+    *,
+    max_text_chars: int,
+) -> None:
+    layers = []
+    for layer in canonical.get("layers") or []:
+        if isinstance(layer, Mapping) and layer.get("name"):
+            layers.append(str(layer.get("name")))
+    descriptor.layers = tuple(sorted(set(layers)))
+
+    entity_counts: Dict[str, int] = {}
+    text_values: List[str] = []
+    xs: List[float] = []
+    ys: List[float] = []
+    for entity in canonical.get("entities") or []:
+        if not isinstance(entity, Mapping):
+            continue
+        entity_type = str(entity.get("type") or "unknown")
+        entity_counts[entity_type] = entity_counts.get(entity_type, 0) + 1
+        geometry = entity.get("geometry")
+        if isinstance(geometry, Mapping):
+            text_value = geometry.get("canonical_text") or geometry.get("text") or geometry.get("plain_text")
+            if text_value:
+                text_values.append(str(text_value))
+        bbox = entity.get("bbox")
+        if isinstance(bbox, Mapping) and bbox.get("quality") != "missing":
+            for key in ("min_x", "max_x"):
+                value = _float_or_none(bbox.get(key))
+                if value is not None:
+                    xs.append(value)
+            for key in ("min_y", "max_y"):
+                value = _float_or_none(bbox.get(key))
+                if value is not None:
+                    ys.append(value)
+
+    descriptor.entity_counts = entity_counts
+    descriptor.text_hints = tuple(_select_text_hints(text_values, max_text_chars))
+    if xs and ys:
+        descriptor.bbox = (min(xs), min(ys), max(xs), max(ys))
+    descriptor.content_fingerprint = _hash_values(
+        descriptor.identity.match_key,
+        ",".join(descriptor.layers),
+        ",".join(descriptor.layouts),
+        json.dumps(entity_counts, sort_keys=True),
+        " ".join(descriptor.text_hints),
+        str(descriptor.bbox),
+    )
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _descriptor_user_converter_dxf(
+    source_path: Path,
+    options: DescriptorBuildOptions,
+) -> Optional[Path]:
+    if not options.user_converter_path or not _descriptor_uses_user_converter(options):
+        return None
+
+    from .import_pipeline import (
+        ImportPipelineOptions,
+        USER_CONVERTER_CACHE_NAMESPACE,
+        _copy_converted_dxf_to_cache,
+        _user_conversion_timeout_seconds,
+        _user_converter_cache_paths,
+        _write_converter_cache_metadata,
+    )
+    from .user_dwg_converter import UserDwgConverter
+
+    pipeline_options = ImportPipelineOptions(
+        dwg_backend_mode="user_converter",
+        user_converter_path=str(options.user_converter_path),
+        user_conversion_args=tuple(options.user_conversion_args or ()),
+        user_conversion_timeout_seconds=options.user_conversion_timeout_seconds,
+        dwg_conversion_cache_dir=options.dwg_conversion_cache_dir or options.dxf_cache_dir,
+    )
+    cached_dxf, metadata_path, cache_details = _user_converter_cache_paths(source_path, pipeline_options)
+    cache_details["hit"] = cached_dxf.exists()
+    cache_details["metadata_path"] = str(metadata_path)
+    if cache_details["hit"]:
+        return cached_dxf
+
+    converter = UserDwgConverter(
+        options.user_converter_path,
+        args_template=tuple(options.user_conversion_args or ()),
+    )
+    converted = converter.convert(
+        source_path,
+        timeout=_user_conversion_timeout_seconds(pipeline_options),
+    )
+    try:
+        _copy_converted_dxf_to_cache(converted, cached_dxf)
+    finally:
+        converter.cleanup_converted_output(converted)
+    cache_details["converter_path"] = str(converter.converter_path)
+    _write_converter_cache_metadata(metadata_path, USER_CONVERTER_CACHE_NAMESPACE, cache_details)
+    return cached_dxf
+
+
+def _descriptor_uses_user_converter(options: DescriptorBuildOptions) -> bool:
+    if not options.dwg_backend_mode:
+        return False
+    try:
+        from .dwg_backend import DWG_BACKEND_USER_CONVERTER, normalize_dwg_backend_mode
+
+        return normalize_dwg_backend_mode(str(options.dwg_backend_mode)) == DWG_BACKEND_USER_CONVERTER
+    except Exception:
+        return False
+
+
+def _descriptor_uses_commercial_sdk(options: DescriptorBuildOptions) -> bool:
+    if not options.dwg_backend_mode:
+        return False
+    try:
+        from .dwg_backend import DWG_BACKEND_COMMERCIAL_SDK, normalize_dwg_backend_mode
+
+        return normalize_dwg_backend_mode(str(options.dwg_backend_mode)) == DWG_BACKEND_COMMERCIAL_SDK
+    except Exception:
+        return False
 
 
 def _fill_pdf_descriptor(

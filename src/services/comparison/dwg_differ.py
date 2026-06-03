@@ -568,7 +568,11 @@ class DwgDiffer:
             import_options=ImportPipelineOptions(
                 expand_blocks=bool(self._comparison_config.expand_blocks),
                 dwg_backend_mode=dwg_backend_mode,
+                allowed_dwg_license_ids=tuple(self.config.get("allowed_dwg_license_ids") or ("MIT", "INTERNAL")),
                 allow_oda_fallback=self._allow_oda_fallback,
+                user_converter_path=self.config.get("user_converter_path"),
+                user_conversion_args=tuple(self.config.get("user_conversion_args") or ()),
+                user_conversion_timeout_seconds=self.config.get("user_conversion_timeout_seconds"),
                 oda_converter_path=self.config.get("oda_converter_path"),
                 oda_conversion_timeout_seconds=self.config.get("oda_conversion_timeout_seconds"),
                 dwg_conversion_cache_dir=self.config.get("dwg_conversion_cache_dir"),
@@ -577,9 +581,10 @@ class DwgDiffer:
             ),
             compare_options=DrawingCompareOptions(
                 tolerance=tolerance,
+                structural_position_tolerance_mm=float(sensitivity.structural_position_threshold),
                 search_radius_mm=float(sensitivity.near_match_radius),
                 max_spatial_cells_per_entity=stability_limits.max_spatial_cells_per_entity,
-                include_unchanged=True,
+                include_unchanged=bool(self.config.get("include_unchanged", False)),
                 include_entity_snapshots=True,
                 include_match_candidates=False,
             ),

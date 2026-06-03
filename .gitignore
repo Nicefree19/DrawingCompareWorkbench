@@ -179,6 +179,9 @@ fix_*.py
 /test_*.py
 run_*.py
 !src/services/comparison/run_contract.py
+!scripts/run_dwg_product_bridge_evidence.py
+!scripts/run_dwg_release_performance_probe.py
+!scripts/run_dwg_release_supplemental_probe.py
 launch_*.py
 analyze_*.py
 accurate_mgt_load_analyzer*.py

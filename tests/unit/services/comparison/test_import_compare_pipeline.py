@@ -226,6 +226,42 @@ def test_import_pipeline_uses_injected_dwg_adapter_version_capability(tmp_path: 
     assert result.import_report["adapter"]["name"] == "planned-version-fixture"
 
 
+def test_import_pipeline_preserves_adapter_metadata_in_import_report(tmp_path: Path) -> None:
+    path = _write_dwg_fixture(
+        tmp_path / "bridge-metadata.dwg",
+        version="AC1015",
+        payload={
+            "header": {"$INSUNITS": 4},
+            "layers": [{"name": "0"}],
+            "model_space": [
+                {
+                    "type": "LINE",
+                    "handle": "L1",
+                    "layer": "0",
+                    "geometry": {
+                        "start": {"x": 0, "y": 0, "z": 0},
+                        "end": {"x": 100, "y": 0, "z": 0},
+                    },
+                }
+            ],
+            "metadata": {
+                "commercial_dwg_json_bridge": {
+                    "evidence_scope": "native_dwg_bridge",
+                    "uses_native_dwg": True,
+                }
+            },
+        },
+    )
+
+    result = ImportPipeline().import_file(path)
+    report = result.to_dict()["import_report"]
+
+    bridge_metadata = report["metadata"]["adapter_metadata"]["commercial_dwg_json_bridge"]
+    assert result.status == CadPipelineStatus.OK
+    assert bridge_metadata["evidence_scope"] == "native_dwg_bridge"
+    assert bridge_metadata["uses_native_dwg"] is True
+
+
 def test_import_pipeline_explicit_backend_mode_uses_fail_closed_placeholder(tmp_path: Path) -> None:
     path = _write_dwg_fixture(tmp_path / "planned.dwg", version="AC1032")
     pipeline = ImportPipeline(ImportPipelineOptions(dwg_backend_mode="commercial_sdk"))
@@ -307,6 +343,118 @@ def test_compare_pipeline_env_user_converter_mode_uses_converted_dxf_pair(
     assert result.input_resolution["diagnostics"]["dwg_versions"]["a"]["code"] == "AC1024"
     assert result.imports["a"].source_path == str(fallback_a.resolve())
     assert result.imports["b"].source_path == str(fallback_b.resolve())
+
+
+def test_user_converter_fallback_covers_all_major_unsupported_dwg_codes(tmp_path: Path) -> None:
+    codes = ("AC1009", "AC1012", "AC1014", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032")
+
+    for code in codes:
+        case_dir = tmp_path / code
+        case_dir.mkdir()
+        source_a = _write_dwg_fixture(case_dir / "detail.dwg", version=code)
+        source_b = _write_dwg_fixture(case_dir / "detail_r1.dwg", version=code)
+        before_dir = case_dir / "dxf_registered" / "before"
+        after_dir = case_dir / "dxf_registered" / "after"
+        before_dir.mkdir(parents=True)
+        after_dir.mkdir(parents=True)
+        fallback_a = _write_two_layer_dxf(before_dir / "detail.dxf", ignored_line_end_x=100)
+        fallback_b = _write_two_layer_dxf(after_dir / "detail_r1.dxf", ignored_line_end_x=120)
+
+        result = ComparePipeline(
+            ComparePipelineOptions(
+                import_options=ImportPipelineOptions(dwg_backend_mode="user_converter")
+            )
+        ).compare(source_a, source_b)
+
+        assert result.status == CadPipelineStatus.OK, code
+        assert result.input_resolution["used"] is True
+        assert result.input_resolution["diagnostics"]["dwg_versions"]["a"]["code"] == code
+        assert result.imports["a"].source_path == str(fallback_a.resolve())
+        assert result.imports["b"].source_path == str(fallback_b.resolve())
+        assert result.imports["a"].source_format == "dxf"
+        assert result.imports["b"].source_format == "dxf"
+
+
+def test_compare_pipeline_user_converter_path_converts_and_caches_missing_dxf_pair(tmp_path: Path) -> None:
+    source_a = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    source_b = _write_dwg_fixture(tmp_path / "detail_r1.dwg", version="AC1032")
+    converted_a = _write_two_layer_dxf(tmp_path / "converted_a.dxf", ignored_line_end_x=100)
+    converted_b = _write_two_layer_dxf(tmp_path / "converted_b.dxf", ignored_line_end_x=120)
+    cache_dir = tmp_path / "cache"
+
+    def convert_side(path: Path, *_args: object, **_kwargs: object) -> Path:
+        return converted_a if Path(path).name == source_a.name else converted_b
+
+    with patch("src.services.comparison.user_dwg_converter.UserDwgConverter") as converter_class:
+        converter_class.return_value.converter_path = tmp_path / "customer-converter.exe"
+        converter_class.return_value.convert.side_effect = convert_side
+        result = ComparePipeline(
+            ComparePipelineOptions(
+                import_options=ImportPipelineOptions(
+                    dwg_backend_mode="user_converter",
+                    user_converter_path=str(tmp_path / "customer-converter.exe"),
+                    dwg_conversion_cache_dir=cache_dir,
+                )
+            )
+        ).compare(source_a, source_b)
+
+    assert result.status == CadPipelineStatus.OK
+    assert result.input_resolution["used"] is False
+    assert result.imports["a"].source_path == str(source_a)
+    assert result.imports["b"].source_path == str(source_b)
+    assert result.imports["a"].source_format == "dwg"
+    assert result.imports["a"].importer == "DwgImporter:user-converter"
+    assert result.imports["b"].importer == "DwgImporter:user-converter"
+    assert result.imports["a"].import_report["fallback"]["user_converter"] is True
+    assert result.imports["a"].import_report["fallback"]["cache"]["hit"] is False
+    assert Path(result.imports["a"].import_report["fallback"]["cache"]["cache_path"]).exists()
+    assert result.diff is not None
+    assert converter_class.return_value.convert.call_count == 2
+
+
+def test_user_converter_reuses_cached_dxf_without_reconverting(tmp_path: Path) -> None:
+    source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    converted = _write_two_layer_dxf(tmp_path / "converted.dxf", ignored_line_end_x=100)
+    options = ImportPipelineOptions(
+        dwg_backend_mode="user_converter",
+        user_converter_path=str(tmp_path / "customer-converter.exe"),
+        dwg_conversion_cache_dir=tmp_path / "cache",
+    )
+
+    with patch("src.services.comparison.user_dwg_converter.UserDwgConverter") as converter_class:
+        converter_class.return_value.converter_path = tmp_path / "customer-converter.exe"
+        converter_class.return_value.convert.return_value = converted
+        first = ImportPipeline(options).import_file(source)
+        converter_class.return_value.convert.side_effect = AssertionError("must use cache")
+        second = ImportPipeline(options).import_file(source)
+
+    assert first.status == CadPipelineStatus.OK
+    assert second.status == CadPipelineStatus.OK
+    assert first.import_report["fallback"]["cache"]["hit"] is False
+    assert second.import_report["fallback"]["cache"]["hit"] is True
+    assert converter_class.return_value.convert.call_count == 1
+    assert first.import_report["fallback"]["cache"]["cache_path"] == second.import_report["fallback"]["cache"]["cache_path"]
+
+
+def test_user_converter_failure_keeps_cache_provenance(tmp_path: Path) -> None:
+    source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    options = ImportPipelineOptions(
+        dwg_backend_mode="user_converter",
+        user_converter_path=str(tmp_path / "customer-converter.exe"),
+        dwg_conversion_cache_dir=tmp_path / "cache",
+        user_conversion_timeout_seconds=1,
+    )
+
+    with patch("src.services.comparison.user_dwg_converter.UserDwgConverter") as converter_class:
+        converter_class.return_value.converter_path = tmp_path / "customer-converter.exe"
+        converter_class.return_value.convert.side_effect = TimeoutError("conversion timeout")
+        result = ImportPipeline(options).import_file(source)
+
+    assert result.status == CadPipelineStatus.FAILED
+    assert result.error_code == CadPipelineErrorCode.USER_CONVERTER_FAILED
+    assert result.import_report["fallback"]["user_converter"] is True
+    assert result.import_report["fallback"]["cache"]["hit"] is False
+    assert result.warnings[0]["details"]["exception_type"] == "TimeoutError"
 
 
 def test_dwg_differ_user_converter_mode_uses_converted_dxf_pair(tmp_path: Path) -> None:

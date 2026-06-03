@@ -467,7 +467,12 @@ class DwgImporter:
             if raw_type == "CIRCLE":
                 center = _point(geometry.get("center"))
                 radius = max(0.0, float(geometry.get("radius") or 0.0))
-                mapped_geometry = {"type": "circle", "center": center, "radius": radius}
+                mapped_geometry = {
+                    "type": "circle",
+                    "center": center,
+                    "radius": radius,
+                    "normal": _point(geometry.get("normal"), default=(0.0, 0.0, 1.0)),
+                }
                 return self._common(adapter_entity, "circle", mapped_geometry, _circle_bbox(center, radius, "exact"), space, block_id, block_name, source_path)
             if raw_type == "ARC":
                 center = _point(geometry.get("center"))
@@ -650,6 +655,12 @@ class DwgImporter:
         }
         if self.backend_selection is not None:
             report["selection"] = self.backend_selection.to_dict()
+        diagnostics = getattr(self.adapter, "diagnostics", None)
+        if callable(diagnostics):
+            try:
+                report["diagnostics"] = diagnostics()
+            except Exception as exc:
+                report["diagnostics_error"] = f"{type(exc).__name__}: {exc}"
         return report
 
     def _failed_document(

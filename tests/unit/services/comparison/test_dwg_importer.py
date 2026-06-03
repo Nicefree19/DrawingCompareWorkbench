@@ -14,6 +14,7 @@ from src.services.comparison.dwg_importer import (
     DwgVersionDetector,
 )
 from src.services.comparison.dwg_backend import (
+    COMMERCIAL_SDK_ADAPTER_ENV,
     DWG_BACKEND_CLEANROOM_NATIVE,
     DWG_BACKEND_COMMERCIAL_SDK,
     DWG_BACKEND_DISABLED,
@@ -182,6 +183,33 @@ def test_fixture_adapter_imports_dwg_sample_to_canonical_drawing(tmp_path: Path)
     assert insert["geometry"]["block_name"] == "B1"
 
 
+def test_fixture_adapter_preserves_circle_normal(tmp_path: Path) -> None:
+    path = _write_fixture(
+        tmp_path / "sample.dwg",
+        version="AC1015",
+        payload={
+            "model_space": [
+                {
+                    "type": "CIRCLE",
+                    "handle": "11",
+                    "layer": "BEAM",
+                    "geometry": {
+                        "center": {"x": 50, "y": 50, "z": 0},
+                        "radius": 10,
+                        "normal": {"x": 0, "y": 0, "z": -1},
+                    },
+                }
+            ],
+        },
+    )
+
+    doc = DwgImporter(adapter=DwgJsonFixtureAdapter()).import_file(path)
+
+    _validate_schema(doc)
+    circle = next(entity for entity in doc["entities"] if entity["type"] == "circle")
+    assert circle["geometry"]["normal"] == {"x": 0.0, "y": 0.0, "z": -1.0}
+
+
 def test_default_backend_selection_uses_cleanroom_ac1015_preview() -> None:
     selection = create_dwg_backend_selection()
 
@@ -277,6 +305,73 @@ def test_placeholder_backends_do_not_claim_planned_dwg_versions(tmp_path: Path) 
         assert doc["import_report"]["error_code"] == DwgFailureCode.UNSUPPORTED_VERSION
         assert doc["import_report"]["adapter"]["backend_mode"] == mode
         assert doc["import_report"]["adapter"]["approval_required"] is True
+
+
+def test_commercial_sdk_backend_loads_explicit_adapter_but_requires_license_allowlist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    plugin = tmp_path / "approved_commercial_adapter.py"
+    plugin.write_text(
+        "\n".join(
+            [
+                "from src.services.comparison.dwg_backend import DWG_BACKEND_COMMERCIAL_SDK",
+                "from src.services.comparison.dwg_importer import DwgJsonFixtureAdapter",
+                "",
+                "class ApprovedCommercialAdapter(DwgJsonFixtureAdapter):",
+                "    name = 'approved-commercial-fixture'",
+                "    version = '2026.1'",
+                "    license_id = 'COMMERCIAL-APPROVED'",
+                "    backend_mode = DWG_BACKEND_COMMERCIAL_SDK",
+                "    implementation_status = 'approved_plugin'",
+                "    approval_required = True",
+                "",
+                "    def supports_version(self, version):",
+                "        return version.code in {'AC1009', 'AC1012', 'AC1014', 'AC1015', 'AC1018', 'AC1021', 'AC1024', 'AC1027', 'AC1032'}",
+                "",
+                "def create_adapter():",
+                "    return ApprovedCommercialAdapter()",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv(COMMERCIAL_SDK_ADAPTER_ENV, "approved_commercial_adapter:create_adapter")
+    path = _write_fixture(tmp_path / "planned.dwg", version="AC1032")
+
+    selection = create_dwg_backend_selection(DWG_BACKEND_COMMERCIAL_SDK)
+    assert selection.adapter.name == "approved-commercial-fixture"
+    assert selection.implementation_status == "approved_plugin"
+    assert selection.approval_required is True
+    assert COMMERCIAL_SDK_ADAPTER_ENV in selection.source
+
+    forbidden = DwgImporter(backend_mode=DWG_BACKEND_COMMERCIAL_SDK).import_file(path)
+    assert forbidden["import_report"]["status"] == "failed"
+    assert forbidden["import_report"]["error_code"] == DwgFailureCode.FORBIDDEN_LICENSE
+    assert forbidden["import_report"]["adapter"]["license_id"] == "COMMERCIAL-APPROVED"
+
+    approved = DwgImporter(
+        backend_mode=DWG_BACKEND_COMMERCIAL_SDK,
+        allowed_license_ids=("MIT", "INTERNAL", "COMMERCIAL-APPROVED"),
+    ).import_file(path)
+
+    _validate_schema(approved)
+    assert approved["import_report"]["status"] == "ok"
+    assert approved["drawing"]["source"]["acad_version"] == "AC1032"
+    assert approved["drawing"]["importer"]["backend"] == "approved-commercial-fixture"
+    assert approved["import_report"]["adapter"]["backend_mode"] == DWG_BACKEND_COMMERCIAL_SDK
+
+
+def test_commercial_sdk_backend_fails_closed_when_explicit_adapter_load_fails(monkeypatch) -> None:
+    monkeypatch.setenv(COMMERCIAL_SDK_ADAPTER_ENV, "missing_commercial_adapter:create_adapter")
+
+    selection = create_dwg_backend_selection(DWG_BACKEND_COMMERCIAL_SDK)
+
+    assert selection.adapter.name == "commercial-sdk-load-failed"
+    assert selection.implementation_status == "plugin_load_failed"
+    assert selection.approval_required is True
+    assert selection.adapter.supports_version(DwgVersionDetector.detect_bytes(b"AC1032")) is False
 
 
 def test_disabled_backend_fails_closed_for_supported_header(tmp_path: Path) -> None:
