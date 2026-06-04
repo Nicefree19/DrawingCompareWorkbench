@@ -61,16 +61,26 @@ class ZwcadProcessWatchdog:
     def __init__(self, existing_pids: set[int], *, timeout_seconds: float):
         self.existing_pids = set(existing_pids)
         self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.stage = "initializing"
         self.fired = False
         self.killed_pids: list[int] = []
+        self._started = False
         self._timer = threading.Timer(self.timeout_seconds, self._fire)
         self._timer.daemon = True
 
+    def set_stage(self, stage: str) -> None:
+        self.stage = str(stage or "unknown")
+
     def start(self) -> None:
+        self._started = True
         self._timer.start()
 
     def cancel(self) -> None:
         self._timer.cancel()
+        # Join so a _fire() already in progress finishes writing killed_pids before
+        # the caller reads it; otherwise the reported cleanup PIDs race (finding 11).
+        if self._started:
+            self._timer.join(timeout=10.0)
 
     def _fire(self) -> None:
         self.fired = True
@@ -159,7 +169,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
                 _call(app, "Quit")
             except Exception as exc:  # pragma: no cover - defensive COM cleanup.
                 close_errors.append(f"application_quit_failed: {type(exc).__name__}: {exc}")
-            forced_cleanup_pids = _cleanup_spawned_zwcad(existing_zwcad_pids)
+            # Happy path: the app was just Quit() synchronously, so the spawned
+            # ZWCAD is already present/exiting -- no need to sleep a grace window
+            # waiting for a late spawn (finding 8).
+            forced_cleanup_pids = _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0)
 
     metadata = drawing.setdefault("metadata", {})
     if not isinstance(metadata, dict):
@@ -167,6 +180,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
         drawing["metadata"] = metadata
     metadata["source_path"] = str(input_path)
     entity_count = _drawing_entity_count(drawing)
+    truncated = _extraction_truncated(drawing)
     metadata["commercial_dwg_json_bridge"] = {
         "adapter": BRIDGE_NAME,
         "adapter_version": BRIDGE_VERSION,
@@ -177,7 +191,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
         "created_new_com_application": session.created_new,
         "max_entities": max_entities,
         "entity_count": entity_count,
-        "possibly_truncated": entity_count >= max_entities,
+        "truncated": truncated,
+        "possibly_truncated": truncated,
         "roi": roi,
         "close_errors": close_errors,
         "forced_zwcad_process_cleanup_pids": forced_cleanup_pids,
@@ -192,7 +207,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
                 "prog_id": session.prog_id,
                 "entity_count": entity_count,
                 "max_entities": max_entities,
-                "possibly_truncated": entity_count >= max_entities,
+                "truncated": truncated,
+                "possibly_truncated": truncated,
                 "roi": roi,
             }
         )
@@ -221,10 +237,13 @@ def _run_lisp_com_bridge(
         lisp_path.write_text(_lisp_extractor().strip() + "\n", encoding="ascii")
         try:
             watchdog.start()
+            watchdog.set_stage("set_visible")
             _safe_set(app, "Visible", bool(getattr(args, "visible", False)))
+            watchdog.set_stage("get_documents")
             documents = _get(app, "Documents")
             if documents is None:
                 raise BridgeError("ZWCAD COM application does not expose Documents.")
+            watchdog.set_stage("open_document")
             doc = _open_document_readonly(documents, input_path)
             if doc is None:
                 raise BridgeError("ZWCAD COM Documents.Open returned no document.")
@@ -243,26 +262,26 @@ def _run_lisp_com_bridge(
                 ]
             )
             try:
+                watchdog.set_stage("send_command")
                 _call(doc, "SendCommand", command_text)
             except Exception as exc:
                 if watchdog.fired:
                     extraction_timed_out = True
-                    raise BridgeTimeoutError(
-                        f"ZWCAD LISP COM extractor exceeded wall timeout after {timeout_seconds:g}s."
-                    ) from exc
+                    raise BridgeTimeoutError(_lisp_com_timeout_message(watchdog)) from exc
                 raise
             try:
+                watchdog.set_stage("wait_for_output")
                 _wait_for_output(output_path, timeout_seconds=timeout_seconds)
             except BridgeTimeoutError:
                 extraction_timed_out = True
                 raise
+            watchdog.set_stage("load_output")
             drawing = _load_json_with_fallback(output_path)
+            watchdog.set_stage("complete")
         except Exception as exc:
             if watchdog.fired and not isinstance(exc, BridgeTimeoutError):
                 extraction_timed_out = True
-                raise BridgeTimeoutError(
-                    f"ZWCAD LISP COM extractor exceeded wall timeout after {timeout_seconds:g}s."
-                ) from exc
+                raise BridgeTimeoutError(_lisp_com_timeout_message(watchdog)) from exc
             raise
         finally:
             watchdog.cancel()
@@ -289,7 +308,7 @@ def _run_lisp_com_bridge(
                     close_errors.append(f"application_quit_failed: {type(exc).__name__}: {exc}")
                 forced_cleanup_pids = _merge_pids(
                     forced_cleanup_pids,
-                    _cleanup_spawned_zwcad(existing_zwcad_pids),
+                    _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0),
                 )
 
     if not isinstance(drawing, dict):
@@ -300,6 +319,7 @@ def _run_lisp_com_bridge(
         drawing["metadata"] = metadata
     metadata["source_path"] = str(input_path)
     entity_count = _drawing_entity_count(drawing)
+    truncated = _extraction_truncated(drawing)
     metadata["commercial_dwg_json_bridge"] = {
         "adapter": BRIDGE_NAME,
         "adapter_version": BRIDGE_VERSION,
@@ -311,7 +331,8 @@ def _run_lisp_com_bridge(
         "lisp_com_mode": True,
         "max_entities": max_entities,
         "entity_count": entity_count,
-        "possibly_truncated": entity_count >= max_entities,
+        "truncated": truncated,
+        "possibly_truncated": truncated,
         "roi": roi,
         "close_errors": close_errors,
         "forced_zwcad_process_cleanup_pids": forced_cleanup_pids,
@@ -327,7 +348,8 @@ def _run_lisp_com_bridge(
                 "lisp_com_mode": True,
                 "entity_count": entity_count,
                 "max_entities": max_entities,
-                "possibly_truncated": entity_count >= max_entities,
+                "truncated": truncated,
+                "possibly_truncated": truncated,
                 "roi": roi,
             }
         )
@@ -396,6 +418,7 @@ def _run_script_bridge(
         drawing["metadata"] = metadata
     metadata["source_path"] = str(input_path)
     entity_count = _drawing_entity_count(drawing)
+    truncated = _extraction_truncated(drawing)
     metadata["commercial_dwg_json_bridge"] = {
         "adapter": BRIDGE_NAME,
         "adapter_version": BRIDGE_VERSION,
@@ -407,7 +430,8 @@ def _run_script_bridge(
         "script_mode": True,
         "max_entities": max_entities,
         "entity_count": entity_count,
-        "possibly_truncated": entity_count >= max_entities,
+        "truncated": truncated,
+        "possibly_truncated": truncated,
         "roi": roi,
     }
     metadata.setdefault("zwcad_dwg_json_bridge", {})
@@ -421,7 +445,8 @@ def _run_script_bridge(
                 "script_mode": True,
                 "entity_count": entity_count,
                 "max_entities": max_entities,
-                "possibly_truncated": entity_count >= max_entities,
+                "truncated": truncated,
+                "possibly_truncated": truncated,
                 "roi": roi,
             }
         )
@@ -998,6 +1023,13 @@ def _zwcad_process_watchdog(existing_pids: set[int], *, timeout_seconds: float) 
     return ZwcadProcessWatchdog(existing_pids, timeout_seconds=timeout_seconds)
 
 
+def _lisp_com_timeout_message(watchdog: ZwcadProcessWatchdog) -> str:
+    return (
+        f"ZWCAD LISP COM extractor exceeded wall timeout after {watchdog.timeout_seconds:g}s "
+        f"during {watchdog.stage}."
+    )
+
+
 def _merge_pids(left: Sequence[int], right: Sequence[int]) -> list[int]:
     merged: list[int] = []
     seen: set[int] = set()
@@ -1026,6 +1058,24 @@ def _drawing_entity_count(drawing: dict[str, Any]) -> int:
             except (TypeError, ValueError):
                 return 0
     return 0
+
+
+def _extraction_truncated(drawing: dict[str, Any]) -> bool:
+    """Authoritative truncation signal: True only when the extractor stopped early
+    with more entities remaining (LISP/COM ``truncated`` flag), never inferred from
+    ``entity_count >= max_entities`` which false-positives at exactly the cap."""
+    metadata = drawing.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    for key in (
+        "zwcad_dwg_json_bridge",
+        "autocad_dwg_json_bridge",
+        "commercial_dwg_json_bridge",
+    ):
+        section = metadata.get(key)
+        if isinstance(section, dict) and section.get("truncated") is True:
+            return True
+    return False
 
 
 def _kill_process_tree(pid: int) -> bool:

@@ -208,3 +208,4 @@
 - 2026-06-04 Codex: Added cap-aware FN quarantine, ROI JSON extraction for ZWCAD/AutoLISP, and evaluator ROI retry/ROI-first modes; verified unit coverage and found AC1027_pair_016 now needs truth bbox calibration or a broader ROI strategy after zero-entity ROI probes.
 - 2026-06-04 Codex: Added evaluator ROI margin sweep and per-margin timeout retry tracking; AC1027_pair_016 now records sequential ROI attempts, but still skips on after-import ZWCAD timeout with cleanup confirmed.
 - 2026-06-04 Codex: Added a ZWCAD LISP-COM wall-time watchdog so blocked COM calls surface as controlled DWG_IMPORT_TIMEOUT results; rechecked AC1027_pair_016 ROI-first and confirmed no traceback or lingering ZWCAD process.
+- 2026-06-05 Codex: Added ZWCAD LISP-COM timeout stage reporting and adapter `timeout_stage` details; AC1027_pair_016 now classifies the current ZWCAD bottleneck as `open_document` timeout rather than ROI bbox or LISP extraction.

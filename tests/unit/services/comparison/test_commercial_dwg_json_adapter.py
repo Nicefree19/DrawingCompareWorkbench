@@ -116,7 +116,7 @@ def test_commercial_json_bridge_maps_timeout_stderr_to_import_timeout(tmp_path: 
         "\n".join(
             [
                 "import sys",
-                "print('ZWCAD LISP COM extractor did not produce JSON within 1s', file=sys.stderr)",
+                "print('ZWCAD LISP COM extractor exceeded wall timeout after 30s during open_document.', file=sys.stderr)",
                 "raise SystemExit(1)",
             ]
         ),
@@ -136,6 +136,7 @@ def test_commercial_json_bridge_maps_timeout_stderr_to_import_timeout(tmp_path: 
         adapter.read_file(dwg, DwgVersionDetector.detect_bytes(dwg.read_bytes()))
 
     assert exc_info.value.code == DwgFailureCode.IMPORT_TIMEOUT
+    assert exc_info.value.details["timeout_stage"] == "open_document"
 
 
 def test_commercial_json_bridge_subprocess_timeout_cleans_configured_images(

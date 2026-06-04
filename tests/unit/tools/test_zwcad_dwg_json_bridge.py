@@ -49,7 +49,7 @@ def test_zwcad_bridge_wraps_com_output_with_native_provenance(
         lambda explicit=None: bridge.ZwcadSession(app, True, explicit or "ZWCAD.Application.2025"),
     )
     monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: set())
-    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids: [])
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids, **kwargs: [])
 
     payload = bridge.run_bridge(
         Namespace(
@@ -101,7 +101,7 @@ def test_zwcad_bridge_payload_matches_adapter_contract(
         lambda explicit=None: bridge.ZwcadSession(app, True, "ZWCAD.Application"),
     )
     monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: set())
-    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids: [])
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids, **kwargs: [])
 
     payload = bridge.run_bridge(
         Namespace(
@@ -210,7 +210,7 @@ def test_zwcad_lisp_com_mode_uses_send_command_and_wraps_output(
         lambda explicit=None: bridge.ZwcadSession(app, True, "ZWCAD.Application.2025"),
     )
     monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: set())
-    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids: [])
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids, **kwargs: [])
 
     payload = bridge.run_bridge(
         Namespace(
@@ -320,7 +320,7 @@ def test_zwcad_lisp_com_watchdog_maps_blocked_send_command_to_timeout(
     monkeypatch.setattr(bridge, "_zwcad_process_watchdog", lambda existing_pids, **kwargs: watchdog)
     monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", cleanup)
 
-    with pytest.raises(bridge.BridgeTimeoutError, match="wall timeout"):
+    with pytest.raises(bridge.BridgeTimeoutError, match="during send_command"):
         bridge.run_bridge(
             Namespace(
                 input=input_dwg,
@@ -338,6 +338,7 @@ def test_zwcad_lisp_com_watchdog_maps_blocked_send_command_to_timeout(
 
     assert watchdog.started is True
     assert watchdog.cancelled is True
+    assert "send_command" in watchdog.stages
     assert cleanup_calls == [({100}, 0.0)]
     assert doc.closed is False
     assert app.quit_called is False
@@ -491,8 +492,15 @@ class _FakeWatchdog:
     def __init__(self, *, fired: bool, killed_pids: list[int]) -> None:
         self.fired = fired
         self.killed_pids = killed_pids
+        self.timeout_seconds = 1.0
+        self.stage = "initializing"
+        self.stages: list[str] = []
         self.started = False
         self.cancelled = False
+
+    def set_stage(self, stage: str) -> None:
+        self.stage = stage
+        self.stages.append(stage)
 
     def start(self) -> None:
         self.started = True
@@ -575,3 +583,73 @@ class _FakeAttribute:
     TextString = "A"
     InsertionPoint = [3, 4, 0]
     Handle = "15"
+
+
+def test_zwcad_lisp_com_happy_path_cleanup_uses_zero_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a successful close the app is already Quit(), so cleanup must not sleep a
+    grace window (finding 8: avoid the 5s happy-path stall)."""
+    input_dwg = tmp_path / "sample.dwg"
+    input_dwg.write_bytes(b"AC1018 zwcad")
+    doc = _FakeLispDocument()
+    app = _FakeApp(doc)
+    grace_calls: list[float] = []
+
+    def cleanup(existing_pids, *, grace_seconds=5.0):
+        grace_calls.append(grace_seconds)
+        return []
+
+    monkeypatch.setattr(
+        bridge,
+        "_dispatch_zwcad",
+        lambda explicit=None: bridge.ZwcadSession(app, True, "ZWCAD.Application.2025"),
+    )
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {100})
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", cleanup)
+
+    bridge.run_bridge(
+        Namespace(
+            input=input_dwg,
+            acadver="AC1018",
+            mode="lisp-com",
+            zwcad_exe=None,
+            prog_id=None,
+            timeout_seconds=2,
+            max_entities=10,
+            visible=False,
+            keep_temp=False,
+            keep_open=False,
+        )
+    )
+
+    assert grace_calls == [0.0]
+
+
+def test_watchdog_cancel_joins_so_killed_pids_are_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cancel() must join a _fire() already in progress so killed_pids is fully
+    written before the caller reads it (finding 11: no race)."""
+    import time as _time
+
+    def slow_cleanup(existing_pids, *, grace_seconds=5.0):
+        _time.sleep(0.3)
+        return [7]
+
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", slow_cleanup)
+    watchdog = bridge.ZwcadProcessWatchdog(set(), timeout_seconds=1.0)
+    watchdog.start()
+    # Wait until _fire begins (sets fired=True) but is still mid-cleanup (sleeping).
+    deadline = _time.monotonic() + 5.0
+    while not watchdog.fired and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert watchdog.fired is True
+    watchdog.cancel()  # must block until _fire finishes writing killed_pids
+    assert watchdog.killed_pids == [7]
+
+
+def test_watchdog_cancel_before_start_does_not_raise() -> None:
+    watchdog = bridge.ZwcadProcessWatchdog(set(), timeout_seconds=1.0)
+    watchdog.cancel()  # never started -> must not attempt to join an unstarted timer

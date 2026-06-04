@@ -11,6 +11,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -122,16 +123,20 @@ class CommercialDwgJsonBridgeAdapter(DwgImporterAdapter):
                     timeout_cleanup_snapshot,
                     grace_seconds=self.timeout_cleanup_grace_seconds,
                 )
+                details = {
+                    "command": command,
+                    "exit_code": completed.returncode,
+                    "timeout_cleanup_image_names": list(self.timeout_cleanup_image_names),
+                    "timeout_cleanup_grace_seconds": self.timeout_cleanup_grace_seconds,
+                    "timeout_cleanup_pids": timeout_cleanup_pids,
+                }
+                timeout_stage = _timeout_stage(detail)
+                if timeout_stage:
+                    details["timeout_stage"] = timeout_stage
                 raise DwgImportError(
                     DwgFailureCode.IMPORT_TIMEOUT,
                     f"Commercial DWG JSON bridge timed out: {detail}",
-                    details={
-                        "command": command,
-                        "exit_code": completed.returncode,
-                        "timeout_cleanup_image_names": list(self.timeout_cleanup_image_names),
-                        "timeout_cleanup_grace_seconds": self.timeout_cleanup_grace_seconds,
-                        "timeout_cleanup_pids": timeout_cleanup_pids,
-                    },
+                    details=details,
                 )
             raise DwgImportError(
                 DwgFailureCode.ADAPTER_FAILED,
@@ -460,6 +465,11 @@ def _decode_payload(stdout: str) -> dict[str, Any]:
 def _looks_like_timeout(detail: str) -> bool:
     normalized = str(detail or "").lower()
     return "timed out" in normalized or "timeout" in normalized or "did not produce json within" in normalized
+
+
+def _timeout_stage(detail: str) -> str:
+    match = re.search(r"\bduring\s+([A-Za-z0-9_.-]+)", str(detail or ""))
+    return match.group(1).strip(" .,:;") if match else ""
 
 
 def _file_sha256(path: str) -> str:
