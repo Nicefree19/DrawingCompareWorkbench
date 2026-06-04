@@ -286,7 +286,9 @@ def test_evaluate_treats_cap_hit_no_change_as_truncated_skip(
             },
             "metadata": {
                 "adapter_metadata": {
-                    "commercial_dwg_json_bridge": {"max_entities": 5000},
+                    # Genuine cap hit: the bridge emits the authoritative truncation
+                    # flag (more entities remained after the cap).
+                    "commercial_dwg_json_bridge": {"max_entities": 5000, "truncated": True},
                 }
             },
         }
@@ -324,6 +326,79 @@ def test_evaluate_treats_cap_hit_no_change_as_truncated_skip(
     assert pair["status"] == "skipped"
     assert pair["skip_reason"] == "cap_truncated_requires_roi_extraction"
     assert pair["cap_truncation"]["possibly_truncated"] is True
+
+
+def test_evaluate_exact_cap_without_truncation_flag_counts_as_fn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A drawing that holds exactly max_entities but is NOT truncated must be a real
+    FN, not a silent cap-truncated skip (regression for the entity_count>=cap heuristic)."""
+    before = tmp_path / "before.dwg"
+    after = tmp_path / "after.dwg"
+    before.write_bytes(b"AC1015before")
+    after.write_bytes(b"AC1015after")
+    manifest = tmp_path / "manifest.json"
+    truth = tmp_path / "truth.json"
+    manifest.write_text(
+        json.dumps({"files": [_fixture_file("before", before), _fixture_file("after", after)]}),
+        encoding="utf-8",
+    )
+    truth.write_text(
+        json.dumps(
+            {
+                "pairs": [
+                    {
+                        "pair_id": "exact-cap",
+                        "before_file_id": "before",
+                        "after_file_id": "after",
+                        "pair_type": "small_geometry_change",
+                        "expected_changed": True,
+                        "expected_change_count": 1,
+                        "expected_changes": [{"entity_type": "INSERT", "change_type": "geometry_modification"}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_import(self, path):
+        return {
+            "entities": [],
+            "import_report": {
+                "status": "ok",
+                "stats": {"raw_entity_count": 5000, "canonical_entity_count": 5000},
+            },
+            # Exactly at the cap but the extractor finished cleanly -> truncated False.
+            "metadata": {
+                "adapter_metadata": {
+                    "commercial_dwg_json_bridge": {"max_entities": 5000, "truncated": False},
+                }
+            },
+        }
+
+    class NoChangeEngine:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def compare(self, _old_doc, _new_doc):
+            class Result:
+                def to_dict(self):
+                    return {"changes": [], "summary": {"total_changes": 0, "total_records": 5000}}
+
+            return Result()
+
+    monkeypatch.setattr(evaluator.DwgImporter, "import_file", fake_import)
+    monkeypatch.setattr(evaluator, "DrawingCompareEngine", NoChangeEngine)
+
+    report = evaluator.evaluate_evidence(manifest, truth)
+    pair = report["pairs"][0]
+
+    assert pair["status"] == "evaluated"
+    assert pair["classification"] == "FN"
+    assert report["summary"]["fn_count"] == 1
+    assert report["summary"]["skipped_pair_count"] == 0
 
 
 def test_evaluate_roi_retry_recovers_cap_truncated_pair(
@@ -628,6 +703,130 @@ def test_evaluate_roi_first_skips_initial_full_import(
     assert pair_report["roi_retry"]["mode"] == "first"
     assert len(roi_args_seen) == 2
     assert {json.loads(item)["margin"] for item in roi_args_seen} == {100.0}
+
+
+def test_evaluate_roi_first_no_change_falls_through_to_full_extraction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """ROI-first with a non-empty ROI that misses the change must NOT be recorded as
+    FN; it falls through to the full extraction, which detects the change (TP)."""
+    before = tmp_path / "before.dwg"
+    after = tmp_path / "after.dwg"
+    before.write_bytes(b"AC1015before")
+    after.write_bytes(b"AC1015after")
+
+    class FakeAdapter:
+        name = "fake-commercial"
+        version = "1"
+        license_id = "INTERNAL"
+        backend_mode = evaluator.DWG_BACKEND_COMMERCIAL_SDK
+        implementation_status = "json_bridge_configured"
+        approval_required = True
+
+        def __init__(self) -> None:
+            self.args_template = ("bridge.py", "{input}", "{acadver}", "--max-entities", "5000")
+
+        def is_available(self) -> bool:
+            return True
+
+    class FakeSelection:
+        def __init__(self, adapter) -> None:
+            self.adapter = adapter
+
+        def to_dict(self):
+            return {"mode": evaluator.DWG_BACKEND_COMMERCIAL_SDK, "adapter": self.adapter.name}
+
+    adapter = FakeAdapter()
+    roi_imports = 0
+    full_imports = 0
+
+    def fake_import(self, path):
+        nonlocal roi_imports, full_imports
+        path = Path(path)
+        template = tuple(
+            str(item).format(
+                input=str(path), path=str(path), stem=path.stem,
+                version="AC1015", acadver="AC1015",
+                family="AutoCAD 2000", release="AutoCAD 2000/2000i/2002",
+            )
+            for item in getattr(self.adapter, "args_template", ())
+        )
+        is_roi = "--roi-json" in template
+        if is_roi:
+            roi_imports += 1
+        else:
+            full_imports += 1
+        return {
+            "roi_import": is_roi,
+            "entities": [{}, {}, {}],
+            "import_report": {
+                "status": "ok",
+                "stats": {"raw_entity_count": 3, "canonical_entity_count": 3},
+            },
+            "metadata": {
+                "adapter_metadata": {
+                    "commercial_dwg_json_bridge": {"max_entities": 5000, "truncated": False},
+                }
+            },
+        }
+
+    class RoiMissesChangeEngine:
+        """ROI docs show no change; the full (non-ROI) extraction reveals the change."""
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def compare(self, old_doc, _new_doc):
+            changed = not bool(old_doc.get("roi_import"))
+
+            class Result:
+                def to_dict(self_inner):
+                    changes = (
+                        [
+                            {
+                                "change_id": "line-1",
+                                "change_type": "modified",
+                                "entity_type": "line",
+                                "geometry_diff": {"categories": ["geometry"], "fields": [{"path": "geometry.start"}]},
+                            }
+                        ]
+                        if changed
+                        else []
+                    )
+                    return {
+                        "changes": changes,
+                        "summary": {"total_changes": len(changes), "total_records": 3},
+                    }
+
+            return Result()
+
+    monkeypatch.setattr(evaluator.DwgImporter, "import_file", fake_import)
+    monkeypatch.setattr(evaluator, "DrawingCompareEngine", RoiMissesChangeEngine)
+
+    pair_report = evaluator._evaluate_pair(
+        {
+            "pair_id": "roi-first-miss",
+            "before_file_id": "before",
+            "after_file_id": "after",
+            "expected_changed": True,
+            "expected_change_count": 1,
+            "expected_changes": [{"approx_bbox": [100, 100, 500, 500]}],
+        },
+        {"before": _file("before", before), "after": _file("after", after)},
+        {"mode": evaluator.DWG_BACKEND_COMMERCIAL_SDK, "selection": FakeSelection(adapter)},
+        {},
+        roi_retry_margin=100,
+        roi_first=True,
+    )
+
+    assert pair_report["status"] == "evaluated"
+    assert pair_report["classification"] == "TP"
+    assert roi_imports == 2  # ROI-first before+after attempted
+    assert full_imports == 2  # then fell through to the full extraction
+    assert pair_report["roi_first_attempt"]["fell_through_to_full"] is True
+    # the adapter template is restored after the ROI attempt
+    assert adapter.args_template == ("bridge.py", "{input}", "{acadver}", "--max-entities", "5000")
 
 
 def test_evaluate_empty_roi_result_is_not_counted_as_fn(
@@ -1081,3 +1280,167 @@ def _plain_dwg_manifest_and_truth(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return manifest, truth
+
+
+def test_roi_attempt_reuses_cache_for_identical_roi(tmp_path: Path, monkeypatch) -> None:
+    """A successful ROI extraction is cached under an ROI-aware key and reused on an
+    identical second attempt instead of re-launching CAD (finding 4)."""
+    before = tmp_path / "before.dwg"
+    after = tmp_path / "after.dwg"
+    before.write_bytes(b"AC1015before")
+    after.write_bytes(b"AC1015after")
+
+    class FakeAdapter:
+        name = "fake-commercial"
+        version = "1"
+        license_id = "INTERNAL"
+        backend_mode = evaluator.DWG_BACKEND_COMMERCIAL_SDK
+        implementation_status = "json_bridge_configured"
+        approval_required = True
+        args_template = ("bridge.py", "{input}", "{acadver}")
+
+        def is_available(self) -> bool:
+            return True
+
+    import_calls = 0
+
+    def fake_import(self, _path):
+        nonlocal import_calls
+        import_calls += 1
+        return {
+            "roi_retry_import": True,
+            "entities": [{}],
+            "import_report": {"status": "ok", "stats": {"raw_entity_count": 1, "canonical_entity_count": 1}},
+            "metadata": {"adapter_metadata": {"commercial_dwg_json_bridge": {"max_entities": 5000, "truncated": False}}},
+        }
+
+    class AlwaysChangedEngine:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def compare(self, _old, _new):
+            class Result:
+                def to_dict(self):
+                    return {
+                        "changes": [
+                            {
+                                "change_id": "c1",
+                                "change_type": "modified",
+                                "entity_type": "line",
+                                "geometry_diff": {"categories": ["geometry"], "fields": [{"path": "geometry.start"}]},
+                            }
+                        ],
+                        "summary": {"total_changes": 1, "total_records": 1},
+                    }
+
+            return Result()
+
+    monkeypatch.setattr(evaluator.DwgImporter, "import_file", fake_import)
+    monkeypatch.setattr(evaluator, "DrawingCompareEngine", AlwaysChangedEngine)
+
+    adapter = FakeAdapter()
+    backend = {"mode": evaluator.DWG_BACKEND_COMMERCIAL_SDK, "selection": type("S", (), {"adapter": adapter, "to_dict": lambda self: {"mode": evaluator.DWG_BACKEND_COMMERCIAL_SDK}})()}
+    pair = {
+        "pair_id": "roi-cache",
+        "expected_changed": True,
+        "expected_change_count": 1,
+        "expected_changes": [{"approx_bbox": [100, 100, 500, 500]}],
+    }
+    shared_cache: dict = {}
+    common = dict(
+        roi_margin=100.0,
+        roi_attempt_index=1,
+        initial_import_ms=0.0,
+        initial_compare_ms=0.0,
+        initial_cap_truncation={"possibly_truncated": None, "sides": {}},
+        pair_started=0.0,
+        roi_mode="first",
+        import_cache=shared_cache,
+        before_record=_file("before", before),
+        after_record=_file("after", after),
+    )
+
+    first_report, _ = evaluator._roi_attempt_pair(pair, before, after, backend, False, **common)
+    assert first_report["status"] == "evaluated"
+    assert import_calls == 2  # before + after launched once
+    assert first_report["import_cache"] == {"before_hit": False, "after_hit": False}
+
+    second_report, _ = evaluator._roi_attempt_pair(pair, before, after, backend, False, **common)
+    assert second_report["status"] == "evaluated"
+    assert import_calls == 2  # reused from cache, no new CAD launches
+    assert second_report["import_cache"] == {"before_hit": True, "after_hit": True}
+
+
+def test_evaluate_roi_max_attempts_caps_cad_launches(tmp_path: Path, monkeypatch) -> None:
+    """roi_max_attempts bounds the per-pair CAD-launch escalation and the cap is
+    reported explicitly rather than silently truncating the sweep (finding 15)."""
+    before = tmp_path / "before.dwg"
+    after = tmp_path / "after.dwg"
+    before.write_bytes(b"AC1015before")
+    after.write_bytes(b"AC1015after")
+
+    class FakeAdapter:
+        name = "fake-commercial"
+        version = "1"
+        license_id = "INTERNAL"
+        backend_mode = evaluator.DWG_BACKEND_COMMERCIAL_SDK
+        implementation_status = "json_bridge_configured"
+        approval_required = True
+        args_template = ("bridge.py", "{input}", "{acadver}")
+
+        def is_available(self) -> bool:
+            return True
+
+    class FakeSelection:
+        adapter = FakeAdapter()
+
+        def to_dict(self):
+            return {"mode": evaluator.DWG_BACKEND_COMMERCIAL_SDK, "adapter": self.adapter.name}
+
+    import_calls = 0
+
+    def fake_import(self, _path):
+        nonlocal import_calls
+        import_calls += 1
+        return {
+            "entities": [],
+            "import_report": {"status": "ok", "stats": {"raw_entity_count": 0, "canonical_entity_count": 0}},
+            "metadata": {"adapter_metadata": {"commercial_dwg_json_bridge": {"max_entities": 5000, "truncated": False}}},
+        }
+
+    class NoChangeEngine:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def compare(self, _old, _new):
+            class Result:
+                def to_dict(self):
+                    return {"changes": [], "summary": {"total_changes": 0, "total_records": 0}}
+
+            return Result()
+
+    monkeypatch.setattr(evaluator.DwgImporter, "import_file", fake_import)
+    monkeypatch.setattr(evaluator, "DrawingCompareEngine", NoChangeEngine)
+
+    pair_report = evaluator._evaluate_pair(
+        {
+            "pair_id": "roi-capped",
+            "before_file_id": "before",
+            "after_file_id": "after",
+            "expected_changed": True,
+            "expected_change_count": 1,
+            "expected_changes": [{"approx_bbox": [100, 100, 500, 500]}],
+        },
+        {"before": _file("before", before), "after": _file("after", after)},
+        {"mode": evaluator.DWG_BACKEND_COMMERCIAL_SDK, "selection": FakeSelection()},
+        {},
+        roi_retry_margins=(100, 1000, 5000),
+        roi_first=True,
+        roi_max_attempts=1,
+    )
+
+    assert pair_report["status"] == "skipped"
+    assert pair_report["roi_retry"]["launched_attempts"] == 1
+    assert pair_report["roi_retry"]["capped_at_max_attempts"] is True
+    # one attempt = before + after only, not the full 3-margin sweep (which would be 6)
+    assert import_calls == 2

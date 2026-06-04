@@ -75,6 +75,7 @@ def evaluate_evidence(
     roi_retry_margins: Sequence[float] | None = None,
     roi_attempt_retries: int = 1,
     roi_first: bool = False,
+    roi_max_attempts: int | None = None,
     progress: bool = False,
 ) -> dict[str, Any]:
     manifest_path = _resolve(manifest_path)
@@ -102,6 +103,7 @@ def evaluate_evidence(
             roi_retry_margins=roi_retry_margins,
             roi_attempt_retries=roi_attempt_retries,
             roi_first=roi_first,
+            roi_max_attempts=roi_max_attempts,
         )
         pair_reports.append(pair_report)
         if progress:
@@ -268,6 +270,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dwg-bridge-roi-max-attempts",
+        type=int,
+        default=None,
+        help=(
+            "Maximum ROI extraction attempts per pair across all margins/retries "
+            "(each attempt launches CAD for before+after). Prevents silent unbounded "
+            "CAD-launch escalation; the per-pair launch count is always reported."
+        ),
+    )
+    parser.add_argument(
         "--allow-blocked",
         action="store_true",
         help="Write reports and return zero even when the target assessment remains blocked.",
@@ -289,6 +301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             roi_retry_margins=_parse_roi_margins_arg(args.dwg_bridge_roi_retry_margins),
             roi_attempt_retries=args.dwg_bridge_roi_attempt_retries,
             roi_first=args.dwg_bridge_roi_first,
+            roi_max_attempts=args.dwg_bridge_roi_max_attempts,
             progress=args.progress,
         )
     _write_json(args.report_json, report)
@@ -311,6 +324,7 @@ def _evaluate_pair(
     roi_retry_margins: Sequence[float] | None = None,
     roi_attempt_retries: int = 1,
     roi_first: bool = False,
+    roi_max_attempts: int | None = None,
 ) -> dict[str, Any]:
     before = files_by_id.get(str(pair.get("before_file_id") or ""))
     after = files_by_id.get(str(pair.get("after_file_id") or ""))
@@ -339,6 +353,7 @@ def _evaluate_pair(
     before_path = Path(str(before.get("absolute_path") or ""))
     after_path = Path(str(after.get("absolute_path") or ""))
     started = time.perf_counter()
+    roi_first_attempt: dict[str, Any] | None = None
     if roi_first and bool(pair.get("expected_changed")):
         roi_first_report, roi_first_info = _roi_retry_pair(
             pair,
@@ -354,9 +369,22 @@ def _evaluate_pair(
             initial_cap_truncation={"possibly_truncated": None, "sides": {}},
             pair_started=started,
             roi_mode="first",
+            import_cache=import_cache,
+            before_record=before,
+            after_record=after,
+            roi_max_attempts=roi_max_attempts,
         )
+        # ROI-first is only a reliable VERDICT when it detected a change. Trust it for
+        # a positive detection (fast path) or an honest skip (e.g. empty ROI ->
+        # bbox recalibration, which is transparently excluded rather than scored).
+        # But an evaluated "no change" may simply mean the change fell outside the
+        # ROI, so fall through to the full extraction instead of recording a false
+        # negative.
         if roi_first_report is not None:
-            return {**roi_first_report, "roi_retry": roi_first_info}
+            is_evaluated = roi_first_report.get("status") == "evaluated"
+            if not is_evaluated or roi_first_report.get("predicted_changed"):
+                return {**roi_first_report, "roi_retry": roi_first_info}
+            roi_first_attempt = {**roi_first_info, "fell_through_to_full": True}
     try:
         import_start = time.perf_counter()
         importer = DwgImporter(adapter=_adapter_for_pair(backend_selection, before_is_fixture and after_is_fixture))
@@ -426,6 +454,10 @@ def _evaluate_pair(
             initial_compare_ms=compare_ms,
             initial_cap_truncation=cap_truncation,
             pair_started=started,
+            import_cache=import_cache,
+            before_record=before,
+            after_record=after,
+            roi_max_attempts=roi_max_attempts,
         )
         if roi_retry_report is not None:
             return {**roi_retry_report, "roi_retry": roi_retry}
@@ -442,6 +474,7 @@ def _evaluate_pair(
             "summary": payload.get("summary") or {},
             "cap_truncation": cap_truncation,
             "roi_retry": roi_retry,
+            "roi_first_attempt": roi_first_attempt,
             "import_report": {"before": before_report, "after": after_report},
             "timing_ms": {"import": import_ms, "compare": compare_ms, "total": total_ms},
             "import_cache": {"before_hit": before_cache_hit, "after_hit": after_cache_hit},
@@ -464,6 +497,8 @@ def _evaluate_pair(
     bucket = _failure_bucket(pair, classification, structural_changes)
     if bucket:
         evaluated["failure_bucket"] = bucket
+    if roi_first_attempt is not None:
+        evaluated["roi_first_attempt"] = roi_first_attempt
     return evaluated
 
 
@@ -482,6 +517,10 @@ def _roi_retry_pair(
     initial_cap_truncation: dict[str, Any],
     pair_started: float,
     roi_mode: str = "retry",
+    import_cache: dict[str, dict[str, Any]] | None = None,
+    before_record: dict[str, Any] | None = None,
+    after_record: dict[str, Any] | None = None,
+    roi_max_attempts: int | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     margins = _roi_margin_candidates(roi_retry_margin, roi_retry_margins)
     if not margins:
@@ -490,6 +529,9 @@ def _roi_retry_pair(
     last_report: dict[str, Any] | None = None
     last_info: dict[str, Any] = {"attempted": False, "reason": "not_attempted"}
     retries = max(1, int(roi_attempt_retries or 1))
+    max_attempts = roi_max_attempts if (roi_max_attempts and roi_max_attempts > 0) else None
+    launched = 0
+    capped = False
     stop_sweep = False
     for margin in margins:
         for retry_index in range(retries):
@@ -506,14 +548,25 @@ def _roi_retry_pair(
                 initial_cap_truncation=initial_cap_truncation,
                 pair_started=pair_started,
                 roi_mode=roi_mode,
+                import_cache=import_cache,
+                before_record=before_record,
+                after_record=after_record,
             )
             last_report = report
             last_info = info
             attempts.append(_roi_attempt_summary(report, info))
+            if isinstance(info, dict) and info.get("attempted"):
+                launched += 1
             if report is None:
                 stop_sweep = True
                 break
             if report.get("status") == "evaluated":
+                stop_sweep = True
+                break
+            # Bound the per-pair CAD-launch escalation (margins x retries x before/after)
+            # explicitly rather than letting it grow silently (finding 15).
+            if max_attempts is not None and launched >= max_attempts:
+                capped = True
                 stop_sweep = True
                 break
             skip_reason = str(report.get("skip_reason") or "")
@@ -527,6 +580,9 @@ def _roi_retry_pair(
             break
     last_info["attempts"] = attempts
     last_info["attempt_count"] = len(attempts)
+    last_info["launched_attempts"] = launched
+    last_info["max_attempts"] = max_attempts
+    last_info["capped_at_max_attempts"] = capped
     return last_report, last_info
 
 
@@ -544,6 +600,9 @@ def _roi_attempt_pair(
     initial_cap_truncation: dict[str, Any],
     pair_started: float,
     roi_mode: str,
+    import_cache: dict[str, dict[str, Any]] | None = None,
+    before_record: dict[str, Any] | None = None,
+    after_record: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     if fixture_pair or backend_selection["mode"] == EVALUATION_BACKEND_FIXTURE_ONLY:
         return None, {"attempted": False, "reason": "requires_non_fixture_commercial_backend"}
@@ -555,6 +614,12 @@ def _roi_attempt_pair(
     args_template = getattr(adapter, "args_template", None)
     if args_template is None:
         return None, {"attempted": False, "reason": "adapter_does_not_support_roi_args"}
+    # ROI imports are cached/quarantined under an ROI-aware key so they never collide
+    # with the full-extraction docs and are reused across attempts/pairs sharing the
+    # same file + ROI (finding 4).
+    roi_cache_suffix = "|roi=" + json.dumps(roi_request, sort_keys=True, separators=(",", ":"))
+    before_hit = False
+    after_hit = False
 
     retry_info = {
         "attempted": True,
@@ -574,7 +639,14 @@ def _roi_attempt_pair(
         with _temporary_bridge_roi_args(adapter, roi_request):
             importer = DwgImporter(adapter=adapter)
             import_start = time.perf_counter()
-            old_doc = importer.import_file(before_path)
+            old_doc, before_hit = _import_with_cache(
+                importer,
+                before_path,
+                before_record or {},
+                import_cache,
+                cache_key_suffix=roi_cache_suffix,
+                cache_failures=False,
+            )
             before_report = old_doc.get("import_report") or {}
             if before_report.get("status") not in {"ok", "partial"}:
                 import_ms = round((time.perf_counter() - import_start) * 1000.0, 3)
@@ -595,7 +667,14 @@ def _roi_attempt_pair(
                     },
                     retry_info,
                 )
-            new_doc = importer.import_file(after_path)
+            new_doc, after_hit = _import_with_cache(
+                importer,
+                after_path,
+                after_record or {},
+                import_cache,
+                cache_key_suffix=roi_cache_suffix,
+                cache_failures=False,
+            )
             import_ms = round((time.perf_counter() - import_start) * 1000.0, 3)
             after_report = new_doc.get("import_report") or {}
             if after_report.get("status") not in {"ok", "partial"}:
@@ -639,7 +718,7 @@ def _roi_attempt_pair(
                     "initial_compare": initial_compare_ms,
                     "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
                 },
-                "import_cache": {"before_hit": False, "after_hit": False},
+                "import_cache": {"before_hit": before_hit, "after_hit": after_hit},
             },
             retry_info,
         )
@@ -670,7 +749,7 @@ def _roi_attempt_pair(
                     "roi_compare": compare_ms,
                     "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
                 },
-                "import_cache": {"before_hit": False, "after_hit": False},
+                "import_cache": {"before_hit": before_hit, "after_hit": after_hit},
             },
             retry_info,
         )
@@ -695,7 +774,7 @@ def _roi_attempt_pair(
                     "roi_compare": compare_ms,
                     "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
                 },
-                "import_cache": {"before_hit": False, "after_hit": False},
+                "import_cache": {"before_hit": before_hit, "after_hit": after_hit},
             },
             retry_info,
         )
@@ -720,7 +799,7 @@ def _roi_attempt_pair(
             "roi_compare": compare_ms,
             "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
         },
-        "import_cache": {"before_hit": False, "after_hit": False},
+        "import_cache": {"before_hit": before_hit, "after_hit": after_hit},
     }
     bucket = _failure_bucket(pair, classification, structural_changes)
     if bucket:
@@ -869,13 +948,14 @@ def _cap_truncation_side(doc: dict[str, Any]) -> dict[str, Any]:
     report = doc.get("import_report") or {}
     stats = report.get("stats") or {}
     max_entities = _doc_bridge_max_entities(doc)
+    # Trust the bridge's authoritative truncation flag only. The previous
+    # ``raw_count >= max_entities`` heuristic false-positived whenever a drawing
+    # legitimately held exactly ``max_entities`` entities, which silently
+    # reclassified genuine false negatives as cap-truncated skips.
     explicit_truncated = _doc_bridge_possibly_truncated(doc)
     raw_count = _safe_int(stats.get("raw_entity_count"))
     canonical_count = _safe_int(stats.get("canonical_entity_count"))
-    possibly_truncated = bool(
-        explicit_truncated
-        or (max_entities and raw_count is not None and raw_count >= max_entities)
-    )
+    possibly_truncated = bool(explicit_truncated)
     return {
         "possibly_truncated": possibly_truncated,
         "raw_entity_count": raw_count,
@@ -903,9 +983,11 @@ def _doc_bridge_possibly_truncated(doc: dict[str, Any]) -> bool:
     adapter_metadata = metadata.get("adapter_metadata") if isinstance(metadata, dict) else None
     if not isinstance(adapter_metadata, dict):
         return False
-    for key in ("commercial_dwg_json_bridge", "zwcad_dwg_json_bridge"):
+    for key in ("commercial_dwg_json_bridge", "zwcad_dwg_json_bridge", "autocad_dwg_json_bridge"):
         section = adapter_metadata.get(key)
-        if isinstance(section, dict) and section.get("possibly_truncated") is True:
+        if isinstance(section, dict) and (
+            section.get("truncated") is True or section.get("possibly_truncated") is True
+        ):
             return True
     return False
 
@@ -943,14 +1025,22 @@ def _import_with_cache(
     path: Path,
     record: dict[str, Any],
     import_cache: dict[str, dict[str, Any]] | None,
+    *,
+    cache_key_suffix: str = "",
+    cache_failures: bool = True,
 ) -> tuple[dict[str, Any], bool]:
     if import_cache is None:
         return importer.import_file(path), False
-    key = _import_cache_key(record, path)
+    key = _import_cache_key(record, path) + cache_key_suffix
     if key in import_cache:
         return import_cache[key], True
     doc = importer.import_file(path)
-    import_cache[key] = doc
+    # ROI imports pass cache_failures=False so a transient ROI timeout is retried
+    # rather than permanently quarantined, while successful ROI extractions are
+    # still reused across attempts/pairs that share the same file + ROI.
+    report = doc.get("import_report") or {}
+    if cache_failures or report.get("status") in {"ok", "partial"}:
+        import_cache[key] = doc
     return doc, False
 
 
@@ -1000,14 +1090,22 @@ def _pair_backend_report(backend_selection: dict[str, Any], fixture_pair: bool) 
 def _print_progress(index: int, total: int, pair_report: dict[str, Any]) -> None:
     elapsed = (pair_report.get("timing_ms") or {}).get("total")
     detail = pair_report.get("classification") or pair_report.get("skip_reason") or ""
+    roi_suffix = ""
+    roi_info = pair_report.get("roi_retry") or pair_report.get("roi_first_attempt")
+    if isinstance(roi_info, dict) and roi_info.get("attempted"):
+        launched = roi_info.get("launched_attempts", roi_info.get("attempt_count"))
+        roi_suffix = f" roi_cad_launches={launched}"
+        if roi_info.get("capped_at_max_attempts"):
+            roi_suffix += " roi_capped=1"
     print(
-        "[{}/{}] pair_id={} status={} detail={} elapsed_ms={}".format(
+        "[{}/{}] pair_id={} status={} detail={} elapsed_ms={}{}".format(
             index,
             total,
             pair_report.get("pair_id"),
             pair_report.get("status"),
             detail,
             elapsed if elapsed is not None else "",
+            roi_suffix,
         ),
         file=sys.stderr,
         flush=True,
