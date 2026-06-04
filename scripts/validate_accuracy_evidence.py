@@ -80,6 +80,31 @@ DWG_VERSION_ORDER = (
     "AC1032",
 )
 DWG_VERSION_RANK = {version: index for index, version in enumerate(DWG_VERSION_ORDER)}
+TARGET_PROFILES = {
+    "internal_pilot": {
+        "min_active_pairs": 50,
+        "required_pair_types": {
+            "identical": 1,
+            "version_resave": 1,
+            "non_structural_noise": 3,
+            "block_transform_case": 2,
+            "import_edge_case": 2,
+            "structural_change": 1,
+        },
+    },
+    "limited_customer_release": {
+        "min_active_pairs": 100,
+        "required_pair_types": {
+            "identical": 10,
+            "version_resave": 10,
+            "non_structural_noise": 10,
+            "block_transform_case": 5,
+            "import_edge_case": 5,
+            "structural_change": 10,
+        },
+        "requires_accuracy_metrics": True,
+    },
+}
 
 
 def load_records(path: Path, *, key: str) -> list[dict[str, Any]]:
@@ -134,13 +159,19 @@ def build_manifest_payload(
     files: Sequence[dict[str, Any]],
     *,
     source_manifest: Path,
+    extra_source_manifests: Sequence[Path] = (),
 ) -> dict[str, Any]:
     normalized = normalize_manifest_records(files)
+    source_paths = [source_manifest, *extra_source_manifests]
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(),
         "source_manifest": str(_resolve(source_manifest)),
         "source_manifest_sha256": sha256_file(_resolve(source_manifest)),
+        "source_manifests": [
+            {"path": str(_resolve(path)), "sha256": sha256_file(_resolve(path))}
+            for path in source_paths
+        ],
         "summary": {
             "source_file_count": len(files),
             "file_count": len(normalized),
@@ -200,6 +231,7 @@ def build_truth_payload(
     *,
     source_manifest: Path,
     source_truth: Path,
+    extra_source_truths: Sequence[Path] = (),
     add_identical_controls: bool = True,
     add_version_resave_controls: bool = True,
 ) -> dict[str, Any]:
@@ -209,6 +241,7 @@ def build_truth_payload(
         add_identical_controls=add_identical_controls,
         add_version_resave_controls=add_version_resave_controls,
     )
+    truth_paths = [source_truth, *extra_source_truths]
     return {
         "schema_version": TRUTH_SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(),
@@ -216,6 +249,10 @@ def build_truth_payload(
         "source_truth": str(_resolve(source_truth)),
         "source_manifest_sha256": sha256_file(_resolve(source_manifest)),
         "source_truth_sha256": sha256_file(_resolve(source_truth)),
+        "source_truths": [
+            {"path": str(_resolve(path)), "sha256": sha256_file(_resolve(path))}
+            for path in truth_paths
+        ],
         "summary": _pair_summary(normalized),
         "pairs": normalized,
     }
@@ -243,6 +280,17 @@ def build_report(
     versions = Counter(str(pair.get("dwg_version") or _pair_version_from_ids(pair, files_by_id) or "unknown") for pair in active_pairs)
     expected_changed = Counter(str(pair.get("expected_changed")) for pair in active_pairs)
 
+    summary = {
+        "file_count": len(files),
+        "pair_count": len(pairs),
+        "active_pair_count": len(active_pairs),
+        "excluded_pair_count": len(excluded_pairs),
+        "negative_control_count": sum(pair_types.get(kind, 0) for kind in NEGATIVE_PAIR_TYPES),
+        "expected_changed_counts": dict(sorted(expected_changed.items())),
+        "pair_type_counts": dict(sorted(pair_types.items())),
+        "version_counts": dict(sorted(versions.items())),
+        "confidential_file_count": _confidential_file_count(files),
+    }
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(),
@@ -251,17 +299,8 @@ def build_report(
         "truth_path": str(_resolve(truth_path)) if truth_path else None,
         "manifest_sha256": sha256_file(_resolve(manifest_path)) if manifest_path and _resolve(manifest_path).exists() else None,
         "truth_sha256": sha256_file(_resolve(truth_path)) if truth_path and _resolve(truth_path).exists() else None,
-        "summary": {
-            "file_count": len(files),
-            "pair_count": len(pairs),
-            "active_pair_count": len(active_pairs),
-            "excluded_pair_count": len(excluded_pairs),
-            "negative_control_count": sum(pair_types.get(kind, 0) for kind in NEGATIVE_PAIR_TYPES),
-            "expected_changed_counts": dict(sorted(expected_changed.items())),
-            "pair_type_counts": dict(sorted(pair_types.items())),
-            "version_counts": dict(sorted(versions.items())),
-            "confidential_file_count": _confidential_file_count(files),
-        },
+        "summary": summary,
+        "target_assessment": _target_assessment(summary),
         "errors": errors,
         "warnings": warnings,
         "excluded_pairs": [
@@ -301,6 +340,11 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## Versions", "", "| DWG version | active count |", "| --- | ---: |"])
     for key, value in (summary.get("version_counts") or {}).items():
         lines.append(f"| `{key}` | {value} |")
+    if report.get("target_assessment"):
+        lines.extend(["", "## Target Assessment", "", "| profile | status | blockers |", "| --- | --- | --- |"])
+        for key, assessment in (report.get("target_assessment") or {}).items():
+            blockers = ", ".join(assessment.get("blockers") or [])
+            lines.append(f"| `{key}` | `{assessment.get('status')}` | {blockers} |")
     if report.get("errors"):
         lines.extend(["", "## Errors", ""])
         lines.extend(f"- {error}" for error in report["errors"])
@@ -319,8 +363,10 @@ def render_markdown(report: dict[str, Any]) -> str:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--extra-manifest", type=Path, action="append", default=[])
     parser.add_argument("--write-normalized-manifest", type=Path, default=None)
     parser.add_argument("--truth", type=Path, default=DEFAULT_TRUTH)
+    parser.add_argument("--extra-truth", type=Path, action="append", default=[])
     parser.add_argument("--write-normalized", type=Path, default=None)
     parser.add_argument("--report-json", type=Path, default=DEFAULT_REPORT_JSON)
     parser.add_argument("--report-md", type=Path, default=DEFAULT_REPORT_MD)
@@ -333,19 +379,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     files = load_manifest(args.manifest)
+    for path in args.extra_manifest:
+        files.extend(load_manifest(path))
     manifest_for_report = args.manifest
     if args.write_normalized_manifest:
-        manifest_payload = build_manifest_payload(files, source_manifest=args.manifest)
+        manifest_payload = build_manifest_payload(
+            files,
+            source_manifest=args.manifest,
+            extra_source_manifests=args.extra_manifest,
+        )
         _write_json(args.write_normalized_manifest, manifest_payload)
         files = manifest_payload["files"]
         manifest_for_report = args.write_normalized_manifest
     pairs = load_truth(args.truth)
+    for path in args.extra_truth:
+        pairs.extend(load_truth(path))
     if args.write_normalized:
         payload = build_truth_payload(
             files,
             pairs,
             source_manifest=manifest_for_report,
             source_truth=args.truth,
+            extra_source_truths=args.extra_truth,
             add_identical_controls=not args.no_identical_controls,
             add_version_resave_controls=not args.no_version_resave_controls,
         )
@@ -448,6 +503,29 @@ def _append_coverage_warnings(pairs: Sequence[dict[str, Any]], warnings: list[st
         warnings.append("block_transform_case coverage is missing")
     if types.get("import_edge_case", 0) == 0:
         warnings.append("import_edge_case coverage is missing")
+
+
+def _target_assessment(summary: dict[str, Any]) -> dict[str, Any]:
+    assessments: dict[str, Any] = {}
+    pair_types = summary.get("pair_type_counts") or {}
+    active_pair_count = int(summary.get("active_pair_count") or 0)
+    for profile, target in TARGET_PROFILES.items():
+        blockers: list[str] = []
+        min_active = int(target["min_active_pairs"])
+        if active_pair_count < min_active:
+            blockers.append(f"active_pair_count={active_pair_count}/{min_active}")
+        for pair_type, minimum in (target.get("required_pair_types") or {}).items():
+            actual = int(pair_types.get(pair_type, 0))
+            if actual < int(minimum):
+                blockers.append(f"{pair_type}={actual}/{minimum}")
+        if target.get("requires_accuracy_metrics"):
+            blockers.append("accuracy_metrics_not_connected")
+            blockers.append("performance_metrics_not_connected")
+        assessments[profile] = {
+            "status": "passed" if not blockers else "blocked",
+            "blockers": blockers,
+        }
+    return assessments
 
 
 def _exclude_duplicate_active_pairs(pairs: list[dict[str, Any]]) -> None:

@@ -194,3 +194,8 @@
 - 2026-06-03 Codex: Addressed DWG review findings by unignoring release probe scripts, cleaning user converter temp dirs on failure, preserving DWG circle normals, and keeping commercial SDK DWG region sources on the canonical path.
 - 2026-06-03 Codex: Added local DWG accuracy evidence normalization/validation tooling, corrected Gemini truth direction issues into local normalized evidence, and ignored `.local/` evidence artifacts.
 - 2026-06-03 Codex: Extended local accuracy evidence normalization to derive cross-version `version_resave` negative controls from existing DWG version-matrix groups without copying raw drawing files.
+- 2026-06-03 Codex: Added local synthetic DWG accuracy controls for non-structural noise, block transforms, and import edge cases, bringing the local internal-pilot corpus readiness target to passed.
+- 2026-06-03 Codex: Added local accuracy metric evaluation for runnable DWG fixture evidence, reporting structural TP/FP/FN, precision/recall, skipped bridge-required pairs, and target blockers.
+- 2026-06-03 Codex: Wired the accuracy metric evaluator to optional real DWG backend selection and made target-blocked coverage report as blocked instead of passed.
+- 2026-06-04 Codex: Added a ZWCAD native DWG JSON bridge with COM and LISP-COM extraction modes, verified native provenance on a real AC1018 DWG, and smoke-tested one real accuracy pair through the evaluator.
+- 2026-06-04 Codex: Added import caching and progress logging to the accuracy evaluator, stopped a slow uncached ZWCAD full run, and hardened the ZWCAD bridge to open DWGs read-only and close without save prompts.

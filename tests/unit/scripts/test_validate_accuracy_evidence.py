@@ -123,6 +123,40 @@ def test_build_report_fails_on_active_reversed_pair() -> None:
     assert any("appears to have before/after reversed" in error for error in report["errors"])
 
 
+def test_build_report_marks_internal_pilot_target_when_coverage_is_met() -> None:
+    files = [
+        _file(f"f{i}", f"D:/samples/f{i}.dwg", "AC1015", exists=False)
+        for i in range(100)
+    ]
+    pair_types = (
+        ["identical"] * 1
+        + ["version_resave"] * 1
+        + ["non_structural_noise"] * 3
+        + ["block_transform_case"] * 2
+        + ["import_edge_case"] * 2
+        + ["structural_change"] * 1
+        + ["small_geometry_change"] * 40
+    )
+    pairs = [
+        _pair(
+            f"p{i}",
+            before_file_id=f"f{i * 2}",
+            after_file_id=f"f{i * 2 + 1}",
+            pair_type=pair_type,
+        )
+        for i, pair_type in enumerate(pair_types)
+    ]
+
+    report = evidence.build_report(files, pairs)
+
+    assert report["target_assessment"]["internal_pilot"] == {
+        "status": "passed",
+        "blockers": [],
+    }
+    assert report["target_assessment"]["limited_customer_release"]["status"] == "blocked"
+    assert "accuracy_metrics_not_connected" in report["target_assessment"]["limited_customer_release"]["blockers"]
+
+
 def test_cli_writes_normalized_truth_and_report(tmp_path: Path) -> None:
     before = tmp_path / "before.dwg"
     after = tmp_path / "after.dwg"
