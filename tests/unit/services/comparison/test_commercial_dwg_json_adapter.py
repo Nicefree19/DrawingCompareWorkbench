@@ -189,7 +189,10 @@ def test_timeout_cleanup_only_kills_new_image_pids(monkeypatch: pytest.MonkeyPat
 
 
 def test_timeout_cleanup_waits_for_late_spawned_image_pid(monkeypatch: pytest.MonkeyPatch) -> None:
-    snapshots = iter([{100}, {100, 200}])
+    # poll 1: nothing new; poll 2: late PID 200 appears and is killed; poll 3: quiet
+    # (200 gone) -> settled and returns. The extra poll proves it no longer early-returns
+    # on the first spawn (finding 10) yet still settles without waiting the full grace.
+    snapshots = iter([{100}, {100, 200}, {100}])
     killed: list[int] = []
 
     monkeypatch.setattr(adapter_module, "_process_ids_for_image", lambda image_name: next(snapshots))
@@ -218,3 +221,36 @@ def test_process_ids_for_image_fallback_timeout_returns_empty(monkeypatch: pytes
     monkeypatch.setattr(adapter_module.subprocess, "run", timeout_run)
 
     assert adapter_module._process_ids_for_image("ZWCAD.exe") == set()
+
+
+def test_timeout_cleanup_settles_without_waiting_full_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once spawns are killed and a quiet poll confirms none remain, cleanup returns
+    without blocking the (here very large) grace window (finding 9)."""
+    snapshots = iter([{100, 200}, {100}])  # kill 200, then quiet -> settle
+    killed: list[int] = []
+    monkeypatch.setattr(adapter_module, "_process_ids_for_image", lambda image_name: next(snapshots))
+    monkeypatch.setattr(adapter_module, "_kill_process_tree", lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(adapter_module.time, "sleep", lambda seconds: None)
+
+    # grace=3600 would loop forever (sleep is a no-op, deadline never reached) unless
+    # the settle path returns -- so reaching this assert proves finding 9.
+    assert adapter_module._cleanup_spawned_images({"ZWCAD.exe": {100}}, grace_seconds=3600.0) == {"ZWCAD.exe": [200]}
+    assert killed == [200]
+
+
+def test_timeout_cleanup_retries_failed_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A kill that fails on the first poll is retried on the next instead of leaving
+    the process alive (finding 10b)."""
+    attempts: list[int] = []
+
+    def flaky_kill(pid: int) -> bool:
+        attempts.append(pid)
+        return attempts.count(pid) >= 2  # fails first time, succeeds second
+
+    monkeypatch.setattr(adapter_module, "_process_ids_for_image", lambda image_name: {100, 200})
+    monkeypatch.setattr(adapter_module, "_kill_process_tree", flaky_kill)
+    monkeypatch.setattr(adapter_module.time, "sleep", lambda seconds: None)
+
+    result = adapter_module._cleanup_spawned_images({"ZWCAD.exe": {100}}, grace_seconds=3600.0)
+    assert result == {"ZWCAD.exe": [200]}
+    assert attempts == [200, 200]  # retried after the first failure

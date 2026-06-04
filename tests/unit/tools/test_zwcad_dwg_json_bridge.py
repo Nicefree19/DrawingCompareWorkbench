@@ -261,7 +261,7 @@ def test_zwcad_lisp_com_timeout_kills_spawned_process_without_graceful_close(
     def fail_wait(*_args, **_kwargs) -> None:
         raise bridge.BridgeTimeoutError("timed out")
 
-    def cleanup(existing_pids: set[int], *, grace_seconds: float = 5.0) -> list[int]:
+    def cleanup(existing_pids: set[int], *, grace_seconds: float = 5.0, only_pids=None) -> list[int]:
         cleanup_calls.append((set(existing_pids), grace_seconds))
         return [200]
 
@@ -307,7 +307,7 @@ def test_zwcad_lisp_com_watchdog_maps_blocked_send_command_to_timeout(
     cleanup_calls: list[tuple[set[int], float]] = []
     watchdog = _FakeWatchdog(fired=True, killed_pids=[200])
 
-    def cleanup(existing_pids: set[int], *, grace_seconds: float = 5.0) -> list[int]:
+    def cleanup(existing_pids: set[int], *, grace_seconds: float = 5.0, only_pids=None) -> list[int]:
         cleanup_calls.append((set(existing_pids), grace_seconds))
         return []
 
@@ -597,7 +597,7 @@ def test_zwcad_lisp_com_happy_path_cleanup_uses_zero_grace(
     app = _FakeApp(doc)
     grace_calls: list[float] = []
 
-    def cleanup(existing_pids, *, grace_seconds=5.0):
+    def cleanup(existing_pids, *, grace_seconds=5.0, only_pids=None):
         grace_calls.append(grace_seconds)
         return []
 
@@ -634,7 +634,7 @@ def test_watchdog_cancel_joins_so_killed_pids_are_readable(
     written before the caller reads it (finding 11: no race)."""
     import time as _time
 
-    def slow_cleanup(existing_pids, *, grace_seconds=5.0):
+    def slow_cleanup(existing_pids, *, grace_seconds=5.0, only_pids=None):
         _time.sleep(0.3)
         return [7]
 
@@ -653,3 +653,27 @@ def test_watchdog_cancel_joins_so_killed_pids_are_readable(
 def test_watchdog_cancel_before_start_does_not_raise() -> None:
     watchdog = bridge.ZwcadProcessWatchdog(set(), timeout_seconds=1.0)
     watchdog.cancel()  # never started -> must not attempt to join an unstarted timer
+
+
+def test_cleanup_spawned_zwcad_only_kills_pinned_pids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With only_pids set, cleanup terminates exactly the PID we spawned and leaves a
+    ZWCAD the user launched independently after the snapshot alone (finding 7)."""
+    killed: list[int] = []
+
+    def fake_run(command, **kwargs):
+        killed.append(int(command[2]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    # Snapshot was {100}; now {100 existing, 200 ours, 300 user's-new}.
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {100, 200, 300})
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+
+    assert bridge._cleanup_spawned_zwcad({100}, only_pids={200}) == [200]
+    assert killed == [200]  # 300 (the user's instance) is never touched
+
+
+def test_cleanup_spawned_zwcad_empty_pin_kills_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Attaching to an existing instance (created_new False -> empty pin) kills nothing."""
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {100, 200, 300})
+    monkeypatch.setattr(bridge.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not kill")))
+    assert bridge._cleanup_spawned_zwcad({100}, only_pids=set()) == []

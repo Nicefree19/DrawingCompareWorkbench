@@ -58,8 +58,11 @@ class BridgeTimeoutError(BridgeError):
 class ZwcadProcessWatchdog:
     """Kill spawned ZWCAD instances if a blocking COM call exceeds the timeout."""
 
-    def __init__(self, existing_pids: set[int], *, timeout_seconds: float):
+    def __init__(self, existing_pids: set[int], *, timeout_seconds: float, only_pids: set[int] | None = None):
         self.existing_pids = set(existing_pids)
+        # Only ever terminate the specific PIDs we spawned (finding 7); never a
+        # ZWCAD instance the user launched independently after our snapshot.
+        self.only_pids = set(only_pids) if only_pids is not None else None
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.stage = "initializing"
         self.fired = False
@@ -85,7 +88,9 @@ class ZwcadProcessWatchdog:
     def _fire(self) -> None:
         self.fired = True
         with contextlib.suppress(Exception):
-            self.killed_pids = _cleanup_spawned_zwcad(self.existing_pids, grace_seconds=0.0)
+            self.killed_pids = _cleanup_spawned_zwcad(
+                self.existing_pids, grace_seconds=0.0, only_pids=self.only_pids
+            )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -139,6 +144,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
         return _run_lisp_com_bridge(args, input_path=input_path, max_entities=max_entities, roi=roi)
     existing_zwcad_pids = _zwcad_process_ids()
     session = _dispatch_zwcad(args.prog_id)
+    spawned_zwcad_pids = _spawned_zwcad_pids(existing_zwcad_pids) if session.created_new else set()
     app = session.app
     doc = None
     close_errors: list[str] = []
@@ -172,7 +178,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
             # Happy path: the app was just Quit() synchronously, so the spawned
             # ZWCAD is already present/exiting -- no need to sleep a grace window
             # waiting for a late spawn (finding 8).
-            forced_cleanup_pids = _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0)
+            forced_cleanup_pids = _cleanup_spawned_zwcad(
+                existing_zwcad_pids, grace_seconds=0.0, only_pids=spawned_zwcad_pids
+            )
 
     metadata = drawing.setdefault("metadata", {})
     if not isinstance(metadata, dict):
@@ -225,12 +233,15 @@ def _run_lisp_com_bridge(
     timeout_seconds = max(1.0, float(getattr(args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS))
     existing_zwcad_pids = _zwcad_process_ids()
     session = _dispatch_zwcad(getattr(args, "prog_id", None))
+    spawned_zwcad_pids = _spawned_zwcad_pids(existing_zwcad_pids) if session.created_new else set()
     app = session.app
     doc = None
     close_errors: list[str] = []
     forced_cleanup_pids: list[int] = []
     extraction_timed_out = False
-    watchdog = _zwcad_process_watchdog(existing_zwcad_pids, timeout_seconds=timeout_seconds)
+    watchdog = _zwcad_process_watchdog(
+        existing_zwcad_pids, timeout_seconds=timeout_seconds, only_pids=spawned_zwcad_pids
+    )
     with _bridge_workspace(keep=bool(getattr(args, "keep_temp", False))) as work_dir:
         lisp_path = work_dir / "extract_dwg_json.lsp"
         output_path = work_dir / "drawing.json"
@@ -290,7 +301,7 @@ def _run_lisp_com_bridge(
                 with contextlib.suppress(Exception):
                     forced_cleanup_pids = _merge_pids(
                         forced_cleanup_pids,
-                        _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0),
+                        _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0, only_pids=spawned_zwcad_pids),
                     )
             elif doc is not None:
                 try:
@@ -308,7 +319,7 @@ def _run_lisp_com_bridge(
                     close_errors.append(f"application_quit_failed: {type(exc).__name__}: {exc}")
                 forced_cleanup_pids = _merge_pids(
                     forced_cleanup_pids,
-                    _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0),
+                    _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0, only_pids=spawned_zwcad_pids),
                 )
 
     if not isinstance(drawing, dict):
@@ -1009,18 +1020,37 @@ def _process_ids_for_image_toolhelp(image_name: str) -> set[int] | None:
     return pids
 
 
-def _cleanup_spawned_zwcad(existing_pids: set[int], *, grace_seconds: float = 5.0) -> list[int]:
-    time.sleep(max(0.0, grace_seconds))
-    spawned = sorted(_zwcad_process_ids() - set(existing_pids))
+def _spawned_zwcad_pids(existing_pids: set[int]) -> set[int]:
+    """PIDs that appeared since ``existing_pids`` was snapshotted -- i.e. the ZWCAD
+    instance(s) this bridge spawned. Pin this set right after dispatch so cleanup
+    never targets a ZWCAD the user opens later (finding 7)."""
+    return _zwcad_process_ids() - set(existing_pids)
+
+
+def _cleanup_spawned_zwcad(
+    existing_pids: set[int],
+    *,
+    grace_seconds: float = 0.0,
+    only_pids: set[int] | None = None,
+) -> list[int]:
+    if grace_seconds > 0.0:
+        time.sleep(grace_seconds)
+    spawned = _zwcad_process_ids() - set(existing_pids)
+    if only_pids is not None:
+        # Restrict to the PIDs we actually spawned; a user instance started after
+        # our snapshot is excluded even though it matches the image name.
+        spawned &= set(only_pids)
     killed: list[int] = []
-    for pid in spawned:
+    for pid in sorted(spawned):
         if _kill_process_tree(pid):
             killed.append(pid)
     return killed
 
 
-def _zwcad_process_watchdog(existing_pids: set[int], *, timeout_seconds: float) -> ZwcadProcessWatchdog:
-    return ZwcadProcessWatchdog(existing_pids, timeout_seconds=timeout_seconds)
+def _zwcad_process_watchdog(
+    existing_pids: set[int], *, timeout_seconds: float, only_pids: set[int] | None = None
+) -> ZwcadProcessWatchdog:
+    return ZwcadProcessWatchdog(existing_pids, timeout_seconds=timeout_seconds, only_pids=only_pids)
 
 
 def _lisp_com_timeout_message(watchdog: ZwcadProcessWatchdog) -> str:

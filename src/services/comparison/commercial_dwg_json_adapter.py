@@ -302,17 +302,26 @@ def _cleanup_spawned_images(snapshot: dict[str, set[int]], *, grace_seconds: flo
         return killed_by_image
     deadline = time.monotonic() + max(0.0, float(grace_seconds))
     while True:
-        found_spawned = False
+        killed_this_round = 0
+        kill_pending = False  # a spawned PID we tried but failed to kill -> retry next poll
         for image_name, existing_pids in snapshot.items():
-            already_killed = set(killed_by_image.get(image_name) or [])
-            spawned = sorted(_process_ids_for_image(image_name) - set(existing_pids) - already_killed)
-            if spawned:
-                found_spawned = True
-            killed: list[int] = killed_by_image.setdefault(image_name, [])
-            for pid in spawned:
+            already_killed = set(killed_by_image[image_name])
+            spawned = _process_ids_for_image(image_name) - set(existing_pids)
+            for pid in sorted(spawned - already_killed):
                 if _kill_process_tree(pid):
-                    killed.append(pid)
-        if found_spawned or time.monotonic() >= deadline:
+                    killed_by_image[image_name].append(pid)
+                    killed_this_round += 1
+            if spawned - set(killed_by_image[image_name]):
+                kill_pending = True
+        if time.monotonic() >= deadline:
+            return killed_by_image
+        total_killed = sum(len(pids) for pids in killed_by_image.values())
+        # Settled: we have already killed at least one spawn and this poll found
+        # nothing new and nothing left to retry -> return without waiting the rest of
+        # the grace window (finding 9). Do NOT return merely because the first poll
+        # saw a spawn (finding 10a): keep polling so late/second-wave spawns and
+        # kill-failure retries are still handled until settled or the deadline.
+        if total_killed and killed_this_round == 0 and not kill_pending:
             return killed_by_image
         time.sleep(0.5)
 
