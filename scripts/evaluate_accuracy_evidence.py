@@ -9,8 +9,9 @@ silently counted as pass/fail.
 from __future__ import annotations
 
 import argparse
-import os
 import json
+import math
+import os
 import sys
 import time
 from collections import Counter, defaultdict
@@ -70,6 +71,10 @@ def evaluate_evidence(
     pair_ids: set[str] | None = None,
     max_pairs: int | None = None,
     dwg_backend: str = EVALUATION_BACKEND_FIXTURE_ONLY,
+    roi_retry_margin: float | None = None,
+    roi_retry_margins: Sequence[float] | None = None,
+    roi_attempt_retries: int = 1,
+    roi_first: bool = False,
     progress: bool = False,
 ) -> dict[str, Any]:
     manifest_path = _resolve(manifest_path)
@@ -88,7 +93,16 @@ def evaluate_evidence(
     import_cache: dict[str, dict[str, Any]] = {}
     started = time.perf_counter()
     for index, pair in enumerate(active_pairs, start=1):
-        pair_report = _evaluate_pair(pair, files_by_id, backend_selection, import_cache)
+        pair_report = _evaluate_pair(
+            pair,
+            files_by_id,
+            backend_selection,
+            import_cache,
+            roi_retry_margin=roi_retry_margin,
+            roi_retry_margins=roi_retry_margins,
+            roi_attempt_retries=roi_attempt_retries,
+            roi_first=roi_first,
+        )
         pair_reports.append(pair_report)
         if progress:
             _print_progress(index, len(active_pairs), pair_report)
@@ -97,6 +111,7 @@ def evaluate_evidence(
     evaluated = [item for item in pair_reports if item["status"] == "evaluated"]
     skipped = [item for item in pair_reports if item["status"] == "skipped"]
     counts = Counter(item.get("classification") for item in evaluated)
+    skip_reason_counts = Counter(item.get("skip_reason") for item in skipped)
     bucket_counts = Counter(
         item.get("failure_bucket")
         for item in evaluated
@@ -121,6 +136,7 @@ def evaluate_evidence(
             "elapsed_ms": elapsed_ms,
             **metrics,
             "classification_counts": dict(sorted((str(k), v) for k, v in counts.items() if k)),
+            "skip_reason_counts": dict(sorted((str(k), v) for k, v in skip_reason_counts.items() if k)),
             "failure_bucket_counts": dict(sorted((str(k), v) for k, v in bucket_counts.items() if k)),
         },
         "target_assessment": _target_assessment(len(active_pairs), len(evaluated), metrics),
@@ -175,6 +191,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.extend(["", "## Failure Buckets", "", "| bucket | count |", "| --- | ---: |"])
         for bucket, count in summary["failure_bucket_counts"].items():
             lines.append(f"| `{bucket}` | {count} |")
+    if summary.get("skip_reason_counts"):
+        lines.extend(["", "## Skip Reasons", "", "| reason | count |", "| --- | ---: |"])
+        for reason, count in summary["skip_reason_counts"].items():
+            lines.append(f"| `{reason}` | {count} |")
     lines.append("")
     return "\n".join(lines)
 
@@ -217,6 +237,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--dwg-bridge-timeout-seconds", type=float, default=None)
     parser.add_argument(
+        "--dwg-bridge-roi-retry-margin",
+        type=float,
+        default=None,
+        help=(
+            "When a changed pair produces no structural changes and bridge output appears capped, "
+            "retry the pair once with --roi-json derived from expected_changes approx_bbox plus this margin."
+        ),
+    )
+    parser.add_argument(
+        "--dwg-bridge-roi-retry-margins",
+        default=None,
+        help=(
+            "Comma-separated ROI margins to try in order, for example 250,1000,5000. "
+            "Useful when reviewed approx_bbox is only a rough locator."
+        ),
+    )
+    parser.add_argument(
+        "--dwg-bridge-roi-attempt-retries",
+        type=int,
+        default=1,
+        help="Retry the same ROI margin this many times when ZWCAD import times out.",
+    )
+    parser.add_argument(
+        "--dwg-bridge-roi-first",
+        action="store_true",
+        help=(
+            "For changed commercial-DWG evidence pairs with expected_changes approx_bbox, "
+            "start with ROI extraction instead of waiting for a capped full extraction."
+        ),
+    )
+    parser.add_argument(
         "--allow-blocked",
         action="store_true",
         help="Write reports and return zero even when the target assessment remains blocked.",
@@ -234,6 +285,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             pair_ids=set(args.pair_id) if args.pair_id else None,
             max_pairs=args.max_pairs,
             dwg_backend=args.dwg_backend,
+            roi_retry_margin=args.dwg_bridge_roi_retry_margin,
+            roi_retry_margins=_parse_roi_margins_arg(args.dwg_bridge_roi_retry_margins),
+            roi_attempt_retries=args.dwg_bridge_roi_attempt_retries,
+            roi_first=args.dwg_bridge_roi_first,
             progress=args.progress,
         )
     _write_json(args.report_json, report)
@@ -251,6 +306,11 @@ def _evaluate_pair(
     files_by_id: dict[str, dict[str, Any]],
     backend_selection: dict[str, Any],
     import_cache: dict[str, dict[str, Any]] | None = None,
+    *,
+    roi_retry_margin: float | None = None,
+    roi_retry_margins: Sequence[float] | None = None,
+    roi_attempt_retries: int = 1,
+    roi_first: bool = False,
 ) -> dict[str, Any]:
     before = files_by_id.get(str(pair.get("before_file_id") or ""))
     after = files_by_id.get(str(pair.get("after_file_id") or ""))
@@ -279,6 +339,24 @@ def _evaluate_pair(
     before_path = Path(str(before.get("absolute_path") or ""))
     after_path = Path(str(after.get("absolute_path") or ""))
     started = time.perf_counter()
+    if roi_first and bool(pair.get("expected_changed")):
+        roi_first_report, roi_first_info = _roi_retry_pair(
+            pair,
+            before_path,
+            after_path,
+            backend_selection,
+            before_is_fixture and after_is_fixture,
+            roi_retry_margin=roi_retry_margin,
+            roi_retry_margins=roi_retry_margins,
+            roi_attempt_retries=roi_attempt_retries,
+            initial_import_ms=0.0,
+            initial_compare_ms=0.0,
+            initial_cap_truncation={"possibly_truncated": None, "sides": {}},
+            pair_started=started,
+            roi_mode="first",
+        )
+        if roi_first_report is not None:
+            return {**roi_first_report, "roi_retry": roi_first_info}
     try:
         import_start = time.perf_counter()
         importer = DwgImporter(adapter=_adapter_for_pair(backend_selection, before_is_fixture and after_is_fixture))
@@ -288,6 +366,17 @@ def _evaluate_pair(
             before,
             import_cache,
         )
+        before_report = old_doc.get("import_report") or {}
+        if before_report.get("status") not in {"ok", "partial"}:
+            import_ms = round((time.perf_counter() - import_start) * 1000.0, 3)
+            return {
+                **base,
+                "status": "skipped",
+                "skip_reason": f"before_import_{before_report.get('error_code') or before_report.get('status')}",
+                "import_report": {"before": before_report, "after": None},
+                "import_cache": {"before_hit": before_cache_hit, "after_hit": False},
+                "timing_ms": {"import": import_ms, "total": round((time.perf_counter() - started) * 1000.0, 3)},
+            }
         new_doc, after_cache_hit = _import_with_cache(
             importer,
             after_path,
@@ -295,15 +384,16 @@ def _evaluate_pair(
             import_cache,
         )
         import_ms = round((time.perf_counter() - import_start) * 1000.0, 3)
-        for label, doc in (("before", old_doc), ("after", new_doc)):
-            report = doc.get("import_report") or {}
-            if report.get("status") not in {"ok", "partial"}:
-                return {
-                    **base,
-                    "status": "skipped",
-                    "skip_reason": f"{label}_import_{report.get('error_code') or report.get('status')}",
-                    "import_report": {"before": old_doc.get("import_report"), "after": new_doc.get("import_report")},
-                }
+        after_report = new_doc.get("import_report") or {}
+        if after_report.get("status") not in {"ok", "partial"}:
+            return {
+                **base,
+                "status": "skipped",
+                "skip_reason": f"after_import_{after_report.get('error_code') or after_report.get('status')}",
+                "import_report": {"before": before_report, "after": after_report},
+                "import_cache": {"before_hit": before_cache_hit, "after_hit": after_cache_hit},
+                "timing_ms": {"import": import_ms, "total": round((time.perf_counter() - started) * 1000.0, 3)},
+            }
         compare_start = time.perf_counter()
         result = DrawingCompareEngine(
             DrawingCompareOptions(
@@ -321,6 +411,41 @@ def _evaluate_pair(
     structural_changes = [_change_summary(change) for change in payload.get("changes") or [] if _is_structural_change(change)]
     predicted_changed = bool(structural_changes)
     expected_changed = bool(pair.get("expected_changed"))
+    cap_truncation = _cap_truncation_assessment(old_doc, new_doc)
+    if expected_changed and not predicted_changed and cap_truncation["possibly_truncated"]:
+        roi_retry_report, roi_retry = _roi_retry_pair(
+            pair,
+            before_path,
+            after_path,
+            backend_selection,
+            before_is_fixture and after_is_fixture,
+            roi_retry_margin=roi_retry_margin,
+            roi_retry_margins=roi_retry_margins,
+            roi_attempt_retries=roi_attempt_retries,
+            initial_import_ms=import_ms,
+            initial_compare_ms=compare_ms,
+            initial_cap_truncation=cap_truncation,
+            pair_started=started,
+        )
+        if roi_retry_report is not None:
+            return {**roi_retry_report, "roi_retry": roi_retry}
+        total_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        return {
+            **base,
+            "status": "skipped",
+            "skip_reason": "cap_truncated_requires_roi_extraction",
+            "dwg_backend": _pair_backend_report(backend_selection, before_is_fixture and after_is_fixture),
+            "predicted_changed": predicted_changed,
+            "predicted_total_change_count": int(payload.get("summary", {}).get("total_changes") or 0),
+            "predicted_structural_change_count": len(structural_changes),
+            "structural_changes": structural_changes,
+            "summary": payload.get("summary") or {},
+            "cap_truncation": cap_truncation,
+            "roi_retry": roi_retry,
+            "import_report": {"before": before_report, "after": after_report},
+            "timing_ms": {"import": import_ms, "compare": compare_ms, "total": total_ms},
+            "import_cache": {"before_hit": before_cache_hit, "after_hit": after_cache_hit},
+        }
     classification = _classification(expected_changed, predicted_changed)
     total_ms = round((time.perf_counter() - started) * 1000.0, 3)
     evaluated = {
@@ -340,6 +465,466 @@ def _evaluate_pair(
     if bucket:
         evaluated["failure_bucket"] = bucket
     return evaluated
+
+
+def _roi_retry_pair(
+    pair: dict[str, Any],
+    before_path: Path,
+    after_path: Path,
+    backend_selection: dict[str, Any],
+    fixture_pair: bool,
+    *,
+    roi_retry_margin: float | None,
+    roi_retry_margins: Sequence[float] | None = None,
+    roi_attempt_retries: int = 1,
+    initial_import_ms: float,
+    initial_compare_ms: float,
+    initial_cap_truncation: dict[str, Any],
+    pair_started: float,
+    roi_mode: str = "retry",
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    margins = _roi_margin_candidates(roi_retry_margin, roi_retry_margins)
+    if not margins:
+        return None, {"attempted": False, "reason": "disabled"}
+    attempts: list[dict[str, Any]] = []
+    last_report: dict[str, Any] | None = None
+    last_info: dict[str, Any] = {"attempted": False, "reason": "not_attempted"}
+    retries = max(1, int(roi_attempt_retries or 1))
+    stop_sweep = False
+    for margin in margins:
+        for retry_index in range(retries):
+            report, info = _roi_attempt_pair(
+                pair,
+                before_path,
+                after_path,
+                backend_selection,
+                fixture_pair,
+                roi_margin=margin,
+                roi_attempt_index=retry_index + 1,
+                initial_import_ms=initial_import_ms,
+                initial_compare_ms=initial_compare_ms,
+                initial_cap_truncation=initial_cap_truncation,
+                pair_started=pair_started,
+                roi_mode=roi_mode,
+            )
+            last_report = report
+            last_info = info
+            attempts.append(_roi_attempt_summary(report, info))
+            if report is None:
+                stop_sweep = True
+                break
+            if report.get("status") == "evaluated":
+                stop_sweep = True
+                break
+            skip_reason = str(report.get("skip_reason") or "")
+            if _roi_timeout_skip_reason(skip_reason) and retry_index + 1 < retries:
+                continue
+            if skip_reason == "roi_empty_requires_bbox_recalibration":
+                break
+            stop_sweep = True
+            break
+        if stop_sweep:
+            break
+    last_info["attempts"] = attempts
+    last_info["attempt_count"] = len(attempts)
+    return last_report, last_info
+
+
+def _roi_attempt_pair(
+    pair: dict[str, Any],
+    before_path: Path,
+    after_path: Path,
+    backend_selection: dict[str, Any],
+    fixture_pair: bool,
+    *,
+    roi_margin: float,
+    roi_attempt_index: int,
+    initial_import_ms: float,
+    initial_compare_ms: float,
+    initial_cap_truncation: dict[str, Any],
+    pair_started: float,
+    roi_mode: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if fixture_pair or backend_selection["mode"] == EVALUATION_BACKEND_FIXTURE_ONLY:
+        return None, {"attempted": False, "reason": "requires_non_fixture_commercial_backend"}
+    roi_request = _roi_request_from_expected_changes(pair, roi_margin)
+    if roi_request is None:
+        return None, {"attempted": False, "reason": "missing_expected_change_bbox"}
+
+    adapter = _adapter_for_pair(backend_selection, fixture_pair)
+    args_template = getattr(adapter, "args_template", None)
+    if args_template is None:
+        return None, {"attempted": False, "reason": "adapter_does_not_support_roi_args"}
+
+    retry_info = {
+        "attempted": True,
+        "mode": roi_mode,
+        "attempt_index": roi_attempt_index,
+        "roi_request": roi_request,
+        "initial_cap_truncation": initial_cap_truncation,
+    }
+    base = {
+        "pair_id": pair.get("pair_id"),
+        "pair_type": pair.get("pair_type"),
+        "dwg_version": pair.get("dwg_version"),
+        "expected_changed": bool(pair.get("expected_changed")),
+        "expected_change_count": int(pair.get("expected_change_count") or 0),
+    }
+    try:
+        with _temporary_bridge_roi_args(adapter, roi_request):
+            importer = DwgImporter(adapter=adapter)
+            import_start = time.perf_counter()
+            old_doc = importer.import_file(before_path)
+            before_report = old_doc.get("import_report") or {}
+            if before_report.get("status") not in {"ok", "partial"}:
+                import_ms = round((time.perf_counter() - import_start) * 1000.0, 3)
+                return (
+                    {
+                        **base,
+                        "status": "skipped",
+                        "skip_reason": f"roi_retry_before_import_{before_report.get('error_code') or before_report.get('status')}",
+                        "dwg_backend": _pair_backend_report(backend_selection, fixture_pair),
+                        "import_report": {"before": before_report, "after": None},
+                        "timing_ms": {
+                            "initial_import": initial_import_ms,
+                            "initial_compare": initial_compare_ms,
+                            "roi_import": import_ms,
+                            "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
+                        },
+                        "import_cache": {"before_hit": False, "after_hit": False},
+                    },
+                    retry_info,
+                )
+            new_doc = importer.import_file(after_path)
+            import_ms = round((time.perf_counter() - import_start) * 1000.0, 3)
+            after_report = new_doc.get("import_report") or {}
+            if after_report.get("status") not in {"ok", "partial"}:
+                return (
+                    {
+                        **base,
+                        "status": "skipped",
+                        "skip_reason": f"roi_retry_after_import_{after_report.get('error_code') or after_report.get('status')}",
+                        "dwg_backend": _pair_backend_report(backend_selection, fixture_pair),
+                        "import_report": {"before": before_report, "after": after_report},
+                        "timing_ms": {
+                            "initial_import": initial_import_ms,
+                            "initial_compare": initial_compare_ms,
+                            "roi_import": import_ms,
+                            "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
+                        },
+                        "import_cache": {"before_hit": False, "after_hit": False},
+                    },
+                    retry_info,
+                )
+            compare_start = time.perf_counter()
+            result = DrawingCompareEngine(
+                DrawingCompareOptions(
+                    tolerance=CompareTolerance(position_tolerance_mm=1.0, bbox_tolerance_mm=1.0),
+                    structural_position_tolerance_mm=0.1,
+                    include_unchanged=False,
+                    include_entity_snapshots=False,
+                )
+            ).compare(old_doc, new_doc)
+            compare_ms = round((time.perf_counter() - compare_start) * 1000.0, 3)
+    except Exception as exc:
+        return (
+            {
+                **base,
+                "status": "skipped",
+                "skip_reason": "roi_retry_exception",
+                "message": str(exc),
+                "dwg_backend": _pair_backend_report(backend_selection, fixture_pair),
+                "timing_ms": {
+                    "initial_import": initial_import_ms,
+                    "initial_compare": initial_compare_ms,
+                    "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
+                },
+                "import_cache": {"before_hit": False, "after_hit": False},
+            },
+            retry_info,
+        )
+
+    payload = result.to_dict()
+    structural_changes = [_change_summary(change) for change in payload.get("changes") or [] if _is_structural_change(change)]
+    predicted_changed = bool(structural_changes)
+    expected_changed = bool(pair.get("expected_changed"))
+    cap_truncation = _cap_truncation_assessment(old_doc, new_doc)
+    if expected_changed and not predicted_changed and cap_truncation["possibly_truncated"]:
+        return (
+            {
+                **base,
+                "status": "skipped",
+                "skip_reason": "roi_retry_cap_truncated",
+                "dwg_backend": _pair_backend_report(backend_selection, fixture_pair),
+                "predicted_changed": predicted_changed,
+                "predicted_total_change_count": int(payload.get("summary", {}).get("total_changes") or 0),
+                "predicted_structural_change_count": len(structural_changes),
+                "structural_changes": structural_changes,
+                "summary": payload.get("summary") or {},
+                "cap_truncation": cap_truncation,
+                "import_report": {"before": before_report, "after": after_report},
+                "timing_ms": {
+                    "initial_import": initial_import_ms,
+                    "initial_compare": initial_compare_ms,
+                    "roi_import": import_ms,
+                    "roi_compare": compare_ms,
+                    "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
+                },
+                "import_cache": {"before_hit": False, "after_hit": False},
+            },
+            retry_info,
+        )
+    if expected_changed and not predicted_changed and _both_docs_have_no_imported_entities(old_doc, new_doc):
+        return (
+            {
+                **base,
+                "status": "skipped",
+                "skip_reason": "roi_empty_requires_bbox_recalibration",
+                "dwg_backend": _pair_backend_report(backend_selection, fixture_pair),
+                "predicted_changed": predicted_changed,
+                "predicted_total_change_count": int(payload.get("summary", {}).get("total_changes") or 0),
+                "predicted_structural_change_count": len(structural_changes),
+                "structural_changes": structural_changes,
+                "summary": payload.get("summary") or {},
+                "cap_truncation": cap_truncation,
+                "import_report": {"before": before_report, "after": after_report},
+                "timing_ms": {
+                    "initial_import": initial_import_ms,
+                    "initial_compare": initial_compare_ms,
+                    "roi_import": import_ms,
+                    "roi_compare": compare_ms,
+                    "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
+                },
+                "import_cache": {"before_hit": False, "after_hit": False},
+            },
+            retry_info,
+        )
+
+    classification = _classification(expected_changed, predicted_changed)
+    evaluated = {
+        **base,
+        "status": "evaluated",
+        "dwg_backend": _pair_backend_report(backend_selection, fixture_pair),
+        "classification": classification,
+        "predicted_changed": predicted_changed,
+        "predicted_total_change_count": int(payload.get("summary", {}).get("total_changes") or 0),
+        "predicted_structural_change_count": len(structural_changes),
+        "structural_changes": structural_changes,
+        "summary": payload.get("summary") or {},
+        "cap_truncation": cap_truncation,
+        "import_report": {"before": before_report, "after": after_report},
+        "timing_ms": {
+            "initial_import": initial_import_ms,
+            "initial_compare": initial_compare_ms,
+            "roi_import": import_ms,
+            "roi_compare": compare_ms,
+            "total": round((time.perf_counter() - pair_started) * 1000.0, 3),
+        },
+        "import_cache": {"before_hit": False, "after_hit": False},
+    }
+    bucket = _failure_bucket(pair, classification, structural_changes)
+    if bucket:
+        evaluated["failure_bucket"] = bucket
+    return evaluated, retry_info
+
+
+def _roi_margin_candidates(
+    roi_retry_margin: float | None,
+    roi_retry_margins: Sequence[float] | None,
+) -> list[float]:
+    raw_values: list[Any] = []
+    if roi_retry_margins is not None:
+        raw_values.extend(roi_retry_margins)
+    elif roi_retry_margin is not None:
+        raw_values.append(roi_retry_margin)
+
+    margins: list[float] = []
+    seen: set[float] = set()
+    for raw in raw_values:
+        value = _safe_float(raw)
+        if value is None or value < 0:
+            continue
+        key = round(value, 9)
+        if key in seen:
+            continue
+        seen.add(key)
+        margins.append(value)
+    return margins
+
+
+def _roi_attempt_summary(report: dict[str, Any] | None, info: dict[str, Any]) -> dict[str, Any]:
+    roi_request = info.get("roi_request") if isinstance(info, dict) else None
+    summary = {
+        "attempted": bool(info.get("attempted")) if isinstance(info, dict) else False,
+        "mode": info.get("mode") if isinstance(info, dict) else None,
+        "attempt_index": info.get("attempt_index") if isinstance(info, dict) else None,
+        "roi_request": roi_request,
+    }
+    if report is not None:
+        summary.update(
+            {
+                "status": report.get("status"),
+                "detail": report.get("classification") or report.get("skip_reason"),
+                "timing_ms": report.get("timing_ms"),
+                "predicted_structural_change_count": report.get("predicted_structural_change_count"),
+            }
+        )
+    elif isinstance(info, dict):
+        summary["reason"] = info.get("reason")
+    return summary
+
+
+def _roi_timeout_skip_reason(skip_reason: str) -> bool:
+    return skip_reason in {
+        "roi_retry_before_import_DWG_IMPORT_TIMEOUT",
+        "roi_retry_after_import_DWG_IMPORT_TIMEOUT",
+    }
+
+
+def _roi_request_from_expected_changes(pair: dict[str, Any], margin: float) -> dict[str, Any] | None:
+    margin_value = _safe_float(margin)
+    if margin_value is None or margin_value < 0:
+        return None
+    boxes: list[tuple[float, float, float, float]] = []
+    for change in pair.get("expected_changes") or []:
+        if not isinstance(change, dict):
+            continue
+        bbox = change.get("approx_bbox") or change.get("bbox")
+        parsed = _bbox_tuple(bbox)
+        if parsed is not None:
+            boxes.append(parsed)
+    if not boxes:
+        return None
+    minx = min(box[0] for box in boxes)
+    miny = min(box[1] for box in boxes)
+    maxx = max(box[2] for box in boxes)
+    maxy = max(box[3] for box in boxes)
+    return {
+        "bbox": [minx, miny, maxx, maxy],
+        "margin": margin_value,
+    }
+
+
+def _bbox_tuple(value: Any) -> tuple[float, float, float, float] | None:
+    if value is None or isinstance(value, (str, bytes)):
+        return None
+    try:
+        raw = list(value)
+    except TypeError:
+        return None
+    if len(raw) != 4:
+        return None
+    values = [_safe_float(item) for item in raw]
+    if any(item is None for item in values):
+        return None
+    minx, miny, maxx, maxy = [float(item) for item in values]
+    if minx > maxx or miny > maxy:
+        return None
+    return (minx, miny, maxx, maxy)
+
+
+def _both_docs_have_no_imported_entities(before_doc: dict[str, Any], after_doc: dict[str, Any]) -> bool:
+    return _doc_imported_entity_count(before_doc) == 0 and _doc_imported_entity_count(after_doc) == 0
+
+
+def _doc_imported_entity_count(doc: dict[str, Any]) -> int | None:
+    report = doc.get("import_report") or {}
+    stats = report.get("stats") or {}
+    raw_count = _safe_int(stats.get("raw_entity_count"))
+    if raw_count is not None:
+        return raw_count
+    canonical_count = _safe_int(stats.get("canonical_entity_count"))
+    if canonical_count is not None:
+        return canonical_count
+    entities = doc.get("entities")
+    if isinstance(entities, list):
+        return len(entities)
+    return None
+
+
+@contextmanager
+def _temporary_bridge_roi_args(adapter: Any, roi_request: dict[str, Any]):
+    previous = tuple(getattr(adapter, "args_template"))
+    roi_json = json.dumps(roi_request, ensure_ascii=False, separators=(",", ":"))
+    roi_json_template = roi_json.replace("{", "{{").replace("}", "}}")
+    setattr(adapter, "args_template", (*previous, "--roi-json", roi_json_template))
+    try:
+        yield
+    finally:
+        setattr(adapter, "args_template", previous)
+
+
+def _cap_truncation_assessment(before_doc: dict[str, Any], after_doc: dict[str, Any]) -> dict[str, Any]:
+    sides = {
+        "before": _cap_truncation_side(before_doc),
+        "after": _cap_truncation_side(after_doc),
+    }
+    return {
+        "possibly_truncated": any(item.get("possibly_truncated") for item in sides.values()),
+        "sides": sides,
+    }
+
+
+def _cap_truncation_side(doc: dict[str, Any]) -> dict[str, Any]:
+    report = doc.get("import_report") or {}
+    stats = report.get("stats") or {}
+    max_entities = _doc_bridge_max_entities(doc)
+    explicit_truncated = _doc_bridge_possibly_truncated(doc)
+    raw_count = _safe_int(stats.get("raw_entity_count"))
+    canonical_count = _safe_int(stats.get("canonical_entity_count"))
+    possibly_truncated = bool(
+        explicit_truncated
+        or (max_entities and raw_count is not None and raw_count >= max_entities)
+    )
+    return {
+        "possibly_truncated": possibly_truncated,
+        "raw_entity_count": raw_count,
+        "canonical_entity_count": canonical_count,
+        "max_entities": max_entities,
+    }
+
+
+def _doc_bridge_max_entities(doc: dict[str, Any]) -> int | None:
+    metadata = doc.get("metadata") or {}
+    adapter_metadata = metadata.get("adapter_metadata") if isinstance(metadata, dict) else None
+    if not isinstance(adapter_metadata, dict):
+        return None
+    for key in ("commercial_dwg_json_bridge", "zwcad_dwg_json_bridge"):
+        section = adapter_metadata.get(key)
+        if isinstance(section, dict):
+            value = _safe_int(section.get("max_entities"))
+            if value:
+                return value
+    return None
+
+
+def _doc_bridge_possibly_truncated(doc: dict[str, Any]) -> bool:
+    metadata = doc.get("metadata") or {}
+    adapter_metadata = metadata.get("adapter_metadata") if isinstance(metadata, dict) else None
+    if not isinstance(adapter_metadata, dict):
+        return False
+    for key in ("commercial_dwg_json_bridge", "zwcad_dwg_json_bridge"):
+        section = adapter_metadata.get(key)
+        if isinstance(section, dict) and section.get("possibly_truncated") is True:
+            return True
+    return False
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _is_fixture_file(record: dict[str, Any]) -> bool:
@@ -370,14 +955,16 @@ def _import_with_cache(
 
 
 def _import_cache_key(record: dict[str, Any], path: Path) -> str:
-    return "|".join(
-        [
-            str(record.get("file_id") or path),
-            str(record.get("sha256") or ""),
-            str(record.get("file_size_bytes") or ""),
-            str(record.get("dwg_version") or ""),
-        ]
-    )
+    version = str(record.get("dwg_version") or "")
+    size = str(record.get("file_size_bytes") or "")
+    digest = str(record.get("sha256") or "").strip().lower()
+    if digest and set(digest) != {"0"}:
+        return "|".join(["sha256", digest, size, version])
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    return "|".join(["path", resolved.casefold(), size, version])
 
 
 def _create_evaluation_backend(dwg_backend: str) -> dict[str, Any]:
@@ -603,6 +1190,31 @@ def _temporary_env(updates: dict[str, str | None]):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _parse_roi_margins_arg(value: str | None) -> tuple[float, ...] | None:
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    try:
+        if raw.startswith("["):
+            parsed = json.loads(raw)
+            items = parsed if isinstance(parsed, list) else None
+        else:
+            items = [item.strip() for item in raw.replace(";", ",").split(",")]
+    except json.JSONDecodeError as exc:
+        raise ValueError("--dwg-bridge-roi-retry-margins must be a JSON array or comma-separated numbers.") from exc
+    if items is None:
+        raise ValueError("--dwg-bridge-roi-retry-margins JSON value must be an array.")
+    margins: list[float] = []
+    for item in items:
+        if item in (None, ""):
+            continue
+        margin = _safe_float(item)
+        if margin is None or margin < 0:
+            raise ValueError("--dwg-bridge-roi-retry-margins values must be finite non-negative numbers.")
+        margins.append(margin)
+    return tuple(margins) if margins else None
 
 
 def _round_metric(value: float) -> float:

@@ -48,6 +48,8 @@ def test_zwcad_bridge_wraps_com_output_with_native_provenance(
         "_dispatch_zwcad",
         lambda explicit=None: bridge.ZwcadSession(app, True, explicit or "ZWCAD.Application.2025"),
     )
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: set())
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids: [])
 
     payload = bridge.run_bridge(
         Namespace(
@@ -68,7 +70,11 @@ def test_zwcad_bridge_wraps_com_output_with_native_provenance(
     assert provenance["uses_native_dwg"] is True
     assert provenance["uses_converted_dxf"] is False
     assert provenance["prog_id"] == "ZWCAD.Application.2025"
+    assert provenance["entity_count"] == 5
+    assert provenance["max_entities"] == 25
+    assert provenance["possibly_truncated"] is False
     assert metadata["zwcad_dwg_json_bridge"]["bridge"] == bridge.BRIDGE_NAME
+    assert metadata["zwcad_dwg_json_bridge"]["possibly_truncated"] is False
     assert drawing["entities"][0]["type"] == "LINE"
     assert drawing["entities"][0]["geometry"]["start"] == [0.0, 0.0, 0.0]
     assert drawing["entities"][1]["type"] == "CIRCLE"
@@ -94,6 +100,8 @@ def test_zwcad_bridge_payload_matches_adapter_contract(
         "_dispatch_zwcad",
         lambda explicit=None: bridge.ZwcadSession(app, True, "ZWCAD.Application"),
     )
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: set())
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids: [])
 
     payload = bridge.run_bridge(
         Namespace(
@@ -127,6 +135,9 @@ def test_zwcad_script_mode_wraps_lisp_output_with_native_provenance(
         assert command[2] == "/b"
         script_path = Path(command[3])
         script = script_path.read_text(encoding="ascii")
+        assert "(setq DCW_ROI_ENABLED T)" in script
+        assert "(setq DCW_ROI_MINX -5)" in script
+        assert "(setq DCW_ROI_MAXX 15)" in script
         match = re.search(r'\(setq DCW_OUT "([^"]+)"\)', script)
         assert match is not None
         out = Path(match.group(1).replace("/", "\\"))
@@ -162,6 +173,7 @@ def test_zwcad_script_mode_wraps_lisp_output_with_native_provenance(
             prog_id=None,
             timeout_seconds=1,
             max_entities=10,
+            roi_json=json.dumps({"bbox": [0, 0, 10, 10], "margin": 5}),
             visible=False,
             keep_temp=False,
             keep_open=False,
@@ -176,6 +188,11 @@ def test_zwcad_script_mode_wraps_lisp_output_with_native_provenance(
     assert provenance["uses_converted_dxf"] is False
     assert provenance["script_mode"] is True
     assert provenance["zwcad_exe"] == str(zwcad.resolve())
+    assert provenance["entity_count"] == 1
+    assert provenance["max_entities"] == 10
+    assert provenance["possibly_truncated"] is False
+    assert provenance["roi"] == {"minx": -5.0, "miny": -5.0, "maxx": 15.0, "maxy": 15.0}
+    assert metadata["zwcad_dwg_json_bridge"]["possibly_truncated"] is False
     assert payload["drawing"]["entities"][0]["type"] == "LINE"
 
 
@@ -192,6 +209,8 @@ def test_zwcad_lisp_com_mode_uses_send_command_and_wraps_output(
         "_dispatch_zwcad",
         lambda explicit=None: bridge.ZwcadSession(app, True, "ZWCAD.Application.2025"),
     )
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: set())
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", lambda existing_pids: [])
 
     payload = bridge.run_bridge(
         Namespace(
@@ -202,6 +221,7 @@ def test_zwcad_lisp_com_mode_uses_send_command_and_wraps_output(
             prog_id=None,
             timeout_seconds=2,
             max_entities=10,
+            roi_json=json.dumps({"bbox": [0, 0, 10, 10], "margin": 2}),
             visible=False,
             keep_temp=False,
             keep_open=False,
@@ -211,13 +231,116 @@ def test_zwcad_lisp_com_mode_uses_send_command_and_wraps_output(
     metadata = payload["drawing"]["metadata"]
     provenance = metadata["commercial_dwg_json_bridge"]
     assert doc.sent_commands
+    assert "(setq DCW_ROI_ENABLED T)" in doc.sent_commands[0]
+    assert "(setq DCW_ROI_MINX -2)" in doc.sent_commands[0]
+    assert "(setq DCW_ROI_MAXX 12)" in doc.sent_commands[0]
     assert provenance["lisp_com_mode"] is True
     assert provenance["uses_native_dwg"] is True
+    assert provenance["entity_count"] == 1
+    assert provenance["max_entities"] == 10
+    assert provenance["possibly_truncated"] is False
+    assert provenance["roi"] == {"minx": -2.0, "miny": -2.0, "maxx": 12.0, "maxy": 12.0}
+    assert metadata["zwcad_dwg_json_bridge"]["possibly_truncated"] is False
     assert payload["drawing"]["entities"][0]["type"] == "LINE"
     assert doc.closed is True
     assert doc.Saved is True
     assert app.Documents.opened_read_only is True
     assert app.quit_called is True
+
+
+def test_zwcad_lisp_com_timeout_kills_spawned_process_without_graceful_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dwg = tmp_path / "sample.dwg"
+    input_dwg.write_bytes(b"AC1014 zwcad")
+    doc = _FakeLispDocument()
+    app = _FakeApp(doc)
+    cleanup_calls: list[tuple[set[int], float]] = []
+
+    def fail_wait(*_args, **_kwargs) -> None:
+        raise bridge.BridgeTimeoutError("timed out")
+
+    def cleanup(existing_pids: set[int], *, grace_seconds: float = 5.0) -> list[int]:
+        cleanup_calls.append((set(existing_pids), grace_seconds))
+        return [200]
+
+    monkeypatch.setattr(
+        bridge,
+        "_dispatch_zwcad",
+        lambda explicit=None: bridge.ZwcadSession(app, True, "ZWCAD.Application.2025"),
+    )
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {100})
+    monkeypatch.setattr(bridge, "_wait_for_output", fail_wait)
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", cleanup)
+
+    with pytest.raises(bridge.BridgeTimeoutError):
+        bridge.run_bridge(
+            Namespace(
+                input=input_dwg,
+                acadver="AC1014",
+                mode="lisp-com",
+                zwcad_exe=None,
+                prog_id=None,
+                timeout_seconds=1,
+                max_entities=10,
+                visible=False,
+                keep_temp=False,
+                keep_open=False,
+            )
+        )
+
+    assert cleanup_calls == [({100}, 0.0)]
+    assert doc.sent_commands
+    assert doc.closed is False
+    assert app.quit_called is False
+
+
+def test_zwcad_lisp_com_watchdog_maps_blocked_send_command_to_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dwg = tmp_path / "sample.dwg"
+    input_dwg.write_bytes(b"AC1027 zwcad")
+    doc = _BlockingSendCommandDocument()
+    app = _FakeApp(doc)
+    cleanup_calls: list[tuple[set[int], float]] = []
+    watchdog = _FakeWatchdog(fired=True, killed_pids=[200])
+
+    def cleanup(existing_pids: set[int], *, grace_seconds: float = 5.0) -> list[int]:
+        cleanup_calls.append((set(existing_pids), grace_seconds))
+        return []
+
+    monkeypatch.setattr(
+        bridge,
+        "_dispatch_zwcad",
+        lambda explicit=None: bridge.ZwcadSession(app, True, "ZWCAD.Application.2025"),
+    )
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {100})
+    monkeypatch.setattr(bridge, "_zwcad_process_watchdog", lambda existing_pids, **kwargs: watchdog)
+    monkeypatch.setattr(bridge, "_cleanup_spawned_zwcad", cleanup)
+
+    with pytest.raises(bridge.BridgeTimeoutError, match="wall timeout"):
+        bridge.run_bridge(
+            Namespace(
+                input=input_dwg,
+                acadver="AC1027",
+                mode="lisp-com",
+                zwcad_exe=None,
+                prog_id=None,
+                timeout_seconds=1,
+                max_entities=10,
+                visible=False,
+                keep_temp=False,
+                keep_open=False,
+            )
+        )
+
+    assert watchdog.started is True
+    assert watchdog.cancelled is True
+    assert cleanup_calls == [({100}, 0.0)]
+    assert doc.closed is False
+    assert app.quit_called is False
 
 
 def test_candidate_prog_ids_prefers_explicit_then_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -228,6 +351,67 @@ def test_candidate_prog_ids_prefers_explicit_then_env(monkeypatch: pytest.Monkey
         "ZWCAD.Application.2024",
         "ZWCAD.Application.2025",
     )
+
+
+def test_roi_json_expands_bbox_with_margin() -> None:
+    assert bridge._roi_from_arg('{"bbox":[100,100,500,500],"margin":25}') == {
+        "minx": 75.0,
+        "miny": 75.0,
+        "maxx": 525.0,
+        "maxy": 525.0,
+    }
+
+
+def test_payload_in_roi_filters_insert_points_and_line_bboxes() -> None:
+    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+
+    assert bridge._payload_in_roi(
+        {"type": "INSERT", "geometry": {"insert": [150, 150, 0]}},
+        roi,
+    )
+    assert not bridge._payload_in_roi(
+        {"type": "INSERT", "geometry": {"insert": [999, 999, 0]}},
+        roi,
+    )
+    assert bridge._payload_in_roi(
+        {"type": "LINE", "geometry": {"start": [0, 300, 0], "end": [1000, 300, 0]}},
+        roi,
+    )
+
+
+def test_cleanup_spawned_zwcad_only_kills_new_pids(monkeypatch: pytest.MonkeyPatch) -> None:
+    killed: list[int] = []
+
+    def fake_run(command, **kwargs):
+        killed.append(int(command[2]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(bridge.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {100, 200, 300})
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+
+    assert bridge._cleanup_spawned_zwcad({100}) == [200, 300]
+    assert killed == [200, 300]
+
+
+def test_zwcad_process_ids_fallback_timeout_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    def timeout_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(bridge, "_process_ids_for_image_toolhelp", lambda image_name: None)
+    monkeypatch.setattr(bridge.subprocess, "run", timeout_run)
+
+    assert bridge._zwcad_process_ids() == set()
+
+
+def test_zwcad_kill_process_tree_falls_back_to_terminate_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failed_taskkill(command, **kwargs):
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
+
+    monkeypatch.setattr(bridge.subprocess, "run", failed_taskkill)
+    monkeypatch.setattr(bridge, "_terminate_process", lambda pid: pid == 200)
+
+    assert bridge._kill_process_tree(200) is True
 
 
 class _FakeApp:
@@ -293,6 +477,28 @@ class _FakeLispDocument(_FakeDocument):
             ),
             encoding="utf-8",
         )
+
+
+class _BlockingSendCommandDocument(_FakeDocument):
+    def __init__(self) -> None:
+        super().__init__(entities=[])
+
+    def SendCommand(self, command: str) -> None:
+        raise RuntimeError("COM call unblocked after watchdog cleanup")
+
+
+class _FakeWatchdog:
+    def __init__(self, *, fired: bool, killed_pids: list[int]) -> None:
+        self.fired = fired
+        self.killed_pids = killed_pids
+        self.started = False
+        self.cancelled = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
 
 class _FakeLayer:

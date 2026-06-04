@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import csv
+import ctypes
 import json
 import math
 import os
@@ -19,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +51,33 @@ class BridgeError(RuntimeError):
     """User-facing bridge failure."""
 
 
+class BridgeTimeoutError(BridgeError):
+    """Bridge operation exceeded its local timeout."""
+
+
+class ZwcadProcessWatchdog:
+    """Kill spawned ZWCAD instances if a blocking COM call exceeds the timeout."""
+
+    def __init__(self, existing_pids: set[int], *, timeout_seconds: float):
+        self.existing_pids = set(existing_pids)
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.fired = False
+        self.killed_pids: list[int] = []
+        self._timer = threading.Timer(self.timeout_seconds, self._fire)
+        self._timer.daemon = True
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+    def _fire(self) -> None:
+        self.fired = True
+        with contextlib.suppress(Exception):
+            self.killed_pids = _cleanup_spawned_zwcad(self.existing_pids, grace_seconds=0.0)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -68,6 +98,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prog-id")
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--max-entities", type=int)
+    parser.add_argument(
+        "--roi-json",
+        help=(
+            "Optional ROI JSON object or file path. Shape: "
+            "{\"bbox\":[minx,miny,maxx,maxy],\"margin\":100}."
+        ),
+    )
     parser.add_argument("--visible", action="store_true")
     parser.add_argument("--keep-temp", action="store_true")
     parser.add_argument(
@@ -84,15 +121,18 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
         raise BridgeError(f"input DWG does not exist: {input_path}")
 
     max_entities = _max_entities(args.max_entities)
+    roi = _roi_from_arg(getattr(args, "roi_json", None))
     mode = getattr(args, "mode", "com")
     if mode == "script":
-        return _run_script_bridge(args, input_path=input_path, max_entities=max_entities)
+        return _run_script_bridge(args, input_path=input_path, max_entities=max_entities, roi=roi)
     if mode == "lisp-com":
-        return _run_lisp_com_bridge(args, input_path=input_path, max_entities=max_entities)
+        return _run_lisp_com_bridge(args, input_path=input_path, max_entities=max_entities, roi=roi)
+    existing_zwcad_pids = _zwcad_process_ids()
     session = _dispatch_zwcad(args.prog_id)
     app = session.app
     doc = None
     close_errors: list[str] = []
+    forced_cleanup_pids: list[int] = []
     try:
         _safe_set(app, "Visible", bool(args.visible))
         documents = _get(app, "Documents")
@@ -106,6 +146,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
             input_path=input_path,
             acadver=str(args.acadver).upper(),
             max_entities=max_entities,
+            roi=roi,
         )
     finally:
         if doc is not None:
@@ -118,12 +159,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
                 _call(app, "Quit")
             except Exception as exc:  # pragma: no cover - defensive COM cleanup.
                 close_errors.append(f"application_quit_failed: {type(exc).__name__}: {exc}")
+            forced_cleanup_pids = _cleanup_spawned_zwcad(existing_zwcad_pids)
 
     metadata = drawing.setdefault("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
         drawing["metadata"] = metadata
     metadata["source_path"] = str(input_path)
+    entity_count = _drawing_entity_count(drawing)
     metadata["commercial_dwg_json_bridge"] = {
         "adapter": BRIDGE_NAME,
         "adapter_version": BRIDGE_VERSION,
@@ -133,7 +176,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
         "prog_id": session.prog_id,
         "created_new_com_application": session.created_new,
         "max_entities": max_entities,
+        "entity_count": entity_count,
+        "possibly_truncated": entity_count >= max_entities,
+        "roi": roi,
         "close_errors": close_errors,
+        "forced_zwcad_process_cleanup_pids": forced_cleanup_pids,
     }
     metadata.setdefault("zwcad_dwg_json_bridge", {})
     if isinstance(metadata["zwcad_dwg_json_bridge"], dict):
@@ -143,23 +190,37 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
                 "bridge_version": BRIDGE_VERSION,
                 "acadver": str(args.acadver).upper(),
                 "prog_id": session.prog_id,
-                "entity_count": len(drawing.get("entities") or []),
+                "entity_count": entity_count,
+                "max_entities": max_entities,
+                "possibly_truncated": entity_count >= max_entities,
+                "roi": roi,
             }
         )
     return {"schema_version": SCHEMA_VERSION, "drawing": drawing}
 
 
-def _run_lisp_com_bridge(args: argparse.Namespace, *, input_path: Path, max_entities: int) -> dict[str, Any]:
+def _run_lisp_com_bridge(
+    args: argparse.Namespace,
+    *,
+    input_path: Path,
+    max_entities: int,
+    roi: dict[str, float] | None,
+) -> dict[str, Any]:
     timeout_seconds = max(1.0, float(getattr(args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS))
+    existing_zwcad_pids = _zwcad_process_ids()
     session = _dispatch_zwcad(getattr(args, "prog_id", None))
     app = session.app
     doc = None
     close_errors: list[str] = []
+    forced_cleanup_pids: list[int] = []
+    extraction_timed_out = False
+    watchdog = _zwcad_process_watchdog(existing_zwcad_pids, timeout_seconds=timeout_seconds)
     with _bridge_workspace(keep=bool(getattr(args, "keep_temp", False))) as work_dir:
         lisp_path = work_dir / "extract_dwg_json.lsp"
         output_path = work_dir / "drawing.json"
         lisp_path.write_text(_lisp_extractor().strip() + "\n", encoding="ascii")
         try:
+            watchdog.start()
             _safe_set(app, "Visible", bool(getattr(args, "visible", False)))
             documents = _get(app, "Documents")
             if documents is None:
@@ -176,24 +237,60 @@ def _run_lisp_com_bridge(args: argparse.Namespace, *, input_path: Path, max_enti
                     f'(setq DCW_OUT "{_lisp_path(output_path)}")',
                     f'(setq DCW_ACADVER "{_escape_lisp_string(str(args.acadver).upper())}")',
                     f"(setq DCW_MAX_ENTITIES {max_entities})",
+                    *_roi_lisp_lines(roi),
                     "(DCW_EXPORT)",
                     "",
                 ]
             )
-            _call(doc, "SendCommand", command_text)
-            _wait_for_output(output_path, timeout_seconds=timeout_seconds)
+            try:
+                _call(doc, "SendCommand", command_text)
+            except Exception as exc:
+                if watchdog.fired:
+                    extraction_timed_out = True
+                    raise BridgeTimeoutError(
+                        f"ZWCAD LISP COM extractor exceeded wall timeout after {timeout_seconds:g}s."
+                    ) from exc
+                raise
+            try:
+                _wait_for_output(output_path, timeout_seconds=timeout_seconds)
+            except BridgeTimeoutError:
+                extraction_timed_out = True
+                raise
             drawing = _load_json_with_fallback(output_path)
+        except Exception as exc:
+            if watchdog.fired and not isinstance(exc, BridgeTimeoutError):
+                extraction_timed_out = True
+                raise BridgeTimeoutError(
+                    f"ZWCAD LISP COM extractor exceeded wall timeout after {timeout_seconds:g}s."
+                ) from exc
+            raise
         finally:
-            if doc is not None:
+            watchdog.cancel()
+            forced_cleanup_pids = _merge_pids(forced_cleanup_pids, watchdog.killed_pids)
+            if extraction_timed_out:
+                with contextlib.suppress(Exception):
+                    forced_cleanup_pids = _merge_pids(
+                        forced_cleanup_pids,
+                        _cleanup_spawned_zwcad(existing_zwcad_pids, grace_seconds=0.0),
+                    )
+            elif doc is not None:
                 try:
                     _close_document(doc)
                 except Exception as exc:  # pragma: no cover - defensive COM cleanup.
                     close_errors.append(f"document_close_failed: {type(exc).__name__}: {exc}")
-            if session.created_new and not bool(getattr(args, "keep_open", False)):
+            if (
+                not extraction_timed_out
+                and session.created_new
+                and not bool(getattr(args, "keep_open", False))
+            ):
                 try:
                     _call(app, "Quit")
                 except Exception as exc:  # pragma: no cover - defensive COM cleanup.
                     close_errors.append(f"application_quit_failed: {type(exc).__name__}: {exc}")
+                forced_cleanup_pids = _merge_pids(
+                    forced_cleanup_pids,
+                    _cleanup_spawned_zwcad(existing_zwcad_pids),
+                )
 
     if not isinstance(drawing, dict):
         raise BridgeError("ZWCAD LISP COM extractor output must be a JSON object.")
@@ -202,6 +299,7 @@ def _run_lisp_com_bridge(args: argparse.Namespace, *, input_path: Path, max_enti
         metadata = {}
         drawing["metadata"] = metadata
     metadata["source_path"] = str(input_path)
+    entity_count = _drawing_entity_count(drawing)
     metadata["commercial_dwg_json_bridge"] = {
         "adapter": BRIDGE_NAME,
         "adapter_version": BRIDGE_VERSION,
@@ -212,7 +310,11 @@ def _run_lisp_com_bridge(args: argparse.Namespace, *, input_path: Path, max_enti
         "created_new_com_application": session.created_new,
         "lisp_com_mode": True,
         "max_entities": max_entities,
+        "entity_count": entity_count,
+        "possibly_truncated": entity_count >= max_entities,
+        "roi": roi,
         "close_errors": close_errors,
+        "forced_zwcad_process_cleanup_pids": forced_cleanup_pids,
     }
     metadata.setdefault("zwcad_dwg_json_bridge", {})
     if isinstance(metadata["zwcad_dwg_json_bridge"], dict):
@@ -223,12 +325,22 @@ def _run_lisp_com_bridge(args: argparse.Namespace, *, input_path: Path, max_enti
                 "acadver": str(args.acadver).upper(),
                 "prog_id": session.prog_id,
                 "lisp_com_mode": True,
+                "entity_count": entity_count,
+                "max_entities": max_entities,
+                "possibly_truncated": entity_count >= max_entities,
+                "roi": roi,
             }
         )
     return {"schema_version": SCHEMA_VERSION, "drawing": drawing}
 
 
-def _run_script_bridge(args: argparse.Namespace, *, input_path: Path, max_entities: int) -> dict[str, Any]:
+def _run_script_bridge(
+    args: argparse.Namespace,
+    *,
+    input_path: Path,
+    max_entities: int,
+    roi: dict[str, float] | None,
+) -> dict[str, Any]:
     zwcad_exe = resolve_zwcad_exe(getattr(args, "zwcad_exe", None))
     if not zwcad_exe:
         raise BridgeError(f"ZWCAD.exe was not found. Set {EXE_ENV} or pass --zwcad-exe.")
@@ -246,6 +358,7 @@ def _run_script_bridge(args: argparse.Namespace, *, input_path: Path, max_entiti
                     f'(setq DCW_OUT "{_lisp_path(output_path)}")',
                     f'(setq DCW_ACADVER "{_escape_lisp_string(str(args.acadver).upper())}")',
                     f"(setq DCW_MAX_ENTITIES {max_entities})",
+                    *_roi_lisp_lines(roi),
                     "(DCW_EXPORT)",
                     "_.QUIT",
                     "",
@@ -282,6 +395,7 @@ def _run_script_bridge(args: argparse.Namespace, *, input_path: Path, max_entiti
         metadata = {}
         drawing["metadata"] = metadata
     metadata["source_path"] = str(input_path)
+    entity_count = _drawing_entity_count(drawing)
     metadata["commercial_dwg_json_bridge"] = {
         "adapter": BRIDGE_NAME,
         "adapter_version": BRIDGE_VERSION,
@@ -292,6 +406,9 @@ def _run_script_bridge(args: argparse.Namespace, *, input_path: Path, max_entiti
         "zwcad_exit_code": completed.returncode,
         "script_mode": True,
         "max_entities": max_entities,
+        "entity_count": entity_count,
+        "possibly_truncated": entity_count >= max_entities,
+        "roi": roi,
     }
     metadata.setdefault("zwcad_dwg_json_bridge", {})
     if isinstance(metadata["zwcad_dwg_json_bridge"], dict):
@@ -302,6 +419,10 @@ def _run_script_bridge(args: argparse.Namespace, *, input_path: Path, max_entiti
                 "acadver": str(args.acadver).upper(),
                 "zwcad_exe": str(zwcad_exe),
                 "script_mode": True,
+                "entity_count": entity_count,
+                "max_entities": max_entities,
+                "possibly_truncated": entity_count >= max_entities,
+                "roi": roi,
             }
         )
     return {"schema_version": SCHEMA_VERSION, "drawing": drawing}
@@ -378,6 +499,7 @@ def _drawing_from_document(
     input_path: Path,
     acadver: str,
     max_entities: int,
+    roi: dict[str, float] | None,
 ) -> dict[str, Any]:
     layers = _layers(doc)
     entities: list[dict[str, Any]] = []
@@ -388,6 +510,8 @@ def _drawing_from_document(
         if payload is None:
             raw_type = _object_name(entity) or "UNKNOWN"
             skipped[raw_type] = skipped.get(raw_type, 0) + 1
+            continue
+        if roi is not None and not _payload_in_roi(payload, roi):
             continue
         if len(entities) >= max_entities:
             truncated = True
@@ -407,6 +531,7 @@ def _drawing_from_document(
                 "entity_count": len(entities),
                 "skipped_entity_counts": skipped,
                 "truncated": truncated,
+                "roi": roi,
             },
         },
     }
@@ -567,6 +692,155 @@ def _vertices(value: Any, *, raw_type: str) -> list[dict[str, Any]]:
     return vertices
 
 
+def _roi_from_arg(value: str | None) -> dict[str, float] | None:
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    try:
+        if raw[0] in "{[":
+            data = json.loads(raw)
+        else:
+            path = Path(raw)
+            if path.exists() and path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                data = json.loads(raw)
+    except OSError as exc:
+        raise BridgeError(f"--roi-json could not be read: {raw}") from exc
+    except json.JSONDecodeError as exc:
+        raise BridgeError("--roi-json must be a JSON object string or an existing JSON file.") from exc
+
+    if not isinstance(data, dict):
+        raise BridgeError("--roi-json must be a JSON object.")
+    bbox = data.get("bbox")
+    if bbox is None or isinstance(bbox, (str, bytes)):
+        raise BridgeError('--roi-json requires "bbox": [minx, miny, maxx, maxy].')
+    try:
+        bbox_values = list(bbox)
+    except TypeError as exc:
+        raise BridgeError('--roi-json requires "bbox": [minx, miny, maxx, maxy].') from exc
+    if len(bbox_values) != 4:
+        raise BridgeError('--roi-json requires "bbox": [minx, miny, maxx, maxy].')
+
+    minx, miny, maxx, maxy = [_finite_float(item, "--roi-json bbox values") for item in bbox_values]
+    if minx > maxx or miny > maxy:
+        raise BridgeError("--roi-json bbox minimum values must be <= maximum values.")
+    margin = _finite_float(data.get("margin", 0.0), "--roi-json margin")
+    if margin < 0:
+        raise BridgeError("--roi-json margin must be >= 0.")
+    return {
+        "minx": minx - margin,
+        "miny": miny - margin,
+        "maxx": maxx + margin,
+        "maxy": maxy + margin,
+    }
+
+
+def _roi_lisp_lines(roi: dict[str, float] | None) -> list[str]:
+    if roi is None:
+        return []
+    return [
+        "(setq DCW_ROI_ENABLED T)",
+        f"(setq DCW_ROI_MINX {_lisp_number(roi['minx'])})",
+        f"(setq DCW_ROI_MINY {_lisp_number(roi['miny'])})",
+        f"(setq DCW_ROI_MAXX {_lisp_number(roi['maxx'])})",
+        f"(setq DCW_ROI_MAXY {_lisp_number(roi['maxy'])})",
+    ]
+
+
+def _payload_in_roi(payload: dict[str, Any], roi: dict[str, float]) -> bool:
+    bbox = _payload_bbox(payload)
+    if bbox is None:
+        return True
+    minx, miny, maxx, maxy = bbox
+    return not (
+        maxx < roi["minx"]
+        or minx > roi["maxx"]
+        or maxy < roi["miny"]
+        or miny > roi["maxy"]
+    )
+
+
+def _payload_bbox(payload: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    points = list(_payload_points(payload))
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    minx = min(xs)
+    miny = min(ys)
+    maxx = max(xs)
+    maxy = max(ys)
+    geometry = payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {}
+    if str(payload.get("type") or "").upper() in {"CIRCLE", "ARC"}:
+        center = _roi_point_xy(geometry.get("center"))
+        radius = _optional_finite_float(geometry.get("radius"))
+        if center is not None and radius is not None and radius > 0.0:
+            minx = min(minx, center[0] - radius)
+            miny = min(miny, center[1] - radius)
+            maxx = max(maxx, center[0] + radius)
+            maxy = max(maxy, center[1] + radius)
+    return (minx, miny, maxx, maxy)
+
+
+def _payload_points(payload: dict[str, Any]) -> Iterable[tuple[float, float]]:
+    geometry = payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {}
+    raw_type = str(payload.get("type") or "").upper()
+    candidate_points: list[Any] = []
+    if raw_type == "LINE":
+        candidate_points.extend([geometry.get("start"), geometry.get("end")])
+    elif raw_type in {"CIRCLE", "ARC"}:
+        candidate_points.append(geometry.get("center"))
+    elif raw_type in {"LWPOLYLINE", "POLYLINE"}:
+        for vertex in geometry.get("vertices") or []:
+            candidate_points.append(vertex.get("point") if isinstance(vertex, dict) else vertex)
+    elif raw_type in {"TEXT", "MTEXT", "INSERT"}:
+        candidate_points.append(geometry.get("insert"))
+    for attr in payload.get("attributes") or []:
+        if isinstance(attr, dict):
+            candidate_points.append(attr.get("insert"))
+    for attr in geometry.get("attributes") or []:
+        if isinstance(attr, dict):
+            candidate_points.append(attr.get("insert"))
+
+    for point in candidate_points:
+        xy = _roi_point_xy(point)
+        if xy is not None:
+            yield xy
+
+
+def _roi_point_xy(point: Any) -> tuple[float, float] | None:
+    values = _sequence(point)
+    if len(values) < 2:
+        return None
+    x = _optional_finite_float(values[0])
+    y = _optional_finite_float(values[1])
+    if x is None or y is None:
+        return None
+    return (x, y)
+
+
+def _finite_float(value: Any, label: str) -> float:
+    result = _optional_finite_float(value)
+    if result is None:
+        raise BridgeError(f"{label} must be finite numbers.")
+    return result
+
+
+def _optional_finite_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _lisp_number(value: float) -> str:
+    return format(float(value), ".12g")
+
+
 def _lisp_extractor() -> str:
     try:
         from tools.autocad_dwg_json_bridge import LISP_EXTRACTOR
@@ -621,7 +895,179 @@ def _wait_for_output(path: Path, *, timeout_seconds: float) -> None:
                 stable_size = size
                 stable_seen_at = now
         time.sleep(0.2)
-    raise BridgeError(f"ZWCAD LISP COM extractor did not produce JSON within {timeout_seconds:g}s: {path}")
+    raise BridgeTimeoutError(f"ZWCAD LISP COM extractor did not produce JSON within {timeout_seconds:g}s: {path}")
+
+
+def _zwcad_process_ids() -> set[int]:
+    native = _process_ids_for_image_toolhelp("ZWCAD.exe")
+    if native is not None:
+        return native
+    try:
+        completed = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq ZWCAD.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if completed.returncode != 0:
+        return set()
+    pids: set[int] = set()
+    for row in csv.reader(line for line in completed.stdout.splitlines() if line.strip()):
+        if len(row) < 2:
+            continue
+        if row[0].strip('"').lower() != "zwcad.exe":
+            continue
+        try:
+            pids.add(int(row[1]))
+        except ValueError:
+            continue
+    return pids
+
+
+def _process_ids_for_image_toolhelp(image_name: str) -> set[int] | None:
+    if os.name != "nt":
+        return set()
+    expected = Path(image_name).name.casefold()
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception:
+        return None
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_uint32),
+            ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    create_snapshot = kernel32.CreateToolhelp32Snapshot
+    create_snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    create_snapshot.restype = ctypes.c_void_p
+    process_first = kernel32.Process32FirstW
+    process_first.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry32W)]
+    process_first.restype = ctypes.c_int
+    process_next = kernel32.Process32NextW
+    process_next.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry32W)]
+    process_next.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    snapshot = create_snapshot(0x00000002, 0)
+    if snapshot in (None, ctypes.c_void_p(-1).value):
+        return None
+    pids: set[int] = set()
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        if not process_first(snapshot, ctypes.byref(entry)):
+            return pids
+        while True:
+            if str(entry.szExeFile).casefold() == expected:
+                pids.add(int(entry.th32ProcessID))
+            if not process_next(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        close_handle(snapshot)
+    return pids
+
+
+def _cleanup_spawned_zwcad(existing_pids: set[int], *, grace_seconds: float = 5.0) -> list[int]:
+    time.sleep(max(0.0, grace_seconds))
+    spawned = sorted(_zwcad_process_ids() - set(existing_pids))
+    killed: list[int] = []
+    for pid in spawned:
+        if _kill_process_tree(pid):
+            killed.append(pid)
+    return killed
+
+
+def _zwcad_process_watchdog(existing_pids: set[int], *, timeout_seconds: float) -> ZwcadProcessWatchdog:
+    return ZwcadProcessWatchdog(existing_pids, timeout_seconds=timeout_seconds)
+
+
+def _merge_pids(left: Sequence[int], right: Sequence[int]) -> list[int]:
+    merged: list[int] = []
+    seen: set[int] = set()
+    for value in (*left, *right):
+        pid = int(value)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        merged.append(pid)
+    return merged
+
+
+def _drawing_entity_count(drawing: dict[str, Any]) -> int:
+    entities = drawing.get("entities")
+    if isinstance(entities, list):
+        return len(entities)
+    model_space = drawing.get("model_space")
+    if isinstance(model_space, list):
+        return len(model_space)
+    metadata = drawing.get("metadata")
+    if isinstance(metadata, dict):
+        bridge_meta = metadata.get("zwcad_dwg_json_bridge")
+        if isinstance(bridge_meta, dict):
+            try:
+                return int(bridge_meta.get("entity_count") or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _kill_process_tree(pid: int) -> bool:
+    try:
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F", "/T"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _terminate_process(pid)
+    return completed.returncode == 0 or _terminate_process(pid)
+
+
+def _terminate_process(pid: int) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception:
+        return False
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    terminate_process = kernel32.TerminateProcess
+    terminate_process.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    terminate_process.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    handle = open_process(0x0001, 0, int(pid))
+    if not handle:
+        return False
+    try:
+        return bool(terminate_process(handle, 1))
+    finally:
+        close_handle(handle)
 
 
 def _close_document(doc: Any) -> None:

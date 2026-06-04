@@ -95,6 +95,185 @@ LISP_EXTRACTOR = r"""
   )
 )
 
+(defun dcw-roi-active-p ()
+  (and
+    (boundp 'DCW_ROI_ENABLED)
+    DCW_ROI_ENABLED
+    (boundp 'DCW_ROI_MINX)
+    (boundp 'DCW_ROI_MINY)
+    (boundp 'DCW_ROI_MAXX)
+    (boundp 'DCW_ROI_MAXY)
+    (numberp DCW_ROI_MINX)
+    (numberp DCW_ROI_MINY)
+    (numberp DCW_ROI_MAXX)
+    (numberp DCW_ROI_MAXY)
+  )
+)
+
+(defun dcw-point-x (pt)
+  (if (and (listp pt) (numberp (car pt))) (car pt) nil)
+)
+
+(defun dcw-point-y (pt)
+  (if (and (listp pt) (numberp (cadr pt))) (cadr pt) nil)
+)
+
+(defun dcw-bbox-in-roi-p (minx miny maxx maxy)
+  (if (not (dcw-roi-active-p))
+    T
+    (not
+      (or
+        (< maxx DCW_ROI_MINX)
+        (> minx DCW_ROI_MAXX)
+        (< maxy DCW_ROI_MINY)
+        (> miny DCW_ROI_MAXY)
+      )
+    )
+  )
+)
+
+(defun dcw-point-in-roi-p (pt / x y)
+  (if (not (dcw-roi-active-p))
+    T
+    (progn
+      (setq x (dcw-point-x pt))
+      (setq y (dcw-point-y pt))
+      (and
+        x
+        y
+        (>= x DCW_ROI_MINX)
+        (<= x DCW_ROI_MAXX)
+        (>= y DCW_ROI_MINY)
+        (<= y DCW_ROI_MAXY)
+      )
+    )
+  )
+)
+
+(defun dcw-line-in-roi-p (data / p1 p2 x1 y1 x2 y2)
+  (setq p1 (cdr (assoc 10 data)))
+  (setq p2 (cdr (assoc 11 data)))
+  (setq x1 (dcw-point-x p1))
+  (setq y1 (dcw-point-y p1))
+  (setq x2 (dcw-point-x p2))
+  (setq y2 (dcw-point-y p2))
+  (or
+    (dcw-point-in-roi-p p1)
+    (dcw-point-in-roi-p p2)
+    (and
+      x1 y1 x2 y2
+      (dcw-bbox-in-roi-p (min x1 x2) (min y1 y2) (max x1 x2) (max y1 y2))
+    )
+  )
+)
+
+(defun dcw-circle-in-roi-p (data / center radius x y)
+  (setq center (cdr (assoc 10 data)))
+  (setq radius (cdr (assoc 40 data)))
+  (setq x (dcw-point-x center))
+  (setq y (dcw-point-y center))
+  (or
+    (dcw-point-in-roi-p center)
+    (and
+      x y (numberp radius)
+      (dcw-bbox-in-roi-p (- x radius) (- y radius) (+ x radius) (+ y radius))
+    )
+  )
+)
+
+(defun dcw-lwvertices-in-roi-p (data / hit seen item pt x y minx miny maxx maxy)
+  (setq hit nil)
+  (setq seen nil)
+  (foreach item data
+    (if (= (car item) 10)
+      (progn
+        (setq pt (cdr item))
+        (if (dcw-point-in-roi-p pt) (setq hit T))
+        (setq x (dcw-point-x pt))
+        (setq y (dcw-point-y pt))
+        (if (and x y)
+          (progn
+            (if seen
+              (progn
+                (setq minx (min minx x))
+                (setq miny (min miny y))
+                (setq maxx (max maxx x))
+                (setq maxy (max maxy y))
+              )
+              (progn
+                (setq minx x)
+                (setq miny y)
+                (setq maxx x)
+                (setq maxy y)
+                (setq seen T)
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (or hit (and seen (dcw-bbox-in-roi-p minx miny maxx maxy)))
+)
+
+(defun dcw-polyvertices-in-roi-p (entity / hit seen cursor data etype pt x y minx miny maxx maxy)
+  (setq hit nil)
+  (setq seen nil)
+  (setq cursor (entnext entity))
+  (while cursor
+    (setq data (entget cursor))
+    (setq etype (strcase (cdr (assoc 0 data))))
+    (cond
+      ((= etype "VERTEX")
+        (progn
+          (setq pt (cdr (assoc 10 data)))
+          (if (dcw-point-in-roi-p pt) (setq hit T))
+          (setq x (dcw-point-x pt))
+          (setq y (dcw-point-y pt))
+          (if (and x y)
+            (progn
+              (if seen
+                (progn
+                  (setq minx (min minx x))
+                  (setq miny (min miny y))
+                  (setq maxx (max maxx x))
+                  (setq maxy (max maxy y))
+                )
+                (progn
+                  (setq minx x)
+                  (setq miny y)
+                  (setq maxx x)
+                  (setq maxy y)
+                  (setq seen T)
+                )
+              )
+            )
+          )
+        )
+      )
+      ((= etype "SEQEND") (setq cursor nil))
+    )
+    (if cursor (setq cursor (entnext cursor)))
+  )
+  (or hit (and seen (dcw-bbox-in-roi-p minx miny maxx maxy)))
+)
+
+(defun dcw-entity-in-roi-p (entity data etype)
+  (if (not (dcw-roi-active-p))
+    T
+    (cond
+      ((= etype "LINE") (dcw-line-in-roi-p data))
+      ((or (= etype "CIRCLE") (= etype "ARC")) (dcw-circle-in-roi-p data))
+      ((= etype "LWPOLYLINE") (dcw-lwvertices-in-roi-p data))
+      ((= etype "POLYLINE") (dcw-polyvertices-in-roi-p entity))
+      ((or (= etype "TEXT") (= etype "MTEXT") (= etype "INSERT"))
+        (dcw-point-in-roi-p (cdr (assoc 10 data)))
+      )
+      (T T)
+    )
+  )
+)
+
 (defun dcw-common-prefix (etype data)
   (strcat
     "{\"type\":" (dcw-json-string etype)
@@ -161,80 +340,83 @@ LISP_EXTRACTOR = r"""
     nil
     (progn
       (setq etype (strcase (cdr (assoc 0 data))))
-      (cond
-        ((= etype "LINE")
-          (strcat
-            (dcw-common-prefix "LINE" data)
-            "{\"start\":" (dcw-point-json (cdr (assoc 10 data)))
-            ",\"end\":" (dcw-point-json (cdr (assoc 11 data))) "}}"
-          )
-        )
-        ((= etype "CIRCLE")
-          (strcat
-            (dcw-common-prefix "CIRCLE" data)
-            "{\"center\":" (dcw-point-json (cdr (assoc 10 data)))
-            ",\"radius\":" (dcw-num (cdr (assoc 40 data))) "}}"
-          )
-        )
-        ((= etype "ARC")
-          (strcat
-            (dcw-common-prefix "ARC" data)
-            "{\"center\":" (dcw-point-json (cdr (assoc 10 data)))
-            ",\"radius\":" (dcw-num (cdr (assoc 40 data)))
-            ",\"start_angle_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
-            ",\"end_angle_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 51 data))))
-            ",\"normal\":[0,0,1]}}"
-          )
-        )
-        ((= etype "LWPOLYLINE")
-          (strcat
-            (dcw-common-prefix "LWPOLYLINE" data)
-            "{\"vertices\":" (dcw-lwvertices-json data)
-            ",\"closed\":" (dcw-closed-p data) "}}"
-          )
-        )
-        ((= etype "POLYLINE")
-          (strcat
-            (dcw-common-prefix "POLYLINE" data)
-            "{\"vertices\":" (dcw-polyvertices-json entity)
-            ",\"closed\":" (dcw-closed-p data) "}}"
-          )
-        )
-        ((= etype "TEXT")
-          (strcat
-            (dcw-common-prefix "TEXT" data)
-            "{\"insert\":" (dcw-point-json (cdr (assoc 10 data)))
-            ",\"height\":" (dcw-num (cdr (assoc 40 data)))
-            ",\"text\":" (dcw-json-string (cdr (assoc 1 data)))
-            ",\"rotation_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
-            ",\"alignment\":\"0:0\"}}"
-          )
-        )
-        ((= etype "MTEXT")
-          (strcat
-            (dcw-common-prefix "MTEXT" data)
-            "{\"insert\":" (dcw-point-json (cdr (assoc 10 data)))
-            ",\"height\":" (dcw-num (cdr (assoc 40 data)))
-            ",\"raw_content\":" (dcw-json-string (dcw-mtext-content data))
-            ",\"plain_text\":" (dcw-json-string (dcw-mtext-content data))
-            ",\"rotation_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
-            "}}"
-          )
-        )
-        ((= etype "INSERT")
-          (progn
-            (setq blockname (cdr (assoc 2 data)))
+      (if (not (dcw-entity-in-roi-p entity data etype))
+        nil
+        (cond
+          ((= etype "LINE")
             (strcat
-              (dcw-common-prefix "INSERT" data)
-              "{\"insert\":" (dcw-point-json (cdr (assoc 10 data)))
-              ",\"scale\":[" (dcw-num (cdr (assoc 41 data))) "," (dcw-num (cdr (assoc 42 data))) "," (dcw-num (cdr (assoc 43 data))) "]"
-              ",\"rotation_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
-              ",\"block_name\":" (dcw-json-string blockname)
-              ",\"attributes\":[]}}"
+              (dcw-common-prefix "LINE" data)
+              "{\"start\":" (dcw-point-json (cdr (assoc 10 data)))
+              ",\"end\":" (dcw-point-json (cdr (assoc 11 data))) "}}"
             )
           )
+          ((= etype "CIRCLE")
+            (strcat
+              (dcw-common-prefix "CIRCLE" data)
+              "{\"center\":" (dcw-point-json (cdr (assoc 10 data)))
+              ",\"radius\":" (dcw-num (cdr (assoc 40 data))) "}}"
+            )
+          )
+          ((= etype "ARC")
+            (strcat
+              (dcw-common-prefix "ARC" data)
+              "{\"center\":" (dcw-point-json (cdr (assoc 10 data)))
+              ",\"radius\":" (dcw-num (cdr (assoc 40 data)))
+              ",\"start_angle_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
+              ",\"end_angle_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 51 data))))
+              ",\"normal\":[0,0,1]}}"
+            )
+          )
+          ((= etype "LWPOLYLINE")
+            (strcat
+              (dcw-common-prefix "LWPOLYLINE" data)
+              "{\"vertices\":" (dcw-lwvertices-json data)
+              ",\"closed\":" (dcw-closed-p data) "}}"
+            )
+          )
+          ((= etype "POLYLINE")
+            (strcat
+              (dcw-common-prefix "POLYLINE" data)
+              "{\"vertices\":" (dcw-polyvertices-json entity)
+              ",\"closed\":" (dcw-closed-p data) "}}"
+            )
+          )
+          ((= etype "TEXT")
+            (strcat
+              (dcw-common-prefix "TEXT" data)
+              "{\"insert\":" (dcw-point-json (cdr (assoc 10 data)))
+              ",\"height\":" (dcw-num (cdr (assoc 40 data)))
+              ",\"text\":" (dcw-json-string (cdr (assoc 1 data)))
+              ",\"rotation_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
+              ",\"alignment\":\"0:0\"}}"
+            )
+          )
+          ((= etype "MTEXT")
+            (strcat
+              (dcw-common-prefix "MTEXT" data)
+              "{\"insert\":" (dcw-point-json (cdr (assoc 10 data)))
+              ",\"height\":" (dcw-num (cdr (assoc 40 data)))
+              ",\"raw_content\":" (dcw-json-string (dcw-mtext-content data))
+              ",\"plain_text\":" (dcw-json-string (dcw-mtext-content data))
+              ",\"rotation_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
+              "}}"
+            )
+          )
+          ((= etype "INSERT")
+            (progn
+              (setq blockname (cdr (assoc 2 data)))
+              (strcat
+                (dcw-common-prefix "INSERT" data)
+                "{\"insert\":" (dcw-point-json (cdr (assoc 10 data)))
+                ",\"scale\":[" (dcw-num (cdr (assoc 41 data))) "," (dcw-num (cdr (assoc 42 data))) "," (dcw-num (cdr (assoc 43 data))) "]"
+                ",\"rotation_deg\":" (dcw-num (dcw-angle-deg (cdr (assoc 50 data))))
+                ",\"block_name\":" (dcw-json-string blockname)
+                ",\"attributes\":[]}}"
+              )
+            )
+          )
+          (T nil)
         )
-        (T nil)
       )
     )
   )
@@ -252,25 +434,49 @@ LISP_EXTRACTOR = r"""
   (write-line "]," f)
 )
 
-(defun dcw-write-entities (f / entity json first count maxcount)
+(defun dcw-write-entities (f / entity json first count maxcount ss index total truncated)
   (write-line "\"entities\":[" f)
   (setq first T)
   (setq count 0)
+  (setq truncated nil)
   (setq maxcount (if (and (boundp 'DCW_MAX_ENTITIES) (numberp DCW_MAX_ENTITIES)) DCW_MAX_ENTITIES 200000))
-  (setq entity (entnext))
-  (while (and entity (< count maxcount))
-    (setq json (dcw-entity-json entity))
-    (if json
-      (progn
-        (if first (setq first nil) (princ "," f))
-        (write-line json f)
-        (setq count (1+ count))
+  (if (dcw-roi-active-p)
+    (progn
+      (setq ss (ssget "_C" (list DCW_ROI_MINX DCW_ROI_MINY 0.0) (list DCW_ROI_MAXX DCW_ROI_MAXY 0.0)))
+      (setq index 0)
+      (setq total (if ss (sslength ss) 0))
+      (while (and ss (< index total) (< count maxcount))
+        (setq entity (ssname ss index))
+        (setq json (dcw-entity-json entity))
+        (if json
+          (progn
+            (if first (setq first nil) (princ "," f))
+            (write-line json f)
+            (setq count (1+ count))
+          )
+        )
+        (setq index (1+ index))
       )
+      (if (and ss (< index total) (>= count maxcount)) (setq truncated T))
     )
-    (setq entity (entnext entity))
+    (progn
+      (setq entity (entnext))
+      (while (and entity (< count maxcount))
+        (setq json (dcw-entity-json entity))
+        (if json
+          (progn
+            (if first (setq first nil) (princ "," f))
+            (write-line json f)
+            (setq count (1+ count))
+          )
+        )
+        (setq entity (entnext entity))
+      )
+      (if (and entity (>= count maxcount)) (setq truncated T))
+    )
   )
   (write-line "]," f)
-  (write-line (strcat "\"metadata\":{\"autocad_dwg_json_bridge\":{\"entity_count\":" (itoa count) ",\"truncated\":" (if (and entity (>= count maxcount)) "true" "false") "}}") f)
+  (write-line (strcat "\"metadata\":{\"autocad_dwg_json_bridge\":{\"entity_count\":" (itoa count) ",\"truncated\":" (if truncated "true" "false") "}}") f)
 )
 
 (defun DCW_EXPORT (/ f acadver)
