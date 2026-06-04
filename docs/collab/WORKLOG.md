@@ -199,3 +199,4 @@
 - 2026-06-03 Codex: Wired the accuracy metric evaluator to optional real DWG backend selection and made target-blocked coverage report as blocked instead of passed.
 - 2026-06-04 Codex: Added a ZWCAD native DWG JSON bridge with COM and LISP-COM extraction modes, verified native provenance on a real AC1018 DWG, and smoke-tested one real accuracy pair through the evaluator.
 - 2026-06-04 Codex: Added import caching and progress logging to the accuracy evaluator, stopped a slow uncached ZWCAD full run, and hardened the ZWCAD bridge to open DWGs read-only and close without save prompts.
+- 2026-06-04 Codex: Re-ran a 3-pair ZWCAD accuracy smoke after no-save hardening; all three real pairs evaluated as TP with no skipped imports or lingering ZWCAD process.
