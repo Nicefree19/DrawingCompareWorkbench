@@ -210,6 +210,10 @@ class MarkedArtifact:
     cloud_region_count: int = 0
     cloud_omitted_zone_count: int = 0
     warnings: list[str] = field(default_factory=list)
+    # P0-2b — RigidTransform.to_dict() (after->before) from the comparison
+    # metadata, carried through the artifact manifest so the viewer can warp the
+    # after raster into the before frame. None = no significant alignment.
+    alignment: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -230,6 +234,7 @@ class MarkedArtifact:
             "cloud_region_count": self.cloud_region_count,
             "cloud_omitted_zone_count": self.cloud_omitted_zone_count,
             "warnings": self.warnings,
+            "alignment": self.alignment,
         }
 
 
@@ -793,6 +798,11 @@ def export_change_artifacts(
             raw_change_count=_result_change_count(result),
             cloud_export_mode=cloud_options.export_mode,
         )
+        # P0-2b — carry the rigid alignment (after->before) so the viewer can
+        # visually align the after raster. Only a dict survives (defensive).
+        _alignment_meta = result.metadata.get("alignment")
+        if isinstance(_alignment_meta, dict):
+            artifact.alignment = _alignment_meta
         try:
             zones = build_change_zones(
                 result,

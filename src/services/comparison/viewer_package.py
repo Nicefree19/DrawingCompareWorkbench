@@ -802,6 +802,9 @@ def export_viewer_package(
             "compare_pdf_dpi": pair_pdf_dpi if has_pdf_visual_background else None,
             "display_overlay_space": display_overlay_space,
             "transform_quality": hybrid_transform_quality if is_hybrid_pdf_visual_pair else "",
+            # P0-2b — rigid alignment (after->before) carried from the artifact
+            # manifest; the zone render warps the after raster when significant.
+            "alignment": pair_artifact.get("alignment"),
             "before_transform": before_transform,
             "after_transform": after_transform,
             "before_image": before_image,

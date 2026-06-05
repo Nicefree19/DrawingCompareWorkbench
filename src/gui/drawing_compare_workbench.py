@@ -1953,6 +1953,7 @@ class ZoneCropRenderWorker(QThread):
                     world_window=window,
                     cache_root=self.viewer_cache_root,
                     dxf_cache_dir=self.dxf_cache_dir,
+                    alignment=self.viewer_pair.get("alignment"),  # P0-2b
                 )
             )
             result_payload = result.to_dict()
@@ -2016,6 +2017,8 @@ def _local_overlays_for_zone(
 ) -> list[dict]:
     before_transform = result_payload.get("before_transform") or {}
     after_transform = result_payload.get("after_transform") or {}
+    from src.services.comparison.render_alignment import align_marker_bbox  # P0-2b
+    after_marker_tf = result_payload.get("after_marker_world_transform")
     window = result_payload.get("world_window") or {}
     try:
         window_bbox = [window["xmin"], window["ymin"], window["xmax"], window["ymax"]]
@@ -2025,7 +2028,7 @@ def _local_overlays_for_zone(
     for item_source in overlays:
         item_zone_id = str(item_source.get("zone_id") or "")
         before_bbox = _bbox_for_zone_crop_transform(item_source, viewer_pair, before=True)
-        after_bbox = _bbox_for_zone_crop_transform(item_source, viewer_pair, before=False)
+        after_bbox = align_marker_bbox(_bbox_for_zone_crop_transform(item_source, viewer_pair, before=False), after_marker_tf)
         bbox = union_bboxes(before_bbox, after_bbox)
         if item_zone_id != zone_id and window_bbox and bbox and not _cad_boxes_intersect(bbox, window_bbox):
             continue
@@ -2044,7 +2047,7 @@ def _local_overlays_for_zone(
     if not any(str(item.get("zone_id") or "") == zone_id for item in selected):
         item = dict(overlay)
         before_bbox = _bbox_for_zone_crop_transform(item, viewer_pair, before=True)
-        after_bbox = _bbox_for_zone_crop_transform(item, viewer_pair, before=False)
+        after_bbox = align_marker_bbox(_bbox_for_zone_crop_transform(item, viewer_pair, before=False), after_marker_tf)
         before_px = zone_bbox_to_pixel_rect(before_bbox, before_transform)
         after_px = zone_bbox_to_pixel_rect(after_bbox, after_transform)
         if before_px:

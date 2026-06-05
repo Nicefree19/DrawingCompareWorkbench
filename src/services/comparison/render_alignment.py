@@ -193,6 +193,27 @@ def align_world_bbox(
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
+def align_marker_bbox(
+    bbox: Optional[Sequence[float]], marker_world_transform: Optional[Dict[str, Any]]
+) -> Optional[Sequence[float]]:
+    """Map an after-frame marker bbox into the before frame using the transform
+    dict emitted by the renderer (``after_marker_world_transform`` = T, after->before).
+
+    Thin convenience for the monolith call site: builds the ``RigidTransform`` and
+    delegates to :func:`align_world_bbox`. Identity when the transform is absent
+    (no warp happened) so unaligned renders keep current marker positions.
+    """
+    if not marker_world_transform:
+        return bbox
+    from .global_alignment import RigidTransform
+
+    try:
+        rigid = RigidTransform.from_dict(marker_world_transform)
+    except (TypeError, ValueError):
+        return bbox
+    return align_world_bbox(bbox, rigid)
+
+
 def warp_after_image(image: Any, pixel_affine: Optional[Affine], out_size: Tuple[int, int]) -> Any:
     """Warp an after-image numpy array by ``pixel_affine`` into ``out_size``.
 
