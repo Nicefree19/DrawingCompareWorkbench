@@ -1448,7 +1448,16 @@ class DxfComparator:
         entities_a: Dict[str, List[NormalizedEntity]],
         entities_b: Dict[str, List[NormalizedEntity]],
     ) -> Optional["RigidTransform"]:  # noqa: F821 — forward ref to local import
-        """Phase O2 — SensitivityConfig 토글 + ignore-layers 필터 후 추정."""
+        """Phase O2 — SensitivityConfig 토글 + ignore-layers 필터 후 추정.
+
+        P0-1: sets the transient ``self._alignment_low_confidence`` flag when
+        the estimator rejects the alignment (returns None) DESPITE enough
+        geometry to attempt it — i.e. a low-inlier rejection rather than
+        "feature disabled" or "too little data". The call site copies the
+        flag into ``result.metadata`` so the GUI badge can surface it. This
+        does not change estimate_rigid_transform's contract.
+        """
+        self._alignment_low_confidence = False
         if self._config is None or not getattr(
             self._config.sensitivity, "global_alignment_enabled", True
         ):
@@ -1488,11 +1497,25 @@ class DxfComparator:
         except ImportError:
             return None
 
+        # Enough geometry on both sides to expect a real attempt? Below this
+        # an empty result is "too little data", not a low-confidence reject —
+        # don't cry wolf. Mirrors the large-mode anchor floor used above.
+        _MIN_ANCHORS = 8
+        candidate_total = sum(len(v) for v in filtered_a.values()) + sum(
+            len(v) for v in filtered_b.values()
+        )
+
         try:
-            return estimate_rigid_transform(filtered_a, filtered_b)
+            transform = estimate_rigid_transform(filtered_a, filtered_b)
         except Exception:
             logger.exception("global alignment estimation failed — continuing without")
             return None
+
+        if transform is None and candidate_total >= _MIN_ANCHORS:
+            # Estimator rejected the alignment (e.g. inlier ratio < threshold)
+            # even though there was ample geometry → low confidence.
+            self._alignment_low_confidence = True
+        return transform
 
     def _is_pure_alignment_artifact(
         self,
@@ -2229,6 +2252,11 @@ class DxfComparator:
             result.metadata["alignment"] = alignment.to_dict()
             if alignment.is_significant:
                 result.metadata["applied_global_shift_mm"] = (alignment.dx, alignment.dy)
+        elif getattr(self, "_alignment_low_confidence", False):
+            # P0-1: estimator rejected the alignment despite ample geometry.
+            # Surface it so the GUI badge warns the user instead of silently
+            # comparing un-aligned. Matching is unchanged (no tolerance edit).
+            result.metadata["alignment_low_confidence"] = True
 
         # 삭제/추가 분리
         deleted = [c for c in result.changes if c.change_type == DxfChangeType.DELETED]

@@ -168,3 +168,74 @@ class TestGuardInteractions:
         a = _ToyChange(location=(150.0, 100.0), metadata={"layer": "MISC"})
         align = _alignment(dx=-50.0, inlier_ratio=0.95)
         assert cmp._is_pure_alignment_artifact(d, a, align) is False
+
+
+@dataclass
+class _Anchor:
+    """Minimal NormalizedEntity surface for alignment-input filtering."""
+
+    layer: str = "BEAM"
+    location: Tuple[float, float] = (0.0, 0.0)
+
+
+def _entities(count: int) -> Dict[str, Any]:
+    return {"LINE": [_Anchor(location=(float(i), 0.0)) for i in range(count)]}
+
+
+class TestLowConfidenceFlag:
+    """P0-1 — silently-rejected low-inlier alignment becomes a user signal."""
+
+    def test_flag_set_when_rejected_with_ample_geometry(self, monkeypatch) -> None:
+        """estimator returns None despite >=8 anchors → low-confidence flag."""
+        import src.services.comparison.global_alignment as ga
+
+        monkeypatch.setattr(ga, "estimate_rigid_transform", lambda a, b: None)
+        cmp = _make_comparator()
+        out = cmp._estimate_global_alignment(_entities(5), _entities(5))  # 10 total
+        assert out is None
+        assert cmp._alignment_low_confidence is True
+
+    def test_no_flag_when_too_few_anchors(self, monkeypatch) -> None:
+        """Below the anchor floor an empty result is 'too little data',
+        not low confidence — don't cry wolf."""
+        import src.services.comparison.global_alignment as ga
+
+        monkeypatch.setattr(ga, "estimate_rigid_transform", lambda a, b: None)
+        cmp = _make_comparator()
+        out = cmp._estimate_global_alignment(_entities(2), _entities(2))  # 4 total
+        assert out is None
+        assert cmp._alignment_low_confidence is False
+
+    def test_no_flag_when_alignment_succeeds(self, monkeypatch) -> None:
+        import src.services.comparison.global_alignment as ga
+
+        align = _alignment(dx=-50.0, inlier_ratio=0.95)
+        monkeypatch.setattr(ga, "estimate_rigid_transform", lambda a, b: align)
+        cmp = _make_comparator()
+        out = cmp._estimate_global_alignment(_entities(5), _entities(5))
+        assert out is align
+        assert cmp._alignment_low_confidence is False
+
+    def test_flag_written_to_result_metadata(self, monkeypatch) -> None:
+        """The call site copies the transient flag into result.metadata."""
+
+        def _fake(self_, a, b):
+            self_._alignment_low_confidence = True
+            return None
+
+        monkeypatch.setattr(DxfComparator, "_estimate_global_alignment", _fake)
+        cmp = _make_comparator()
+        result = cmp.compare_with_modified_detection({}, {})
+        assert result.metadata.get("alignment_low_confidence") is True
+
+    def test_clean_run_has_no_low_confidence_key(self, monkeypatch) -> None:
+        """No alignment + no rejection → key absent (honest clean run)."""
+
+        def _fake(self_, a, b):
+            self_._alignment_low_confidence = False
+            return None
+
+        monkeypatch.setattr(DxfComparator, "_estimate_global_alignment", _fake)
+        cmp = _make_comparator()
+        result = cmp.compare_with_modified_detection({}, {})
+        assert "alignment_low_confidence" not in result.metadata
