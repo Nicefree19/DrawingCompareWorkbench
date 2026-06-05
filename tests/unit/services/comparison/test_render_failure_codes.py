@@ -373,6 +373,10 @@ def test_mapper_known_warning_substring_maps() -> None:
     assert codes_from_comparison_result(
         warnings=["완전히 모르는 경고 문자열"], metadata={}
     ) == ()
+    # resilient-render skip warning reuses the existing partial-render code
+    assert codes_from_comparison_result(
+        warnings=["dxf_render:entities_skipped:2"], metadata={}
+    ) == ("vector_draw_partial",)
 
 
 def test_mapper_passes_through_zone_codes_and_dedupes() -> None:

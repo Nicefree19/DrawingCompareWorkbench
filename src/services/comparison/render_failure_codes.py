@@ -294,6 +294,10 @@ _WARNING_SUBSTRING_TO_CODE: Final[Tuple[Tuple[str, RenderFailureCode], ...]] = (
     ("신뢰도 낮음", "alignment_low_confidence"),
     ("quality LOW", "alignment_low_confidence"),
     ("alignment quality low", "alignment_low_confidence"),
+    # zone render skipped un-renderable entities (e.g. malformed MULTILEADER from
+    # a DWG->DXF conversion). Reuses the existing partial-render code rather than
+    # minting a new one.
+    ("entities_skipped", "vector_draw_partial"),
 )
 
 

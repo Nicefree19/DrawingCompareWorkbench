@@ -1166,7 +1166,7 @@ def _render_source_crop(
     # actually saving on each render. ``_render_dxf_window`` returns
     # ``(visible_count, total_count, prefilter_skipped)`` so the caller
     # can surface them as warnings consumed by the validator + GUI.
-    visible_count, total_count, prefilter_skipped = _render_dxf_window(
+    visible_count, total_count, prefilter_skipped, entities_skipped = _render_dxf_window(
         render_index, output_path, window, transform
     )
     if prefilter_skipped:
@@ -1177,6 +1177,17 @@ def _render_source_crop(
         warnings.append(
             f"dxf_prefilter:applied:visible_entities={visible_count}/"
             f"{total_count}"
+        )
+    if entities_skipped > 0:
+        # Honest degradation — some entities could not be drawn (e.g. malformed
+        # MULTILEADER from a DWG->DXF conversion). The crop still renders the rest
+        # instead of blanking; surface the count so it is visible, not silent.
+        warnings.append(f"dxf_render:entities_skipped:{entities_skipped}")
+        logger.warning(
+            "zone render skipped %d un-renderable entit%s in %s",
+            entities_skipped,
+            "y" if entities_skipped == 1 else "ies",
+            output_path.name,
         )
 
 
@@ -1392,19 +1403,61 @@ def _build_entity_envelopes(msp: Any, cache: Any) -> list[EntityEnvelope]:
 _DXF_PREFILTER_THRESHOLD = 200
 
 
+_RESILIENT_FRONTEND_CLS: Any = None
+
+
+def _resilient_frontend_class(dxf_module: Any) -> Any:
+    """Memoized ``Frontend`` subclass that never lets one malformed entity blank
+    the whole render.
+
+    A converted-DWG DXF can contain entities ezdxf cannot draw (e.g. a
+    MULTILEADER whose virtual MTEXT has an empty style name ->
+    ``doc.styles.get("")`` -> ``DXFTableEntryError``). ``draw_layout`` is a single
+    call, so without this the first such entity aborts the entire crop. The
+    per-entity exception propagates through ``draw_entity``, so guarding that one
+    method renders everything else and records what was skipped (surfaced as a
+    warning + failure code — honest degradation, never a silent blank).
+    """
+    global _RESILIENT_FRONTEND_CLS
+    if _RESILIENT_FRONTEND_CLS is None:
+
+        class _ResilientFrontend(dxf_module.Frontend):  # type: ignore[name-defined,misc]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.skipped_handles: list[str] = []
+
+            def draw_entity(self, entity: Any, properties: Any) -> None:  # type: ignore[override]
+                try:
+                    super().draw_entity(entity, properties)
+                except Exception as exc:  # noqa: BLE001 — render-resilience guard
+                    handle = getattr(getattr(entity, "dxf", None), "handle", None)
+                    self.skipped_handles.append(str(handle) if handle is not None else "?")
+                    logger.debug(
+                        "skipped un-renderable %s (handle=%s): %s",
+                        getattr(entity, "dxftype", lambda: "?")(),
+                        handle,
+                        type(exc).__name__,
+                    )
+
+        _RESILIENT_FRONTEND_CLS = _ResilientFrontend
+    return _RESILIENT_FRONTEND_CLS
+
+
 def _render_dxf_window(
     render_index: DrawingRenderIndex,
     output_path: Path,
     window: WorldWindow,
     transform: dict[str, Any],
-) -> tuple[int, int, bool]:
-    """Render the DXF window. Plan §17 Phase B-3 returns
+) -> tuple[int, int, bool, int]:
+    """Render the DXF window. Returns
 
-        (visible_entity_count, total_entity_count, prefilter_skipped)
+        (visible_entity_count, total_entity_count, prefilter_skipped, entities_skipped)
 
-    so callers can surface entity-pre-filter telemetry.
-    ``prefilter_skipped`` is True when the modelspace is below the
-    skip threshold and the full layout was drawn without a filter.
+    so callers can surface entity-pre-filter telemetry. ``prefilter_skipped`` is
+    True when the modelspace is below the skip threshold and the full layout was
+    drawn without a filter. ``entities_skipped`` counts entities that raised while
+    drawing and were skipped to avoid blanking the whole crop (see
+    :func:`_resilient_frontend_class`).
     """
     from .dxf_renderer import RENDERER_AVAILABLE
 
@@ -1451,17 +1504,14 @@ def _render_dxf_window(
             background_policy=drawing_config.BackgroundPolicy.WHITE,
         )
 
+        frontend = _resilient_frontend_class(dxf_module)(
+            context, backend, config=render_config
+        )
         if filter_func is None:
-            dxf_module.Frontend(context, backend, config=render_config).draw_layout(
-                msp,
-                finalize=False,
-            )
+            frontend.draw_layout(msp, finalize=False)
         else:
-            dxf_module.Frontend(context, backend, config=render_config).draw_layout(
-                msp,
-                finalize=False,
-                filter_func=filter_func,
-            )
+            frontend.draw_layout(msp, finalize=False, filter_func=filter_func)
+        entities_skipped = len(getattr(frontend, "skipped_handles", ()))
         ax.set_xlim(window.xmin, window.xmax)
         ax.set_ylim(window.ymin, window.ymax)
         ax.set_aspect("equal", adjustable="box")
@@ -1473,7 +1523,7 @@ def _render_dxf_window(
     finally:
         dxf_module.plt.close(fig)
 
-    return len(visible_handles), total_count, prefilter_skipped
+    return len(visible_handles), total_count, prefilter_skipped, entities_skipped
 
 
 def visible_handles_for_window(render_index: DrawingRenderIndex, window: WorldWindow) -> set[str]:
