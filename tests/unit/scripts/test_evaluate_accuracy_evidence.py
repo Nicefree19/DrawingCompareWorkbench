@@ -1444,3 +1444,20 @@ def test_evaluate_roi_max_attempts_caps_cad_launches(tmp_path: Path, monkeypatch
     assert pair_report["roi_retry"]["capped_at_max_attempts"] is True
     # one attempt = before + after only, not the full 3-margin sweep (which would be 6)
     assert import_calls == 2
+
+
+def test_temporary_bridge_roi_args_restores_on_exception() -> None:
+    """The ROI args context manager must restore args_template even when the body
+    raises, so a failed ROI import never leaves a stale --roi-json on a shared adapter."""
+    class _Adapter:
+        args_template = ("bridge.py", "{input}", "{acadver}")
+
+    adapter = _Adapter()
+    original = adapter.args_template
+    try:
+        with evaluator._temporary_bridge_roi_args(adapter, {"bbox": [0, 0, 10, 10], "margin": 5}):
+            assert "--roi-json" in adapter.args_template
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert adapter.args_template == original

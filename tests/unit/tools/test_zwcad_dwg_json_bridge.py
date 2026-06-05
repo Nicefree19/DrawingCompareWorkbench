@@ -739,3 +739,19 @@ def test_suppress_open_dialogs_no_active_document_is_noop() -> None:
         ActiveDocument = None
 
     bridge._suppress_open_dialogs(_App())  # must not raise
+
+
+def test_main_returns_timeout_exit_code_on_bridge_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(_args):
+        raise bridge.BridgeTimeoutError("ZWCAD LISP COM extractor exceeded wall timeout")
+
+    monkeypatch.setattr(bridge, "run_bridge", boom)
+    assert bridge.main(["x.dwg", "AC1015"]) == bridge.TIMEOUT_EXIT_CODE == 124
+
+
+def test_main_returns_one_on_other_bridge_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(_args):
+        raise bridge.BridgeError("missing input")
+
+    monkeypatch.setattr(bridge, "run_bridge", boom)
+    assert bridge.main(["x.dwg", "AC1015"]) == 1

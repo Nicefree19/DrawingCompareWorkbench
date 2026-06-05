@@ -254,3 +254,55 @@ def test_timeout_cleanup_retries_failed_kill(monkeypatch: pytest.MonkeyPatch) ->
     result = adapter_module._cleanup_spawned_images({"ZWCAD.exe": {100}}, grace_seconds=3600.0)
     assert result == {"ZWCAD.exe": [200]}
     assert attempts == [200, 200]  # retried after the first failure
+
+
+def test_commercial_json_bridge_maps_timeout_exit_code_without_stderr_text(tmp_path: Path) -> None:
+    """A bridge that exits with the structured timeout code is classified as
+    IMPORT_TIMEOUT even when stderr carries no 'timeout' wording (finding 12b)."""
+    bridge = tmp_path / "exit124_bridge.py"
+    bridge.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "print('extractor aborted (stage=open_document)', file=sys.stderr)",
+                "raise SystemExit(124)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dwg = tmp_path / "sample_ac1032.dwg"
+    dwg.write_bytes(b"AC1032 exit code timeout test")
+    adapter = CommercialDwgJsonBridgeAdapter(
+        command=sys.executable,
+        args_template=(str(bridge), "{input}", "{acadver}"),
+        license_id="COMMERCIAL-APPROVED",
+        supported_versions=("AC1032",),
+        timeout_seconds=10,
+    )
+
+    with pytest.raises(DwgImportError) as exc_info:
+        adapter.read_file(dwg, DwgVersionDetector.detect_bytes(dwg.read_bytes()))
+
+    assert exc_info.value.code == DwgFailureCode.IMPORT_TIMEOUT
+    assert exc_info.value.details["timeout_signal"] == "exit_code"
+    assert exc_info.value.details["exit_code"] == 124
+
+
+def test_commercial_json_bridge_nonzero_nontimeout_is_adapter_failed(tmp_path: Path) -> None:
+    """A plain non-zero exit with no timeout code/text stays ADAPTER_FAILED."""
+    bridge = tmp_path / "fail_bridge.py"
+    bridge.write_text("import sys\nprint('bad input', file=sys.stderr)\nraise SystemExit(2)\n", encoding="utf-8")
+    dwg = tmp_path / "sample_ac1032.dwg"
+    dwg.write_bytes(b"AC1032 fail test")
+    adapter = CommercialDwgJsonBridgeAdapter(
+        command=sys.executable,
+        args_template=(str(bridge), "{input}", "{acadver}"),
+        license_id="COMMERCIAL-APPROVED",
+        supported_versions=("AC1032",),
+        timeout_seconds=10,
+    )
+
+    with pytest.raises(DwgImportError) as exc_info:
+        adapter.read_file(dwg, DwgVersionDetector.detect_bytes(dwg.read_bytes()))
+
+    assert exc_info.value.code == DwgFailureCode.ADAPTER_FAILED

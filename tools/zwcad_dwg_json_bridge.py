@@ -38,6 +38,9 @@ DEFAULT_PROG_IDS = ("ZWCAD.Application.2025", "ZWCAD.Application")
 DEFAULT_ZWCAD_EXE_CANDIDATES = (r"C:\Program Files\ZWSOFT\ZWCAD 2025\ZWCAD.exe",)
 DEFAULT_MAX_ENTITIES = 200_000
 DEFAULT_TIMEOUT_SECONDS = 180.0
+# Exit code emitted on a controlled timeout (GNU `timeout` convention). Wire contract
+# with commercial_dwg_json_adapter.BRIDGE_TIMEOUT_EXIT_CODE -- keep the two in sync.
+TIMEOUT_EXIT_CODE = 124
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         payload = run_bridge(args)
+    except BridgeTimeoutError as exc:
+        # Structured timeout signal (GNU `timeout` convention) so the adapter can
+        # classify IMPORT_TIMEOUT by exit code instead of sniffing stderr text.
+        # Must match commercial_dwg_json_adapter.BRIDGE_TIMEOUT_EXIT_CODE.
+        print(str(exc), file=sys.stderr)
+        return TIMEOUT_EXIT_CODE
     except BridgeError as exc:
         print(str(exc), file=sys.stderr)
         return 1

@@ -40,6 +40,12 @@ TIMEOUT_SECONDS_ENV = "DRAWING_COMPARE_COMMERCIAL_DWG_JSON_TIMEOUT_SECONDS"
 TIMEOUT_CLEANUP_IMAGE_NAMES_ENV = "DRAWING_COMPARE_COMMERCIAL_DWG_JSON_TIMEOUT_CLEANUP_IMAGE_NAMES"
 TIMEOUT_CLEANUP_GRACE_SECONDS_ENV = "DRAWING_COMPARE_COMMERCIAL_DWG_JSON_TIMEOUT_CLEANUP_GRACE_SECONDS"
 
+# Exit code the bridge uses to signal a controlled timeout (GNU `timeout` convention).
+# This is the wire contract between the bridge subprocess and this adapter; it must
+# match tools/zwcad_dwg_json_bridge.py TIMEOUT_EXIT_CODE. Structured signalling is
+# preferred over sniffing English text out of stderr.
+BRIDGE_TIMEOUT_EXIT_CODE = 124
+
 
 class CommercialDwgJsonBridgeAdapter(DwgImporterAdapter):
     """Run an approved wrapper that emits adapter-drawing JSON to stdout."""
@@ -118,7 +124,8 @@ class CommercialDwgJsonBridgeAdapter(DwgImporterAdapter):
             ) from exc
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "no bridge output")[:800]
-            if _looks_like_timeout(detail):
+            timed_out_by_code = completed.returncode == BRIDGE_TIMEOUT_EXIT_CODE
+            if timed_out_by_code or _looks_like_timeout(detail):
                 timeout_cleanup_pids = _cleanup_spawned_images(
                     timeout_cleanup_snapshot,
                     grace_seconds=self.timeout_cleanup_grace_seconds,
@@ -126,6 +133,9 @@ class CommercialDwgJsonBridgeAdapter(DwgImporterAdapter):
                 details = {
                     "command": command,
                     "exit_code": completed.returncode,
+                    # Prefer the structured exit code; fall back to stderr text only
+                    # when an older/foreign bridge does not use the timeout code.
+                    "timeout_signal": "exit_code" if timed_out_by_code else "stderr",
                     "timeout_cleanup_image_names": list(self.timeout_cleanup_image_names),
                     "timeout_cleanup_grace_seconds": self.timeout_cleanup_grace_seconds,
                     "timeout_cleanup_pids": timeout_cleanup_pids,
