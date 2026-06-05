@@ -623,7 +623,13 @@ def render_cache_key(job: RenderJob) -> str:
         "after_background_transform": job.after_background_transform or {},
         "alignment": job.alignment or {},
     }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    # surrogatepass: Korean Windows paths can carry lone CP949<->UTF-16 surrogate
+    # codepoints (build_source_signature stores str(resolved)). A plain
+    # .encode("utf-8") raises "surrogates not allowed" here, which surfaced as
+    # "선택 구역 렌더 실패 - 상대 위치 표시를 유지합니다" — the zoom crop never rendered.
+    # Windows still opens the file via the surrogate path, so keep it for access
+    # and only make the hash encoding tolerant.
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8", "surrogatepass")
     return hashlib.sha256(raw).hexdigest()[:32]
 
 
@@ -650,7 +656,7 @@ def render_environment_signature(
         "dxf_cache_dir": str(Path(dxf_cache_dir).resolve()) if dxf_cache_dir else "",
         "font_support_dirs": [_directory_signature(Path(path)) for path in support_dirs],
     }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8", "surrogatepass")
     return hashlib.sha256(raw).hexdigest()[:32]
 
 
@@ -2061,7 +2067,7 @@ def _directory_signature(path: Path) -> dict[str, Any]:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8", errors="surrogatepass"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -2070,7 +2076,11 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # surrogatepass keeps Korean Windows paths (lone CP949<->UTF-16 surrogates)
+    # from raising "surrogates not allowed" on write; _read_json matches it.
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8", errors="surrogatepass"
+    )
     tmp.replace(path)
 
 

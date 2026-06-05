@@ -120,6 +120,31 @@ def _frozen_layer_doc(tmp_path):
     return path
 
 
+def test_render_cache_key_survives_korean_surrogate_path(tmp_path):
+    """A Korean Windows path can carry lone CP949<->UTF-16 surrogate codepoints.
+    render_cache_key must not raise 'surrogates not allowed' (that aborted the
+    zone-crop render -> '선택 구역 렌더 실패 - 상대 위치 표시를 유지합니다')."""
+    from src.services.comparison.zone_render_service import RenderJob, render_cache_key
+
+    surrogate_name = "P5_\udceb_POT_BEARING.dxf"  # lone surrogate U+DCEB
+    job = RenderJob(
+        pair_uuid="p", zone_id="C-001",
+        source_before=__import__("pathlib").Path("C:/x/" + surrogate_name),
+        source_after=__import__("pathlib").Path("C:/x/" + surrogate_name),
+        world_window=WorldWindow(0.0, 0.0, 100.0, 100.0),
+        cache_root=tmp_path, dxf_cache_dir=tmp_path,
+    )
+    key = render_cache_key(job)  # must not raise
+    assert isinstance(key, str) and len(key) == 32
+
+
+def test_source_signature_hash_survives_surrogate_path():
+    from src.services.comparison.source_signature import source_signature_hash
+
+    digest = source_signature_hash("C:/도면/P5_\udceb_상세도.dxf")  # must not raise
+    assert isinstance(digest, str) and len(digest) == 64
+
+
 def test_make_all_layers_visible_thaws_and_turns_on(tmp_path):
     ezdxf = pytest.importorskip("ezdxf")
     from src.services.comparison.zone_render_service import _make_all_layers_visible

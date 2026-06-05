@@ -74,7 +74,13 @@ def source_signature_hash(signature: Union[dict[str, Any], str, Path, None]) -> 
     else:
         payload = build_source_signature(signature)
         payload.pop("source_hash", None)
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # surrogatepass: a Korean Windows source_path may carry lone CP949<->UTF-16
+    # surrogate codepoints; a plain utf-8 encode raises "surrogates not allowed"
+    # and previously aborted the zone-crop render ("선택 구역 렌더 실패"). The file
+    # still opens via the surrogate path, so only the digest encoding is relaxed.
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8", "surrogatepass"
+    )
     return hashlib.sha256(raw).hexdigest()
 
 
