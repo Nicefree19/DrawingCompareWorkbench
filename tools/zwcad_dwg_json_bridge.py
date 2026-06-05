@@ -559,7 +559,7 @@ def _drawing_from_document(
             raw_type = _object_name(entity) or "UNKNOWN"
             skipped[raw_type] = skipped.get(raw_type, 0) + 1
             continue
-        if roi is not None and not _payload_in_roi(payload, roi):
+        if roi is not None and not _entity_in_roi(entity, payload, roi):
             continue
         if len(entities) >= max_entities:
             truncated = True
@@ -796,10 +796,39 @@ def _roi_lisp_lines(roi: dict[str, float] | None) -> list[str]:
     ]
 
 
-def _payload_in_roi(payload: dict[str, Any], roi: dict[str, float]) -> bool:
-    bbox = _payload_bbox(payload)
-    if bbox is None:
-        return True
+def _entity_in_roi(entity: Any, payload: dict[str, Any], roi: dict[str, float]) -> bool:
+    """ROI membership for a live COM entity. Prefer the entity's true geometric extents
+    (GetBoundingBox), which cover block/text bodies regardless of insertion point and
+    give a real box for entities the payload exposes no points for (findings 1 & 6).
+    Fall back to the payload point/bbox test only when GetBoundingBox is unavailable."""
+    bbox = _com_entity_bbox(entity)
+    if bbox is not None:
+        return _bbox_overlaps_roi(bbox, roi)
+    return _payload_in_roi(payload, roi)
+
+
+def _com_entity_bbox(entity: Any) -> tuple[float, float, float, float] | None:
+    getter = getattr(entity, "GetBoundingBox", None)
+    if not callable(getter):
+        return None
+    try:
+        result = getter()
+    except Exception:
+        return None
+    if not result or len(result) != 2:
+        return None
+    minp = _sequence(result[0])
+    maxp = _sequence(result[1])
+    if len(minp) < 2 or len(maxp) < 2:
+        return None
+    xs = [_optional_finite_float(minp[0]), _optional_finite_float(maxp[0])]
+    ys = [_optional_finite_float(minp[1]), _optional_finite_float(maxp[1])]
+    if any(v is None for v in xs) or any(v is None for v in ys):
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))  # type: ignore[type-var]
+
+
+def _bbox_overlaps_roi(bbox: tuple[float, float, float, float], roi: dict[str, float]) -> bool:
     minx, miny, maxx, maxy = bbox
     return not (
         maxx < roi["minx"]
@@ -807,6 +836,13 @@ def _payload_in_roi(payload: dict[str, Any], roi: dict[str, float]) -> bool:
         or maxy < roi["miny"]
         or miny > roi["maxy"]
     )
+
+
+def _payload_in_roi(payload: dict[str, Any], roi: dict[str, float]) -> bool:
+    bbox = _payload_bbox(payload)
+    if bbox is None:
+        return True
+    return _bbox_overlaps_roi(bbox, roi)
 
 
 def _payload_bbox(payload: dict[str, Any]) -> tuple[float, float, float, float] | None:

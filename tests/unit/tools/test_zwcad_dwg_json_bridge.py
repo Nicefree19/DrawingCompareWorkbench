@@ -755,3 +755,40 @@ def test_main_returns_one_on_other_bridge_error(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(bridge, "run_bridge", boom)
     assert bridge.main(["x.dwg", "AC1015"]) == 1
+
+
+class _BBoxEntity:
+    def __init__(self, lo, hi) -> None:
+        self._lo = lo
+        self._hi = hi
+
+    def GetBoundingBox(self):
+        return (self._lo, self._hi)
+
+
+def test_entity_in_roi_uses_real_bbox_for_block_whose_insert_point_is_outside() -> None:
+    """A block reference inserted outside the ROI but whose body overlaps it must be
+    kept (finding 1) -- the point-only test would have wrongly dropped it."""
+    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+    payload = {"type": "INSERT", "geometry": {"insert": [900, 900, 0]}}
+    entity = _BBoxEntity([300, 300, 0], [600, 600, 0])  # body overlaps ROI
+
+    assert bridge._entity_in_roi(entity, payload, roi) is True
+    assert bridge._payload_in_roi(payload, roi) is False  # point-only would exclude
+
+
+def test_entity_in_roi_excludes_block_fully_outside_roi() -> None:
+    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+    payload = {"type": "INSERT", "geometry": {"insert": [900, 900, 0]}}
+    entity = _BBoxEntity([700, 700, 0], [800, 800, 0])
+    assert bridge._entity_in_roi(entity, payload, roi) is False
+
+
+def test_entity_in_roi_falls_back_to_payload_without_getboundingbox() -> None:
+    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+    payload = {"type": "LINE", "geometry": {"start": [0, 300, 0], "end": [1000, 300, 0]}}
+
+    class _NoBox:
+        pass
+
+    assert bridge._entity_in_roi(_NoBox(), payload, roi) is True  # crosses ROI via payload
