@@ -130,6 +130,21 @@ class RigidTransform:
             "candidate_count": self.candidate_count,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RigidTransform":
+        """``to_dict`` 산출물에서 복원한다 (파생 키 theta_deg 등은 무시).
+
+        canonical 필드(dx, dy, theta_rad)만 읽으며 누락 시 0.0으로 방어한다.
+        품질 필드(inlier_ratio, candidate_count)는 있으면 보존한다.
+        """
+        return cls(
+            dx=float(data.get("dx", 0.0)),
+            dy=float(data.get("dy", 0.0)),
+            theta_rad=float(data.get("theta_rad", 0.0)),
+            inlier_ratio=float(data.get("inlier_ratio", 1.0)),
+            candidate_count=int(data.get("candidate_count", 0)),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Candidate pair 수집
