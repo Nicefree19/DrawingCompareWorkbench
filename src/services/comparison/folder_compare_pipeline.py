@@ -45,6 +45,7 @@ from .drawing_batch import (
     scan_drawing_inputs,
 )
 from .dwg_dxf_fallback import (
+    auto_convert_unsupported_dwg,
     fallback_review_notice,
     resolve_dwg_dxf_fallback_pair,
 )
@@ -344,6 +345,30 @@ class FolderComparePipeline:
                     source_a_input,
                     fallback_resolution.source_b,
                     source_b_input,
+                )
+            # When no pre-converted sibling DXF exists, auto-convert an
+            # unsupported DWG (e.g. AC1032) with ODA File Converter so "just give
+            # a DWG" works. No-op when ODA is absent -> the preflight still emits
+            # its actionable message instead of a silent pass.
+            source_a_input, _oda_conv_a, _oda_note_a = auto_convert_unsupported_dwg(
+                source_a_input, dxf_cache_dir
+            )
+            source_b_input, _oda_conv_b, _oda_note_b = auto_convert_unsupported_dwg(
+                source_b_input, dxf_cache_dir
+            )
+            if _oda_conv_a or _oda_conv_b:
+                logger.info(
+                    "ODA auto-converted unsupported DWG -> DXF (a=%s, b=%s)",
+                    _oda_note_a,
+                    _oda_note_b,
+                )
+                run_manifest.stage(
+                    "dwg_oda_autoconvert",
+                    "completed",
+                    source_a_note=_oda_note_a,
+                    source_b_note=_oda_note_b,
+                    effective_source_a=str(source_a_input),
+                    effective_source_b=str(source_b_input),
                 )
             preflight_started = time.perf_counter()
             preflight = run_preflight(

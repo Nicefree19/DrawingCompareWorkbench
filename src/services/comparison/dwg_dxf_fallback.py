@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional, Union
+from typing import Any, Iterable, Optional, Tuple, Union
 
 from .dwg_importer import DwgImportError, DwgVersionDetector
+from .source_signature import source_cache_stem, source_signature_hash
+
+logger = logging.getLogger(__name__)
 
 FALLBACK_ROOT_NAMES = (
     "dxf_registered",
@@ -391,3 +396,86 @@ def _normal_stem(value: str) -> str:
 
 def _is_existing_file_with_suffix(path: Path, suffix: str) -> bool:
     return path.exists() and path.is_file() and path.suffix.lower() == suffix
+
+
+def auto_convert_unsupported_dwg(
+    source: Union[str, Path],
+    dxf_cache_dir: Union[str, Path],
+    *,
+    output_version: str = "ACAD2018",
+    timeout_seconds: int = 180,
+) -> Tuple[Path, bool, str]:
+    """Auto-convert a natively-unsupported DWG to a cached DXF via ODA File Converter.
+
+    This makes "just give a DWG" work: when ``resolve_dwg_dxf_fallback_pair`` found
+    no pre-converted sibling DXF and the DWG version is unreadable by the native
+    adapter (e.g. AC1032), convert it once with ODA File Converter (if installed)
+    and reuse the cached DXF on later runs. The result is a DXF, so the downstream
+    preflight + native DXF reader proceed normally.
+
+    Returns ``(effective_path, converted, note)``. When ``source`` is not a DWG,
+    is a natively-supported DWG, or ODA is unavailable / fails, the original path
+    is returned with ``converted=False`` so existing behaviour (pre-converted DXF
+    or the honest preflight error) is preserved — never a silent substitution.
+    """
+
+    src = Path(source)
+    if src.suffix.lower() != ".dwg":
+        return src, False, "not_dwg"
+
+    # Only convert versions the native adapter cannot read; a supported DWG is
+    # left for the native path. An undetectable version still gets a repair-convert
+    # attempt (ODA's audit pass often recovers it) rather than failing outright.
+    try:
+        version = DwgVersionDetector.detect_file(src)
+        if version.supported:
+            return src, False, "native_supported"
+    except Exception:  # noqa: BLE001 — detection best-effort
+        pass
+
+    try:
+        from .dwg_converter import DwgConverter, ODAConverterNotFoundError
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning("DWG converter module unavailable: %s", exc)
+        return src, False, "converter_module_unavailable"
+
+    try:
+        converter = DwgConverter()
+    except ODAConverterNotFoundError:
+        # No converter installed — keep the original so the preflight emits its
+        # actionable "install ODA / pre-convert" message instead of a silent pass.
+        return src, False, "oda_unavailable"
+
+    cache_dir = Path(dxf_cache_dir) / "oda_auto"
+    cached = cache_dir / f"{source_cache_stem(src)}__{source_signature_hash(src)[:16]}.dxf"
+    try:
+        if cached.exists() and cached.stat().st_size > 0:
+            return cached, True, "oda_cache_hit"
+    except OSError:
+        pass
+
+    try:
+        converted = converter.convert(src, output_version=output_version, timeout=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 — conversion failure stays non-fatal
+        logger.warning("ODA auto-convert failed for %s: %s", src, exc)
+        return src, False, f"oda_failed:{type(exc).__name__}"
+
+    converted = Path(converted)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(converted, cached)
+        result = cached
+        note = "oda_converted"
+    except Exception as exc:  # noqa: BLE001 — fall back to the temp output path
+        logger.warning("Failed to cache ODA-converted DXF for %s: %s", src, exc)
+        result, note = converted, "oda_converted_uncached"
+    finally:
+        if note != "oda_converted_uncached":
+            # ODA writes the DXF into a temp output dir; drop it once cached.
+            try:
+                shutil.rmtree(converted.parent, ignore_errors=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+    logger.info("ODA auto-converted unsupported DWG -> DXF: %s -> %s", src.name, result)
+    return result, True, note
