@@ -259,4 +259,33 @@ def collect_viewport_failure_codes(*viewports) -> Tuple[RenderFailureCode, ...]:
     return tuple(collected)
 
 
+def badge_codes_for_run(viewports, items) -> Tuple[RenderFailureCode, ...]:
+    """One-call badge code set for a completed comparison run (P0-1).
+
+    Merges *fresh* viewport-side codes (backend fallbacks, vector-draw
+    failures — re-read now, not stale init state) with run-level
+    degradation codes derived from each pair's result
+    (``alignment_low_confidence`` / ``alignment_not_applied``, zone
+    failures), then dedupes so the badge count is accurate. Keeps the
+    workbench monolith thin: it just calls this with its viewports and
+    ``compare_summary.items``.
+
+    Args:
+        viewports: iterable of viewport-like objects (see
+            :func:`collect_viewport_failure_codes`).
+        items: iterable of ``BatchCompareItemResult``-like objects, each
+            exposing ``.result`` with ``.warnings`` / ``.metadata``.
+    """
+
+    from src.services.comparison.render_failure_codes import (
+        aggregate_run_failure_codes,
+        dedupe_failure_codes,
+    )
+
+    return dedupe_failure_codes(
+        collect_viewport_failure_codes(*viewports)
+        + aggregate_run_failure_codes(items)
+    )
+
+
 __all__ = ["FailureBadge", "collect_viewport_failure_codes"]

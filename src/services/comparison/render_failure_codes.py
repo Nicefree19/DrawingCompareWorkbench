@@ -316,6 +316,17 @@ def _dedupe_codes(codes: Tuple[RenderFailureCode, ...]) -> Tuple[RenderFailureCo
     return tuple(out)
 
 
+def dedupe_failure_codes(codes: object) -> Tuple[RenderFailureCode, ...]:
+    """Public order-preserving dedupe (drops ``"ok"`` / invalid codes).
+
+    Lets the GUI merge fresh viewport codes with run-level codes into a
+    single, accurate ``FailureBadge.set_failure_codes(...)`` call without
+    inflating the displayed count with duplicates.
+    """
+
+    return _dedupe_codes(tuple(codes or ()))
+
+
 def codes_from_comparison_result(
     *,
     warnings: object = (),

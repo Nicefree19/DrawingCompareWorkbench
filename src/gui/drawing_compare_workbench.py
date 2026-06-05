@@ -10586,6 +10586,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.summary_labels["omitted"].setText(_format_count(artifact.cloud_omitted_zone_count))
         self._update_review_queue_summary_v2()
         self._update_viewer_perf_summary_v2()
+        from src.gui.failure_badge import badge_codes_for_run  # P0-1 honesty badge refresh
+        self.failure_badge.set_failure_codes(badge_codes_for_run(
+            (self.preview_before_lightweight_v2, self.preview_after_lightweight_v2),
+            self._result.compare_summary.items))
 
     def _update_viewer_perf_summary_v2(self) -> None:
         if not hasattr(self, "lbl_viewer_perf_v2"):

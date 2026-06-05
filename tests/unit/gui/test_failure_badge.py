@@ -312,3 +312,81 @@ def test_collect_viewport_failure_codes_integrates_with_real_lightweight_viewpor
     codes = collect_viewport_failure_codes(vp)
 
     assert "backend_fallback_canvas_skeleton" in codes
+
+
+# ---------------------------------------------------------------------------
+# P0-1 — badge_codes_for_run (viewport + run-level merge for the monolith)
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, field  # noqa: E402
+from typing import Any, Dict, List, Tuple  # noqa: E402
+
+
+class _FakeViewport:
+    def __init__(self, codes: Tuple[str, ...]) -> None:
+        self._codes = codes
+
+    def render_failure_codes(self) -> Tuple[str, ...]:
+        return self._codes
+
+
+@dataclass
+class _FakeResult:
+    warnings: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _FakeItem:
+    result: Any = None
+
+
+def test_badge_codes_for_run_merges_viewport_and_run_codes() -> None:
+    """P0-1: a low-confidence alignment AND a backend fallback both surface."""
+    from src.gui.failure_badge import badge_codes_for_run
+
+    viewports = (_FakeViewport(("backend_fallback_canvas_skeleton",)),)
+    items = [_FakeItem(result=_FakeResult(metadata={"alignment_low_confidence": True}))]
+    codes = badge_codes_for_run(viewports, items)
+    assert "alignment_low_confidence" in codes
+    assert "backend_fallback_canvas_skeleton" in codes
+
+
+def test_badge_codes_for_run_dedupes_count_accurately() -> None:
+    """A code present in both viewport and run output appears once."""
+    from src.gui.failure_badge import badge_codes_for_run
+
+    viewports = (_FakeViewport(("vector_draw_failed", "ok")),)
+    items = [
+        _FakeItem(result=_FakeResult(metadata={"zone_failure_codes": ("vector_draw_failed",)})),
+    ]
+    # zone_failure_codes is read off the result by aggregate_run_failure_codes
+    codes = badge_codes_for_run(viewports, items)
+    assert codes.count("vector_draw_failed") == 1
+    assert "ok" not in codes  # HIDDEN dropped
+
+
+def test_badge_codes_for_run_clean_run_hides_badge() -> None:
+    """A clean run with a healthy viewport yields no codes → badge hidden."""
+    _ensure_app()
+    from src.gui.failure_badge import FailureBadge, badge_codes_for_run
+
+    viewports = (_FakeViewport(("ok",)),)
+    items = [_FakeItem(result=_FakeResult())]
+    badge = FailureBadge()
+    badge.set_failure_codes(badge_codes_for_run(viewports, items))
+    assert not badge.isVisible()
+    assert badge.failure_codes() == ()
+
+
+def test_badge_codes_for_run_low_confidence_makes_badge_visible() -> None:
+    """End-to-end: a degraded run lights the badge (the P0-1 fix)."""
+    _ensure_app()
+    from src.gui.failure_badge import FailureBadge, badge_codes_for_run
+
+    viewports = (_FakeViewport(()),)
+    items = [_FakeItem(result=_FakeResult(metadata={"alignment_low_confidence": True}))]
+    badge = FailureBadge()
+    badge.set_failure_codes(badge_codes_for_run(viewports, items))
+    assert badge.isVisible()
+    assert "alignment_low_confidence" in badge.failure_codes()
