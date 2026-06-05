@@ -874,12 +874,12 @@ def _roi_request_from_expected_changes(pair: dict[str, Any], margin: float) -> d
             boxes.append(parsed)
     if not boxes:
         return None
-    minx = min(box[0] for box in boxes)
-    miny = min(box[1] for box in boxes)
-    maxx = max(box[2] for box in boxes)
-    maxy = max(box[3] for box in boxes)
+    # One ROI box per expected change rather than a single union: scattered changes
+    # would otherwise produce a whole-drawing bounding box, defeating the ROI
+    # narrowing and re-hitting the entity cap (finding 14). The bridge keeps the
+    # extraction within the union of these boxes.
     return {
-        "bbox": [minx, miny, maxx, maxy],
+        "boxes": [[box[0], box[1], box[2], box[3]] for box in boxes],
         "margin": margin_value,
     }
 

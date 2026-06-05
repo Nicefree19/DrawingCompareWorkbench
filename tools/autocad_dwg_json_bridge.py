@@ -99,14 +99,9 @@ LISP_EXTRACTOR = r"""
   (and
     (boundp 'DCW_ROI_ENABLED)
     DCW_ROI_ENABLED
-    (boundp 'DCW_ROI_MINX)
-    (boundp 'DCW_ROI_MINY)
-    (boundp 'DCW_ROI_MAXX)
-    (boundp 'DCW_ROI_MAXY)
-    (numberp DCW_ROI_MINX)
-    (numberp DCW_ROI_MINY)
-    (numberp DCW_ROI_MAXX)
-    (numberp DCW_ROI_MAXY)
+    (boundp 'DCW_ROI_BOXES)
+    DCW_ROI_BOXES
+    (listp DCW_ROI_BOXES)
   )
 )
 
@@ -118,33 +113,50 @@ LISP_EXTRACTOR = r"""
   (if (and (listp pt) (numberp (cadr pt))) (cadr pt) nil)
 )
 
-(defun dcw-bbox-in-roi-p (minx miny maxx maxy)
+(defun dcw-bbox-in-roi-p (minx miny maxx maxy / hit)
   (if (not (dcw-roi-active-p))
     T
-    (not
-      (or
-        (< maxx DCW_ROI_MINX)
-        (> minx DCW_ROI_MAXX)
-        (< maxy DCW_ROI_MINY)
-        (> miny DCW_ROI_MAXY)
+    (progn
+      (setq hit nil)
+      (foreach b DCW_ROI_BOXES
+        (if (not
+              (or
+                (< maxx (car b))
+                (> minx (caddr b))
+                (< maxy (cadr b))
+                (> miny (cadddr b))
+              )
+            )
+          (setq hit T)
+        )
       )
+      hit
     )
   )
 )
 
-(defun dcw-point-in-roi-p (pt / x y)
+(defun dcw-point-in-roi-p (pt / x y hit)
   (if (not (dcw-roi-active-p))
     T
     (progn
       (setq x (dcw-point-x pt))
       (setq y (dcw-point-y pt))
-      (and
-        x
-        y
-        (>= x DCW_ROI_MINX)
-        (<= x DCW_ROI_MAXX)
-        (>= y DCW_ROI_MINY)
-        (<= y DCW_ROI_MAXY)
+      (if (and x y)
+        (progn
+          (setq hit nil)
+          (foreach b DCW_ROI_BOXES
+            (if (and
+                  (>= x (car b))
+                  (<= x (caddr b))
+                  (>= y (cadr b))
+                  (<= y (cadddr b))
+                )
+              (setq hit T)
+            )
+          )
+          hit
+        )
+        nil
       )
     )
   )

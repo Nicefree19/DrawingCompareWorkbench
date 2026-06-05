@@ -580,7 +580,7 @@ def test_evaluate_roi_retry_recovers_cap_truncated_pair(
     assert pair["classification"] == "TP"
     assert pair["roi_retry"]["attempted"] is True
     assert pair["roi_retry"]["mode"] == "retry"
-    assert pair["roi_retry"]["roi_request"] == {"bbox": [100.0, 100.0, 500.0, 500.0], "margin": 250.0}
+    assert pair["roi_retry"]["roi_request"] == {"boxes": [[100.0, 100.0, 500.0, 500.0]], "margin": 250.0}
     assert {json.loads(item)["margin"] for item in roi_args_seen} == {250.0}
     assert adapter.args_template == ("bridge.py", "{input}", "{acadver}", "--max-entities", "5000")
 
@@ -1461,3 +1461,20 @@ def test_temporary_bridge_roi_args_restores_on_exception() -> None:
     except RuntimeError:
         pass
     assert adapter.args_template == original
+
+
+def test_roi_request_emits_per_change_boxes_not_union() -> None:
+    """Scattered expected changes must yield one ROI box each, not a single union
+    box that would span (and re-cap) the whole drawing (finding 14)."""
+    pair = {
+        "expected_changes": [
+            {"approx_bbox": [0, 0, 10, 10]},
+            {"approx_bbox": [1000, 1000, 1010, 1010]},
+        ]
+    }
+    req = evaluator._roi_request_from_expected_changes(pair, 5.0)
+    assert req == {
+        "boxes": [[0, 0, 10, 10], [1000, 1000, 1010, 1010]],
+        "margin": 5.0,
+    }
+    assert "bbox" not in req  # not a single union box

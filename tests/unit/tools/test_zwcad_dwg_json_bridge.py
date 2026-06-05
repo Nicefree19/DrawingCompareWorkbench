@@ -136,8 +136,7 @@ def test_zwcad_script_mode_wraps_lisp_output_with_native_provenance(
         script_path = Path(command[3])
         script = script_path.read_text(encoding="ascii")
         assert "(setq DCW_ROI_ENABLED T)" in script
-        assert "(setq DCW_ROI_MINX -5)" in script
-        assert "(setq DCW_ROI_MAXX 15)" in script
+        assert "(setq DCW_ROI_BOXES (list (list -5 -5 15 15)))" in script
         match = re.search(r'\(setq DCW_OUT "([^"]+)"\)', script)
         assert match is not None
         out = Path(match.group(1).replace("/", "\\"))
@@ -191,7 +190,7 @@ def test_zwcad_script_mode_wraps_lisp_output_with_native_provenance(
     assert provenance["entity_count"] == 1
     assert provenance["max_entities"] == 10
     assert provenance["possibly_truncated"] is False
-    assert provenance["roi"] == {"minx": -5.0, "miny": -5.0, "maxx": 15.0, "maxy": 15.0}
+    assert provenance["roi"] == [{"minx": -5.0, "miny": -5.0, "maxx": 15.0, "maxy": 15.0}]
     assert metadata["zwcad_dwg_json_bridge"]["possibly_truncated"] is False
     assert payload["drawing"]["entities"][0]["type"] == "LINE"
 
@@ -232,14 +231,13 @@ def test_zwcad_lisp_com_mode_uses_send_command_and_wraps_output(
     provenance = metadata["commercial_dwg_json_bridge"]
     assert doc.sent_commands
     assert "(setq DCW_ROI_ENABLED T)" in doc.sent_commands[0]
-    assert "(setq DCW_ROI_MINX -2)" in doc.sent_commands[0]
-    assert "(setq DCW_ROI_MAXX 12)" in doc.sent_commands[0]
+    assert "(setq DCW_ROI_BOXES (list (list -2 -2 12 12)))" in doc.sent_commands[0]
     assert provenance["lisp_com_mode"] is True
     assert provenance["uses_native_dwg"] is True
     assert provenance["entity_count"] == 1
     assert provenance["max_entities"] == 10
     assert provenance["possibly_truncated"] is False
-    assert provenance["roi"] == {"minx": -2.0, "miny": -2.0, "maxx": 12.0, "maxy": 12.0}
+    assert provenance["roi"] == [{"minx": -2.0, "miny": -2.0, "maxx": 12.0, "maxy": 12.0}]
     assert metadata["zwcad_dwg_json_bridge"]["possibly_truncated"] is False
     assert payload["drawing"]["entities"][0]["type"] == "LINE"
     assert doc.closed is True
@@ -355,16 +353,18 @@ def test_candidate_prog_ids_prefers_explicit_then_env(monkeypatch: pytest.Monkey
 
 
 def test_roi_json_expands_bbox_with_margin() -> None:
-    assert bridge._roi_from_arg('{"bbox":[100,100,500,500],"margin":25}') == {
-        "minx": 75.0,
-        "miny": 75.0,
-        "maxx": 525.0,
-        "maxy": 525.0,
-    }
+    assert bridge._roi_from_arg('{"bbox":[100,100,500,500],"margin":25}') == [
+        {"minx": 75.0, "miny": 75.0, "maxx": 525.0, "maxy": 525.0}
+    ]
+    # multiple per-change boxes are preserved (finding 14)
+    assert bridge._roi_from_arg('{"boxes":[[0,0,10,10],[100,100,110,110]],"margin":0}') == [
+        {"minx": 0.0, "miny": 0.0, "maxx": 10.0, "maxy": 10.0},
+        {"minx": 100.0, "miny": 100.0, "maxx": 110.0, "maxy": 110.0},
+    ]
 
 
 def test_payload_in_roi_filters_insert_points_and_line_bboxes() -> None:
-    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+    roi = [{"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}]
 
     assert bridge._payload_in_roi(
         {"type": "INSERT", "geometry": {"insert": [150, 150, 0]}},
@@ -749,7 +749,7 @@ class _BBoxEntity:
 def test_entity_in_roi_uses_real_bbox_for_block_whose_insert_point_is_outside() -> None:
     """A block reference inserted outside the ROI but whose body overlaps it must be
     kept (finding 1) -- the point-only test would have wrongly dropped it."""
-    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+    roi = [{"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}]
     payload = {"type": "INSERT", "geometry": {"insert": [900, 900, 0]}}
     entity = _BBoxEntity([300, 300, 0], [600, 600, 0])  # body overlaps ROI
 
@@ -758,17 +758,29 @@ def test_entity_in_roi_uses_real_bbox_for_block_whose_insert_point_is_outside() 
 
 
 def test_entity_in_roi_excludes_block_fully_outside_roi() -> None:
-    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+    roi = [{"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}]
     payload = {"type": "INSERT", "geometry": {"insert": [900, 900, 0]}}
     entity = _BBoxEntity([700, 700, 0], [800, 800, 0])
     assert bridge._entity_in_roi(entity, payload, roi) is False
 
 
 def test_entity_in_roi_falls_back_to_payload_without_getboundingbox() -> None:
-    roi = {"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}
+    roi = [{"minx": 100.0, "miny": 100.0, "maxx": 500.0, "maxy": 500.0}]
     payload = {"type": "LINE", "geometry": {"start": [0, 300, 0], "end": [1000, 300, 0]}}
 
     class _NoBox:
         pass
 
     assert bridge._entity_in_roi(_NoBox(), payload, roi) is True  # crosses ROI via payload
+
+
+def test_payload_in_roi_matches_any_box_and_excludes_the_gap() -> None:
+    """Multi-box ROI: an entity in any box is kept; one in the gap between boxes is
+    excluded (a single union box would have wrongly included it) (finding 14)."""
+    roi = [
+        {"minx": 0.0, "miny": 0.0, "maxx": 10.0, "maxy": 10.0},
+        {"minx": 100.0, "miny": 100.0, "maxx": 110.0, "maxy": 110.0},
+    ]
+    assert bridge._payload_in_roi({"type": "INSERT", "geometry": {"insert": [5, 5, 0]}}, roi)
+    assert bridge._payload_in_roi({"type": "INSERT", "geometry": {"insert": [105, 105, 0]}}, roi)
+    assert not bridge._payload_in_roi({"type": "INSERT", "geometry": {"insert": [50, 50, 0]}}, roi)

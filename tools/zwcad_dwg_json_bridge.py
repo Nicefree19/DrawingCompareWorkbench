@@ -146,7 +146,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--roi-json",
         help=(
             "Optional ROI JSON object or file path. Shape: "
-            "{\"bbox\":[minx,miny,maxx,maxy],\"margin\":100}."
+            "{\"bbox\":[minx,miny,maxx,maxy],\"margin\":100} or, for scattered changes, "
+            "{\"boxes\":[[minx,miny,maxx,maxy],...],\"margin\":100}."
         ),
     )
     parser.add_argument("--visible", action="store_true")
@@ -258,7 +259,7 @@ def _run_lisp_com_bridge(
     *,
     input_path: Path,
     max_entities: int,
-    roi: dict[str, float] | None,
+    roi: list[dict[str, float]] | None,
 ) -> dict[str, Any]:
     timeout_seconds = max(1.0, float(getattr(args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS))
     existing_zwcad_pids = _zwcad_process_ids()
@@ -404,7 +405,7 @@ def _run_script_bridge(
     *,
     input_path: Path,
     max_entities: int,
-    roi: dict[str, float] | None,
+    roi: list[dict[str, float]] | None,
 ) -> dict[str, Any]:
     zwcad_exe = resolve_zwcad_exe(getattr(args, "zwcad_exe", None))
     if not zwcad_exe:
@@ -567,7 +568,7 @@ def _drawing_from_document(
     input_path: Path,
     acadver: str,
     max_entities: int,
-    roi: dict[str, float] | None,
+    roi: list[dict[str, float]] | None,
 ) -> dict[str, Any]:
     layers = _layers(doc)
     entities: list[dict[str, Any]] = []
@@ -760,7 +761,7 @@ def _vertices(value: Any, *, raw_type: str) -> list[dict[str, Any]]:
     return vertices
 
 
-def _roi_from_arg(value: str | None) -> dict[str, float] | None:
+def _roi_from_arg(value: str | None) -> list[dict[str, float]] | None:
     if value is None or not str(value).strip():
         return None
     raw = str(value).strip()
@@ -780,22 +781,33 @@ def _roi_from_arg(value: str | None) -> dict[str, float] | None:
 
     if not isinstance(data, dict):
         raise BridgeError("--roi-json must be a JSON object.")
-    bbox = data.get("bbox")
-    if bbox is None or isinstance(bbox, (str, bytes)):
-        raise BridgeError('--roi-json requires "bbox": [minx, miny, maxx, maxy].')
-    try:
-        bbox_values = list(bbox)
-    except TypeError as exc:
-        raise BridgeError('--roi-json requires "bbox": [minx, miny, maxx, maxy].') from exc
-    if len(bbox_values) != 4:
-        raise BridgeError('--roi-json requires "bbox": [minx, miny, maxx, maxy].')
-
-    minx, miny, maxx, maxy = [_finite_float(item, "--roi-json bbox values") for item in bbox_values]
-    if minx > maxx or miny > maxy:
-        raise BridgeError("--roi-json bbox minimum values must be <= maximum values.")
     margin = _finite_float(data.get("margin", 0.0), "--roi-json margin")
     if margin < 0:
         raise BridgeError("--roi-json margin must be >= 0.")
+    raw_boxes = data.get("boxes")
+    if raw_boxes is not None:
+        if isinstance(raw_boxes, (str, bytes)) or not isinstance(raw_boxes, (list, tuple)):
+            raise BridgeError('--roi-json "boxes" must be a list of [minx, miny, maxx, maxy].')
+        boxes = [_roi_box(item, margin) for item in raw_boxes]
+        if not boxes:
+            raise BridgeError('--roi-json "boxes" must contain at least one box.')
+        return boxes
+    bbox = data.get("bbox")
+    if bbox is None or isinstance(bbox, (str, bytes)):
+        raise BridgeError('--roi-json requires "bbox": [minx, miny, maxx, maxy] or "boxes": [[...], ...].')
+    return [_roi_box(bbox, margin)]
+
+
+def _roi_box(bbox: Any, margin: float) -> dict[str, float]:
+    try:
+        values = list(bbox)
+    except TypeError as exc:
+        raise BridgeError("--roi-json box must be [minx, miny, maxx, maxy].") from exc
+    if len(values) != 4:
+        raise BridgeError("--roi-json box must be [minx, miny, maxx, maxy].")
+    minx, miny, maxx, maxy = [_finite_float(item, "--roi-json bbox values") for item in values]
+    if minx > maxx or miny > maxy:
+        raise BridgeError("--roi-json bbox minimum values must be <= maximum values.")
     return {
         "minx": minx - margin,
         "miny": miny - margin,
@@ -804,19 +816,25 @@ def _roi_from_arg(value: str | None) -> dict[str, float] | None:
     }
 
 
-def _roi_lisp_lines(roi: dict[str, float] | None) -> list[str]:
-    if roi is None:
+def _roi_lisp_lines(roi: list[dict[str, float]] | None) -> list[str]:
+    if not roi:
         return []
+    boxes = " ".join(
+        "(list {0} {1} {2} {3})".format(
+            _lisp_number(box["minx"]),
+            _lisp_number(box["miny"]),
+            _lisp_number(box["maxx"]),
+            _lisp_number(box["maxy"]),
+        )
+        for box in roi
+    )
     return [
         "(setq DCW_ROI_ENABLED T)",
-        f"(setq DCW_ROI_MINX {_lisp_number(roi['minx'])})",
-        f"(setq DCW_ROI_MINY {_lisp_number(roi['miny'])})",
-        f"(setq DCW_ROI_MAXX {_lisp_number(roi['maxx'])})",
-        f"(setq DCW_ROI_MAXY {_lisp_number(roi['maxy'])})",
+        f"(setq DCW_ROI_BOXES (list {boxes}))",
     ]
 
 
-def _entity_in_roi(entity: Any, payload: dict[str, Any], roi: dict[str, float]) -> bool:
+def _entity_in_roi(entity: Any, payload: dict[str, Any], roi: list[dict[str, float]]) -> bool:
     """ROI membership for a live COM entity. Prefer the entity's true geometric extents
     (GetBoundingBox), which cover block/text bodies regardless of insertion point and
     give a real box for entities the payload exposes no points for (findings 1 & 6).
@@ -848,17 +866,20 @@ def _com_entity_bbox(entity: Any) -> tuple[float, float, float, float] | None:
     return (min(xs), min(ys), max(xs), max(ys))  # type: ignore[type-var]
 
 
-def _bbox_overlaps_roi(bbox: tuple[float, float, float, float], roi: dict[str, float]) -> bool:
+def _bbox_overlaps_roi(bbox: tuple[float, float, float, float], roi: list[dict[str, float]]) -> bool:
     minx, miny, maxx, maxy = bbox
-    return not (
-        maxx < roi["minx"]
-        or minx > roi["maxx"]
-        or maxy < roi["miny"]
-        or miny > roi["maxy"]
-    )
+    for box in roi:
+        if not (
+            maxx < box["minx"]
+            or minx > box["maxx"]
+            or maxy < box["miny"]
+            or miny > box["maxy"]
+        ):
+            return True
+    return False
 
 
-def _payload_in_roi(payload: dict[str, Any], roi: dict[str, float]) -> bool:
+def _payload_in_roi(payload: dict[str, Any], roi: list[dict[str, float]]) -> bool:
     bbox = _payload_bbox(payload)
     if bbox is None:
         return True
