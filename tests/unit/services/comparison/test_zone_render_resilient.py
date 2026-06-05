@@ -96,3 +96,62 @@ def test_render_source_crop_no_warning_when_zero_skipped(tmp_path, monkeypatch):
         dxf_cache_dir=tmp_path, render_environment_hash="h", warnings=warnings,
     )
     assert not any("entities_skipped" in w for w in warnings)
+
+
+# --------------------------------------------------------------------------- #
+# frozen/off layers: a detected change on a hidden layer must still render in
+# the inspection crop (otherwise the zoom is blank — the diff sees all layers).
+# --------------------------------------------------------------------------- #
+
+
+def _frozen_layer_doc(tmp_path):
+    ezdxf = pytest.importorskip("ezdxf")
+    doc = ezdxf.new("R2010")
+    frozen = doc.layers.add("REV_FROZEN")
+    frozen.freeze()
+    off = doc.layers.add("REV_OFF")
+    off.off()
+    msp = doc.modelspace()
+    msp.add_line((0.0, 0.0), (100.0, 80.0), dxfattribs={"layer": "REV_FROZEN"})
+    msp.add_lwpolyline([(10, 10), (90, 10), (90, 70), (10, 70)], close=True,
+                       dxfattribs={"layer": "REV_OFF"})
+    path = tmp_path / "frozen.dxf"
+    doc.saveas(str(path))
+    return path
+
+
+def test_make_all_layers_visible_thaws_and_turns_on(tmp_path):
+    ezdxf = pytest.importorskip("ezdxf")
+    from src.services.comparison.zone_render_service import _make_all_layers_visible
+
+    doc = ezdxf.readfile(str(_frozen_layer_doc(tmp_path)))
+    changed = _make_all_layers_visible(doc)
+    assert changed >= 2
+    for layer in doc.layers:
+        assert not layer.is_frozen()
+        assert not layer.is_off()
+
+
+def test_zone_crop_renders_frozen_and_off_layer_changes(tmp_path):
+    """End-to-end: an entity on a frozen layer and one on an off layer both
+    render in the zone crop (ink > 0) instead of a blank zoom."""
+    import numpy as np
+    from PIL import Image
+
+    from src.services.comparison.zone_render_service import (
+        RenderJob,
+        render_zone_pair,
+    )
+
+    pytest.importorskip("numpy")
+    pytest.importorskip("PIL.Image")
+    path = _frozen_layer_doc(tmp_path)
+    job = RenderJob(
+        pair_uuid="fz", zone_id="z", source_before=path, source_after=path,
+        world_window=WorldWindow(-10.0, -10.0, 110.0, 90.0),
+        cache_root=tmp_path / "c", dxf_cache_dir=tmp_path / "d",
+        output_width=300, output_height=300,
+    )
+    res = render_zone_pair(job)
+    img = np.asarray(Image.open(res.before_image).convert("L"))
+    assert int((img < 200).sum()) > 0  # frozen/off-layer geometry is visible

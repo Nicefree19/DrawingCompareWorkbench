@@ -23,7 +23,9 @@ from .source_signature import build_source_signature
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+# v2: zone crops now render frozen/off layers (a detected change on a frozen
+# layer was producing a blank zoom). Bump invalidates stale blank-crop caches.
+SCHEMA_VERSION = 2
 DEFAULT_OUTPUT_SIZE = (1600, 900)
 DEFAULT_TARGET_ASPECT = DEFAULT_OUTPUT_SIZE[0] / DEFAULT_OUTPUT_SIZE[1]
 
@@ -1314,6 +1316,34 @@ def _window_to_background_pixel_rect(
     return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
 
 
+def _make_all_layers_visible(doc: Any) -> int:
+    """Thaw and turn on every layer of a render-only doc.
+
+    The comparison extracts entities regardless of layer on/off/freeze, so the
+    zone inspection crop must render them too — a detected change on a frozen or
+    off layer would otherwise produce a blank zoom. Returns the number of layers
+    that were hidden (frozen or off) and have been made visible.
+    """
+
+    try:
+        layers = doc.layers
+    except Exception:  # pragma: no cover - defensive
+        return 0
+    changed = 0
+    for layer in layers:
+        try:
+            hidden = bool(layer.is_frozen()) or bool(layer.is_off())
+            if layer.is_frozen():
+                layer.thaw()
+            if layer.is_off():
+                layer.on()
+            if hidden:
+                changed += 1
+        except Exception:  # noqa: BLE001 — never let one bad layer abort the index
+            continue
+    return changed
+
+
 def get_drawing_render_index(dxf_path: Path, render_environment_hash: str = "unknown") -> DrawingRenderIndex:
     global _INDEX_CACHE_TOTAL_ESTIMATED_BYTES
     global _INDEX_CACHE_HIT_COUNT
@@ -1354,6 +1384,15 @@ def get_drawing_render_index(dxf_path: Path, render_environment_hash: str = "unk
         logger.warning("Render index using sanitized DXF %s: %s", dxf_path, read_warning)
     doc = read_result.doc
     msp = doc.modelspace()
+    # The diff extracts entities on ALL layers (incl. frozen/off), so the zone
+    # inspection crop must draw them too. Otherwise a change on a frozen layer
+    # (observed: a frozen revision layer "-230726 Rev.02") is detected and gets a
+    # change zone, but the zoomed render is blank — "변경된 부분 확대가 안 보임".
+    # This is a render-only doc (separate from the diff extraction), so making
+    # every layer visible is safe and aligns the render with what the diff saw.
+    _thawed = _make_all_layers_visible(doc)
+    if _thawed:
+        logger.info("zone render: made %d hidden layer(s) visible for %s", _thawed, dxf_path.name)
     bbox_cache = dxf_module.ezdxf_bbox.Cache()
     envelopes = _build_entity_envelopes(msp, bbox_cache)
     build_elapsed_ms = (time.perf_counter() - build_started) * 1000.0
