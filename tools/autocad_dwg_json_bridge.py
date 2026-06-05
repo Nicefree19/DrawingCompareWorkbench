@@ -258,6 +258,38 @@ LISP_EXTRACTOR = r"""
   (or hit (and seen (dcw-bbox-in-roi-p minx miny maxx maxy)))
 )
 
+(defun dcw-block-in-roi-p (entity data / res mn mx)
+  ;; INSERT/TEXT/MTEXT bodies extend well beyond their assoc-10 insertion point, so
+  ;; test the entity's true geometric extents (vla-getboundingbox). On any failure
+  ;; fall back to the insertion-point test so extraction never breaks.
+  (setq res
+    (vl-catch-all-apply
+      (function
+        (lambda ( / obj minp maxp)
+          (setq obj (vlax-ename->vla-object entity))
+          (vla-getboundingbox obj 'minp 'maxp)
+          (cons
+            (vlax-safearray->list (vlax-variant-value minp))
+            (vlax-safearray->list (vlax-variant-value maxp))
+          )
+        )
+      )
+      nil
+    )
+  )
+  (if (or (vl-catch-all-error-p res) (null res))
+    (dcw-point-in-roi-p (cdr (assoc 10 data)))
+    (progn
+      (setq mn (car res))
+      (setq mx (cdr res))
+      (if (and mn mx (numberp (car mn)) (numberp (cadr mn)) (numberp (car mx)) (numberp (cadr mx)))
+        (dcw-bbox-in-roi-p (car mn) (cadr mn) (car mx) (cadr mx))
+        (dcw-point-in-roi-p (cdr (assoc 10 data)))
+      )
+    )
+  )
+)
+
 (defun dcw-entity-in-roi-p (entity data etype)
   (if (not (dcw-roi-active-p))
     T
@@ -267,7 +299,7 @@ LISP_EXTRACTOR = r"""
       ((= etype "LWPOLYLINE") (dcw-lwvertices-in-roi-p data))
       ((= etype "POLYLINE") (dcw-polyvertices-in-roi-p entity))
       ((or (= etype "TEXT") (= etype "MTEXT") (= etype "INSERT"))
-        (dcw-point-in-roi-p (cdr (assoc 10 data)))
+        (dcw-block-in-roi-p entity data)
       )
       (T T)
     )
@@ -434,47 +466,29 @@ LISP_EXTRACTOR = r"""
   (write-line "]," f)
 )
 
-(defun dcw-write-entities (f / entity json first count maxcount ss index total truncated)
+(defun dcw-write-entities (f / entity json first count maxcount truncated)
   (write-line "\"entities\":[" f)
   (setq first T)
   (setq count 0)
   (setq truncated nil)
   (setq maxcount (if (and (boundp 'DCW_MAX_ENTITIES) (numberp DCW_MAX_ENTITIES)) DCW_MAX_ENTITIES 200000))
-  (if (dcw-roi-active-p)
-    (progn
-      (setq ss (ssget "_C" (list DCW_ROI_MINX DCW_ROI_MINY 0.0) (list DCW_ROI_MAXX DCW_ROI_MAXY 0.0)))
-      (setq index 0)
-      (setq total (if ss (sslength ss) 0))
-      (while (and ss (< index total) (< count maxcount))
-        (setq entity (ssname ss index))
-        (setq json (dcw-entity-json entity))
-        (if json
-          (progn
-            (if first (setq first nil) (princ "," f))
-            (write-line json f)
-            (setq count (1+ count))
-          )
-        )
-        (setq index (1+ index))
+  ;; Always walk the full model-space table via entnext and let dcw-entity-json's
+  ;; per-entity ROI test decide membership. Using ssget "_C" here skipped entities
+  ;; on frozen/off layers and outside the current space, and could return nil
+  ;; (zero entities) in a headless session -- diverging from this walk.
+  (setq entity (entnext))
+  (while (and entity (< count maxcount))
+    (setq json (dcw-entity-json entity))
+    (if json
+      (progn
+        (if first (setq first nil) (princ "," f))
+        (write-line json f)
+        (setq count (1+ count))
       )
-      (if (and ss (< index total) (>= count maxcount)) (setq truncated T))
     )
-    (progn
-      (setq entity (entnext))
-      (while (and entity (< count maxcount))
-        (setq json (dcw-entity-json entity))
-        (if json
-          (progn
-            (if first (setq first nil) (princ "," f))
-            (write-line json f)
-            (setq count (1+ count))
-          )
-        )
-        (setq entity (entnext entity))
-      )
-      (if (and entity (>= count maxcount)) (setq truncated T))
-    )
+    (setq entity (entnext entity))
   )
+  (if (and entity (>= count maxcount)) (setq truncated T))
   (write-line "]," f)
   (write-line (strcat "\"metadata\":{\"autocad_dwg_json_bridge\":{\"entity_count\":" (itoa count) ",\"truncated\":" (if truncated "true" "false") "}}") f)
 )
