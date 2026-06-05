@@ -238,3 +238,107 @@ def test_warp_translation_and_determinism():
     assert np.array_equal(out1, out2)  # deterministic
     # the bright pixel moved from x=5 to x=8 (row stays 5)
     assert out1[5, 8].sum() > out1[5, 5].sum()
+
+
+# --------------------------------------------------------------------------- #
+# zone_render_service._apply_after_alignment — wiring integration
+# --------------------------------------------------------------------------- #
+
+
+def _make_job(tmp_path, alignment):
+    from src.services.comparison.zone_render_service import RenderJob
+
+    return RenderJob(
+        pair_uuid="p",
+        zone_id="z",
+        source_before=tmp_path / "a.dxf",
+        source_after=tmp_path / "b.dxf",
+        world_window=WorldWindow(0.0, 0.0, 100.0, 100.0),
+        cache_root=tmp_path,
+        dxf_cache_dir=tmp_path,
+        alignment=alignment,
+    )
+
+
+def _write_png(path, np, Image):
+    arr = np.zeros((200, 200, 3), dtype=np.uint8)
+    arr[100, 40] = (255, 255, 255)
+    Image.fromarray(arr).save(path)
+    return arr
+
+
+def test_apply_after_alignment_warps_and_emits_marker_transform(tmp_path, window_tf):
+    from src.services.comparison import zone_render_service as zrs
+
+    np = pytest.importorskip("numpy")
+    Image = pytest.importorskip("PIL.Image")
+    after_png = tmp_path / "after.png"
+    original = _write_png(after_png, np, Image)
+    t = RigidTransform(dx=10.0, dy=0.0, theta_rad=0.0)
+    job = _make_job(tmp_path, t.to_dict())
+    warnings: list = []
+
+    new_tf, marker = zrs._apply_after_alignment(job, window_tf, window_tf, after_png, warnings)
+
+    assert marker is not None and marker["dx"] == pytest.approx(10.0)  # emits T, not inverse
+    assert new_tf["world_to_pixel"] == window_tf["world_to_pixel"]
+    assert "after_alignment_applied" in warnings
+    with Image.open(after_png) as im:
+        warped = np.asarray(im.convert("RGB"))
+    assert not np.array_equal(original, warped)  # raster actually changed
+
+
+def test_apply_after_alignment_noop_without_alignment(tmp_path, window_tf):
+    from src.services.comparison import zone_render_service as zrs
+
+    np = pytest.importorskip("numpy")
+    Image = pytest.importorskip("PIL.Image")
+    after_png = tmp_path / "after.png"
+    original = _write_png(after_png, np, Image)
+    job = _make_job(tmp_path, None)
+    warnings: list = []
+
+    new_tf, marker = zrs._apply_after_alignment(job, window_tf, window_tf, after_png, warnings)
+
+    assert marker is None
+    assert new_tf is window_tf
+    assert warnings == []
+    with Image.open(after_png) as im:
+        assert np.array_equal(original, np.asarray(im.convert("RGB")))  # untouched
+
+
+def test_apply_after_alignment_insignificant_is_noop(tmp_path, window_tf):
+    from src.services.comparison import zone_render_service as zrs
+
+    tiny = RigidTransform(dx=0.001, dy=0.0, theta_rad=0.0)
+    job = _make_job(tmp_path, tiny.to_dict())
+    warnings: list = []
+    new_tf, marker = zrs._apply_after_alignment(
+        job, window_tf, window_tf, tmp_path / "missing.png", warnings
+    )
+    assert marker is None and new_tf is window_tf and warnings == []
+
+
+def test_apply_after_alignment_warp_failure_is_honest_fallback(tmp_path, window_tf):
+    from src.services.comparison import zone_render_service as zrs
+
+    t = RigidTransform(dx=10.0, dy=0.0, theta_rad=0.0)
+    job = _make_job(tmp_path, t.to_dict())
+    warnings: list = []
+    # after image does not exist -> PIL open fails -> honest fallback, no raise
+    new_tf, marker = zrs._apply_after_alignment(
+        job, window_tf, window_tf, tmp_path / "does_not_exist.png", warnings
+    )
+    assert marker is None
+    assert new_tf is window_tf
+    assert any(w.startswith("after_alignment_warp_failed") for w in warnings)
+
+
+def test_alignment_changes_cache_key(tmp_path):
+    from src.services.comparison import zone_render_service as zrs
+
+    base = _make_job(tmp_path, None)
+    aligned = _make_job(
+        tmp_path, RigidTransform(dx=10.0, dy=0.0, theta_rad=0.0).to_dict()
+    )
+    assert zrs.render_cache_key(base) != zrs.render_cache_key(aligned)

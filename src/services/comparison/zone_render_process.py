@@ -39,6 +39,7 @@ def _job_from_request(request: dict[str, Any]) -> RenderJob:
         after_background_image=str(request.get("after_background_image") or ""),
         before_background_transform=request.get("before_background_transform") if isinstance(request.get("before_background_transform"), dict) else None,
         after_background_transform=request.get("after_background_transform") if isinstance(request.get("after_background_transform"), dict) else None,
+        alignment=request.get("alignment") if isinstance(request.get("alignment"), dict) else None,
     )
 
 

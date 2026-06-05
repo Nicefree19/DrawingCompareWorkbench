@@ -73,6 +73,11 @@ class RenderJob:
     after_background_transform: Optional[dict[str, Any]] = None
     perf_event_root: Optional[Path] = None
     perf_run_id: str = ""
+    # P0-2b — RigidTransform.to_dict() (after->before, B->A) when the diff
+    # pipeline found a significant alignment; None = no visual alignment (the
+    # historical path). Drives the after-raster warp + marker transform so they
+    # stay in lockstep. Part of the cache key (aligned != unaligned render).
+    alignment: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,10 @@ class RenderResult:
     warnings: list[str]
     request_id: str = ""
     reason_code: str = ""
+    # P0-2b — RigidTransform.to_dict() (after->before, B->A) emitted when the
+    # after raster was warped into the before frame, so the monolith can move the
+    # after-side change markers by the SAME transform (lockstep). None = no warp.
+    after_marker_world_transform: Optional[dict[str, Any]] = None
     # Plan §17 Phase B-1 (GPT Pro F3 follow-up) — wall time of the
     # ``render_zone_pair`` call. Without this, the GUI handler at
     # ``drawing_compare_workbench.py`` was reading
@@ -112,6 +121,7 @@ class RenderResult:
             "after_image": self.after_image,
             "before_transform": self.before_transform,
             "after_transform": self.after_transform,
+            "after_marker_world_transform": self.after_marker_world_transform,
             "world_window": self.world_window,
             "renderer_backend": self.renderer_backend,
             "cache_key": self.cache_key,
@@ -609,6 +619,7 @@ def render_cache_key(job: RenderJob) -> str:
         "after_background": file_signature(Path(job.after_background_image)) if job.after_background_image else {},
         "before_background_transform": job.before_background_transform or {},
         "after_background_transform": job.after_background_transform or {},
+        "alignment": job.alignment or {},
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:32]
@@ -716,6 +727,59 @@ def _diff_index_cache_stats(
     return result
 
 
+def _apply_after_alignment(
+    job: RenderJob,
+    before_transform: dict[str, Any],
+    after_transform: dict[str, Any],
+    after_image: Path,
+    warnings: list[str],
+) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+    """P0-2b — warp the after PNG into the before frame when ``job.alignment`` is
+    a significant rigid transform (after->before, B->A).
+
+    Returns ``(after_transform, marker_world_transform)``:
+      - on success: the before-frame transform + ``rigid.to_dict()`` (the SAME T
+        the monolith applies to after-side marker world coords -> lockstep);
+      - when no/insignificant alignment, or on ANY failure: the original
+        after_transform + ``None`` (honest fallback; a warning is appended so the
+        degradation is visible rather than silent). Never raises into the render.
+    """
+    if not job.alignment:
+        return after_transform, None
+    try:
+        from .global_alignment import RigidTransform
+        from . import render_alignment as ra
+    except ImportError:
+        return after_transform, None
+    try:
+        rigid = RigidTransform.from_dict(job.alignment)
+    except (TypeError, ValueError):
+        return after_transform, None
+    if not ra.is_alignment_active(rigid):
+        return after_transform, None
+    pixel_affine = ra.compose_after_pixel_affine(before_transform, after_transform, rigid)
+    if pixel_affine is None:
+        return after_transform, None
+    try:
+        import numpy as np
+        from PIL import Image
+
+        out_w = int(after_transform.get("img_width") or DEFAULT_OUTPUT_SIZE[0])
+        out_h = int(after_transform.get("img_height") or DEFAULT_OUTPUT_SIZE[1])
+        with Image.open(after_image) as im:
+            arr = np.asarray(im.convert("RGB"))
+        warped = ra.warp_after_image(arr, pixel_affine, (out_w, out_h))
+        Image.fromarray(warped).save(after_image)
+    except Exception as exc:  # honest fallback — keep the unaligned render
+        warnings.append(f"after_alignment_warp_failed:{type(exc).__name__}")
+        return after_transform, None
+    warnings.append("after_alignment_applied")
+    return (
+        ra.aligned_after_transform(before_transform, after_transform, rigid),
+        rigid.to_dict(),
+    )
+
+
 def render_zone_pair(job: RenderJob) -> RenderResult:
     """Render before/after local crops for a selected zone."""
 
@@ -746,6 +810,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 after_image=str(after_image),
                 before_transform=payload.get("before_transform") or {},
                 after_transform=payload.get("after_transform") or {},
+                after_marker_world_transform=payload.get("after_marker_world_transform"),
                 world_window=payload.get("world_window") or job.world_window.to_dict(),
                 renderer_backend=str(payload.get("renderer_backend") or job.renderer_backend),
                 cache_key=cache_key,
@@ -984,6 +1049,13 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
             )
         )
     dxf_index_cache = _diff_index_cache_stats(index_cache_before, render_index_cache_stats())
+    # P0-2b — when a significant rigid alignment was supplied, warp the after
+    # raster into the before frame and emit the marker-side transform. On any
+    # failure this returns the unaligned after_transform + None (honest fallback,
+    # warning appended) so the render never silently corrupts.
+    after_transform, after_marker_world_transform = _apply_after_alignment(
+        job, before_transform, after_transform, after_image, warnings
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "pair_uuid": job.pair_uuid,
@@ -992,6 +1064,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
         "after_image": _cache_relative_path(after_image, job.cache_root),
         "before_transform": before_transform,
         "after_transform": after_transform,
+        "after_marker_world_transform": after_marker_world_transform,
         "world_window": job.world_window.to_dict(),
         "renderer_backend": job.renderer_backend,
         "cache_key": cache_key,
@@ -1010,6 +1083,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
         after_image=str(after_image),
         before_transform=before_transform,
         after_transform=after_transform,
+        after_marker_world_transform=after_marker_world_transform,
         world_window=job.world_window.to_dict(),
         renderer_backend=job.renderer_backend,
         cache_key=cache_key,
