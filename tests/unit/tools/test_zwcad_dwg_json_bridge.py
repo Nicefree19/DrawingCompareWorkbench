@@ -677,3 +677,65 @@ def test_cleanup_spawned_zwcad_empty_pin_kills_nothing(monkeypatch: pytest.Monke
     monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {100, 200, 300})
     monkeypatch.setattr(bridge.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not kill")))
     assert bridge._cleanup_spawned_zwcad({100}, only_pids=set()) == []
+
+
+def test_cleanup_kills_pinned_pid_even_when_enumeration_is_blind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The open_document hang showed ZWCAD.exe enumeration returning empty while the
+    process was alive. A precisely pinned PID must still be terminated directly so the
+    hang is cleared at the watchdog instead of waiting the full outer timeout."""
+    killed: list[int] = []
+
+    def fake_run(command, **kwargs):
+        killed.append(int(command[2]))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: set())  # enumeration blind
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+
+    assert bridge._cleanup_spawned_zwcad(set(), only_pids={4242}) == [4242]
+    assert killed == [4242]
+
+
+def test_pinned_zwcad_pids_prefers_hwnd_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bridge, "_zwcad_pid_from_app", lambda app: 999)
+    assert bridge._pinned_zwcad_pids(object(), {1}, created_new=True) == {999}
+    # Attached to an existing instance -> never pin/kill anything.
+    assert bridge._pinned_zwcad_pids(object(), {1}, created_new=False) == set()
+
+
+def test_pinned_zwcad_pids_falls_back_to_image_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bridge, "_zwcad_pid_from_app", lambda app: None)
+    monkeypatch.setattr(bridge, "_zwcad_process_ids", lambda: {1, 2, 3})
+    assert bridge._pinned_zwcad_pids(object(), {1}, created_new=True) == {2, 3}
+
+
+def test_zwcad_pid_from_app_returns_none_without_hwnd() -> None:
+    class _NoHwndApp:
+        pass
+
+    assert bridge._zwcad_pid_from_app(_NoHwndApp()) is None
+
+
+def test_suppress_open_dialogs_sets_proxy_and_dialog_sysvars_before_open() -> None:
+    sent: list[str] = []
+
+    class _Doc:
+        def SendCommand(self, command: str) -> None:
+            sent.append(command)
+
+    class _App:
+        ActiveDocument = _Doc()
+
+    bridge._suppress_open_dialogs(_App())
+
+    assert len(sent) == 1
+    cmd = sent[0]
+    for var in ("PROXYNOTICE", "FILEDIA", "CMDDIA", "SECURELOAD", "XLOADCTL", "FONTALT"):
+        assert var in cmd
+
+
+def test_suppress_open_dialogs_no_active_document_is_noop() -> None:
+    class _App:
+        ActiveDocument = None
+
+    bridge._suppress_open_dialogs(_App())  # must not raise

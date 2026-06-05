@@ -144,8 +144,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
         return _run_lisp_com_bridge(args, input_path=input_path, max_entities=max_entities, roi=roi)
     existing_zwcad_pids = _zwcad_process_ids()
     session = _dispatch_zwcad(args.prog_id)
-    spawned_zwcad_pids = _spawned_zwcad_pids(existing_zwcad_pids) if session.created_new else set()
     app = session.app
+    spawned_zwcad_pids = _pinned_zwcad_pids(app, existing_zwcad_pids, created_new=session.created_new)
     doc = None
     close_errors: list[str] = []
     forced_cleanup_pids: list[int] = []
@@ -154,6 +154,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, Any]:
         documents = _get(app, "Documents")
         if documents is None:
             raise BridgeError("ZWCAD COM application does not expose Documents.")
+        _suppress_open_dialogs(app)
         doc = _open_document_readonly(documents, input_path)
         if doc is None:
             raise BridgeError("ZWCAD COM Documents.Open returned no document.")
@@ -233,8 +234,8 @@ def _run_lisp_com_bridge(
     timeout_seconds = max(1.0, float(getattr(args, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS))
     existing_zwcad_pids = _zwcad_process_ids()
     session = _dispatch_zwcad(getattr(args, "prog_id", None))
-    spawned_zwcad_pids = _spawned_zwcad_pids(existing_zwcad_pids) if session.created_new else set()
     app = session.app
+    spawned_zwcad_pids = _pinned_zwcad_pids(app, existing_zwcad_pids, created_new=session.created_new)
     doc = None
     close_errors: list[str] = []
     forced_cleanup_pids: list[int] = []
@@ -254,6 +255,8 @@ def _run_lisp_com_bridge(
             documents = _get(app, "Documents")
             if documents is None:
                 raise BridgeError("ZWCAD COM application does not expose Documents.")
+            watchdog.set_stage("suppress_dialogs")
+            _suppress_open_dialogs(app)
             watchdog.set_stage("open_document")
             doc = _open_document_readonly(documents, input_path)
             if doc is None:
@@ -1027,6 +1030,66 @@ def _spawned_zwcad_pids(existing_pids: set[int]) -> set[int]:
     return _zwcad_process_ids() - set(existing_pids)
 
 
+def _zwcad_pid_from_app(app: Any) -> int | None:
+    """Resolve the exact PID backing a COM app via its main window handle
+    (AcadApplication.HWND -> GetWindowThreadProcessId). This pins the instance we
+    drive regardless of the process image name and even when a blocked COM call
+    keeps image enumeration from seeing it, so a hung open can still be killed."""
+    if os.name != "nt":
+        return None
+    hwnd = _get(app, "HWND")
+    try:
+        hwnd_int = int(hwnd)
+    except (TypeError, ValueError):
+        return None
+    if not hwnd_int:
+        return None
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+    except Exception:
+        return None
+    get_pid = user32.GetWindowThreadProcessId
+    get_pid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    get_pid.restype = ctypes.c_uint32
+    pid = ctypes.c_uint32(0)
+    get_pid(ctypes.c_void_p(hwnd_int), ctypes.byref(pid))
+    return int(pid.value) or None
+
+
+def _pinned_zwcad_pids(app: Any, existing_pids: set[int], *, created_new: bool) -> set[int]:
+    """The precise set of PIDs cleanup/watchdog may terminate. Prefer the HWND-derived
+    PID; fall back to the post-dispatch image-name diff. Empty when we attached to an
+    instance the user already had open (created_new False), so it is never killed."""
+    if not created_new:
+        return set()
+    pid = _zwcad_pid_from_app(app)
+    if pid:
+        return {pid}
+    return _spawned_zwcad_pids(existing_pids)
+
+
+_OPEN_DIALOG_SUPPRESSION = (
+    '(setvar "FILEDIA" 0)'
+    '(setvar "CMDDIA" 0)'
+    '(setvar "SECURELOAD" 0)'
+    '(setvar "PROXYNOTICE" 0)'
+    '(setvar "XLOADCTL" 0)'
+    '(setvar "FONTALT" "simplex")'
+)
+
+
+def _suppress_open_dialogs(app: Any) -> None:
+    """Disable modal dialogs that block Documents.Open under COM automation (proxy
+    notice, missing-font/xref prompts, security/file dialogs) BEFORE opening the
+    target. These system variables are registry/profile-scoped, so setting them on
+    the app's initial document carries into the subsequent open. Best-effort."""
+    doc = _get(app, "ActiveDocument")
+    if doc is None:
+        return
+    with contextlib.suppress(Exception):
+        _call(doc, "SendCommand", _OPEN_DIALOG_SUPPRESSION + "\n")
+
+
 def _cleanup_spawned_zwcad(
     existing_pids: set[int],
     *,
@@ -1035,13 +1098,21 @@ def _cleanup_spawned_zwcad(
 ) -> list[int]:
     if grace_seconds > 0.0:
         time.sleep(grace_seconds)
-    spawned = _zwcad_process_ids() - set(existing_pids)
     if only_pids is not None:
-        # Restrict to the PIDs we actually spawned; a user instance started after
-        # our snapshot is excluded even though it matches the image name.
-        spawned &= set(only_pids)
-    killed: list[int] = []
-    for pid in sorted(spawned):
+        # Precisely pinned PIDs (e.g. resolved from the COM app window via
+        # app.HWND): terminate them directly so a HUNG ZWCAD is killed even when
+        # image-name enumeration misses it (the open_document hang showed an empty
+        # ZWCAD.exe enumeration while the process was alive). Never touch a PID that
+        # pre-existed our dispatch.
+        targets = {int(pid) for pid in only_pids} - set(existing_pids)
+        killed: list[int] = []
+        for pid in sorted(targets):
+            if _kill_process_tree(pid):
+                killed.append(pid)
+        return killed
+    spawned = sorted(_zwcad_process_ids() - set(existing_pids))
+    killed = []
+    for pid in spawned:
         if _kill_process_tree(pid):
             killed.append(pid)
     return killed
