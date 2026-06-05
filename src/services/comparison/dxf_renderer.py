@@ -177,6 +177,44 @@ def _simple_entity_extents(msp) -> Optional[Tuple[float, float, float, float]]:
     return (min_x, min_y, max_x, max_y)
 
 
+def _resilient_msp_extents(msp) -> Optional[Tuple[float, float, float, float]]:
+    """True render extent, computed entity-by-entity so one un-boundable entity
+    cannot abort the whole bbox.
+
+    ``ezdxf.bbox.extents(msp)`` is a single call that raises (e.g.
+    ``DXFTableEntryError`` from a MULTILEADER whose virtual MTEXT has an empty
+    style) — the same malformed-entity class that blanks zone renders. When that
+    happens the caller previously fell back to ``_simple_entity_extents`` which
+    reads raw ``insert``/``start`` points and can pick up a stray block base
+    point at an absurd coordinate (observed: y = -34,891,598 mm), corrupting the
+    BEFORE frame so overlay/marker world coords no longer map onto the raster.
+
+    Accumulating ``bbox.extents([entity])`` per entity and skipping the few that
+    raise yields the real extent of the renderable geometry (verified: matches
+    the AFTER side, no outlier).
+    """
+
+    xmin = ymin = float("inf")
+    xmax = ymax = float("-inf")
+    found = False
+    for entity in msp:
+        try:
+            box = ezdxf_bbox.extents([entity])
+        except Exception:  # noqa: BLE001 — extent-resilience guard
+            continue
+        if not box.has_data:
+            continue
+        lo, hi = box.extmin, box.extmax
+        if not all(np.isfinite(v) for v in (lo.x, lo.y, hi.x, hi.y)):
+            continue
+        xmin = min(xmin, float(lo.x)); ymin = min(ymin, float(lo.y))
+        xmax = max(xmax, float(hi.x)); ymax = max(ymax, float(hi.y))
+        found = True
+    if not found or not _valid_extents(xmin, ymin, xmax, ymax):
+        return None
+    return (xmin, ymin, xmax, ymax)
+
+
 # --- ezdxf + PyMuPDF 백엔드 임포트 (선택적; 없으면 Matplotlib만 사용) ----
 try:
     from ezdxf.addons.drawing import layout as _ezdxf_layout
@@ -354,7 +392,20 @@ class DxfRenderer:
                 max_x, max_y = float(max_pt.x), float(max_pt.y)
                 extent_source = "ezdxf_bbox"
         except Exception as exc:  # pragma: no cover - 방어 코드
-            logger.warning("범위 계산 실패: %s", exc)
+            logger.warning("범위 계산 실패 (entity-resilient 재시도): %s", exc)
+
+        # When the whole-modelspace bbox aborts (e.g. a malformed MULTILEADER
+        # raises DXFTableEntryError) recompute it entity-by-entity, skipping the
+        # few that raise. This yields the TRUE extent instead of the lossy
+        # ``_simple_entity_extents`` path, which reads raw block insert points
+        # and could pick up a stray base point (observed y=-34,891,598 mm) that
+        # corrupted the BEFORE frame and broke overlay/marker mapping.
+        if extent_source == "default" or not _valid_extents(min_x, min_y, max_x, max_y):
+            resilient = _resilient_msp_extents(msp)
+            if resilient is not None:
+                min_x, min_y, max_x, max_y = resilient
+                extent_source = "ezdxf_bbox_resilient"
+                logger.info("DXF extents recovered entity-by-entity: %s", resilient)
 
         if extent_source == "default" or not _valid_extents(min_x, min_y, max_x, max_y):
             fallback_extents = _simple_entity_extents(msp)
