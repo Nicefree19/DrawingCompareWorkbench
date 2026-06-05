@@ -24,9 +24,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, FrozenSet, Literal, Tuple
 
-#: 11 codes (1 OK + 10 fallback). String literal — JSON-serialisable as-is.
+#: 13 codes (1 OK + 12 fallback). String literal — JSON-serialisable as-is.
 #: Added in S1.3.1: ``dwg_vector_normalise_failed`` to distinguish a
 #: failed-then-cached path (warn) from a normal cache reuse (info).
+#: Added in P0-1: ``alignment_low_confidence`` / ``alignment_not_applied``
+#: so a silently-degraded RANSAC alignment reaches the user via the badge.
 RenderFailureCode = Literal[
     "ok",
     "dwg_unsupported_version",
@@ -39,6 +41,8 @@ RenderFailureCode = Literal[
     "dwg_vector_normalise_failed",
     "zone_crop_stale",
     "zone_crop_cancelled",
+    "alignment_low_confidence",
+    "alignment_not_applied",
 ]
 
 ALL_FAILURE_CODES: Final[Tuple[RenderFailureCode, ...]] = (
@@ -53,6 +57,8 @@ ALL_FAILURE_CODES: Final[Tuple[RenderFailureCode, ...]] = (
     "dwg_vector_normalise_failed",
     "zone_crop_stale",
     "zone_crop_cancelled",
+    "alignment_low_confidence",
+    "alignment_not_applied",
 )
 
 Severity = Literal["info", "warn", "error"]
@@ -178,6 +184,26 @@ FAILURE_CODE_INFO: Final[dict[RenderFailureCode, FailureCodeInfo]] = {
         suggested_action_ko="다시 선택하여 재시도하세요.",
         requires_user_action=False,
     ),
+    "alignment_low_confidence": FailureCodeInfo(
+        code="alignment_low_confidence",
+        severity="warn",
+        message_ko=(
+            "⚠️ 도면 정합 신뢰도 낮음 — 자동 정렬을 적용하지 않고 비교했습니다. "
+            "before/after가 어긋나 있거나 변경 위치가 부정확할 수 있습니다."
+        ),
+        suggested_action_ko=(
+            "두 도면의 좌표계/기준점이 동일한지 확인하세요. "
+            "결과를 신뢰하기 전에 정렬 상태를 육안으로 검토하세요."
+        ),
+        requires_user_action=True,
+    ),
+    "alignment_not_applied": FailureCodeInfo(
+        code="alignment_not_applied",
+        severity="info",
+        message_ko="ℹ️ 두 도면 간 유의미한 이동이 없어 자동 정합을 적용하지 않았습니다 (정상).",
+        suggested_action_ko="",
+        requires_user_action=False,
+    ),
 }
 
 
@@ -202,7 +228,7 @@ USER_ACTION_REQUIRED_CODES: Final[FrozenSet[RenderFailureCode]] = frozenset(
 
 
 def is_valid_code(value: object) -> bool:
-    """Return True if ``value`` is one of the 10 enum strings."""
+    """Return True if ``value`` is one of the enum strings."""
 
     return isinstance(value, str) and value in ALL_FAILURE_CODES
 
@@ -254,6 +280,116 @@ def highest_severity(*codes: RenderFailureCode) -> Severity:
             best_rank = rank[sev]
             best = sev
     return best
+
+
+# ---------------------------------------------------------------------------
+# P0-1 — Comparison-result → failure-code mapper (silent-degradation surface)
+# ---------------------------------------------------------------------------
+
+#: Substrings of free-text ``ComparisonResult.warnings`` that map to a
+#: structured code. Conservative on purpose: an unknown warning string is
+#: ignored rather than invented into a (possibly wrong) code. Extend this
+#: table when a new warning needs to reach the badge.
+_WARNING_SUBSTRING_TO_CODE: Final[Tuple[Tuple[str, RenderFailureCode], ...]] = (
+    ("신뢰도 낮음", "alignment_low_confidence"),
+    ("quality LOW", "alignment_low_confidence"),
+    ("alignment quality low", "alignment_low_confidence"),
+)
+
+
+def _dedupe_codes(codes: Tuple[RenderFailureCode, ...]) -> Tuple[RenderFailureCode, ...]:
+    """Order-preserving dedupe that drops ``"ok"`` and any invalid code.
+
+    An empty result means "nothing to show" → the badge stays hidden, which
+    preserves the honest "변경구역 없음" surface for a genuinely clean run.
+    """
+
+    seen: set = set()
+    out: list = []
+    for code in codes:
+        if code == "ok" or not is_valid_code(code):
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return tuple(out)
+
+
+def codes_from_comparison_result(
+    *,
+    warnings: object = (),
+    metadata: object = None,
+    zone_failure_codes: object = (),
+) -> Tuple[RenderFailureCode, ...]:
+    """Derive badge codes from one comparison's degradation signals.
+
+    Pure: no Qt/IO. Reads the signals the pipeline already produces but the
+    GUI never consumed — ``ComparisonResult.warnings`` / ``.metadata`` and
+    any zone-level ``RenderFailureCode`` tuple — and returns the structured
+    codes the ``FailureBadge`` should show. Returns ``()`` for a clean run.
+
+    Args:
+        warnings: iterable of free-text warning strings (best-effort mapped).
+        metadata: the result ``metadata`` dict (alignment signals live here).
+        zone_failure_codes: already-typed ``RenderFailureCode`` values from
+            the vector renderer (passed through verbatim).
+    """
+
+    meta = metadata if isinstance(metadata, dict) else {}
+    collected: list = []
+
+    # Alignment degradation (mutually exclusive): a low-confidence rejection
+    # (estimator returned None) is worse than a no-op skip (no real shift).
+    if meta.get("alignment_low_confidence"):
+        collected.append("alignment_low_confidence")
+    elif "alignment" in meta and "applied_global_shift_mm" not in meta:
+        collected.append("alignment_not_applied")
+
+    # Best-effort mapping of known free-text warnings.
+    if warnings:
+        for raw in warnings:
+            if not isinstance(raw, str):
+                continue
+            low = raw.lower()
+            for needle, code in _WARNING_SUBSTRING_TO_CODE:
+                if needle in raw or needle.lower() in low:
+                    collected.append(code)
+                    break
+
+    # Zone-level codes are already RenderFailureCode — pass through.
+    if zone_failure_codes:
+        for code in zone_failure_codes:
+            collected.append(code)
+
+    return _dedupe_codes(tuple(collected))
+
+
+def aggregate_run_failure_codes(items: object) -> Tuple[RenderFailureCode, ...]:
+    """Aggregate per-pair codes across a whole comparison run.
+
+    Iterates ``BatchCompareItemResult``-like objects (``.result`` holding a
+    ``ComparisonResult`` with ``.warnings`` / ``.metadata``), maps each via
+    :func:`codes_from_comparison_result`, and flattens + dedupes. Defensive
+    against missing/None results so the GUI thin-call can never raise.
+    """
+
+    collected: list = []
+    for item in items or ():
+        result = getattr(item, "result", None)
+        if result is None:
+            continue
+        warnings = getattr(result, "warnings", ()) or ()
+        metadata = getattr(result, "metadata", {}) or {}
+        zone_codes = getattr(result, "zone_failure_codes", ()) or ()
+        collected.extend(
+            codes_from_comparison_result(
+                warnings=warnings,
+                metadata=metadata,
+                zone_failure_codes=zone_codes,
+            )
+        )
+    return _dedupe_codes(tuple(collected))
 
 
 # ---------------------------------------------------------------------------

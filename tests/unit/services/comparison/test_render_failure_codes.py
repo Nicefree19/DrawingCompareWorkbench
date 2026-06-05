@@ -21,14 +21,15 @@ from src.services.comparison.render_failure_codes import (
 )
 
 
-def test_eleven_codes_present() -> None:
-    """The taxonomy must have exactly 11 codes (S1.1 + S1.3.1 contract).
+def test_thirteen_codes_present() -> None:
+    """The taxonomy must have exactly 13 codes (S1.1 + S1.3.1 + P0-1).
 
-    S1.3.1 added ``dwg_vector_normalise_failed`` to distinguish a
-    failed-then-cached path (warn) from normal DWG cache reuse (info).
+    S1.3.1 added ``dwg_vector_normalise_failed``; P0-1 added
+    ``alignment_low_confidence`` / ``alignment_not_applied`` so a
+    silently-degraded RANSAC alignment reaches the badge.
     """
 
-    assert len(ALL_FAILURE_CODES) == 11
+    assert len(ALL_FAILURE_CODES) == 13
     assert "ok" in ALL_FAILURE_CODES
     assert set(ALL_FAILURE_CODES) == {
         "ok",
@@ -42,7 +43,25 @@ def test_eleven_codes_present() -> None:
         "dwg_vector_normalise_failed",
         "zone_crop_stale",
         "zone_crop_cancelled",
+        "alignment_low_confidence",
+        "alignment_not_applied",
     }
+
+
+def test_alignment_codes_severity_and_action() -> None:
+    """P0-1: low-confidence is a warn that needs user attention; the
+    no-op skip is a benign info."""
+
+    low = FAILURE_CODE_INFO["alignment_low_confidence"]
+    assert low.severity == "warn"
+    assert low.requires_user_action is True
+    assert "alignment_low_confidence" in WARN_CODES
+    assert highest_severity("ok", "alignment_low_confidence") == "warn"
+
+    skip = FAILURE_CODE_INFO["alignment_not_applied"]
+    assert skip.severity == "info"
+    assert skip.requires_user_action is False
+    assert "alignment_not_applied" in INFO_CODES
 
 
 def test_dwg_vector_normalise_failed_is_warn_with_user_action() -> None:
@@ -293,3 +312,104 @@ def test_from_dwg_failure_code_uses_real_dwg_importer_constant() -> None:
         from_dwg_failure_code(DwgFailureCode.UNSUPPORTED_VERSION)
         == "dwg_unsupported_version"
     )
+
+
+# ---------------------------------------------------------------------------
+# P0-1 — codes_from_comparison_result / aggregate_run_failure_codes
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, field  # noqa: E402
+from typing import Any, Dict, List  # noqa: E402
+
+from src.services.comparison.render_failure_codes import (  # noqa: E402
+    aggregate_run_failure_codes,
+    codes_from_comparison_result,
+)
+
+
+def test_mapper_clean_run_returns_empty() -> None:
+    """A genuinely clean run produces no codes → badge stays hidden,
+    preserving the honest '변경구역 없음' surface."""
+
+    assert codes_from_comparison_result(warnings=(), metadata={}) == ()
+    assert codes_from_comparison_result(warnings=[], metadata=None) == ()
+
+
+def test_mapper_insignificant_alignment_is_not_applied() -> None:
+    """alignment recorded but no applied_global_shift_mm = no real shift."""
+
+    meta = {"alignment": {"dx": 0.0, "dy": 0.0}}
+    assert codes_from_comparison_result(metadata=meta) == ("alignment_not_applied",)
+
+
+def test_mapper_significant_alignment_emits_nothing() -> None:
+    """When the shift WAS applied, there is no degradation to surface."""
+
+    meta = {"alignment": {"dx": 50.0, "dy": 0.0}, "applied_global_shift_mm": (50.0, 0.0)}
+    assert codes_from_comparison_result(metadata=meta) == ()
+
+
+def test_mapper_low_confidence_flag_wins_over_not_applied() -> None:
+    """A low-confidence rejection is the worse signal and is mutually
+    exclusive with the benign no-op skip."""
+
+    meta = {"alignment_low_confidence": True}
+    assert codes_from_comparison_result(metadata=meta) == ("alignment_low_confidence",)
+    # even if a stale alignment dict is also present, low-confidence wins
+    meta2 = {"alignment_low_confidence": True, "alignment": {"dx": 0.0}}
+    assert codes_from_comparison_result(metadata=meta2) == ("alignment_low_confidence",)
+
+
+def test_mapper_known_warning_substring_maps() -> None:
+    """Known free-text warnings reach the badge; unknown ones are ignored
+    (no invented codes)."""
+
+    assert codes_from_comparison_result(
+        warnings=["diff 결과 신뢰도 낮음"], metadata={}
+    ) == ("alignment_low_confidence",)
+    assert codes_from_comparison_result(
+        warnings=["alignment quality LOW (inlier 0.30)"], metadata={}
+    ) == ("alignment_low_confidence",)
+    assert codes_from_comparison_result(
+        warnings=["완전히 모르는 경고 문자열"], metadata={}
+    ) == ()
+
+
+def test_mapper_passes_through_zone_codes_and_dedupes() -> None:
+    """Zone-level RenderFailureCodes pass through; duplicates collapse,
+    'ok' and invalid codes are dropped, order is preserved."""
+
+    out = codes_from_comparison_result(
+        warnings=["신뢰도 낮음"],
+        metadata={"alignment_low_confidence": True},
+        zone_failure_codes=("ok", "vector_draw_failed", "vector_draw_failed", "bogus"),
+    )
+    assert out == ("alignment_low_confidence", "vector_draw_failed")
+
+
+@dataclass
+class _FakeResult:
+    warnings: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _FakeItem:
+    result: Any = None
+
+
+def test_aggregate_run_flattens_and_dedupes_across_items() -> None:
+    items = [
+        _FakeItem(result=_FakeResult(metadata={"alignment_low_confidence": True})),
+        _FakeItem(result=_FakeResult(metadata={"alignment": {"dx": 0.0}})),
+        _FakeItem(result=_FakeResult(metadata={"alignment_low_confidence": True})),
+        _FakeItem(result=None),  # must not raise
+        _FakeItem(result=_FakeResult()),  # clean → nothing
+    ]
+    out = aggregate_run_failure_codes(items)
+    assert out == ("alignment_low_confidence", "alignment_not_applied")
+
+
+def test_aggregate_run_handles_empty_and_none() -> None:
+    assert aggregate_run_failure_codes(None) == ()
+    assert aggregate_run_failure_codes([]) == ()
