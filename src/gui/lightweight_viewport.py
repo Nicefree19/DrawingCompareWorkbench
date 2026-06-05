@@ -1364,6 +1364,15 @@ class LightweightDrawingViewport(QWidget):
             root.setProperty("unitsPerPixel", upp)
         except Exception:
             logger.exception("LightweightViewport: setProperty failed")
+        # Phase G2.7-FU2 follow-up — a programmatic zone-focus zoom sets
+        # unitsPerPixel directly (no QML wheel event), so it never reached
+        # _on_qml_viewport_changed and the PDF was left at the base 150-DPI
+        # render -> the auto-zoomed change looked blurry ("흐리게"). Trigger the
+        # same debounced higher-DPI re-render here. No-op outside PDF mode.
+        try:
+            self._maybe_schedule_pdf_rerender(float(upp))
+        except Exception:  # noqa: BLE001 — never let re-render scheduling break focus
+            logger.debug("zone-focus PDF rerender schedule failed", exc_info=True)
 
     def set_camera(
         self,
