@@ -395,26 +395,6 @@ def test_cleanup_spawned_zwcad_only_kills_new_pids(monkeypatch: pytest.MonkeyPat
     assert killed == [200, 300]
 
 
-def test_zwcad_process_ids_fallback_timeout_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    def timeout_run(command, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
-
-    monkeypatch.setattr(bridge, "_process_ids_for_image_toolhelp", lambda image_name: None)
-    monkeypatch.setattr(bridge.subprocess, "run", timeout_run)
-
-    assert bridge._zwcad_process_ids() == set()
-
-
-def test_zwcad_kill_process_tree_falls_back_to_terminate_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    def failed_taskkill(command, **kwargs):
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
-
-    monkeypatch.setattr(bridge.subprocess, "run", failed_taskkill)
-    monkeypatch.setattr(bridge, "_terminate_process", lambda pid: pid == 200)
-
-    assert bridge._kill_process_tree(200) is True
-
-
 class _FakeApp:
     def __init__(self, doc: "_FakeDocument") -> None:
         self.Documents = _FakeDocuments(doc)

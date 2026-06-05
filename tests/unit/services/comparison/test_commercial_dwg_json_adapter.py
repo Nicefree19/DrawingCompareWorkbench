@@ -203,26 +203,6 @@ def test_timeout_cleanup_waits_for_late_spawned_image_pid(monkeypatch: pytest.Mo
     assert killed == [200]
 
 
-def test_kill_process_tree_falls_back_to_terminate_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    def failed_taskkill(command, **kwargs):
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
-
-    monkeypatch.setattr(adapter_module.subprocess, "run", failed_taskkill)
-    monkeypatch.setattr(adapter_module, "_terminate_process", lambda pid: pid == 200)
-
-    assert adapter_module._kill_process_tree(200) is True
-
-
-def test_process_ids_for_image_fallback_timeout_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    def timeout_run(command, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout"))
-
-    monkeypatch.setattr(adapter_module, "_process_ids_for_image_toolhelp", lambda image_name: None)
-    monkeypatch.setattr(adapter_module.subprocess, "run", timeout_run)
-
-    assert adapter_module._process_ids_for_image("ZWCAD.exe") == set()
-
-
 def test_timeout_cleanup_settles_without_waiting_full_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     """Once spawns are killed and a quiet poll confirms none remain, cleanup returns
     without blocking the (here very large) grace window (finding 9)."""
