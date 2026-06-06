@@ -315,3 +315,22 @@ def test_large_offset_unrelated_layouts_not_falsely_aligned():
     )
     t = estimate_rigid_transform(a, b)
     assert t is None or t.inlier_ratio < 0.5
+
+
+def test_recovers_translation_with_asymmetric_added_content():
+    """Re-origin translation AND a revision that ADDED entities (so the entity
+    DENSITY differs between A and B): the bbox-centre coarse must still recover
+    the translation. A density-sensitive centre (interior percentile / mean)
+    would be skewed by the added cluster and miss the 50mm refine — this guards
+    against regressing to that."""
+    a = _build_entities(_SPREAD_LOCS)
+    DX, DY = 128348.0, -315950.0
+    b_locs = [(x + DX, y + DY) for (x, y) in _SPREAD_LOCS]
+    # 8 NEW entities clustered in one corner, WITHIN the translated extent
+    # (skews density, not the bounding box).
+    b_locs += [(DX + 150.0 + i * 25.0, DY + 150.0 + i * 18.0) for i in range(8)]
+    b = _build_entities(b_locs)
+    t = estimate_rigid_transform(a, b)
+    assert t is not None, "must recover translation despite added/asymmetric content"
+    assert t.dx == pytest.approx(-DX, abs=25.0)
+    assert t.dy == pytest.approx(-DY, abs=25.0)

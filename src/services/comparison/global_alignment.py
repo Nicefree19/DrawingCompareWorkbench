@@ -323,14 +323,16 @@ class _ShiftedEntity:
         self.layer = layer
 
 
-def _robust_center(entities: Dict[str, List[Any]]) -> Optional[Tuple[float, float]]:
-    """10–90 percentile midpoint of all entity locations (per axis).
+def _bbox_center(entities: Dict[str, List[Any]]) -> Optional[Tuple[float, float]]:
+    """Outlier-robust bounding-box centre of all entity locations.
 
-    Midpoint of the inner 80 % range: robust to (a) outlier/stray entities and
-    extent pollution (they fall in the trimmed 10 % tails) and (b) uneven entity
-    DENSITY (unlike the mean, the percentile midpoint tracks the geometric
-    middle). For a drawing translated as a whole, ``center_A − center_B`` equals
-    the translation. Needs ≥8 points or returns None.
+    Uses the 1st/99th percentile per axis as the box corners (rejecting the
+    extreme 1 % each end — e.g. a stray entity or extent pollution) and returns
+    their midpoint. Unlike an INTERIOR percentile midpoint (density-sensitive,
+    shifts when a revision adds/removes entities), the near-corner midpoint
+    tracks the drawing EXTENT, which a whole-drawing translation moves rigidly —
+    so ``center_A − center_B`` recovers the translation even with asymmetric
+    content. Needs ≥8 points.
     """
     xs: List[float] = []
     ys: List[float] = []
@@ -345,28 +347,33 @@ def _robust_center(entities: Dict[str, List[Any]]) -> Optional[Tuple[float, floa
     xs.sort()
     ys.sort()
 
-    def _mid(arr: List[float]) -> float:
-        lo = arr[int(len(arr) * 0.1)]
-        hi = arr[min(len(arr) - 1, int(len(arr) * 0.9))]
+    def _center(arr: List[float]) -> float:
+        lo = arr[max(0, int(len(arr) * 0.01))]
+        hi = arr[min(len(arr) - 1, int(len(arr) * 0.99))]
         return (lo + hi) / 2.0
 
-    return (_mid(xs), _mid(ys))
+    return (_center(xs), _center(ys))
 
 
 def estimate_coarse_translation(
     entities_a: Dict[str, List[Any]],
     entities_b: Dict[str, List[Any]],
 ) -> Optional[Tuple[float, float]]:
-    """Coarse (Δx, Δy) translation B → A from robust-center difference.
+    """Coarse (Δx, Δy) translation B → A from the robust bbox-centre difference.
 
     Recovers a gross re-origin shift (a revision re-inserted at a different
     model-space origin) that the 50 mm nearest-neighbour pairing in
     ``estimate_rigid_transform`` cannot see — every counterpart is thousands of
     mm away, so it finds no pairs and the diff reports "everything added".
+
+    The estimate need not be exact: ``estimate_rigid_transform`` shifts B by it
+    and then RANSAC-refines within ``search_radius`` (with a one-step median
+    correction first to absorb a moderate centre skew), and the inlier gate
+    rejects a bad coarse — so this only has to land close enough to re-pair.
     Returns None when either side lacks enough geometry.
     """
-    ca = _robust_center(entities_a)
-    cb = _robust_center(entities_b)
+    ca = _bbox_center(entities_a)
+    cb = _bbox_center(entities_b)
     if ca is None or cb is None:
         return None
     return (ca[0] - cb[0], ca[1] - cb[1])
@@ -452,6 +459,20 @@ def estimate_rigid_transform(
             )
             return None
         shifted_b = _shift_entities(entities_b, coarse)
+        # One median-shift correction: pair within a generous radius so true
+        # counterparts (now within a few hundred mm of their coarse-shifted
+        # position when the bbox centre is skewed by asymmetric content) pair up,
+        # and take the MEDIAN offset (robust to wrong neighbours). For an exact
+        # coarse this is a ~0 no-op; for a skewed one it pulls B within the fine
+        # search_radius so the RANSAC below can lock on.
+        refine_pairs = _entities_to_pairs(
+            entities_a, shifted_b, search_radius=search_radius * 8.0
+        )
+        if len(refine_pairs) >= min_candidate_count:
+            median = _estimate_median_shift(refine_pairs)
+            if median is not None and median.translation_magnitude > 1e-6:
+                coarse = (coarse[0] + median.dx, coarse[1] + median.dy)
+                shifted_b = _shift_entities(entities_b, coarse)
         pairs = _entities_to_pairs(entities_a, shifted_b, search_radius=search_radius)
         if len(pairs) < min_candidate_count:
             logger.info(
