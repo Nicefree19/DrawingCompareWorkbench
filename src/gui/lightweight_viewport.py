@@ -227,6 +227,15 @@ def _pdf_source_signature(source_path: Path) -> str:
     return f"{source_path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
 
 
+# Zoom-in re-render pixel cap. The initial page load uses ~5 MP (proven to
+# display). An UNCAPPED zoom re-render asked for 600 DPI and produced a
+# 5793x8192 (~47 MP) image that the Canvas-fallback viewport could not display
+# -> the PDF background went blank ("실배경 아님"). 10 MP keeps the largest
+# dimension well under the failing 8192 while still rendering sharper than the
+# 150-DPI base. (Crisp deep-zoom ultimately needs region-cropped rendering.)
+_PDF_RERENDER_MAX_PIXELS = 10_000_000
+
+
 def _normalise_pdf_pixel_budget(max_render_pixels: Optional[int]) -> Optional[int]:
     if max_render_pixels is None:
         return None
@@ -1665,13 +1674,17 @@ class LightweightDrawingViewport(QWidget):
             "Auto re-rendering PDF at DPI %d (was %d) on zoom-in",
             int(target_dpi), int(state.get("current_dpi", 150)),
         )
-        # The load_pdf_page call updates self._pdf_render_state.current_dpi
+        # The load_pdf_page call updates self._pdf_render_state.current_dpi.
+        # Cap the pixel budget so a deep zoom (e.g. 600 DPI) cannot produce an
+        # oversized image the viewport can't display (which blanked the PDF
+        # background). load_pdf_page lowers the effective DPI to fit the budget.
         try:
             self.load_pdf_page(
                 Path(str(pdf_path)),
                 page_index=int(page_index),
                 target_dpi=float(target_dpi),
                 cache_dir=Path(str(cache_dir)) if cache_dir else None,
+                max_render_pixels=_PDF_RERENDER_MAX_PIXELS,
             )
         except Exception:  # noqa: BLE001
             logger.exception("PDF zoom-rerender failed")

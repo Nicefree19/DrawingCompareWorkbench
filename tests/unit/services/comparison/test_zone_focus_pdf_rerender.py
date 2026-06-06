@@ -66,3 +66,35 @@ def test_zone_focus_rerender_schedule_failure_is_non_fatal():
     LightweightDrawingViewport.set_camera_to_world_bbox(
         fake_self, (100.0, 100.0, 140.0, 140.0)
     )
+
+
+def test_fire_pdf_rerender_caps_pixel_budget():
+    """The zoom re-render must cap max_render_pixels so a deep zoom (600 DPI)
+    cannot produce an oversized image the viewport can't display (which blanked
+    the PDF background)."""
+    from src.gui.lightweight_viewport import (
+        LightweightDrawingViewport,
+        _PDF_RERENDER_MAX_PIXELS,
+    )
+
+    captured: dict = {}
+
+    def _spy_load_pdf_page(path, *, page_index=0, target_dpi=150.0, cache_dir=None,
+                           max_render_pixels=None, **kw):
+        captured["target_dpi"] = target_dpi
+        captured["max_render_pixels"] = max_render_pixels
+        return True
+
+    fake_self = SimpleNamespace(
+        _pdf_render_state={
+            "pending_dpi": 600.0,
+            "pdf_path": "C:/x/page.pdf",
+            "page_index": 0,
+            "cache_dir": None,
+            "current_dpi": 150.0,
+        },
+        load_pdf_page=_spy_load_pdf_page,
+    )
+    LightweightDrawingViewport._fire_pdf_rerender(fake_self)
+    assert captured["max_render_pixels"] == _PDF_RERENDER_MAX_PIXELS
+    assert _PDF_RERENDER_MAX_PIXELS < 47_000_000  # well below the 47-69 MP that blanked
