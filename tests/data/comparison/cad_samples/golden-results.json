@@ -65,7 +65,7 @@
         "line": 3
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:59254294f2f9662406ea4463298640595790ae65681c1ff9ec2ec8660614c0ad",
+      "geometry_hash": "cad-geom:v1:sha256:d85a774f4122d10c4ebb93210594e9ef8acd1c7443929518a513f46e9da79bc3",
       "layer_count": 2,
       "normalization": {
         "changed_entity_count": 8,
@@ -99,7 +99,7 @@
         "line": 2
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:e61e0771a437c0be8c692a09447c3a8ded07432605b16603201511842227c1c6",
+      "geometry_hash": "cad-geom:v1:sha256:4123e06be4d7ff6c3643788605923b8e98047ebe28ac461a045ead4518c7a3fc",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 5,
@@ -133,7 +133,7 @@
         "line": 3
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:89031488e7a39fa4c45031507e6aea0c03cf9c75effaef4ed9316a2f5902904c",
+      "geometry_hash": "cad-geom:v1:sha256:d3754198cff9c00eb2aa43a2f2eb01a54b45b011660258086e6e7fe447b6139d",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 8,
@@ -167,7 +167,7 @@
         "line": 4
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:ded8758a6ae610a4ef73e3ae63f6d5d6782cfa2c2f6d0d9c4a737dda3024c138",
+      "geometry_hash": "cad-geom:v1:sha256:8304673a69113a67c103ea36a553a0f5038bfee4403480ad3d28a0788a65fd40",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 11,
@@ -201,7 +201,7 @@
         "line": 2
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:21fad19a6f5c08077386f4e79e75b65f830e0fcc9aea3a5566daed52ba4da6d8",
+      "geometry_hash": "cad-geom:v1:sha256:c407512e31a5e6fc92c0aa88fee2fff078e6a23dd22337b50526e0f30bd5e9e0",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 5,
@@ -235,7 +235,7 @@
         "line": 3
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:cd1331e2e2a583fb1c8274732c4a1f5f20b4425025e8779544128da2fa833720",
+      "geometry_hash": "cad-geom:v1:sha256:faeb659bee713a2a9746b61352972cb1f07a7b2884cc026f4003b18834bf3485",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 8,
@@ -269,7 +269,7 @@
         "line": 4
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:c55846f539c5c57370f93d0c5eecf6f36bd8381e8716b0619838d9439449df8a",
+      "geometry_hash": "cad-geom:v1:sha256:6bf0d1617413964e0663a3c495cc5718b0e3e7568b0bf459319d7724e330748f",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 11,
@@ -303,7 +303,7 @@
         "line": 2
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:130bb3974f9de8620a74d1f814148b3cccf39dd23d88c0154b2cf6d6e0f27396",
+      "geometry_hash": "cad-geom:v1:sha256:e068701b8a5b9e37b1adbcb6f7a56e0b9bec6d3c59327f3b73b4a18bef78ad01",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 5,
@@ -337,7 +337,7 @@
         "line": 3
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:672b61926a08da3843bf86dc7c1b123ef24adfe0df30433bd5527958546fea3f",
+      "geometry_hash": "cad-geom:v1:sha256:41fd834c688bdc05fb81272dcf30269aaed69156c4a52414ca3a09fec39d231e",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 8,
@@ -371,7 +371,7 @@
         "line": 4
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:c2fbf35d3b1609dafe33176a961ecf52f67f51b8bd6e59305cbae1cd3acfa5c1",
+      "geometry_hash": "cad-geom:v1:sha256:accefdab014055f73241fec1e094d2b96fa477c0bba7037b0188e05b4edadefb",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 11,
@@ -405,7 +405,7 @@
         "line": 2
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:13d7b9c79f31abb329e3c69d72b6cb9fe6d0a6847fbc20f3ec9e5779704a7740",
+      "geometry_hash": "cad-geom:v1:sha256:645a7197a6b4fdead35c370acb601f6f2158aa1a8a8b250cbd7004178ab98a55",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 5,
@@ -439,7 +439,7 @@
         "line": 3
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:ff668fe9c1f403a3281df69a06d0eef8f14fe4d065032d5bc83a02f0d2fbeb5c",
+      "geometry_hash": "cad-geom:v1:sha256:9377a1f88a8bbf3a103f6adca22423e8dcefa302e2f7abfdafa19993170cd9bf",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 8,
@@ -473,7 +473,7 @@
         "line": 4
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:fb81201b477419aabc05d5965db53ae66925d2e00e059602e72dd6712249195f",
+      "geometry_hash": "cad-geom:v1:sha256:209ab4e6031f540ad0409098900c23a15e4640652ea89507ca48cd3dc4b6ad28",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 11,
@@ -507,7 +507,7 @@
         "line": 2
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:b1594b7fd7495837ebfd121414574f911d57830f79b5c10cba5fad4d41cf47b9",
+      "geometry_hash": "cad-geom:v1:sha256:1a86dff9c0924c1bef9773f5a40532ad81c78619e10575ad486cd15b2165142f",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 5,
@@ -541,7 +541,7 @@
         "line": 3
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:0c7b1f17768b45ddb420844d649b40d236f1f3b4d8cb7600e679e4bfcc0c2aa8",
+      "geometry_hash": "cad-geom:v1:sha256:46e6a8be340a8f3ed89344511126c20806c58a3548e4b1fcc32b32a545985ecb",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 8,
@@ -575,7 +575,7 @@
         "line": 4
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:38ad75d353225dad30747ced3e50b4dab50ea644227baadd84ef59e45f80af9e",
+      "geometry_hash": "cad-geom:v1:sha256:6d658deac6f784de4385af30fbfe3061aa9569c64d49311c288015380b39997e",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 11,
@@ -609,7 +609,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:1665de940b9520f1be62df683528ce74aaf770e202466c5ae7910dd496d889cb",
+      "geometry_hash": "cad-geom:v1:sha256:1c39629c8116c1e68ebd2c0d8456e7c2ff5eecf53d04eada08961b6c06a52e3f",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -643,7 +643,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:3b675f9247b022eacd936f4ade6825750a5772befb4b0ea94d8c2292fa3306a6",
+      "geometry_hash": "cad-geom:v1:sha256:a6c5b7acad12f4e0a466dbcc8a648415459758a9de2e3451edece01c3da81389",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -677,7 +677,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:8e74ce511c3257fa6040c894730b18cc2cb645b68c8dbb0631827db588121d92",
+      "geometry_hash": "cad-geom:v1:sha256:da6d66f49626b27f664e4b542d383212f0ee8e0d7e2461ede7507127a283ab60",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -711,7 +711,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:5a6a968edd0d7bae6b2620c7d916d595b619e9f61eddfb47a9786db9dd8b08d1",
+      "geometry_hash": "cad-geom:v1:sha256:c4a5f94f51c82ae6e587dd836e1aa28cad3d96cd531e776b2f5b5b02a2e32186",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -745,7 +745,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:0e4de7df288cee8ffa5434e30c365f99a2133214cc165f45652d61a7f4eb4e03",
+      "geometry_hash": "cad-geom:v1:sha256:7ab5c28752f48c71ce1d52df98d5b95086ae594eed60c6adf30bf888890e3e1e",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -779,7 +779,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:521c164e721e2134e63bd9acfcfad41b1006a5f715926b61634a91222f9a97f3",
+      "geometry_hash": "cad-geom:v1:sha256:0f85f3ee9e2065bb1d967e68dde2606077eff308fed5dcecc6166ea9fa0092ad",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -813,7 +813,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:f04e4e5b4d314853203e9e751ac39360f0157a796adabe20fcb08de5571e0bec",
+      "geometry_hash": "cad-geom:v1:sha256:bb4e3d93f790f7590c237141c0f15434ef1de8ff37776d5a75e3cba25eca7ec8",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -847,7 +847,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:a6608228e57f5c758dc580667026e0dec24c0e30a6de27f27c2e14f0079c0dd5",
+      "geometry_hash": "cad-geom:v1:sha256:3fc03c4ef47290614d6547af36a08d96b410e0c2884c1d2b646c811ec4165aca",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 4,
@@ -1702,7 +1702,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:58bdd15fa0dbebd3245fb2205051b7445498d7e2401c2e4376fa553257f846f7",
+      "geometry_hash": "cad-geom:v1:sha256:d751cc0afce0b1740488e77a56643794c9c099d090e7559b0115ae99f59a3397",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 5,
@@ -1737,7 +1737,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:b290c1498c3d17de2c68ef920dbe28956ed8243c0ca9b0d2188c2039de8afaba",
+      "geometry_hash": "cad-geom:v1:sha256:24492dac394e22bde61429e3e0c21746a00690222dd763712faead6a3487d040",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 6,
@@ -1772,7 +1772,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:3e29fa7acb819a0ce495b970a6af04d7f95e6667b5e6fc6725f1b16aced5c8d7",
+      "geometry_hash": "cad-geom:v1:sha256:a91eb6dffe0a944b4532ffaf75bac934a563a044827315e9bc2304f9b92f3806",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 7,
@@ -1807,7 +1807,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:ecfada448d22b3df690244a572ebf8e9ac39bf0b01fd98e7f17420c767b9cf81",
+      "geometry_hash": "cad-geom:v1:sha256:0c1076be18ae11325e1d42fb06d5afd16bdcaeccc15da278c4c172d48ddc5cd9",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 8,
@@ -1842,7 +1842,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:2993c1a814b595f173f974d0c6038bfb3c243dcc355a4b0d42d158d293d4d511",
+      "geometry_hash": "cad-geom:v1:sha256:4a3b121807f10ed9a262d9dc9fa3982a28ca0b34613d91abdadb31461881287a",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 9,
@@ -1877,7 +1877,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:a8e8ecc9fd136b2d2f6df08dd79810edd5e41f5b90f1a726ec762530c2880dbe",
+      "geometry_hash": "cad-geom:v1:sha256:e23375c9e0a4f390680062f8ec0310544b0d8249d46fa258887afa420ec03c57",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 10,
@@ -1912,7 +1912,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:706a009e64fece5f945258f3a2185c0fc7ef4923becadc7d0bb6a06c73452496",
+      "geometry_hash": "cad-geom:v1:sha256:26f5b63e57e905d46afdeb57a78c16895969156c8fd839c4eb1bd5dcab661be4",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 11,
@@ -1947,7 +1947,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:499cfbe09e7a26b14ff1415485627049c695807170450ed71b9ec140dc69a8dd",
+      "geometry_hash": "cad-geom:v1:sha256:9240efbf3704ac7050f1e0ebf1a371ed53d9a71b74960eee525afa23eafb8e8d",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 12,
@@ -1982,7 +1982,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:b7b2a7318c5f1ffcc4087e95f21c9bc7fc76137bc777f7e5f7f159e749c14c92",
+      "geometry_hash": "cad-geom:v1:sha256:a63c9d74b13d25a08ecfd7016b2e5d81dfd7fdbf9eb32f68acd56e18eeb80f62",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 13,
@@ -2017,7 +2017,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:14664916dca990fc494cdba5629e63621e4cda6b1f77df029735b9d405b36c2c",
+      "geometry_hash": "cad-geom:v1:sha256:ff04d5b2d81962737e2b83f82a196713256256ca39528a1ee82d7f2378141351",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 14,
@@ -2052,7 +2052,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:cd43b9f8055195e96d7ac6bda7f227047db1160adcb510ec90aebdfc213ccd04",
+      "geometry_hash": "cad-geom:v1:sha256:0c4c588514c62939c210d907afce8613e84e9c1fccc5a52d5d25c772a38e551a",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 15,
@@ -2087,7 +2087,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:49d1d8ffbfd2b1af3f7775e39edf2dd90264c625a6a053c0d3ff56bb37a30617",
+      "geometry_hash": "cad-geom:v1:sha256:234081ab095409c007bd522ec3f18a804cdc15e119829b4cd6a0aed9a4f65952",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 16,
@@ -2122,7 +2122,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:f961c97a89f7c06e81878faea49ea965e96f3ba9552bc371228b0967c2b412bb",
+      "geometry_hash": "cad-geom:v1:sha256:d25ca1e187929fd6dabf30439cea3d5599838184f584bd24e3ea67ce5224a321",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 17,
@@ -2157,7 +2157,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:48c6c2e6232eece0e96c45d683807372b0c5ac36671c82a601cb11dcc049dcdb",
+      "geometry_hash": "cad-geom:v1:sha256:716b030647a61945e67822e1def120deab571236c2c2c7bcb60913b49b35dd13",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 18,
@@ -2192,7 +2192,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:e6ed395e740a7e974fd60593d31c281da69b18f65e82406f618eb19f3a2a9b76",
+      "geometry_hash": "cad-geom:v1:sha256:bb4191bcaeed9faab525d0358cb110084acfa6c7d02b3964e4ebef0498aba048",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 19,
@@ -2227,7 +2227,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:6f0d851dfdf1e5a81e416dc581eb27f4ecd61025b29f75c000c1fe4164d38f8c",
+      "geometry_hash": "cad-geom:v1:sha256:8fc8679d73c8bf832fc2005de20b597299a7ac59da3d068228e5ea0e7935724b",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 20,
@@ -2262,7 +2262,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:157fc687cacab8857df29528d7250537918190de0e3a9d5b135b7ac7becba899",
+      "geometry_hash": "cad-geom:v1:sha256:be8004bffd8f54c5ad0283d967a83ab37b34e5e97711dd5e4c84aa41137ffc99",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 21,
@@ -2297,7 +2297,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:60c2209168c92083f3517a18a79f117a9a150df8fc5dc0b725e3074e809bdb3a",
+      "geometry_hash": "cad-geom:v1:sha256:8e50cdc73c79d3d23e6de59c296201a408332fdc2b6381b075829e0d205e15cf",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 22,
@@ -2332,7 +2332,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:643b9ab0e915868ca5996548265b3249c4603069f007be548d97cbb1921cc67e",
+      "geometry_hash": "cad-geom:v1:sha256:3804bd60ea2afeb7f78fbbfdc7b23a70451b57e146323f2f9bbf2124ae44ad7c",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 23,
@@ -2367,7 +2367,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:1c4ad23ee2a1f87c3d1dbb57ca5e319e0a5e5714067d2bbf96bdf9f755316f91",
+      "geometry_hash": "cad-geom:v1:sha256:a751b766a419a00a85a712520a7119993e2e82a823bf22232dd816c438e75ecf",
       "layer_count": 5,
       "normalization": {
         "changed_entity_count": 24,
@@ -3282,7 +3282,7 @@
         "polyline": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:523cbc02185bde7c337d9c362612b034c9df31d3280cf8153b88965914fe0f35",
+      "geometry_hash": "cad-geom:v1:sha256:5b23970622a69448b7b4203b9140d14840fa978f7545f9f6f4a616359493e565",
       "layer_count": 2,
       "normalization": {
         "changed_entity_count": 4,
@@ -3318,7 +3318,7 @@
         "text": 1
       },
       "format": "dxf",
-      "geometry_hash": "cad-geom:v1:sha256:e0ed7dcc8d4230a69290a8a2db7785b910fc3ee5024f74a70cec89879d96082d",
+      "geometry_hash": "cad-geom:v1:sha256:6918a18c4dafb23b901544ca1c78fd22d8c65ce49255f23ba134ae308b4883e6",
       "layer_count": 2,
       "normalization": {
         "changed_entity_count": 5,

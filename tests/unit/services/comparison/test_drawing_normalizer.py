@@ -206,6 +206,63 @@ def test_large_closed_polyline_canonicalization_uses_linear_rotation(monkeypatch
     assert len(rotate_calls) <= 2
 
 
+def _all_rotations(keys: tuple) -> list:
+    count = len(keys)
+    if count <= 1:
+        return [tuple(keys)]
+    return [keys[offset:] + keys[:offset] for offset in range(count)]
+
+
+def test_minimal_rotation_offset_matches_brute_force_least_rotation() -> None:
+    """A1 correctness gate (bcb0ecc): the linear ``_minimal_rotation_offset`` must
+    return the SAME rotation as the brute-force lexicographically-least rotation —
+    including periodic/palindromic ties. This guards the closed-polyline
+    canonicalization optimization from ever regressing into a non-minimal (and
+    thus non-canonical) choice, which would produce false "changed" diffs."""
+
+    import random
+
+    rng = random.Random(20260606)
+    for _ in range(4000):
+        count = rng.randint(1, 9)
+        # Small alphabet forces periodic / palindromic / all-equal tie cases,
+        # which are exactly where naive least-rotation implementations break.
+        alphabet = rng.choice([2, 3, 4])
+        keys = tuple((rng.randint(0, alphabet - 1),) for _ in range(count))
+        offset = normalizer_module._minimal_rotation_offset(keys)
+        rotated = keys[offset:] + keys[:offset]
+        assert rotated == min(_all_rotations(keys)), (keys, offset)
+
+
+def test_canonical_closed_polyline_is_rotation_and_reverse_invariant() -> None:
+    """A1 correctness gate: ``_canonical_closed_polyline_vertices`` must yield the
+    SAME canonical key for any starting vertex (rotation) and either winding
+    direction (reverse), and be deterministic. This is the property that lets two
+    drawings of the same closed polyline hash equal regardless of how the CAD tool
+    happened to order the vertices."""
+
+    import random
+
+    rng = random.Random(424242)
+    norm = DrawingNormalizer(NormalizationOptions(resolve_bylayer_byblock=False))
+    canonical = norm._canonical_closed_polyline_vertices
+    key = normalizer_module._vertex_sequence_key
+    reverse = normalizer_module._reverse_closed_vertices
+
+    for _ in range(800):
+        count = rng.randint(2, 8)
+        base = [_vertex(rng.randint(0, 4), rng.randint(0, 4)) for _ in range(count)]
+        expected = key(canonical(base))
+        # determinism
+        assert key(canonical(base)) == expected
+        # rotation invariance (any starting vertex)
+        for offset in range(count):
+            rotated = base[offset:] + base[:offset]
+            assert key(canonical(rotated)) == expected, (base, offset)
+        # reverse invariance (same closed shape, opposite winding)
+        assert key(canonical(reverse(base))) == expected, base
+
+
 def test_bylayer_and_byblock_styles_are_resolved_to_effective_values() -> None:
     layers = [
         {
