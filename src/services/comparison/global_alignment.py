@@ -312,6 +312,103 @@ def _estimate_median_shift(
     )
 
 
+class _ShiftedEntity:
+    """Lightweight duck-typed entity (location + layer) for re-pairing after a
+    coarse shift, without mutating the caller's NormalizedEntity objects."""
+
+    __slots__ = ("location", "layer")
+
+    def __init__(self, location: Tuple[float, float], layer: str) -> None:
+        self.location = location
+        self.layer = layer
+
+
+def _robust_center(entities: Dict[str, List[Any]]) -> Optional[Tuple[float, float]]:
+    """10–90 percentile midpoint of all entity locations (per axis).
+
+    Midpoint of the inner 80 % range: robust to (a) outlier/stray entities and
+    extent pollution (they fall in the trimmed 10 % tails) and (b) uneven entity
+    DENSITY (unlike the mean, the percentile midpoint tracks the geometric
+    middle). For a drawing translated as a whole, ``center_A − center_B`` equals
+    the translation. Needs ≥8 points or returns None.
+    """
+    xs: List[float] = []
+    ys: List[float] = []
+    for lst in entities.values():
+        for e in lst:
+            loc = getattr(e, "location", None)
+            if loc is not None and len(loc) >= 2:
+                xs.append(float(loc[0]))
+                ys.append(float(loc[1]))
+    if len(xs) < 8:
+        return None
+    xs.sort()
+    ys.sort()
+
+    def _mid(arr: List[float]) -> float:
+        lo = arr[int(len(arr) * 0.1)]
+        hi = arr[min(len(arr) - 1, int(len(arr) * 0.9))]
+        return (lo + hi) / 2.0
+
+    return (_mid(xs), _mid(ys))
+
+
+def estimate_coarse_translation(
+    entities_a: Dict[str, List[Any]],
+    entities_b: Dict[str, List[Any]],
+) -> Optional[Tuple[float, float]]:
+    """Coarse (Δx, Δy) translation B → A from robust-center difference.
+
+    Recovers a gross re-origin shift (a revision re-inserted at a different
+    model-space origin) that the 50 mm nearest-neighbour pairing in
+    ``estimate_rigid_transform`` cannot see — every counterpart is thousands of
+    mm away, so it finds no pairs and the diff reports "everything added".
+    Returns None when either side lacks enough geometry.
+    """
+    ca = _robust_center(entities_a)
+    cb = _robust_center(entities_b)
+    if ca is None or cb is None:
+        return None
+    return (ca[0] - cb[0], ca[1] - cb[1])
+
+
+def _shift_entities(
+    entities: Dict[str, List[Any]], offset: Tuple[float, float]
+) -> Dict[str, List[Any]]:
+    """Return entities with locations shifted by ``offset`` (B → B+offset)."""
+    dx, dy = offset
+    out: Dict[str, List[Any]] = {}
+    for et, lst in entities.items():
+        shifted: List[Any] = []
+        for e in lst:
+            loc = getattr(e, "location", None)
+            if loc is None or len(loc) < 2:
+                continue
+            shifted.append(_ShiftedEntity((float(loc[0]) + dx, float(loc[1]) + dy), e.layer))
+        out[et] = shifted
+    return out
+
+
+def _compose_coarse_fine(
+    coarse: Tuple[float, float], fine: RigidTransform
+) -> RigidTransform:
+    """Compose a coarse translation (applied first to B) with a fine transform
+    estimated on the coarse-shifted B. Final maps raw B → A:
+        A = R_fine·(B + coarse) + t_fine = R_fine·B + (R_fine·coarse + t_fine)
+    so θ = θ_fine and the translation gains R_fine·coarse.
+    """
+    cx, cy = coarse
+    c = math.cos(fine.theta_rad)
+    s = math.sin(fine.theta_rad)
+    return RigidTransform(
+        dx=fine.dx + (c * cx - s * cy),
+        dy=fine.dy + (s * cx + c * cy),
+        theta_rad=fine.theta_rad,
+        inlier_ratio=fine.inlier_ratio,
+        candidate_count=fine.candidate_count,
+    )
+
+
 def estimate_rigid_transform(
     entities_a: Dict[str, List[Any]],
     entities_b: Dict[str, List[Any]],
@@ -338,12 +435,35 @@ def estimate_rigid_transform(
         호출자가 적용 여부 판단 (None vs insignificant 구분).
     """
     pairs = _entities_to_pairs(entities_a, entities_b, search_radius=search_radius)
+    coarse: Optional[Tuple[float, float]] = None
     if len(pairs) < min_candidate_count:
-        logger.debug(
-            "alignment skipped — only %d candidate pairs (< %d)",
-            len(pairs), min_candidate_count,
+        # Too few in-radius pairs. This is the normal "no shift / too little
+        # data" case — UNLESS the whole drawing was re-originated by a large
+        # translation, in which case every counterpart sits far beyond
+        # search_radius and nothing pairs (→ the diff reports "everything
+        # added", and the before viewer shows nothing). Recover the gross
+        # offset and retry; the RANSAC refine + inlier gate below still vet the
+        # result, so a wrong coarse self-rejects (no worse than today).
+        coarse = estimate_coarse_translation(entities_a, entities_b)
+        if coarse is None or math.hypot(coarse[0], coarse[1]) <= search_radius:
+            logger.debug(
+                "alignment skipped — only %d candidate pairs (< %d), no coarse offset",
+                len(pairs), min_candidate_count,
+            )
+            return None
+        shifted_b = _shift_entities(entities_b, coarse)
+        pairs = _entities_to_pairs(entities_a, shifted_b, search_radius=search_radius)
+        if len(pairs) < min_candidate_count:
+            logger.info(
+                "coarse translation (dx=%.0f dy=%.0f) brought only %d pairs together "
+                "(< %d) — distrust, no alignment",
+                coarse[0], coarse[1], len(pairs), min_candidate_count,
+            )
+            return None
+        logger.info(
+            "coarse re-origin translation detected: dx=%.0fmm dy=%.0fmm — refining",
+            coarse[0], coarse[1],
         )
-        return None
 
     transform: Optional[RigidTransform]
     if _CV2_AVAILABLE and _NP_AVAILABLE:
@@ -354,6 +474,11 @@ def estimate_rigid_transform(
 
     if transform is None:
         return None
+
+    if coarse is not None:
+        # ``transform`` was estimated on the coarse-shifted B; fold the coarse
+        # translation back in so the result maps RAW B → A.
+        transform = _compose_coarse_fine(coarse, transform)
 
     if transform.inlier_ratio < min_inlier_ratio:
         logger.info(
@@ -408,5 +533,6 @@ def apply_to_changes(
 __all__ = [
     "RigidTransform",
     "estimate_rigid_transform",
+    "estimate_coarse_translation",
     "apply_to_changes",
 ]

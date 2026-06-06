@@ -19,6 +19,7 @@ from src.services.comparison.global_alignment import (
     _entities_to_pairs,
     _estimate_median_shift,
     apply_to_changes,
+    estimate_coarse_translation,
     estimate_rigid_transform,
 )
 
@@ -245,3 +246,72 @@ def test_apply_to_changes_skips_none_location():
     apply_to_changes(changes, RigidTransform(1.0, 1.0, 0.0))
     assert changes[0].location is None
     assert changes[1].location == (11.0, 11.0)
+
+
+# ---------------------------------------------------------------------------
+# Coarse re-origin translation (large offset recovery)
+# ---------------------------------------------------------------------------
+
+
+_SPREAD_LOCS = [
+    (0.0, 0.0), (1000.0, 0.0), (2000.0, 500.0), (0.0, 1500.0),
+    (3000.0, 1500.0), (1500.0, 2500.0), (500.0, 3000.0), (2500.0, 3500.0),
+    (1000.0, 4000.0), (3500.0, 1000.0), (200.0, 2000.0), (2800.0, 200.0),
+]
+
+
+def test_estimate_coarse_translation_center_difference():
+    a = _build_entities(_SPREAD_LOCS)
+    b = _shift(a, 50000.0, -20000.0)  # B = A + (50000, -20000)
+    coarse = estimate_coarse_translation(a, b)
+    assert coarse is not None
+    # coarse maps B -> A, i.e. B + coarse ≈ A, so coarse ≈ (-50000, +20000)
+    assert coarse[0] == pytest.approx(-50000.0, abs=50.0)
+    assert coarse[1] == pytest.approx(20000.0, abs=50.0)
+
+
+def test_estimate_coarse_translation_needs_min_points():
+    a = _build_entities([(0.0, 0.0), (1.0, 1.0)])  # < 8 points
+    b = _shift(a, 1000.0, 1000.0)
+    assert estimate_coarse_translation(a, b) is None
+
+
+def test_estimate_recovers_large_reorigin_translation():
+    """A revision re-originated by a huge translation (far beyond the 50mm
+    nearest-neighbour radius) is still recovered via coarse alignment — without
+    it the diff pairs nothing and reports 'everything added' (empty before)."""
+    a = _build_entities(_SPREAD_LOCS)
+    DX, DY = 128348.0, -315950.0
+    b = _shift(a, DX, DY)
+    t = estimate_rigid_transform(a, b)
+    assert t is not None, "coarse alignment should recover the large translation"
+    # B -> A maps b back to a: dx ≈ -DX, dy ≈ -DY
+    assert t.dx == pytest.approx(-DX, abs=5.0)
+    assert t.dy == pytest.approx(-DY, abs=5.0)
+    assert abs(math.degrees(t.theta_rad)) < 0.1
+
+
+def test_aligned_drawing_does_not_trigger_coarse():
+    """Already-aligned drawings (sub-radius shift, plenty of in-radius pairs)
+    keep their existing small-shift behaviour — coarse must not interfere."""
+    a = _build_entities(_SPREAD_LOCS)
+    b = _shift(a, 0.4, 0.3)  # tiny shift, well within search_radius
+    t = estimate_rigid_transform(a, b)
+    assert t is not None
+    assert t.dx == pytest.approx(-0.4, abs=0.3)
+    assert t.dy == pytest.approx(-0.3, abs=0.3)
+
+
+def test_large_offset_unrelated_layouts_not_falsely_aligned():
+    """Large offset AND different layouts: the coarse shift overlays the point
+    clouds, but the fine RANSAC finds no consistent inliers, so no confident
+    (false) alignment is returned."""
+    import random
+
+    rng = random.Random(42)
+    a = _build_entities([(rng.uniform(0, 5000), rng.uniform(0, 5000)) for _ in range(20)])
+    b = _build_entities(
+        [(rng.uniform(200000, 205000), rng.uniform(200000, 205000)) for _ in range(20)]
+    )
+    t = estimate_rigid_transform(a, b)
+    assert t is None or t.inlier_ratio < 0.5
