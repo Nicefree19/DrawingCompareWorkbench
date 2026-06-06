@@ -413,6 +413,40 @@ class ViewerSession:
         with self._lock:
             return [self.get_pair_state(pid, side) for (pid, side) in self._states]
 
+    def ensure_pair_source(self, pair_id: str, side: Side, source_path: str) -> None:
+        """Inject a usable local source path for a ``(pair_id, side)`` state.
+
+        Sharable viewer packages redact ``source_path`` in the V3 manifest and
+        key the manifest's single state by the package ``pair_uuid`` — so a
+        multi-pair live Workbench that requests a zone by its OWN pair hash
+        finds either no state or a redacted one, and ``request_zone`` then skips
+        the native scene-pack build (the lightweight viewer never gets the
+        full-detail vector). The Workbench repairs the real local path from the
+        comparison summary; this lets it hand that path to the session so the
+        zone-focus build can actually run.
+
+        Creates the state when absent. Only sets/overwrites when the existing
+        state has no usable source (empty or redacted) — never clobbers a good
+        path already present.
+        """
+
+        if self._closed:
+            return
+        text = str(source_path or "").strip()
+        if not text:
+            return
+        with self._lock:
+            state = self._states.get((pair_id, side))
+            if state is None:
+                state = PairSessionState(
+                    pair_id=pair_id, side=side, render_mode="relative_only",
+                )
+                self._states[(pair_id, side)] = state
+            existing = str(state.source_path or "").strip()
+            if existing and "redacted" not in existing.lower():
+                return  # already has a real source — don't clobber
+            state.source_path = text
+
     # ----- zone request queue (skeleton — G2.3 wires the renderer) --------
 
     def request_zone(

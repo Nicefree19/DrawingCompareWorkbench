@@ -210,6 +210,83 @@ def test_select_pair_unknown_pair_creates_default_state(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ensure_pair_source — inject a usable local source for a GUI pair_id that the
+# redacted, package-keyed V3 manifest does not cover.
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_pair_source_seeds_unknown_pair_state(tmp_path: Path) -> None:
+    session = ViewerSession(cache_root=tmp_path / "cache", max_workers=1)
+    try:
+        session.ensure_pair_source("gui-pair", "after", "/local/after.dxf")
+        assert session.get_pair_state("gui-pair", "after").source_path == "/local/after.dxf"
+    finally:
+        session.shutdown()
+
+
+def test_ensure_pair_source_overwrites_redacted_but_keeps_real(tmp_path: Path) -> None:
+    src = tmp_path / "after.dxf"
+    _make_sample_dxf(src)
+    # Manifest seeds a REDACTED source under the package pair_uuid.
+    manifest = _make_sample_manifest("pkg", "<redacted>/after.dxf")
+    mpath = tmp_path / "viewer_manifest_v3.json"
+    write_manifest_v3(mpath, manifest)
+    session = ViewerSession(cache_root=tmp_path / "cache", max_workers=1)
+    try:
+        session.load_manifest(mpath)
+        # redacted -> overwritten with the real local path
+        session.ensure_pair_source("pkg", "after", str(src))
+        assert session.get_pair_state("pkg", "after").source_path == str(src)
+        # real path present -> NOT clobbered by a later (different) call
+        session.ensure_pair_source("pkg", "after", "/other/x.dxf")
+        assert session.get_pair_state("pkg", "after").source_path == str(src)
+    finally:
+        session.shutdown()
+
+
+def test_ensure_pair_source_ignores_empty(tmp_path: Path) -> None:
+    session = ViewerSession(cache_root=tmp_path / "cache", max_workers=1)
+    try:
+        session.ensure_pair_source("gui-pair", "after", "")
+        assert session.get_pair_state("gui-pair", "after").source_path == ""
+    finally:
+        session.shutdown()
+
+
+def test_request_zone_builds_only_after_ensure_pair_source(tmp_path: Path) -> None:
+    """The ⑤ fix end-to-end: request_zone for a GUI pair_id absent from the
+    package-keyed manifest submits NO build (no source) until
+    ensure_pair_source hands it a real local source — then the native
+    zone-focus build runs and fires evidence (which the Workbench turns into
+    the lightweight full-detail vector)."""
+    src = tmp_path / "after.dxf"
+    _make_sample_dxf(src)
+
+    evidence_seen: List[Tuple[str, str]] = []
+    done = threading.Event()
+
+    def _ev(pair_id: str, zone_id: str, evidence) -> None:
+        evidence_seen.append((pair_id, zone_id))
+        done.set()
+
+    session = ViewerSession(
+        cache_root=tmp_path / "cache", max_workers=1, on_zone_evidence=_ev,
+    )
+    try:
+        bbox = (0.0, 0.0, 20.0, 20.0)
+        # No source for this GUI pair -> request_zone is a no-op build.
+        session.request_zone(pair_id="gui-pair", zone_id="z1", side="after", bbox_world=bbox)
+        assert not done.wait(timeout=2.0), "must not build without a usable source"
+        # Inject the repaired local source -> the native build now runs.
+        session.ensure_pair_source("gui-pair", "after", str(src))
+        session.request_zone(pair_id="gui-pair", zone_id="z1", side="after", bbox_world=bbox)
+        assert done.wait(timeout=30.0), "zone build never fired evidence after ensure_pair_source"
+        assert ("gui-pair", "z1") in evidence_seen
+    finally:
+        session.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # Cache reuse — second select_pair on the same source skips build
 # ---------------------------------------------------------------------------
 

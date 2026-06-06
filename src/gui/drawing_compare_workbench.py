@@ -10480,6 +10480,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             active_pair = str(self._active_row.get("pair_id") or "")
         if not active_pair:
             return
+        # Hand the session a usable LOCAL source path before requesting the
+        # zone. The shipped V3 manifest redacts source paths and keys its state
+        # by the package pair_uuid, so without this request_zone finds no source
+        # and skips the native scene-pack build — the lightweight viewer never
+        # gets the full-detail (infinite-zoom) vector for the zone. The
+        # Workbench already repairs the real path from the comparison summary;
+        # reuse it. PDF pairs keep their own page path (no DXF scene pack).
+        viewer_pair = self._viewer_pair_from_row_v2(active_pair, self._active_row or {})
+        if not _viewer_pair_is_pdf(viewer_pair):
+            for src_side, src_key in (("after", "source_b"), ("before", "source_a")):
+                src = viewer_pair.get(src_key)
+                if self._is_usable_zone_render_source_v2(src):
+                    try:
+                        session.ensure_pair_source(active_pair, src_side, str(src))
+                    except Exception:
+                        logger.debug("ensure_pair_source failed", exc_info=True)
         # Phase G2.4 — bbox normalisation (production overlays use the
         # ``{"min_x","min_y","max_x","max_y"}`` dict shape; legacy/test
         # fixtures use ``[x0, y0, x1, y1]``). Accept both.
