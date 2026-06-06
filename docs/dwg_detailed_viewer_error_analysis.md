@@ -333,3 +333,51 @@ misinformation 방지).
 **별도 후속(범위 외)**: 대형 도면의 전체 래스터 배경을 항상 완성시키는 성능/타일링 개선은
 신뢰성 로드맵의 별도 P0 항목으로 다룬다. 현재 동작(정직한 relative_only 폴백)은 안전하다.
 
+---
+
+## 2026-06-06 — DWG 구역 선택 시 "포커싱·변경부위 파악 안 됨" 다층 근본원인 (실측)
+
+사용자: "PDF는 원하는 결과인데 DWG는 여전히 뷰어 포커싱·변경부위 파악이 안 됨." 라이브 실행
+(`compare_20260606_152453` = pair_89cd07e28a3d8e19, `compare_20260606_153048` =
+pair_707b29e82365e060)의 `viewer/viewer_perf.jsonl` + zone_crops/zone_vector 산출물 + 전체
+배경 PNG를 실측해 **경량 전용 모드(QtQuick 머신)에서 DWG 구역의 선명/정합 경로가 여러 층에서
+동시에 실패**함을 확인.
+
+1. **전체 래스터 확대 = mush (지배적 증상)**: 전체 배경 PNG는 8000×1414 px. 경량 뷰어가 전체
+   배경을 구역으로 확대하면 fallback 렌더러가 8000px 텍스처를 다운샘플 → 확대 시 흐림. (PDF는
+   줌 시 고DPI 재렌더 `_maybe_schedule_pdf_rerender`라 선명. DWG 래스터는 재렌더 없음.)
+
+2. **`cad-background-image-crop` 구역 crop은 실제로 선명하지만 경량에 표시 안 됨**: 8000px 배경
+   → 구역(~10,000mm/50,557mm) crop ≈ 1:1(1600px). 즉 crop은 선명. 그러나
+   `_on_zone_crop_render_finished_v2`의 crop 적재 블록이 `if not DRAWING_COMPARE_LIGHTWEIGHT_
+   VIEWER_ONLY`로 **레거시(숨김) 뷰포트에만** 적재 → 경량 전용 모드에서 비가시. **→ 본 커밋
+   7a6678c가 해결**(`_apply_zone_crop_to_lightweight_v2`로 경량에 surface).
+
+3. **before/after 좌표계 불일치 → 한쪽 crop이 blank(백지)**: 실측 전체배경 world_bbox —
+   before=(353044,206619,403601,215556), after=(481392,-109331,531949,-100393) **완전 분리**.
+   변경 zone bbox가 after 좌표라 before-bg 밖 → `_render_background_image_crop`이
+   `outside_background_bounds` → `_write_blank_crop`(백지). pair_707b…의 8개 zone **전부**
+   outside_background_bounds. 그래서 surface 시 **per-side blank guard 필수**(zone world_window가
+   해당 면 전체배경 bbox와 안 겹치면 그 면은 relative_only로 정직 폴백, 백지 패널 금지) — 7a6678c
+   에 포함. **단, 좌표계 불일치 자체는 별개 미해결**(개정 DWG가 다른 datum으로 재원점화? 또는
+   정합/페어링 이슈; P0-2b 정합 영역). added(b_only) 변경은 after 한 면만으로 충분하나, modified의
+   before↔after 대조는 깨짐.
+
+4. **선명 SVG 벡터 렌더는 성공하지만 레거시 뷰포트로만 라우팅**: `_start_zone_vector_render_v2`가
+   source_b(after)에서 zone SVG를 렌더(실측 `compare_20260606_153048/viewer/zone_vector/*.svg`
+   3건, **status=ok, entity_count=1500, 60,000mm 윈도, 1.1MB 진짜 벡터**). 그러나
+   `_apply_zone_vector_to_qml_v2`가 `preview_after_v2`/`preview_before_v2`(레거시)에만 push →
+   경량 전용 모드에서 무한줌 벡터가 비가시. **미해결**(후속: 경량에 벡터/고해상 래스터화 surface).
+
+5. **경량 네이티브 벡터(scene-pack zone-focus) 빌드 자체가 스킵됨**: 로그
+   `request_zone(...): no source path, skipping worker submit`. ViewerSession V3 manifest의
+   per-side `state.source_path`가 비어 `request_zone`이 zone 마이크로팩을 안 만들고 →
+   `push_zone_focus_pack`(경량 네이티브 무한줌 벡터) 미실행 → 전체도 scene-pack 대신 raster 폴백
+   (1번의 mush 뿌리). **미해결**(후속: ViewerSession source_path 배선 — 단, 대형 DWG는 의도적
+   raster 폴백일 가능성 있어 성능/메모리 검토 필요).
+
+**본 커밋(7a6678c) 범위**: 2번(crop을 경량에 surface) + 3번(blank guard)만. 즉 **after 면 선명
+crop은 해결**(지배적 added 케이스). 3·4·5의 잔여(좌표계 불일치, SVG 경량 라우팅, scene-pack
+배선)는 **후속 별도 작업**. 라이브 육안 검증 필요(헤드리스 재현 불가 — [[zone_zoom_surrogate_
+rootcause]] 교훈).
+
