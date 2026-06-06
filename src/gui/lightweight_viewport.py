@@ -1383,6 +1383,65 @@ class LightweightDrawingViewport(QWidget):
         except Exception:  # noqa: BLE001 — never let re-render scheduling break focus
             logger.debug("zone-focus PDF rerender schedule failed", exc_info=True)
 
+    def _fit_units_per_pixel(self) -> float:
+        """unitsPerPixel that fits the whole drawing — matches QML fitToView.
+
+        QML ``fitToView`` uses ``max(ww/availW, wh/availH) * 1.05`` (5 %
+        margin). Mirroring it here lets the zoom slider treat 100 % as the
+        fit zoom so the slider and the wheel/fit button share one scale.
+        """
+
+        root = self._quick.rootObject()
+        if root is None:
+            return 0.0
+        coords = _normalise_bbox(self._world_bbox)
+        if coords is None:
+            return 0.0
+        x0, y0, x1, y1 = coords
+        ww = max(1.0, float(x1) - float(x0))
+        wh = max(1.0, float(y1) - float(y0))
+        try:
+            avail_w = float(root.property("width") or self.width() or 0.0)
+            avail_h = float(root.property("height") or self.height() or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if avail_w <= 0.0 or avail_h <= 0.0:
+            return 0.0
+        return max(ww / avail_w, wh / avail_h) * 1.05
+
+    def apply_zoom_factor(self, factor: float) -> None:
+        """Zoom the camera to ``factor`` × fit-to-view (1.0 == whole drawing).
+
+        The zoom slider is absolute: 100 % is the fit-to-view zoom and higher
+        values zoom in. The lightweight viewport's zoom IS its
+        ``unitsPerPixel`` (smaller == more zoomed), so we anchor to the same
+        fit formula QML's ``fitToView`` uses and divide by the factor. The
+        camera centre is preserved so zooming doesn't also pan, and a
+        higher-DPI PDF re-render is scheduled (no-op outside PDF mode).
+        """
+
+        root = self._quick.rootObject()
+        if root is None:
+            return
+        fit_upp = self._fit_units_per_pixel()
+        if fit_upp <= 0.0:
+            return
+        try:
+            zoom = float(factor)
+        except (TypeError, ValueError):
+            return
+        upp = max(0.0001, fit_upp / max(0.05, zoom))
+        try:
+            cx = float(root.property("cameraCenterX") or 0.0)
+            cy = float(root.property("cameraCenterY") or 0.0)
+        except (TypeError, ValueError):
+            return
+        self.set_camera(cx, cy, upp)
+        try:
+            self._maybe_schedule_pdf_rerender(upp)
+        except Exception:  # noqa: BLE001 — never let re-render break zoom
+            logger.debug("zoom-slider PDF rerender schedule failed", exc_info=True)
+
     def set_camera(
         self,
         center_x: float,

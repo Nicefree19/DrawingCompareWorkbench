@@ -5724,13 +5724,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self.btn_compact_v2.blockSignals(False)
 
     def _on_overlay_opacity_changed_v2(self, value: int) -> None:
-        """Apply slider-driven overlay opacity to both preview viewports."""
+        """Apply slider-driven overlay opacity to every preview viewport.
+
+        Both the legacy GPU viewports and the active lightweight viewports
+        expose ``set_overlay_opacity_scale``; drive all four so the slider
+        works regardless of which viewer is currently shown.
+        """
 
         scale = max(30, min(100, int(value))) / 100.0
-        if hasattr(self, "preview_before_v2"):
-            self.preview_before_v2.set_overlay_opacity_scale(scale)
-        if hasattr(self, "preview_after_v2"):
-            self.preview_after_v2.set_overlay_opacity_scale(scale)
+        for viewport in (
+            getattr(self, "preview_before_v2", None),
+            getattr(self, "preview_after_v2", None),
+            getattr(self, "preview_before_lightweight_v2", None),
+            getattr(self, "preview_after_lightweight_v2", None),
+        ):
+            if viewport is not None:
+                viewport.set_overlay_opacity_scale(scale)
         if hasattr(self, "lbl_overlay_opacity_value_v2"):
             self.lbl_overlay_opacity_value_v2.setText(f"{int(round(scale * 100))}%")
 
@@ -6560,10 +6569,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._set_input_path_v2("source_b", source_b)
 
     def _on_zoom_slider_changed_v2(self, value: int) -> None:
-        """C2 — apply slider zoom to both viewports (sync via existing helper)."""
+        """C2 — apply slider zoom to the active viewport pair.
+
+        When the lightweight viewer is showing, drive its cameras
+        (``apply_zoom_factor`` anchors 100 % to fit-to-view); otherwise fall
+        back to the legacy GPU viewport's ``apply_viewport`` sync.
+        """
 
         zoom = max(0.2, min(8.0, int(value) / 100.0))
-        if hasattr(self, "preview_before_v2") and self.preview_before_v2._quick_ready:
+        if self._is_lightweight_viewer_active_v2():
+            for viewport in (
+                getattr(self, "preview_before_lightweight_v2", None),
+                getattr(self, "preview_after_lightweight_v2", None),
+            ):
+                if viewport is not None:
+                    viewport.apply_zoom_factor(zoom)
+        elif hasattr(self, "preview_before_v2") and self.preview_before_v2._quick_ready:
             root = self.preview_before_v2._quick.rootObject()
             if root is not None:
                 pan_x = float(root.property("panX") or 0.0)
@@ -10494,6 +10515,23 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             )
             return
 
+        active_pair = ""
+        if isinstance(self._active_row, dict):
+            active_pair = str(self._active_row.get("pair_id") or "")
+        # Phase G2.7-COORDFIX2 — active-zone overlays come from the dashboard
+        # ``top_issues`` list, which skips ``_push_overlays_to_lightweight_v2``'s
+        # coord backfill. Without ``bbox_coordinate_space``/``pdf_dpi`` a PDF
+        # bbox (image_pixels) passes through convert_bbox_to_world_space
+        # UNCHANGED → camera zooms to pixel coords off the points-space page,
+        # so the zone-focus zoom never matched the list pick. Backfill first.
+        if active_pair:
+            try:
+                overlay = self._backfill_pdf_overlay_coord_space_v2(
+                    active_pair, [overlay]
+                )[0]
+            except Exception:
+                logger.debug("zone-focus coord backfill failed", exc_info=True)
+
         # Phase G2.7-COORDFIX — for PDF overlays, the bbox is in
         # ``image_pixels`` at ``pdf_dpi`` while the lightweight viewport's
         # world space is in PDF points. Without this conversion the camera
@@ -10575,9 +10613,6 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
 
         # Refresh overlays so the picked zone shows as focus, others as cloud.
-        active_pair = ""
-        if isinstance(self._active_row, dict):
-            active_pair = str(self._active_row.get("pair_id") or "")
         if active_pair:
             self._push_overlays_to_lightweight_v2(active_pair, focus_zone_id=zone_id)
 
