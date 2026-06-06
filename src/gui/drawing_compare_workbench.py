@@ -209,6 +209,10 @@ GUI_FIRST_SELECTION_ZONE_LIMIT = 500
 GUI_FULL_ZONE_TREE_IDLE_DELAY_MS = 120
 GUI_INITIAL_ZONE_SELECT_DELAY_MS = 75
 GUI_INITIAL_ZONE_HEAVY_RENDER_DELAY_MS = 250
+# ② full-detail upgrade: delay before silently re-rendering the on-screen fast
+# crop from source (text/dims/blocks). Small so the upgrade feels prompt, but
+# non-zero so the fast crop paints first and is never delayed by the upgrade.
+GUI_ZONE_FULL_DETAIL_UPGRADE_DELAY_MS = 90
 GUI_LIGHTWEIGHT_PAIR_LOAD_DELAY_MS = 25
 GUI_PDF_INITIAL_RENDER_MAX_PIXELS = 5_000_000
 GUI_PDF_ADJACENT_PREWARM_DELAY_MS = 350
@@ -4544,6 +4548,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._pending_zone_render_request_v2: Optional[tuple[str, str] | tuple[str, str, str]] = None
         self._selected_zone_render_generation_v2: int = 0
         self._active_zone_render_request_v2: Optional[tuple[str, str, str]] = None
+        # ② deferred full-detail upgrade: last (pair, zone, request) for which a
+        # prefer_source_render upgrade was already issued, so the upgrade fires
+        # at most once per zone selection and never loops.
+        self._zone_full_detail_started_request_v2: Optional[tuple[str, str, str]] = None
         self._active_issue_by_zone: dict[str, dict] = {}
         self._active_all_overlays_by_zone: dict[str, dict] = {}
         self._active_overlays_by_zone: dict[str, dict] = {}
@@ -7928,6 +7936,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._pdf_prewarm_generation_v2 += 1
         self._selected_zone_render_generation_v2 += 1
         self._active_zone_render_request_v2 = None
+        self._zone_full_detail_started_request_v2 = None
         self._zone_categories_v2.clear()
         self._active_category_filter_v2 = "전체"
         self._user_picked_category_filter_v2 = False
@@ -11797,7 +11806,14 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             return self._viewer_root
         return _workbench_data_dir() / "viewer_cache"
 
-    def _start_zone_crop_render_v2(self, zone_id: str) -> None:
+    def _start_zone_crop_render_v2(
+        self, zone_id: str, *, prefer_source_render: bool = False
+    ) -> None:
+        # prefer_source_render=True is the ② full-detail (text/dims/blocks)
+        # deferred upgrade: render the zone window from the source via the ezdxf
+        # Frontend instead of cropping the simplified fast raster. Issued by
+        # _maybe_start_zone_full_detail_v2 AFTER the fast crop is already shown,
+        # only when the controller is free, so it never disturbs the fast paint.
         pair_id = str((self._active_row or {}).get("pair_id") or "")
         if not pair_id or not zone_id:
             return
@@ -11858,7 +11874,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             )
             self._set_preview_status_v2(pair_id, "relative_only", "원본 도면 경로를 찾을 수 없어 상대 위치만 표시합니다.")
             return
-        self._set_preview_status_v2(pair_id, "rendering", "선택 변경구역 실도면 crop을 렌더 중입니다.")
+        if not prefer_source_render:
+            # Deferred full-detail upgrade keeps the fast crop on screen (no
+            # "rendering" reset) and replaces it silently when it completes.
+            self._set_preview_status_v2(pair_id, "rendering", "선택 변경구역 실도면 crop을 렌더 중입니다.")
         if _viewer_pair_is_pdf(viewer_pair):
             has_pdf_background = bool(viewer_pair.get("before_image")) and bool(viewer_pair.get("after_image"))
             has_pdf_transform = bool(viewer_pair.get("before_transform")) and bool(viewer_pair.get("after_transform"))
@@ -11904,6 +11923,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             "after_background_image": str(after_background or ""),
             "before_background_transform": viewer_pair.get("before_transform") or {},
             "after_background_transform": viewer_pair.get("after_transform") or {},
+            "prefer_source_render": bool(prefer_source_render),
         }
         process_key = render_environment_hash
         started = self._zone_render_controller_v2.render(
@@ -11943,6 +11963,37 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not _viewer_pair_is_pdf(viewer_pair):
             self._apply_or_start_zone_vector_render_v2(pair_id, zone_id)
         self._refresh_zone_vector_button_state_v2()
+
+    def _maybe_start_zone_full_detail_v2(
+        self, pair_id: str, zone_id: str, request_id: str
+    ) -> None:
+        """② Re-render the on-screen fast crop from source for full detail.
+
+        Issued on a timer after a cad-background fast crop is shown. Re-renders
+        the same zone window via the ezdxf Frontend (prefer_source_render=True)
+        so text/dims/blocks/hatch appear, then swaps it in via the normal render
+        result path. Bails out (leaving the perfectly good fast crop in place) if
+        the selection moved on, the controller is busy, a different render is
+        queued, or this exact request was already upgraded — so the upgrade
+        never loops and never disturbs the fast paint.
+        """
+        if not self._is_lightweight_viewer_active_v2():
+            return
+        if not self._is_current_zone_render_request_v2(pair_id, zone_id, request_id):
+            return
+        if self._zone_render_controller_v2.is_busy() or self._pending_zone_render_request_v2:
+            return
+        key = (pair_id, zone_id, request_id)
+        if self._zone_full_detail_started_request_v2 == key:
+            return
+        self._zone_full_detail_started_request_v2 = key
+        self._record_zone_render_perf_event_v2(
+            "zone_full_detail_upgrade",
+            pair_id,
+            zone_id,
+            request_id=request_id,
+        )
+        self._start_zone_crop_render_v2(zone_id, prefer_source_render=True)
 
     def _on_zone_crop_render_finished_v2(
         self,
@@ -12110,6 +12161,25 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 )
             self.zone_detail_v2.setHtml(self._zone_detail_text_v2(zone_id))
             self._start_selected_zone_deferred_enhancement_v2(pair_id, zone_id, result_request_id)
+            # ② full-detail upgrade. The fast crop just shown is the simplified
+            # whole-drawing raster (LINE/ARC only — no text/dims/blocks/hatch).
+            # Now that it is on screen, schedule a silent re-render of the same
+            # zone window from source via the ezdxf Frontend, which swaps the
+            # full-detail crop in when ready. Only for the cad-background fast
+            # crop (PDF/relative fallbacks already carry their own fidelity), and
+            # only via a timer so the fast paint is never delayed.
+            if (
+                self._is_lightweight_viewer_active_v2()
+                and status == "ready"
+                and str(result_payload.get("renderer_backend") or "")
+                == "cad-background-image-crop"
+            ):
+                QTimer.singleShot(
+                    GUI_ZONE_FULL_DETAIL_UPGRADE_DELAY_MS,
+                    lambda p=pair_id, z=zone_id, r=result_request_id: self._maybe_start_zone_full_detail_v2(
+                        p, z, r
+                    ),
+                )
         self._start_pending_zone_render_v2()
 
     def _apply_zone_crop_to_lightweight_v2(

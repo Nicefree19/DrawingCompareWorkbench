@@ -80,6 +80,12 @@ class RenderJob:
     # historical path). Drives the after-raster warp + marker transform so they
     # stay in lockstep. Part of the cache key (aligned != unaligned render).
     alignment: Optional[dict[str, Any]] = None
+    # ② full-detail deferred upgrade — when True, skip the fast
+    # cad-background-image-crop (which crops the simplified whole-drawing raster,
+    # dropping TEXT/DIMENSION/INSERT/HATCH) and render the zone window directly
+    # from the source via the ezdxf Frontend (text/dims/blocks). Slower (~seconds)
+    # so the GUI issues it as a background upgrade AFTER the fast crop.
+    prefer_source_render: bool = False
 
 
 @dataclass(frozen=True)
@@ -622,6 +628,10 @@ def render_cache_key(job: RenderJob) -> str:
         "before_background_transform": job.before_background_transform or {},
         "after_background_transform": job.after_background_transform or {},
         "alignment": job.alignment or {},
+        # ② full-detail upgrade renders a DIFFERENT image (source ezdxf render vs
+        # the cropped fast raster) for the same zone, so it must not collide with
+        # the fast crop's cache entry.
+        "prefer_source_render": bool(job.prefer_source_render),
     }
     # surrogatepass: Korean Windows paths can carry lone CP949<->UTF-16 surrogate
     # codepoints (build_source_signature stores str(resolved)). A plain
@@ -944,7 +954,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 render_start_perf=_render_start_perf,
             )
         )
-    if _can_render_background_image_crop(job):
+    if not job.prefer_source_render and _can_render_background_image_crop(job):
         before_transform = transform_for_window(
             job.world_window,
             output_width=job.output_width,

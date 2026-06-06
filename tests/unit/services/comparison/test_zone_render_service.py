@@ -881,3 +881,54 @@ def test_pdf_crop_falls_back_to_pil_when_source_missing(tmp_path: Path) -> None:
     assert result.pdf_display_list_cache["render_count"] == 0
     assert result.pdf_display_list_cache["pil_fallback_count"] == 2
     assert result.to_dict()["pdf_pil_fallback_count"] == 2
+
+
+def test_prefer_source_render_skips_background_crop_for_full_detail(tmp_path: Path) -> None:
+    """② full-detail upgrade: with prefer_source_render=True, render_zone_pair
+    bypasses the fast cad-background-image-crop (which drops TEXT/DIMENSION/
+    INSERT/HATCH) even when backgrounds exist, and renders the zone from the
+    source via the ezdxf Frontend instead — with a distinct cache key so the
+    full render does not collide with the fast crop's cache entry."""
+    ezdxf = pytest.importorskip("ezdxf")
+    image_mod = pytest.importorskip("PIL.Image")
+    from src.services.comparison.zone_render_service import render_cache_key
+
+    for name in ("before.dxf", "after.dxf"):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        for i in range(6):
+            msp.add_line((20 + i * 8, 20), (20 + i * 8, 80))
+        msp.add_text("DIM 1234").set_placement((40, 50))
+        doc.saveas(tmp_path / name)
+
+    before_bg = tmp_path / "before.png"
+    after_bg = tmp_path / "after.png"
+    image_mod.new("RGB", (100, 100), "white").save(before_bg)
+    image_mod.new("RGB", (100, 100), "white").save(after_bg)
+    bgt = {
+        "min_x": 0.0, "min_y": 0.0, "max_x": 100.0, "max_y": 100.0,
+        "img_width": 100, "img_height": 100, "scale_x": 1.0, "scale_y": 1.0,
+    }
+    common = dict(
+        pair_uuid="p", zone_id="Z",
+        source_before=tmp_path / "before.dxf", source_after=tmp_path / "after.dxf",
+        world_window=WorldWindow(20.0, 20.0, 80.0, 80.0),
+        cache_root=tmp_path / "cache", dxf_cache_dir=tmp_path / "dxfcache",
+        output_width=120, output_height=80,
+        before_background_image=str(before_bg), after_background_image=str(after_bg),
+        before_background_transform=bgt, after_background_transform=bgt,
+    )
+
+    # Default: backgrounds present -> fast crop.
+    fast = render_zone_pair(RenderJob(**common))
+    assert fast.renderer_backend == "cad-background-image-crop"
+
+    # prefer_source_render -> bypass the crop, render from source (full detail).
+    full = render_zone_pair(RenderJob(**common, prefer_source_render=True))
+    assert full.renderer_backend == "ezdxf-matplotlib-zone"
+    assert any(w.startswith("dxf_prefilter:") for w in full.warnings)
+
+    # Distinct cache keys -> no collision between fast and full.
+    assert render_cache_key(RenderJob(**common)) != render_cache_key(
+        RenderJob(**common, prefer_source_render=True)
+    )

@@ -1408,6 +1408,143 @@ def test_zone_crop_finished_records_pdf_display_list_perf_metrics(qapp, tmp_path
         workbench.deleteLater()
 
 
+def _prepare_zone_finish_workbench(workbench, tmp_path):
+    """Wire a workbench so _on_zone_crop_render_finished_v2 runs in isolation."""
+    workbench._viewer_root = tmp_path
+    workbench._active_row = {"pair_id": "pair"}
+    workbench._active_zone_id = "z1"
+    workbench._viewer_pairs_by_id = {"pair": {"pair_id": "pair"}}
+    workbench._set_preview_status_v2 = lambda *_a, **_k: None  # type: ignore[method-assign]
+    workbench._zone_detail_text_v2 = lambda _z: ""  # type: ignore[method-assign]
+    workbench._start_selected_zone_deferred_enhancement_v2 = lambda *_a, **_k: None  # type: ignore[method-assign]
+    workbench._refresh_viewer_perf_summary_only = lambda: None  # type: ignore[method-assign]
+    workbench._start_pending_zone_render_v2 = lambda: None  # type: ignore[method-assign]
+    workbench._apply_zone_crop_to_lightweight_v2 = lambda *_a, **_k: None  # type: ignore[method-assign]
+    workbench._is_lightweight_viewer_active_v2 = lambda: True  # type: ignore[method-assign]
+
+
+def _cad_crop_payload(request_id):
+    return {
+        "request_id": request_id,
+        "elapsed_ms": 9.0,
+        "cache_hit": False,
+        "render_lifecycle": "ready",
+        "visual_fidelity": "cad_render",
+        "renderer_backend": "cad-background-image-crop",
+        "before_image": "b.png",
+        "after_image": "a.png",
+        "warnings": [],
+    }
+
+
+def test_cad_background_crop_schedules_full_detail_upgrade(qapp, tmp_path, monkeypatch) -> None:
+    # ② The simplified fast crop, once shown, schedules a prefer_source_render
+    # re-render so text/dims/blocks appear. Verifies the finish path wires it.
+    import src.gui.drawing_compare_workbench as dcw
+
+    class _ImmediateTimer:
+        @staticmethod
+        def singleShot(_ms, callback):
+            callback()
+
+    workbench = dcw.DrawingCompareWorkbenchV2()
+    try:
+        _prepare_zone_finish_workbench(workbench, tmp_path)
+        crop_calls: list[tuple] = []
+        workbench._start_zone_crop_render_v2 = (  # type: ignore[method-assign]
+            lambda zone_id, **kw: crop_calls.append((zone_id, kw))
+        )
+        request_id = workbench._begin_selected_zone_render_request_v2("pair", "z1")
+
+        # Patch QTimer only now (after the controller captured the real one at
+        # construction) so the upgrade callback runs synchronously.
+        monkeypatch.setattr(dcw, "QTimer", _ImmediateTimer)
+        workbench._on_zone_crop_render_finished_v2(
+            "pair", "z1", _cad_crop_payload(request_id),
+            {"pair_id": "pair"}, [{"zone_id": "z1"}],
+        )
+
+        assert crop_calls == [("z1", {"prefer_source_render": True})]
+        # Loop guard recorded the upgraded request.
+        assert workbench._zone_full_detail_started_request_v2 == ("pair", "z1", request_id)
+    finally:
+        workbench.deleteLater()
+
+
+def test_pdf_crop_does_not_schedule_full_detail_upgrade(qapp, tmp_path, monkeypatch) -> None:
+    # PDF crops already show the full visual page; no source upgrade is issued.
+    import src.gui.drawing_compare_workbench as dcw
+
+    class _ImmediateTimer:
+        @staticmethod
+        def singleShot(_ms, callback):  # pragma: no cover - must not fire here
+            callback()
+
+    workbench = dcw.DrawingCompareWorkbenchV2()
+    try:
+        _prepare_zone_finish_workbench(workbench, tmp_path)
+        crop_calls: list[tuple] = []
+        workbench._start_zone_crop_render_v2 = (  # type: ignore[method-assign]
+            lambda zone_id, **kw: crop_calls.append((zone_id, kw))
+        )
+        request_id = workbench._begin_selected_zone_render_request_v2("pair", "z1")
+        payload = _cad_crop_payload(request_id)
+        payload.update(
+            {"visual_fidelity": "pdf_render", "renderer_backend": "pdf-image-crop"}
+        )
+
+        monkeypatch.setattr(dcw, "QTimer", _ImmediateTimer)
+        workbench._on_zone_crop_render_finished_v2(
+            "pair", "z1", payload, {"pair_id": "pair"}, [{"zone_id": "z1"}],
+        )
+
+        assert crop_calls == []
+        assert workbench._zone_full_detail_started_request_v2 is None
+    finally:
+        workbench.deleteLater()
+
+
+def test_full_detail_upgrade_fires_once_and_respects_busy_and_pending(qapp, tmp_path) -> None:
+    # Guard matrix for _maybe_start_zone_full_detail_v2: busy/pending/stale skip,
+    # fires once per request, repeat is a no-op (never loops).
+    from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
+
+    workbench = DrawingCompareWorkbenchV2()
+    try:
+        _prepare_zone_finish_workbench(workbench, tmp_path)
+        crop_calls: list[tuple] = []
+        workbench._start_zone_crop_render_v2 = (  # type: ignore[method-assign]
+            lambda zone_id, **kw: crop_calls.append((zone_id, kw))
+        )
+        request_id = workbench._begin_selected_zone_render_request_v2("pair", "z1")
+
+        # Busy controller -> skip (fast crop stays; do not disturb).
+        workbench._zone_render_controller_v2._active_context = {"request_id": "x"}
+        workbench._maybe_start_zone_full_detail_v2("pair", "z1", request_id)
+        assert crop_calls == []
+
+        # A queued different render -> skip.
+        workbench._zone_render_controller_v2._active_context = None
+        workbench._pending_zone_render_request_v2 = ("pair", "z2", "r2")
+        workbench._maybe_start_zone_full_detail_v2("pair", "z1", request_id)
+        assert crop_calls == []
+
+        # Stale request id -> skip.
+        workbench._pending_zone_render_request_v2 = None
+        workbench._maybe_start_zone_full_detail_v2("pair", "z1", "stale-id")
+        assert crop_calls == []
+
+        # Free + current -> fires exactly once.
+        workbench._maybe_start_zone_full_detail_v2("pair", "z1", request_id)
+        assert crop_calls == [("z1", {"prefer_source_render": True})]
+
+        # Repeat same request -> no-op (loop guard).
+        workbench._maybe_start_zone_full_detail_v2("pair", "z1", request_id)
+        assert crop_calls == [("z1", {"prefer_source_render": True})]
+    finally:
+        workbench.deleteLater()
+
+
 def test_zone_crop_error_ignores_stale_request_id_and_keeps_current_status(qapp) -> None:
     from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
 
