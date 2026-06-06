@@ -112,3 +112,36 @@ def test_backfill_noop_when_no_dpi_available():
         fake, "p", [{"zone_id": "C-004", "bbox": _BBOX}]
     )
     assert "pdf_dpi" not in out[0]
+
+
+def test_peek_skips_legacy_overlay_json_for_paged_store_pair(tmp_path):
+    """Paged-store perf invariant: a pair with a paged overlay store must NOT read
+    the legacy overlay JSON for dpi (the benchmark gate
+    p5_overlay_page_store_query_probe.legacy_overlay_json_read_count == 0 enforces
+    this). The pushed overlays already come FROM the page store, so the legacy JSON
+    is redundant — the peek returns 0.0 WITHOUT reading it, even when that JSON
+    contains a dpi. Regression guard for the page-pair tree-refresh leak."""
+    overlay_json = tmp_path / "ov.json"
+    overlay_json.write_text(
+        json.dumps({"overlays": [{"pdf_dpi": 200.0, "bbox_coordinate_space": "image_pixels"}]}),
+        encoding="utf-8",
+    )
+    pair = {"coordinate_source": "image_pixels", "source_a": "a.pdf", "source_b": "b.pdf",
+            "compare_pdf_dpi": None, "overlay_json": str(overlay_json),
+            "overlay_pages_manifest": str(tmp_path / "pages" / "manifest.json")}
+    fake = _fake(pair, viewer_root=tmp_path)
+    # Despite the legacy JSON having dpi=200, the paged-store pair skips it -> 0.0
+    assert DrawingCompareWorkbenchV2._peek_overlay_json_pdf_dpi_v2(fake, pair) == 0.0
+
+
+def test_peek_still_reads_legacy_overlay_json_for_non_paged_pair(tmp_path):
+    """Contrast: a pair WITHOUT a paged store still reads the legacy overlay JSON
+    (the original PDF coord-backfill path is preserved for legacy/raster pairs)."""
+    overlay_json = tmp_path / "ov.json"
+    overlay_json.write_text(
+        json.dumps({"overlays": [{"pdf_dpi": 200.0}]}), encoding="utf-8",
+    )
+    pair = {"coordinate_source": "image_pixels", "source_a": "a.pdf", "source_b": "b.pdf",
+            "compare_pdf_dpi": None, "overlay_json": str(overlay_json)}  # no paged manifest
+    fake = _fake(pair, viewer_root=tmp_path)
+    assert DrawingCompareWorkbenchV2._peek_overlay_json_pdf_dpi_v2(fake, pair) == 200.0

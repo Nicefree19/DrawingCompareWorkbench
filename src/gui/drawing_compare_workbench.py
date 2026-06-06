@@ -10427,6 +10427,14 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         so the paged-overlay-store memory path is preserved).
         """
 
+        # Paged-store pairs: the pushed overlays already come FROM the page store,
+        # so if pdf_dpi wasn't on them it isn't in the store either — reading the
+        # (potentially huge) legacy overlay JSON would only re-confirm that while
+        # breaking the paged-store perf invariant (a page-pair tree refresh must
+        # read the legacy overlay JSON 0×). Skip the legacy read for paged pairs.
+        if viewer_pair.get("overlay_pages_manifest"):
+            return 0.0
+
         raw = viewer_pair.get("overlay_json")
         path = _resolve_viewer_artifact_path(raw, getattr(self, "_viewer_root", None))
         if path is None or not path.exists():
