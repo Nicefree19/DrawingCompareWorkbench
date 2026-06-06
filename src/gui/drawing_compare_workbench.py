@@ -12199,6 +12199,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         loaded_before = False
         loaded_after = False
+        loaded_frames: list[tuple] = []  # (viewport, crop world_bbox) for camera fit
         for side, viewport, image_value, crop_transform, bg_transform in specs:
             bg_bbox = self._transform_world_bbox_v2(bg_transform)
             if zone_window and bg_bbox and not _overlaps(zone_window, bg_bbox):
@@ -12236,6 +12237,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 )
             except Exception:
                 logger.debug("zone crop fidelity state failed", exc_info=True)
+            if loaded and world_bbox is not None:
+                loaded_frames.append((viewport, world_bbox))
             if side == "before":
                 loaded_before = bool(loaded)
             else:
@@ -12246,13 +12249,21 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._lightweight_raster_pairs.add(pair_id)
         self._lightweight_zone_crop_pair_v2 = pair_id
         self._push_overlays_to_lightweight_v2(pair_id, focus_zone_id=zone_id)
-        # Focus was applied at selection time over the full-drawing raster;
-        # load_raster_image does not move the camera, so re-fit onto the change
-        # to frame it against the freshly-loaded crisp crop.
+        # Frame the camera on the loaded crop WINDOW (not the tiny change bbox).
+        # The crop window is already zone-centred (canonical_window_from_bbox), so
+        # fitting it shows the change in context AND is guaranteed visible. Using
+        # the change-bbox focus here instead left the freshly-loaded crop off-frame
+        # (the after pane rendered blank/white in live DWG runs) — load_raster_image
+        # had just swapped the world frame under a camera fit to the old frame.
+        self._lightweight_camera_sync_in_progress = True
         try:
-            self._focus_lightweight_on_zone_v2(zone_id)
-        except Exception:
-            logger.exception("Lightweight zone re-focus after crop failed for %s", zone_id)
+            for viewport, world_bbox in loaded_frames:
+                try:
+                    viewport.set_camera_to_world_bbox(world_bbox, padding_ratio=0.08)
+                except Exception:
+                    logger.exception("zone crop camera fit failed for %s", zone_id)
+        finally:
+            self._lightweight_camera_sync_in_progress = False
         logger.info(
             "[zone crop lightweight] pair=%s zone=%s before=%s after=%s",
             pair_id, zone_id, loaded_before, loaded_after,
