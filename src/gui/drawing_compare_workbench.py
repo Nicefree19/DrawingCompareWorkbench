@@ -12088,9 +12088,159 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 self.preview_after_v2.set_selected_zone(zone_id)
                 self.preview_before_v2.focus_zone(zone_id, padding_ratio=0.25)
                 self.preview_after_v2.focus_zone(zone_id, padding_ratio=0.25)
+            # Lightweight viewer is the active surface on QtQuick machines. The
+            # legacy block above is skipped in lightweight-only mode, so without
+            # this the crisp zone crop renders but is never shown — DWG/CAD zones
+            # stayed pixel-mush (full-drawing raster magnified) or off-frame.
+            # Surface the crop here, framed by its world_window.
+            if self._is_lightweight_viewer_active_v2():
+                self._apply_zone_crop_to_lightweight_v2(
+                    pair_id, zone_id, result_payload, status
+                )
             self.zone_detail_v2.setHtml(self._zone_detail_text_v2(zone_id))
             self._start_selected_zone_deferred_enhancement_v2(pair_id, zone_id, result_request_id)
         self._start_pending_zone_render_v2()
+
+    def _apply_zone_crop_to_lightweight_v2(
+        self,
+        pair_id: str,
+        zone_id: str,
+        result_payload: dict,
+        status: str,
+    ) -> None:
+        """Surface a finished zone-crop render in the lightweight viewer.
+
+        The crop worker produces a per-zone PNG (``before_image`` /
+        ``after_image``) framed by a CAD-world window (``before_transform`` /
+        ``after_transform``, ``min_x/min_y/max_x/max_y`` keys). Because the full
+        drawing background is rendered at high resolution (~8000 px), the crop of
+        a selected zone is effectively 1:1 — far crisper than the lightweight
+        viewer magnifying the whole-drawing raster (which the fallback renderer
+        downsamples, so zoom looks like pixel-mush). In lightweight-only mode the
+        legacy block in ``_on_zone_crop_render_finished_v2`` is skipped, so
+        without this the crisp crop rendered but was never shown.
+
+        Per-side blank guard: when the before/after sources are in disjoint
+        world-coordinate ranges (observed on a revised DWG re-originated to a
+        different datum), the zone window falls OUTSIDE one side's background and
+        the worker writes a blank white crop for it. We detect that (the zone
+        ``world_window`` does not overlap that side's full-background bbox) and
+        degrade that side honestly to ``relative_only`` instead of painting a
+        white panel — the change still shows crisp on the in-bounds side.
+
+        Only ``ready`` (real CAD) crops are surfaced here: PDF crops
+        (``status == "pdf_render"``) keep their own working full-page +
+        re-render-on-zoom path (their crop transform is in ``image_pixels`` while
+        PDF overlays are in points — framing the raster by it would misalign the
+        markers). On a non-``ready`` outcome, if a prior crop from THIS pair is
+        on screen we restore the full-drawing raster so a relative-only zone is
+        not left sitting on a stale neighbouring crop (honest background).
+        """
+
+        before_vp = self.preview_before_lightweight_v2
+        after_vp = self.preview_after_lightweight_v2
+        if before_vp is None or after_vp is None:
+            return
+        if status != "ready":
+            # Crop fell back (or this is a PDF pair, handled by its own path).
+            # Only act if a crisp crop from this pair is currently displayed —
+            # that crop frames a different zone, so leaving it under a
+            # relative-only focus would show the wrong region (silent
+            # misinformation). Restore the full-drawing raster instead.
+            if getattr(self, "_lightweight_zone_crop_pair_v2", "") == pair_id:
+                self._lightweight_zone_crop_pair_v2 = ""
+                viewer_pair = self._viewer_pairs_by_id.get(pair_id)
+                if isinstance(viewer_pair, dict) and not _viewer_pair_is_pdf(viewer_pair):
+                    self._load_lightweight_raster_preview_v2(pair_id, viewer_pair)
+                    try:
+                        self._focus_lightweight_on_zone_v2(zone_id)
+                    except Exception:
+                        logger.exception(
+                            "Lightweight full-raster restore focus failed for %s", zone_id
+                        )
+            return
+
+        viewer_pair = self._viewer_pairs_by_id.get(pair_id) or {}
+        # Zone window (CAD world) — used to detect a side whose crop is blank
+        # because the window lies outside that side's full-drawing background.
+        ww = result_payload.get("world_window") or {}
+        try:
+            zone_window = (
+                float(ww["xmin"]), float(ww["ymin"]),
+                float(ww["xmax"]), float(ww["ymax"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            zone_window = None
+
+        def _overlaps(a, b) -> bool:
+            return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+        specs = (
+            ("before", before_vp, result_payload.get("before_image"),
+             result_payload.get("before_transform"), viewer_pair.get("before_transform")),
+            ("after", after_vp, result_payload.get("after_image"),
+             result_payload.get("after_transform"), viewer_pair.get("after_transform")),
+        )
+        loaded_before = False
+        loaded_after = False
+        for side, viewport, image_value, crop_transform, bg_transform in specs:
+            bg_bbox = self._transform_world_bbox_v2(bg_transform)
+            if zone_window and bg_bbox and not _overlaps(zone_window, bg_bbox):
+                # Blank crop on this side (zone window outside its background).
+                try:
+                    viewport.set_fidelity_state(
+                        "relative_only",
+                        status_text="이 면에는 선택 구역에 해당하는 도면이 없습니다.",
+                    )
+                except Exception:
+                    logger.debug("zone crop blank-side fidelity failed", exc_info=True)
+                continue
+            image_path = _resolve_viewer_artifact_path(image_value, self._viewer_root)
+            world_bbox = self._transform_world_bbox_v2(crop_transform)
+            try:
+                loaded = viewport.load_raster_image(
+                    image_path,
+                    world_bbox=world_bbox,
+                    empty_notice="선택 구역 crop을 불러오지 못했습니다.",
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[zone crop lightweight] %s-side load failed pair=%s zone=%s image=%r",
+                    side, pair_id, zone_id, image_value,
+                )
+                loaded = False
+            try:
+                viewport.set_fidelity_state(
+                    "exact_world_render" if loaded else "relative_only",
+                    status_text=(
+                        "선택 구역 실도면 crop"
+                        if loaded
+                        else "이 면은 crop을 불러오지 못했습니다."
+                    ),
+                )
+            except Exception:
+                logger.debug("zone crop fidelity state failed", exc_info=True)
+            if side == "before":
+                loaded_before = bool(loaded)
+            else:
+                loaded_after = bool(loaded)
+        if not (loaded_before or loaded_after):
+            # Neither side resolved — keep the existing relative-only background.
+            return
+        self._lightweight_raster_pairs.add(pair_id)
+        self._lightweight_zone_crop_pair_v2 = pair_id
+        self._push_overlays_to_lightweight_v2(pair_id, focus_zone_id=zone_id)
+        # Focus was applied at selection time over the full-drawing raster;
+        # load_raster_image does not move the camera, so re-fit onto the change
+        # to frame it against the freshly-loaded crisp crop.
+        try:
+            self._focus_lightweight_on_zone_v2(zone_id)
+        except Exception:
+            logger.exception("Lightweight zone re-focus after crop failed for %s", zone_id)
+        logger.info(
+            "[zone crop lightweight] pair=%s zone=%s before=%s after=%s",
+            pair_id, zone_id, loaded_before, loaded_after,
+        )
 
     @staticmethod
     def _zone_render_reason_message_ko(reason_code: str) -> str:
