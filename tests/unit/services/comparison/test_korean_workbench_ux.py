@@ -191,10 +191,10 @@ def test_lightweight_preview_fidelity_is_side_specific() -> None:
 
     assert '("before", self.preview_before_lightweight_v2, loaded_before)' in pdf_body
     assert '("after", self.preview_after_lightweight_v2, loaded_after)' in pdf_body
-    assert '"exact_world_render" if loaded else "relative_only"' in pdf_body
+    assert '"raster_refined" if loaded else "relative_only"' in pdf_body
     assert "(self.preview_before_lightweight_v2, loaded_before)" in raster_body
     assert "(self.preview_after_lightweight_v2, loaded_after)" in raster_body
-    assert '"exact_world_render" if loaded else "relative_only"' in raster_body
+    assert '"raster_refined" if loaded else "relative_only"' in raster_body
 
 
 def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:

@@ -95,7 +95,7 @@ class TestA2SilentExceptReplacement:
 
         def fake_set_fidelity_state(state, status_text=""):
             states_seen.append(state)
-            if state == "exact_world_render":
+            if state == "raster_refined":
                 raise RuntimeError("simulated Qt invariant failure")
             # relative_only fallback succeeds silently
             return None
@@ -107,7 +107,7 @@ class TestA2SilentExceptReplacement:
         logger = logging.getLogger("test_a2")
         side = "before"
         try:
-            vp.set_fidelity_state("exact_world_render", status_text="PDF · DPI 150")
+            vp.set_fidelity_state("raster_refined", status_text="PDF · DPI 150")
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[PDF lightweight] %s-side set_fidelity_state(exact) "
@@ -117,7 +117,7 @@ class TestA2SilentExceptReplacement:
             vp.set_fidelity_state("relative_only", status_text="PDF · 미리보기 사용 불가")
 
         # Both states must have been attempted in order.
-        assert states_seen == ["exact_world_render", "relative_only"]
+        assert states_seen == ["raster_refined", "relative_only"]
 
 
 class TestA4PdfPathRaceGuard:

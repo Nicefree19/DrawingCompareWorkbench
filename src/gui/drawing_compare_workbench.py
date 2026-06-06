@@ -9826,7 +9826,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 ("after", self.preview_after_lightweight_v2, loaded_after),
             ):
                 try:
-                    fidelity_mode = "exact_world_render" if loaded else "relative_only"
+                    fidelity_mode = "raster_refined" if loaded else "relative_only"
                     effective_dpi = stats.get(f"{side}_effective_dpi")
                     dpi_text = int(float(effective_dpi)) if effective_dpi else 150
                     fidelity_text = (
@@ -9972,7 +9972,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 (self.preview_after_lightweight_v2, loaded_after),
             ):
                 try:
-                    fidelity_mode = "exact_world_render" if loaded else "relative_only"
+                    fidelity_mode = "raster_refined" if loaded else "relative_only"
                     fidelity_text = (
                         "raster preview"
                         if loaded
@@ -10026,7 +10026,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         state = session.get_pair_state(pair_id, side=side)  # type: ignore[arg-type]
         if not state.scene_pack_ref and pair_id in self._lightweight_raster_pairs:
             viewport.set_fidelity_state(
-                "exact_world_render",
+                "raster_refined",
                 status_text="raster preview",
             )
             return
@@ -12227,7 +12227,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 loaded = False
             try:
                 viewport.set_fidelity_state(
-                    "exact_world_render" if loaded else "relative_only",
+                    "raster_refined" if loaded else "relative_only",
                     status_text=(
                         "선택 구역 실도면 crop"
                         if loaded

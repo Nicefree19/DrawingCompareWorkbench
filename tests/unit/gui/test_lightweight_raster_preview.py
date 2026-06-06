@@ -6,7 +6,7 @@ viewer in "상대 위치 모드 · raster preview" (relative-only, no real backg
 code path to show a real CAD background already exists —
 ``_load_lightweight_raster_preview_v2`` resolves the rendered ``before_image`` /
 ``after_image`` PNG + the world transform and calls ``load_raster_image`` on each
-lightweight viewport, then sets fidelity to ``exact_world_render``. The huge DWG
+lightweight viewport, then sets fidelity to ``raster_refined``. The huge DWG
 fell back because its full raster render was pending/failed (an honest fallback).
 
 These tests lock in that path: when a rendered raster + transform exist, the
@@ -63,7 +63,7 @@ _TX = {"min_x": 0.0, "min_y": 0.0, "max_x": 100.0, "max_y": 50.0,
 
 def test_raster_preview_pushes_real_background_with_world_bbox():
     """Both sides have a rendered PNG + transform -> real raster background loaded
-    into both lightweight viewports with the world bbox, fidelity exact_world_render."""
+    into both lightweight viewports with the world bbox, fidelity raster_refined."""
 
     ns, before, after = _make_fake()
     viewer_pair = {
@@ -84,8 +84,8 @@ def test_raster_preview_pushes_real_background_with_world_bbox():
     assert bbbox == (0.0, 0.0, 100.0, 50.0)  # from _transform_world_bbox_v2
     assert str(after.raster_calls[0][0]).endswith("cold_after.png")
     # both report the real-background fidelity, not relative-only
-    assert before.fidelity[-1][0] == "exact_world_render"
-    assert after.fidelity[-1][0] == "exact_world_render"
+    assert before.fidelity[-1][0] == "raster_refined"
+    assert after.fidelity[-1][0] == "raster_refined"
     assert "pair-1" in ns._lightweight_raster_pairs
     assert stats["loaded_before"] is True and stats["loaded_after"] is True
 
@@ -106,7 +106,7 @@ def test_raster_preview_degrades_missing_side_to_relative_only():
         ns, "pair-2", viewer_pair
     )
 
-    assert before.fidelity[-1][0] == "exact_world_render"
+    assert before.fidelity[-1][0] == "raster_refined"
     assert after.fidelity[-1][0] == "relative_only"  # honest degradation
     assert stats["loaded_before"] is True and stats["loaded_after"] is False
     assert "pair-2" in ns._lightweight_raster_pairs

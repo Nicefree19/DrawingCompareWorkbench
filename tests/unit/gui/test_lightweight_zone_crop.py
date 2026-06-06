@@ -101,8 +101,8 @@ def test_ready_crop_loads_into_both_lightweight_viewports_and_refocuses():
     assert str(apath).endswith("zone_C004_after.png")
     assert abbox == (12.0, 22.0, 112.0, 72.0)
     # real-render fidelity, pair tracked as a raster/crop pair
-    assert before.fidelity[-1][0] == "exact_world_render"
-    assert after.fidelity[-1][0] == "exact_world_render"
+    assert before.fidelity[-1][0] == "raster_refined"
+    assert after.fidelity[-1][0] == "raster_refined"
     assert "pair-1" in ns._lightweight_raster_pairs
     assert ns._lightweight_zone_crop_pair_v2 == "pair-1"
     # overlays re-pushed with the zone as focus + camera re-fit on the change
@@ -170,7 +170,7 @@ def test_relative_only_restore_skips_pdf_pair():
 
 def test_ready_crop_with_both_images_missing_keeps_relative_only():
     """``ready`` status but neither crop PNG resolves -> honest degradation: no
-    fidelity flip to exact_world_render, pair not marked as crop-active."""
+    fidelity flip to raster_refined, pair not marked as crop-active."""
 
     ns, before, after = _make_fake()
     payload = {
@@ -184,8 +184,8 @@ def test_ready_crop_with_both_images_missing_keeps_relative_only():
 
     # both sides attempted, both resolved to None path -> load returns False
     assert before.raster_calls[0][0] is None and after.raster_calls[0][0] is None
-    # neither loaded -> no exact_world_render, not tracked, no focus/push
-    assert all(mode != "exact_world_render" for mode, _ in before.fidelity)
+    # neither loaded -> no raster_refined, not tracked, no focus/push
+    assert all(mode != "raster_refined" for mode, _ in before.fidelity)
     assert "pair-1" not in ns._lightweight_raster_pairs
     assert getattr(ns, "_lightweight_zone_crop_pair_v2", "") == ""
     assert ns.push_calls == [] and ns.focus_calls == []
@@ -229,7 +229,7 @@ def test_blank_side_skipped_when_zone_window_outside_that_side_background():
     # after side: zone window inside its background -> crisp crop loaded
     assert len(after.raster_calls) == 1
     assert str(after.raster_calls[0][0]).endswith("zone_after.png")
-    assert after.fidelity[-1][0] == "exact_world_render"
+    assert after.fidelity[-1][0] == "raster_refined"
     # one side loaded -> pair tracked, overlays pushed, camera re-fit
     assert ns._lightweight_zone_crop_pair_v2 == "pair-1"
     assert ns.push_calls == [("pair-1", "C-040")]
@@ -245,3 +245,30 @@ def test_noop_when_lightweight_viewports_absent():
     DrawingCompareWorkbenchV2._apply_zone_crop_to_lightweight_v2(
         ns, "pair-1", "C-004", dict(_READY_PAYLOAD), "ready"
     )
+
+
+def test_loaded_fidelity_is_real_render_mode_without_watermark():
+    """Regression guard for the false '실배경 아님' watermark over a real DWG.
+
+    The lightweight viewport's set_fidelity_state expects a RenderMode and
+    runs it through style_for(); an UNRECOGNISED mode falls back to the
+    relative_only style (orange badge + watermark). The crop/raster paths used
+    the string ``"exact_world_render"`` — which is NOT a RenderMode (it is a
+    legacy GpuViewport fidelity string), so the real, crisp DWG drawing got
+    branded '상대 위치 모드 · 실배경 아님'. The correct value is
+    ``"raster_refined"`` (🔵 실제 렌더, no watermark)."""
+
+    from src.services.comparison.render_modes import RENDER_MODE_STYLES, style_for
+
+    # what the fix now uses: a real mode, no watermark
+    assert "raster_refined" in RENDER_MODE_STYLES
+    assert style_for("raster_refined").show_watermark is False
+    # the old string was never a real mode -> fell back to relative_only+watermark
+    assert "exact_world_render" not in RENDER_MODE_STYLES
+    assert style_for("exact_world_render").show_watermark is True
+
+    # and the crop path actually feeds the real mode to the viewport
+    ns, before, after = _make_fake()
+    _call(ns, "pair-1", "C-004", dict(_READY_PAYLOAD), "ready")
+    assert after.fidelity[-1][0] in RENDER_MODE_STYLES
+    assert style_for(after.fidelity[-1][0]).show_watermark is False
