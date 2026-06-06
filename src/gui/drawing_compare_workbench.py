@@ -10299,6 +10299,16 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not overlays:
             return
 
+        # PDF coordinate-metadata backfill. The marker bbox is in PDF
+        # ``image_pixels`` (at the compare DPI), but some overlay sources
+        # (dashboard ``top_issues``) drop ``bbox_coordinate_space``/``pdf_dpi``.
+        # Without them push_change_overlays_from_v1 -> convert_bbox_to_world_space
+        # treats the bbox as already-world and passes the RAW PIXELS through, so
+        # markers land in pixel space (x~1859) while the PDF background is in
+        # points (0..842) — the page renders off-screen/tiny and only the
+        # markers show ("상대 위치 모드 — 실배경 아님"). Backfill from the pair.
+        overlays = self._backfill_pdf_overlay_coord_space_v2(pair_id, overlays)
+
         for vp, side in (
             (self.preview_before_lightweight_v2, "before"),
             (self.preview_after_lightweight_v2, "after"),
@@ -10311,6 +10321,73 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 )
             except Exception as exc:
                 logger.debug("push_change_overlays_from_v1 failed: %s", exc)
+
+    def _backfill_pdf_overlay_coord_space_v2(
+        self, pair_id: str, overlays: list[dict],
+    ) -> list[dict]:
+        """Ensure PDF overlay records carry ``bbox_coordinate_space`` +
+        ``pdf_dpi`` so the image_pixels->PDF-points conversion fires.
+
+        Returns the original list unchanged for non-PDF pairs or when every
+        record already carries the metadata.
+        """
+
+        viewer_pair = self._viewer_pairs_by_id.get(pair_id) or {}
+        if not _viewer_pair_is_pdf(viewer_pair):
+            return overlays
+        # The pdf_dpi + image_pixels space live on the per-overlay records in
+        # the overlay JSON (NOT on the manifest pair record, where they are
+        # None). Source them from the canonical overlays, then fall back to the
+        # pair fields. Without a positive dpi we cannot convert, so leave the
+        # overlays untouched rather than corrupt them.
+        pair_dpi = 0.0
+        pair_space = ""
+        try:
+            for ref in (self._viewer_overlays_for_pair_v2(pair_id) or []):
+                if not isinstance(ref, dict):
+                    continue
+                if pair_dpi <= 0:
+                    try:
+                        pair_dpi = float(ref.get("pdf_dpi") or 0.0)
+                    except (TypeError, ValueError):
+                        pair_dpi = 0.0
+                if not pair_space:
+                    pair_space = str(ref.get("bbox_coordinate_space") or "")
+                if pair_dpi > 0 and pair_space:
+                    break
+        except Exception:  # noqa: BLE001 — best-effort sourcing
+            logger.debug("PDF overlay dpi sourcing failed for %s", pair_id, exc_info=True)
+        if pair_dpi <= 0:
+            try:
+                pair_dpi = float(
+                    viewer_pair.get("compare_pdf_dpi") or viewer_pair.get("pdf_dpi") or 0.0
+                )
+            except (TypeError, ValueError):
+                pair_dpi = 0.0
+        if not pair_space:
+            pair_space = "image_pixels"
+        if pair_dpi <= 0:
+            return overlays
+        out: list[dict] = []
+        for ov in overlays:
+            if not isinstance(ov, dict):
+                out.append(ov)
+                continue
+            space = str(ov.get("bbox_coordinate_space") or "")
+            try:
+                dpi = float(ov.get("pdf_dpi") or 0.0)
+            except (TypeError, ValueError):
+                dpi = 0.0
+            if space and dpi > 0:
+                out.append(ov)
+                continue
+            patched = dict(ov)
+            if not space:
+                patched["bbox_coordinate_space"] = pair_space
+            if dpi <= 0 and pair_dpi > 0:
+                patched["pdf_dpi"] = pair_dpi
+            out.append(patched)
+        return out
 
     def _request_zone_focus_v2(self, zone_id: str) -> None:
         """Phase G2.3 — Submit a zone-focus build to the ViewerSession.
