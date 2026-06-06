@@ -381,3 +381,25 @@ crop은 해결**(지배적 added 케이스). 3·4·5의 잔여(좌표계 불일�
 배선)는 **후속 별도 작업**. 라이브 육안 검증 필요(헤드리스 재현 불가 — [[zone_zoom_surrogate_
 rootcause]] 교훈).
 
+### 후속 (2026-06-06 동일 세션)
+
+**5번 해결 (commit f05376d)** — 경량 네이티브 무한줌 벡터(zone-focus 마이크로팩):
+디스플레이 경로(`_on_viewer_session_zone_evidence_v2`→`_apply_zone_evidence_to_lightweight_v2`
+→`push_zone_focus_pack`)는 **이미 배선돼 있었으나** `request_zone`이 ViewerSession state의
+`source_path` 부재로 네이티브 빌드를 스킵했음. V3 manifest가 (a) source_path를 `<redacted>`로
+가리고 (b) state를 패키지 pair_uuid로 키잉 → 멀티페어 워크벤치가 자기 pair 해시로 요청하면
+미스. `ViewerSession.ensure_pair_source(pair_id, side, source_path)` 추가 + `_request_zone_focus_v2`
+가 워크벤치가 이미 복구한 로컬 경로(`_repair_viewer_pair_source_paths_v2`)를 주입(non-PDF·usable
+한정). **crop(2번)과 합성**: crop=즉시 첫 페인트, 네이티브 벡터=완료 시 상위 레이어(무한줌). 읽기
+불가 소스(raw .dwg 등)는 `render_zone_focus`에서 graceful skip→evidence 없음→no-op(crop 유지),
+크래시 없음. 4번(SVG 경량 라우팅)은 5번 네이티브 벡터가 상위호환이라 **사실상 대체**.
+
+**3번 = 정합 범위 한계로 재특정 (미해결, 별도 대형 항목)**: V3 manifest 실측 —
+`before_world_bbox == after_world_bbox == shared_world_bbox`(둘의 **합집합**), `alignment_*_to_shared
+== identity`. 그러나 실제 콘텐츠는 before=(353k,206k 영역) vs after=(481k,-109k 영역)로 **약
+178,000mm 떨어진 서로 다른 사분면**. P0-2b 정합 estimator는 **50mm 내 작은 변환만 복원**
+([[p0_2b_visual_alignment]])하므로 이 대규모 오프셋은 범위 밖 → identity 유지 → before/after 분리.
+즉 before↔after 대조에는 **coarse 전역 정합(대규모 오프셋 복원) 단계**가 필요 — 별도 알고리즘 작업.
+(현재 P5_154kv_POT_BEARING 쌍. 두 도면이 진짜 다른 원점인지 추출/정규화 버그인지는 소스파일
+실측 필요.) added(b_only)는 after 한 면으로 충분하므로 2+5로 지배적 케이스는 커버됨.
+
