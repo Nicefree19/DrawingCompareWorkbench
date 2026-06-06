@@ -10335,35 +10335,44 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         viewer_pair = self._viewer_pairs_by_id.get(pair_id) or {}
         if not _viewer_pair_is_pdf(viewer_pair):
             return overlays
-        # The pdf_dpi + image_pixels space live on the per-overlay records in
-        # the overlay JSON (NOT on the manifest pair record, where they are
-        # None). Source them from the canonical overlays, then fall back to the
-        # pair fields. Without a positive dpi we cannot convert, so leave the
-        # overlays untouched rather than corrupt them.
+        # The pdf_dpi + image_pixels space live on the per-overlay records (the
+        # manifest pair record has them as None for raster PDF pairs). Source
+        # them WITHOUT touching the caching ``_viewer_overlays_for_pair_v2``
+        # (which would defeat the paged-overlay-store memory path), in order:
+        #   1) any pushed overlay that already carries the metadata,
+        #   2) the pair / transform fields,
+        #   3) a lightweight direct peek at the overlay JSON file.
+        # Without a positive dpi we cannot convert, so leave overlays untouched.
         pair_dpi = 0.0
         pair_space = ""
-        try:
-            for ref in (self._viewer_overlays_for_pair_v2(pair_id) or []):
-                if not isinstance(ref, dict):
-                    continue
-                if pair_dpi <= 0:
-                    try:
-                        pair_dpi = float(ref.get("pdf_dpi") or 0.0)
-                    except (TypeError, ValueError):
-                        pair_dpi = 0.0
-                if not pair_space:
-                    pair_space = str(ref.get("bbox_coordinate_space") or "")
-                if pair_dpi > 0 and pair_space:
-                    break
-        except Exception:  # noqa: BLE001 — best-effort sourcing
-            logger.debug("PDF overlay dpi sourcing failed for %s", pair_id, exc_info=True)
+        for ov in overlays:
+            if not isinstance(ov, dict):
+                continue
+            if pair_dpi <= 0:
+                try:
+                    pair_dpi = float(ov.get("pdf_dpi") or 0.0)
+                except (TypeError, ValueError):
+                    pair_dpi = 0.0
+            if not pair_space:
+                pair_space = str(ov.get("bbox_coordinate_space") or "")
+            if pair_dpi > 0 and pair_space:
+                break
         if pair_dpi <= 0:
-            try:
-                pair_dpi = float(
-                    viewer_pair.get("compare_pdf_dpi") or viewer_pair.get("pdf_dpi") or 0.0
-                )
-            except (TypeError, ValueError):
-                pair_dpi = 0.0
+            for src in (
+                viewer_pair,
+                viewer_pair.get("before_transform") or {},
+                viewer_pair.get("after_transform") or {},
+            ):
+                try:
+                    pair_dpi = float(
+                        (src or {}).get("compare_pdf_dpi") or (src or {}).get("pdf_dpi") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    pair_dpi = 0.0
+                if pair_dpi > 0:
+                    break
+        if pair_dpi <= 0:
+            pair_dpi = self._peek_overlay_json_pdf_dpi_v2(viewer_pair)
         if not pair_space:
             pair_space = "image_pixels"
         if pair_dpi <= 0:
@@ -10388,6 +10397,36 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 patched["pdf_dpi"] = pair_dpi
             out.append(patched)
         return out
+
+    def _peek_overlay_json_pdf_dpi_v2(self, viewer_pair: dict) -> float:
+        """Return the first ``pdf_dpi`` found in the pair's overlay JSON, or 0.0.
+
+        Lightweight, non-caching last resort for the PDF coord backfill — reads
+        the overlay JSON file directly (does NOT populate ``_viewer_overlay_cache``
+        so the paged-overlay-store memory path is preserved).
+        """
+
+        raw = viewer_pair.get("overlay_json")
+        path = _resolve_viewer_artifact_path(raw, getattr(self, "_viewer_root", None))
+        if path is None or not path.exists():
+            return 0.0
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="surrogatepass"))
+        except Exception:  # noqa: BLE001
+            return 0.0
+        records = data.get("overlays") if isinstance(data, dict) else data
+        if not isinstance(records, list):
+            return 0.0
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            try:
+                dpi = float(rec.get("pdf_dpi") or 0.0)
+            except (TypeError, ValueError):
+                dpi = 0.0
+            if dpi > 0:
+                return dpi
+        return 0.0
 
     def _request_zone_focus_v2(self, zone_id: str) -> None:
         """Phase G2.3 — Submit a zone-focus build to the ViewerSession.

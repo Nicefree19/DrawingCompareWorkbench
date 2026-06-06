@@ -6,12 +6,13 @@ bbox is in PDF image_pixels (e.g. x=1859 @ 200 DPI), but dashboard ``top_issues`
 overlays drop ``bbox_coordinate_space``/``pdf_dpi``. push_change_overlays_from_v1
 then passes the RAW PIXELS through (no conversion), so markers land in pixel space
 while the PDF background is in points (0..842) — the page renders off-screen and
-only relative markers show. The backfill restores the metadata (sourced from the
-canonical overlay JSON, since the manifest pair record has them as None) so the
-image_pixels -> PDF-points conversion fires.
+only relative markers show. The backfill restores the metadata so the
+image_pixels -> PDF-points conversion fires. It must NOT use the caching
+``_viewer_overlays_for_pair_v2`` (that would defeat the paged-overlay-store path).
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -19,56 +20,95 @@ import pytest
 from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
 
 
-def _fake(pair, canonical):
-    return SimpleNamespace(
+def _boom(*_a, **_k):  # ensures the caching path is never taken
+    raise AssertionError("_viewer_overlays_for_pair_v2 must not be called by backfill")
+
+
+def _fake(pair, *, viewer_root=None):
+    ns = SimpleNamespace(
         _viewer_pairs_by_id={"p": pair},
-        _viewer_overlays_for_pair_v2=lambda pid: canonical,
+        _viewer_overlays_for_pair_v2=_boom,
+        _viewer_root=viewer_root,
     )
+    # bind the real (non-caching) peek helper so the last-resort path is exercised
+    ns._peek_overlay_json_pdf_dpi_v2 = (
+        lambda vp: DrawingCompareWorkbenchV2._peek_overlay_json_pdf_dpi_v2(ns, vp)
+    )
+    return ns
 
 
 _PDF_PAIR = {"coordinate_source": "image_pixels", "source_a": "a.pdf",
-             "source_b": "b.pdf", "compare_pdf_dpi": None}
-_CANONICAL = [{"zone_id": "C-004", "pdf_dpi": 200.0, "bbox_coordinate_space": "image_pixels"}]
+             "source_b": "b.pdf", "compare_pdf_dpi": 200.0}
+_BBOX = {"min_x": 1859.0, "min_y": 1286.0, "max_x": 1969.0, "max_y": 1452.0}
 
 
-def test_backfill_stamps_space_and_dpi_from_canonical_overlays():
-    fake = _fake(_PDF_PAIR, _CANONICAL)
-    overlays = [{"zone_id": "C-004", "bbox": {"min_x": 1859.0, "min_y": 1286.0,
-                                              "max_x": 1969.0, "max_y": 1452.0}}]
-    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(fake, "p", overlays)
+def test_backfill_stamps_space_and_dpi_from_pair_without_caching():
+    fake = _fake(_PDF_PAIR)
+    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(
+        fake, "p", [{"zone_id": "C-004", "bbox": _BBOX}]
+    )
     assert out[0]["bbox_coordinate_space"] == "image_pixels"
     assert out[0]["pdf_dpi"] == 200.0
 
 
 def test_backfilled_overlay_converts_to_pdf_points():
-    """End-to-end: after backfill, the shared conversion lands the marker inside
-    the page (points), not at the raw pixel coordinate."""
     from src.gui.lightweight_viewport import convert_bbox_to_world_space
 
-    fake = _fake(_PDF_PAIR, _CANONICAL)
-    overlays = [{"zone_id": "C-004", "bbox": {"min_x": 1859.0, "min_y": 1286.0,
-                                              "max_x": 1969.0, "max_y": 1452.0}}]
-    ov = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(fake, "p", overlays)[0]
+    fake = _fake(_PDF_PAIR)
+    ov = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(
+        fake, "p", [{"zone_id": "C-004", "bbox": _BBOX}]
+    )[0]
     coords = convert_bbox_to_world_space(
         ov["bbox"], coordinate_space=ov["bbox_coordinate_space"],
         pdf_dpi=float(ov["pdf_dpi"]), page_height_points=1190.52,
     )
     assert coords is not None
-    x0, y0, x1, y1 = coords
-    assert 0.0 <= x0 <= 842.0 and x0 == pytest.approx(669.24, abs=1.0)  # 1859*72/200
-    assert 0.0 <= y1 <= 1191.0  # within page height
+    x0, _y0, _x1, y1 = coords
+    assert x0 == pytest.approx(669.24, abs=1.0)  # 1859*72/200, inside page (was 1859 raw)
+    assert 0.0 <= y1 <= 1191.0
+
+
+def test_backfill_sources_dpi_from_overlay_json_peek(tmp_path):
+    """When the pair record lacks dpi, the backfill peeks the overlay JSON file
+    directly (non-caching) instead of the caching overlay loader."""
+    overlay_json = tmp_path / "ov.json"
+    overlay_json.write_text(
+        json.dumps({"overlays": [{"zone_id": "C-004", "pdf_dpi": 200.0,
+                                  "bbox_coordinate_space": "image_pixels"}]}),
+        encoding="utf-8",
+    )
+    pair = {"coordinate_source": "image_pixels", "source_a": "a.pdf", "source_b": "b.pdf",
+            "compare_pdf_dpi": None, "overlay_json": str(overlay_json)}
+    fake = _fake(pair, viewer_root=tmp_path)
+    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(
+        fake, "p", [{"zone_id": "C-004", "bbox": _BBOX}]
+    )
+    assert out[0]["pdf_dpi"] == 200.0
 
 
 def test_backfill_preserves_existing_metadata():
-    fake = _fake(_PDF_PAIR, _CANONICAL)
-    overlays = [{"zone_id": "C-004", "bbox": {"min_x": 1.0, "min_y": 2.0, "max_x": 3.0, "max_y": 4.0},
-                 "bbox_coordinate_space": "image_pixels", "pdf_dpi": 144.0}]
-    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(fake, "p", overlays)
+    fake = _fake(_PDF_PAIR)
+    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(
+        fake, "p", [{"zone_id": "C-004", "bbox": _BBOX,
+                     "bbox_coordinate_space": "image_pixels", "pdf_dpi": 144.0}]
+    )
     assert out[0]["pdf_dpi"] == 144.0  # not overwritten
 
 
 def test_backfill_noop_for_non_pdf_pair():
-    fake = _fake({"coordinate_source": "world", "source_a": "a.dxf", "source_b": "b.dxf"}, [])
-    overlays = [{"zone_id": "Z", "bbox": {"min_x": 1.0, "min_y": 2.0, "max_x": 3.0, "max_y": 4.0}}]
-    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(fake, "p", overlays)
+    fake = _fake({"coordinate_source": "world", "source_a": "a.dxf", "source_b": "b.dxf"})
+    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(
+        fake, "p", [{"zone_id": "Z", "bbox": _BBOX}]
+    )
     assert "bbox_coordinate_space" not in out[0]  # DXF overlays untouched
+
+
+def test_backfill_noop_when_no_dpi_available():
+    """No dpi anywhere -> leave overlays untouched (don't fabricate a wrong scale)."""
+    pair = {"coordinate_source": "image_pixels", "source_a": "a.pdf", "source_b": "b.pdf",
+            "compare_pdf_dpi": None}
+    fake = _fake(pair)
+    out = DrawingCompareWorkbenchV2._backfill_pdf_overlay_coord_space_v2(
+        fake, "p", [{"zone_id": "C-004", "bbox": _BBOX}]
+    )
+    assert "pdf_dpi" not in out[0]
