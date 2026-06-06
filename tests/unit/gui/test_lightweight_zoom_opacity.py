@@ -185,3 +185,47 @@ def test_zoom_slider_uses_gpu_path_when_lightweight_inactive():
     )
     DrawingCompareWorkbenchV2._on_zoom_slider_changed_v2(ns, 300)
     assert applied == [(3.0, 0.0, 0.0)]  # legacy path still works
+
+
+# ---------------------------------------------------------------------------
+# Real-widget: opacity value actually propagates to the QML root property
+# ---------------------------------------------------------------------------
+# The SimpleNamespace tests above prove the handler routes to the viewport.
+# These prove the value reaches the REAL QML root property `overlayOpacityScale`
+# that the QML overlay bindings consume (cloud markers + focus rectangle), which
+# the manual GUI check could not isolate (no marker was in the zoomed frame).
+
+
+def test_overlay_opacity_scale_propagates_to_real_qml_root():
+    from PySide6.QtWidgets import QApplication
+
+    from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+    _ = QApplication.instance() or QApplication([])
+    viewport = LightweightDrawingViewport()
+
+    viewport.set_overlay_opacity_scale(0.5)
+
+    assert viewport.overlay_opacity_scale == pytest.approx(0.5)  # internal contract
+    root = viewport._quick.rootObject()
+    assert root is not None, "QML root must exist after instantiation"
+    assert root.property("overlayOpacityScale") == pytest.approx(0.5)  # reaches QML
+
+
+def test_overlay_opacity_scale_clamps_in_real_qml_root():
+    from PySide6.QtWidgets import QApplication
+
+    from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+    _ = QApplication.instance() or QApplication([])
+    viewport = LightweightDrawingViewport()
+    root = viewport._quick.rootObject()
+    assert root is not None
+
+    viewport.set_overlay_opacity_scale(0.2)  # below 0.3 floor
+    assert viewport.overlay_opacity_scale == pytest.approx(0.3)
+    assert root.property("overlayOpacityScale") == pytest.approx(0.3)
+
+    viewport.set_overlay_opacity_scale(1.5)  # above 1.0 ceiling
+    assert viewport.overlay_opacity_scale == pytest.approx(1.0)
+    assert root.property("overlayOpacityScale") == pytest.approx(1.0)

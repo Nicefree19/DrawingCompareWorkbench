@@ -309,3 +309,27 @@ logger.warning("Unknown change_type detected: %r -> %r, using 'unknown'", raw_ty
 
 이 정보를 제공해주시면 코드 흐름 기준으로 바로 원인 분석 + 해결안까지 정리해드리겠습니다.
 
+---
+
+## 부록: 경량 뷰어(V2)에서 대형 DWG가 "상대 위치 모드"로 보이는 이유 (정직한 폴백)
+
+**증상**: 변경이 매우 많은 대형 DWG(예: 변경 ~20,000 / 구역 ~150)를 경량 뷰어로 열면
+실제 CAD 배경 없이 `상대 위치 모드 · raster preview`(워터마크: "실배경 없음 — 변경구역
+위치만 추정 표시")로 표시되고, 구역 선택 시 마커만 보인다.
+
+**원인 (버그 아님, 의도된 정직 폴백)**: 경량 뷰어는 렌더된 전체 래스터 PNG(`before_image`/
+`after_image`)와 world transform이 있으면 `_load_lightweight_raster_preview_v2`
+(`src/gui/drawing_compare_workbench.py`)가 `load_raster_image`로 **실 배경**을 띄우고
+fidelity를 `exact_world_render`로 둔다(이때 구역 선택 확대는 PDF와 동일하게 실배경 위에서
+매칭됨). 그러나 대형 도면은 전체 래스터 렌더가 **pending/실패**(시간·픽셀 예산 초과)하는 경우가
+있고, 이때 PNG가 없어 `load_raster_image`가 None을 받아 `relative_only`로 **정직하게** 폴백한다.
+`relative_only`는 [render_modes.py](../src/services/comparison/render_modes.py)의 계약상
+**절대 실배경으로 표시되지 않으며** 항상 워터마크로 사용자에게 추정 표시임을 알린다(silent
+misinformation 방지).
+
+**차단 아님**: 중소형 DXF/DWG는 전체 래스터가 완성되어 실배경 + 구역 확대 매칭이 정상 동작한다
+(회귀 테스트 `tests/unit/gui/test_lightweight_raster_preview.py`가 이 경로를 고정).
+
+**별도 후속(범위 외)**: 대형 도면의 전체 래스터 배경을 항상 완성시키는 성능/타일링 개선은
+신뢰성 로드맵의 별도 P0 항목으로 다룬다. 현재 동작(정직한 relative_only 폴백)은 안전하다.
+
