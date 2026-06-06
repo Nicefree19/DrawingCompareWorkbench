@@ -33,6 +33,7 @@ class _FakeViewport:
         self.raster_calls: list[tuple] = []
         self.fidelity: list[tuple] = []
         self.camera_calls: list[tuple] = []
+        self.fit_calls: int = 0
 
     def load_raster_image(self, image_path, *, world_bbox=None, empty_notice=""):
         self.raster_calls.append((image_path, world_bbox))
@@ -43,6 +44,9 @@ class _FakeViewport:
 
     def set_camera_to_world_bbox(self, world_bbox, padding_ratio=0.0):
         self.camera_calls.append((world_bbox, padding_ratio))
+
+    def fit_to_view(self):
+        self.fit_calls += 1
 
 
 def _make_fake():
@@ -111,10 +115,10 @@ def test_ready_crop_loads_into_both_lightweight_viewports_and_refocuses():
     assert ns._lightweight_zone_crop_pair_v2 == "pair-1"
     # overlays re-pushed with the zone as focus
     assert ns.push_calls == [("pair-1", "C-004")]
-    # camera framed on each side's loaded crop WINDOW (guaranteed-visible), not
-    # the tiny change bbox (which left the crop off-frame / blank in live runs)
-    assert before.camera_calls and before.camera_calls[-1][0] == (10.0, 20.0, 110.0, 70.0)
-    assert after.camera_calls and after.camera_calls[-1][0] == (12.0, 22.0, 112.0, 72.0)
+    # each loaded side framed via QML-native fitToView (timing-robust; the
+    # Python-side set_camera read stale root size live -> crop zoomed-out/tiny)
+    assert before.fit_calls == 1
+    assert after.fit_calls == 1
 
 
 def test_pdf_render_status_is_left_to_pdf_path():
@@ -237,11 +241,11 @@ def test_blank_side_skipped_when_zone_window_outside_that_side_background():
     assert len(after.raster_calls) == 1
     assert str(after.raster_calls[0][0]).endswith("zone_after.png")
     assert after.fidelity[-1][0] == "raster_refined"
-    # one side loaded -> pair tracked, overlays pushed, camera fit on AFTER only
+    # one side loaded -> pair tracked, overlays pushed, fitToView on AFTER only
     assert ns._lightweight_zone_crop_pair_v2 == "pair-1"
     assert ns.push_calls == [("pair-1", "C-040")]
-    assert before.camera_calls == []  # blank side: no crop, no camera fit
-    assert after.camera_calls and after.camera_calls[-1][0] == (507000.0, -105000.0, 517000.0, -101000.0)
+    assert before.fit_calls == 0  # blank side: no crop, no fit
+    assert after.fit_calls == 1
 
 
 def test_noop_when_lightweight_viewports_absent():

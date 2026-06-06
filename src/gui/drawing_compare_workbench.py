@@ -12252,17 +12252,53 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # had just swapped the world frame under a camera fit to the old frame.
         self._lightweight_camera_sync_in_progress = True
         try:
-            for viewport, world_bbox in loaded_frames:
+            for viewport, _world_bbox in loaded_frames:
                 try:
-                    viewport.set_camera_to_world_bbox(world_bbox, padding_ratio=0.08)
+                    # Use the QML-native fitToView (the "전체 보기" button's path):
+                    # it computes the fit IN QML from the live root size + the
+                    # crop's worldBbox (set by load_raster_image). The Python-side
+                    # set_camera_to_world_bbox read root width/height right after
+                    # the world-frame swap and got a stale value live, so the crop
+                    # rendered zoomed-out/tiny in the corner. fitToView reads the
+                    # size at QML-execution time and frames the crop reliably.
+                    viewport.fit_to_view()
+                    self._log_zone_crop_camera_state_v2(viewport, zone_id)
                 except Exception:
-                    logger.exception("zone crop camera fit failed for %s", zone_id)
+                    logger.exception("zone crop fit_to_view failed for %s", zone_id)
         finally:
             self._lightweight_camera_sync_in_progress = False
         logger.info(
             "[zone crop lightweight] pair=%s zone=%s before=%s after=%s",
             pair_id, zone_id, loaded_before, loaded_after,
         )
+
+    @staticmethod
+    def _log_zone_crop_camera_state_v2(viewport, zone_id: str) -> None:
+        """Diagnostic: log the post-fit camera/world state of a lightweight
+        viewport. Lets a live run reveal WHY a crop renders zoomed-out/tiny
+        (e.g. root width 0, huge unitsPerPixel) without an interactive session.
+        Best-effort; never raises."""
+
+        try:
+            root = viewport._quick.rootObject()
+            if root is None:
+                return
+
+            def _p(name):
+                try:
+                    return root.property(name)
+                except Exception:
+                    return None
+
+            logger.info(
+                "[zone crop fit] %s zone=%s root=%sx%s cam=(%s,%s) upp=%s worldBbox=%s",
+                getattr(viewport, "_side", "?"), zone_id,
+                _p("width"), _p("height"),
+                _p("cameraCenterX"), _p("cameraCenterY"),
+                _p("unitsPerPixel"), _p("worldBbox"),
+            )
+        except Exception:
+            logger.debug("zone crop camera-state log failed", exc_info=True)
 
     @staticmethod
     def _zone_render_reason_message_ko(reason_code: str) -> str:
