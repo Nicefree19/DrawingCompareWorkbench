@@ -5,44 +5,36 @@ Last updated: 2026-06-07
 ## Active Work
 
 - Current owner: Codex
-- Current thread: Continue Claude Code re-origin comparison hardening
-- State: implementation and runtime verification complete, uncommitted
+- Current thread: Integrate Claude visual/PVH work onto latest re-origin main
+- Branch: `codex/integrate-claude-p0-visuals`
+- State: runtime fix implemented and targeted verification complete, uncommitted
 
 ## Current Decision
 
-- Treat the re-origin work as a classification-quality fix, not a broad change-count reduction claim.
-- In large re-origin cases, compare residual changes in registered space while preserving emitted native coordinates.
-- Remove unchanged entities only when full geometry can be verified for supported entity types.
-- Keep unsupported re-origin entity types as visible changes and report them through metadata.
-- Apply the same conservative registered-space matching to the public canonical engine path used by CLI and Workbench automation.
-- Preserve before/after native bboxes for re-origin selected-zone rendering; use side-specific crop windows instead of one shared native window.
-- Restore local DXF source paths from the live compare summary when sharable viewer manifests contain `<redacted>` sources.
-- Treat failed full-detail source-render upgrades as upgrade failures, not as user-visible selected-zone fallback regressions.
-- Keep ODA conversion quarantined and require explicit `oda_converter` backend selection for folder-compare auto-convert.
+- Claude PR `#3` is already merged into `main`; the missing work was the local branch `feat/p0-reliability-and-pvh-viewer`.
+- Do not merge that branch wholesale. Its older `e5b7d78` alignment/auto-register path conflicts with the newer `main` re-origin fixes.
+- Preserve current `main` re-origin behavior in `dxf_comparator.py`, `global_alignment.py`, `drawing_compare_engine.py`, and the selected-zone source/crop restoration path.
+- Port the user-visible Claude visual work: reference-PDF overlay, shared lightweight camera frame, layer-filtered extents, minimum visible cloud footprint, oversized leader-line rendering, and geometry-aware cloud overlays.
+- Keep `src/gui/drawing_compare_workbench.py` changes narrow by moving visual hook logic into `src/gui/workbench_visual_extensions.py` and AC1032 runtime diagnostics into `src/gui/compare_runtime_diagnostics.py`.
+- Direct AC1032 DWG files still need converted DXF fallback or an explicitly configured converter; this PC currently reports native DWG support limited to AC1015 and ODA unavailable.
 
 ## Verification
 
-- `python -m py_compile src\services\comparison\folder_compare_pipeline.py src\services\comparison\dwg_converter.py src\services\comparison\dwg_dxf_fallback.py src\services\comparison\dxf_comparator.py`
-- `python -m pytest tests\unit\services\comparison\test_folder_compare_pipeline.py tests\unit\services\comparison\test_auto_convert_dwg.py tests\unit\services\comparison\test_import_compare_pipeline.py -q`
-- `python -m pytest tests\unit\services\comparison\test_dxf_global_alignment.py tests\unit\services\comparison\test_alignment_artifact_guard.py tests\unit\services\comparison\test_q6_structural_threshold.py tests\unit\services\comparison\test_q_fu2_alignment_layer_aware.py tests\unit\services\comparison\test_dxf_comparator_modified.py tests\unit\services\comparison\test_dxf_comparator_large_mode.py tests\unit\services\comparison\test_text_near_match_radius.py tests\unit\services\comparison\test_suppression_audit.py tests\unit\services\comparison\test_dxf_comparator_reorigin.py -q`
+- `python -m py_compile src\gui\workbench_visual_extensions.py src\gui\hybrid_reference_pdf.py src\gui\lightweight_viewport.py src\gui\drawing_compare_workbench.py src\services\comparison\cad_pdf_overlay.py src\services\comparison\layer_filter.py src\services\comparison\viewer_frame.py src\services\comparison\change_zones.py src\services\comparison\drawing_normalizer.py src\services\comparison\dxf_renderer.py src\services\comparison\review_project.py src\services\comparison\viewer_package.py`
+- `python -m pytest tests\unit\services\comparison\test_cad_pdf_overlay.py tests\unit\services\comparison\test_viewer_frame_p0_3.py tests\unit\services\comparison\test_p0_reliability_harness.py tests\unit\services\comparison\test_change_zones.py tests\unit\services\comparison\test_workbench_overlay_model.py tests\unit\gui\test_pdf_lightweight_hardening.py -q`
+- `python -m pytest tests\unit\services\comparison\test_dxf_comparator_reorigin.py tests\unit\services\comparison\test_drawing_compare_engine.py tests\unit\services\comparison\test_import_compare_pipeline.py tests\unit\services\comparison\test_folder_compare_pipeline.py tests\unit\services\comparison\test_workbench_phase_c.py::test_redacted_viewer_source_restores_from_compare_summary tests\unit\services\comparison\test_workbench_phase_c.py::test_failed_full_detail_upgrade_keeps_fast_crop_out_of_fallback_counts -q`
 - `python scripts\cad_policy_gate.py`
 - `git diff --check`
-- `python -m py_compile src\services\comparison\drawing_compare_engine.py tests\unit\services\comparison\test_drawing_compare_engine.py`
-- `python -m pytest tests\unit\services\comparison\test_drawing_compare_engine.py::test_canonical_reorigin_registered_matching_surfaces_real_changes -q`
-- `python -m src.cli.cad_compare file build\manual_runtime_debug\reorigin_case\A\S-REORIGIN_REV0.dxf build\manual_runtime_debug\reorigin_case\B\S-REORIGIN_REV1.dxf --output build\manual_runtime_debug\reorigin_case\file_compare_after_fix.json --max-dxf-tokens 2000000`
-- `python -m src.cli.cad_compare file build\manual_runtime_debug\reorigin_case\A\S-REORIGIN_REV0.dxf build\manual_runtime_debug\reorigin_case\B\S-REORIGIN_REV1.dxf --output build\manual_runtime_debug\reorigin_case\file_compare_computer_use_check.json --max-dxf-tokens 2000000`
-- `python scripts\direct_workbench_compare.py --a build\manual_runtime_debug\reorigin_case\A --b build\manual_runtime_debug\reorigin_case\B --out-dir build\manual_runtime_debug\reorigin_case\workbench_after_fix --viewer-render-policy none`
-- `python scripts\direct_workbench_compare.py --a build\manual_runtime_debug\reorigin_case\A --b build\manual_runtime_debug\reorigin_case\B --out-dir build\manual_runtime_debug\reorigin_case\workbench_top_issues_after_fix`
-- Computer Use visible Workbench run via `build\manual_runtime_debug\reorigin_case\launch_visible_workbench_reorigin.py`; result summary: `build\manual_runtime_debug\reorigin_case\workbench_computer_use_visible\visible_summary.json`; UI selected `C-001` added and `C-003` modified zones.
-- `python -m pytest tests\unit\services\comparison\test_drawing_compare_engine.py tests\unit\services\comparison\test_import_compare_pipeline.py tests\unit\services\comparison\test_folder_compare_pipeline.py tests\unit\services\comparison\test_dxf_comparator_reorigin.py -q`
-- `python -m pytest tests\unit\services\comparison\test_workbench_phase_c.py::test_redacted_viewer_source_restores_from_compare_summary tests\unit\services\comparison\test_workbench_phase_c.py::test_failed_full_detail_upgrade_keeps_fast_crop_out_of_fallback_counts -q`
-- Workbench runtime probe `build\manual_runtime_debug\reorigin_case\workbench_zone_crop_source_restore_check\zone_crop_source_restore_runtime_summary.json`: `total_changes=4`, `failed_pairs=0`, selected `C-003`, `selected_zone_fallback_count=0`, `zone_crop_count=2`, renderers `cad-background-image-crop` and `ezdxf-matplotlib-zone`, both `ready/cad_render`.
-- `python -m pytest tests\unit\services\comparison\test_change_zones.py tests\unit\services\comparison\test_drawing_compare_engine.py tests\unit\services\comparison\test_zone_render_service.py tests\unit\services\comparison\test_review_dashboard.py tests\unit\services\comparison\test_workbench_phase_c.py tests\unit\services\comparison\test_import_compare_pipeline.py tests\unit\services\comparison\test_folder_compare_pipeline.py tests\unit\services\comparison\test_dxf_comparator_reorigin.py -q`
+- `DRAWING_COMPARE_SMOKE_EXIT_MS=2000 python -u start_drawing_compare_workbench.py`
+- Visible Workbench run from `codex/integrate-claude-p0-visuals`: `logs\runtime_monitor\integration_20260607_231756\run_manifest.json`; PID `476040`, window title `도면 변경 비교`, responding `true`, new app error bytes `0` before it was stopped for the final smoke checks.
+- `python -m py_compile src\gui\compare_runtime_diagnostics.py src\gui\drawing_compare_workbench.py`
+- `python -m pytest tests\unit\gui\test_compare_runtime_diagnostics.py tests\unit\services\comparison\test_dwg_dxf_fallback.py -q`
+- `python -m pytest tests\unit\gui\test_compare_runtime_diagnostics.py tests\unit\services\comparison\test_folder_compare_pipeline.py::test_folder_compare_pipeline_uses_converted_dxf_fallback_for_unsupported_dwg_folder tests\unit\services\comparison\test_import_compare_pipeline.py::test_oda_fallback_is_disabled_by_default_for_dwg_failures -q`
+- Final smoke after runtime fix: `DRAWING_COMPARE_SMOKE_EXIT_MS=2000 python -u start_drawing_compare_workbench.py`, exit code 0, `logs\error_20260607.log` delta 0.
 
 ## Open Notes
 
-- Untracked Claude/probe files remain intentionally unstaged.
-- Manual runtime fixture and screenshots are under `build\manual_runtime_debug\reorigin_case\`.
-- Computer Use visible run produced `workbench_computer_use_visible\results\artifacts\change_zones.json` with 4 zones: added 1, deleted 1, modified 2.
-- Current re-origin engine and selected-zone render fixes are not staged or committed yet.
-- Final customer-grade release evidence and full MVP closeout remain separate work.
+- Changes are intentionally not staged or committed yet.
+- Existing untracked Claude/probe files remain intentionally untouched.
+- `logs\error_20260607.log` contains unsupported-AC1032 preflight errors from direct DWG file runs; the subsequent folder run completed through converted DXF fallback.
+- Previous visible GUI and monitor processes were stopped before the final smoke run.

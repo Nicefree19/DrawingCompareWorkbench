@@ -25,6 +25,7 @@ from .dxf_importer import (
     _text_bbox,
     _union_bbox,
 )
+from .layer_filter import layer_matches_any
 
 
 Point3 = Dict[str, float]
@@ -52,9 +53,13 @@ class NormalizationOptions:
     normalize_polyline_vertices: bool = True
     remove_near_zero_geometry: bool = True
     update_hashes: bool = True
+    # P0-4 (RELIABILITY_FIRST_ROADMAP) — fnmatch layer patterns whose entities
+    # are excluded ONLY from the extents/frame union (far-flung review markup
+    # like "!*"/"*검토*"/"*_OLD"). Default empty = no-op (golden-safe).
+    ignore_layer_patterns: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out: Dict[str, Any] = {
             "coordinate_quantum_mm": self.coordinate_quantum_mm,
             "bbox_quantum_mm": self.bbox_quantum_mm,
             "angle_quantum_deg": self.angle_quantum_deg,
@@ -73,6 +78,11 @@ class NormalizationOptions:
             "remove_near_zero_geometry": self.remove_near_zero_geometry,
             "update_hashes": self.update_hashes,
         }
+        # P0-4 — only serialize when set, so the default (empty) options dump
+        # stays byte-identical to the checked-in golden regression report.
+        if self.ignore_layer_patterns:
+            out["ignore_layer_patterns"] = list(self.ignore_layer_patterns)
+        return out
 
 
 @dataclass
@@ -716,7 +726,29 @@ class DrawingNormalizer:
             block["entity_ids"] = [eid for eid in block.get("entity_ids") or [] if eid in existing_ids]
             block["bbox"] = _union_bbox([entity_by_id[eid].get("bbox") for eid in block["entity_ids"]])
 
-        drawing["extents"] = _union_bbox([entity.get("bbox") for entity in entities])
+        # P0-4 — exclude ignore-layer (far-flung markup) entities from the
+        # extents/frame union so the real 도곽 is not shrunk to a speck.
+        # Default (no patterns) keeps every entity → identical to prior behaviour.
+        extent_entities = entities
+        if self.options.ignore_layer_patterns:
+            patterns = self.options.ignore_layer_patterns
+            layer_name_by_id = {
+                lyr.get("id"): lyr.get("name")
+                for lyr in (drawing.get("layers") or [])
+            }
+
+            def _ent_layer_name(e: Dict[str, Any]) -> str:
+                return str(
+                    layer_name_by_id.get(e.get("layer_id"))
+                    or e.get("layer")
+                    or ""
+                )
+
+            extent_entities = [
+                e for e in entities
+                if not layer_matches_any(_ent_layer_name(e), patterns)
+            ]
+        drawing["extents"] = _union_bbox([entity.get("bbox") for entity in extent_entities])
         if isinstance(drawing.get("extents"), dict):
             self._round_bbox(drawing["extents"])
 

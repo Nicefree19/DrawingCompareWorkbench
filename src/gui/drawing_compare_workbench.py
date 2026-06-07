@@ -63,6 +63,8 @@ except Exception:
     QQuickWidget = None  # type: ignore[assignment]
     QT_QUICK_AVAILABLE = False
 
+from src.gui import workbench_visual_extensions as visual_ext
+from src.gui.compare_runtime_diagnostics import default_gui_dwg_backend_mode, format_auto_compare_error
 from src.gui.theme import NanoColors, get_stylesheet
 from src.services.comparison import ComparisonConfig
 from src.services.comparison.cache_budget import resolve_cache_byte_limit
@@ -1158,7 +1160,7 @@ class AutoFolderCompareWorker(QThread):
             )
         except Exception as exc:
             logger.exception("Korean folder comparison flow failed")
-            self.error.emit(str(exc))
+            self.error.emit(format_auto_compare_error(exc, self.request))
         finally:
             try:
                 sampler.stop()
@@ -1884,6 +1886,7 @@ class ZoneRenderProcessController(QObject):
         process = self._process
         if process and process.state() != QProcess.NotRunning:
             process.kill()
+            process.waitForFinished(1500)
             process.deleteLater()
         self._process = None
         self._process_key = ""
@@ -5007,6 +5010,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         settings_menu.addAction(noise_filter_action)
 
+        visual_ext.attach_visual_extensions(self, menu_bar)
         help_menu = menu_bar.addMenu("&도움말")
         tutorial_action = QAction("📘 시작 가이드 (5단계 튜토리얼)", self)
         tutorial_action.setShortcut(QKeySequence("F1"))
@@ -7074,6 +7078,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             max_zone_tiles=0,
             export_marked_pdf=False,
             marked_pdf_mode="off",
+            dwg_backend_mode=default_gui_dwg_backend_mode(),
             auto_export_structural_clouds=(
                 self.chk_auto_structural_clouds_v2.isChecked()
                 if hasattr(self, "chk_auto_structural_clouds_v2") else False
@@ -9978,6 +9983,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 stats["loaded_after"] = bool(loaded)
         if loaded_before or loaded_after:
             self._lightweight_raster_pairs.add(pair_id)
+            visual_ext.apply_shared_lightweight_camera_frame(self, viewer_pair)
             for viewport, loaded in (
                 (self.preview_before_lightweight_v2, loaded_before),
                 (self.preview_after_lightweight_v2, loaded_after),

@@ -2398,6 +2398,17 @@ def _overlay_from_zone_row(
         "bbox_coordinate_space": bbox_coordinate_space,
         "pdf_dpi": pdf_dpi,
     }
+    # B안 — carry the entity geometry (JSON in the zone CSV) so the reloaded
+    # overlay path draws the cloud along the real shape, matching the live
+    # fresh-compare path (ZoneOverlay.geometry). Absent/blank → omitted.
+    geometry_raw = str(row.get("geometry") or "").strip()
+    if geometry_raw:
+        try:
+            geometry = json.loads(geometry_raw)
+        except (ValueError, TypeError):
+            geometry = None
+        if isinstance(geometry, dict):
+            overlay["geometry"] = geometry
     if page_pair is not None:
         page_a, page_b = page_pair
         overlay["page_a"] = page_a

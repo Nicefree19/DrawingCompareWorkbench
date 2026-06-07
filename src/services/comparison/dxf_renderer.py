@@ -27,6 +27,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from .dxf_read import read_dxf_document, read_dxf_document_result
+from .layer_filter import layer_matches_any
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +117,15 @@ def _valid_extents(min_x: float, min_y: float, max_x: float, max_y: float) -> bo
     return bool(np.all(np.isfinite(values)) and max_x > min_x and max_y > min_y)
 
 
-def _simple_entity_extents(msp) -> Optional[Tuple[float, float, float, float]]:
-    """Recover render extents without ezdxf's recursive bbox engine."""
+def _simple_entity_extents(
+    msp, ignore_layer_patterns: Tuple[str, ...] = ()
+) -> Optional[Tuple[float, float, float, float]]:
+    """Recover render extents without ezdxf's recursive bbox engine.
+
+    P0-4 — entities on ``ignore_layer_patterns`` (far-flung review markup) are
+    excluded from the extents so the viewer frame is the real 도곽, not the
+    inflated markup span. Default empty = no-op (prior behaviour).
+    """
 
     xs: list[float] = []
     ys: list[float] = []
@@ -144,6 +152,10 @@ def _simple_entity_extents(msp) -> Optional[Tuple[float, float, float, float]]:
 
     for entity in msp:
         try:
+            if ignore_layer_patterns and layer_matches_any(
+                getattr(entity.dxf, "layer", ""), ignore_layer_patterns
+            ):
+                continue
             entity_type = entity.dxftype()
             if entity_type == "LINE":
                 add_point(entity.dxf.start)

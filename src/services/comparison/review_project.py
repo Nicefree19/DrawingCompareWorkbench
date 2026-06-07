@@ -93,6 +93,12 @@ class ZoneOverlay:
     layers: list[str] = field(default_factory=list)
     entity_types: list[str] = field(default_factory=list)
     note: str = ""
+    # B안 — entity geometry (CAD-world mm, e.g. {"type": "LINE", "points": [...]})
+    # so the live viewer can draw a revision cloud along the actual leader line
+    # instead of its bbox. This is the path a fresh DWG/DXF compare uses
+    # (DrawingChangeZone → ZoneOverlay → overlay dict), so geometry must be
+    # carried here, not only in DrawingChangeZone.to_dict().
+    geometry: Optional[dict] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +118,7 @@ class ZoneOverlay:
             "layers": self.layers,
             "entity_types": self.entity_types,
             "note": self.note,
+            "geometry": self.geometry,
         }
 
 
@@ -587,6 +594,7 @@ def _zone_overlay(
         layers=list(zone.layers),
         entity_types=list(zone.entity_types),
         note=note,
+        geometry=zone.geometry,
     )
 
 

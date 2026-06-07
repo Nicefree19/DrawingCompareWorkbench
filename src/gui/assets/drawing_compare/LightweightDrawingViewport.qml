@@ -48,6 +48,21 @@ Item {
     property var overlaysFocus: []
     // User-controlled overlay opacity scale (0.3-1.0).
     property real overlayOpacityScale: 1.0
+    // Phase Q1 — minimum on-screen footprint (px) for a change marker so
+    // small change zones (e.g. a 110 mm text edit) stay perceptible even
+    // when the camera fits the whole multi-detail drawing (fitToView yields
+    // ~578 mm/px on a 137 m × 551 m sheet → a 110 mm zone is ~0.2 px). The
+    // marker is expanded SYMMETRICALLY about the change centre so it still
+    // points at the real spot. >= 32 routes tiny zones through the scalloped
+    // revision-cloud path (not the plain rect fallback).
+    property real minCloudPx: 32
+    // Phase A (large-cloud) — a change whose bbox spans more than this
+    // fraction of the drawing in EITHER axis is treated as "oversized"
+    // (e.g. a review leader line that crosses the sheet). Its cloud is
+    // rendered as a faint dashed outline + a centroid pin instead of a bold
+    // scalloped fill, so it doesn't blanket the view and drown the small
+    // note clouds Q1 just made visible.
+    property real largeCloudFraction: 0.5
     // Empty-state notice when no primitives loaded yet.
     property string emptyNotice: "도면을 선택하면 빠르게 표시됩니다."
     // Side-specific note for added/deleted zones where the opposite drawing
@@ -268,22 +283,34 @@ Item {
                 property real cloudLineWidth: modelData.dimmed === true ? 1.2 : 2.0
 
                 // Convert world bbox → pixel bbox using same affine as Canvas.
-                x: {
-                    var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                    return root.width / 2 + (modelData.x - root.cameraCenterX) * s
-                }
-                y: {
-                    var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                    return root.height / 2 - ((modelData.y + (modelData.h || 0)) - root.cameraCenterY) * s
-                }
-                width: {
-                    var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                    return Math.max(2, (modelData.w || 0) * s)
-                }
-                height: {
-                    var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                    return Math.max(2, (modelData.h || 0) * s)
-                }
+                // World→pixel scale (identical affine to the vector Canvas).
+                property real _s: 1.0 / Math.max(0.0001, root.unitsPerPixel)
+                // Natural pixel footprint of the change bbox at the current zoom.
+                property real _natW: (modelData.w || 0) * _s
+                property real _natH: (modelData.h || 0) * _s
+                // Phase Q1 — clamp to a minimum perceptible footprint so small
+                // zones don't vanish to sub-pixel at whole-drawing fit.
+                property real _drawW: Math.max(root.minCloudPx, _natW)
+                property real _drawH: Math.max(root.minCloudPx, _natH)
+                // Screen position of the change CENTRE; the min-size growth
+                // then expands symmetrically about it (current x/y must NOT
+                // anchor to the world top-left or a clamped marker drifts off
+                // the real change spot by up to minCloudPx/2 px).
+                property real _cxScreen: root.width / 2 + ((modelData.x || 0) + (modelData.w || 0) / 2 - root.cameraCenterX) * _s
+                property real _cyScreen: root.height / 2 - ((modelData.y || 0) + (modelData.h || 0) / 2 - root.cameraCenterY) * _s
+                // Phase A — drawing extents + "oversized" test. Intrinsic to the
+                // change (zoom-independent). Guarded so a degenerate worldBbox
+                // ([0,0,1,1]) can't flag every zone oversized.
+                property real _drawingW: Math.max(1, (root.worldBbox && root.worldBbox.length === 4 ? root.worldBbox[2] - root.worldBbox[0] : 0))
+                property real _drawingH: Math.max(1, (root.worldBbox && root.worldBbox.length === 4 ? root.worldBbox[3] - root.worldBbox[1] : 0))
+                property bool _oversized: _drawingW > 100 && _drawingH > 100
+                    && ((modelData.w || 0) > root.largeCloudFraction * _drawingW
+                        || (modelData.h || 0) > root.largeCloudFraction * _drawingH)
+
+                x: _cxScreen - _drawW / 2
+                y: _cyScreen - _drawH / 2
+                width: _drawW
+                height: _drawH
 
                 // Revision-cloud border (scalloped perimeter) — replaces
                 // the plain Rectangle border so the visual matches AEC
@@ -304,6 +331,43 @@ Item {
 
                         var w = Math.max(2, width)
                         var h = Math.max(2, height)
+
+                        // Phase A — oversized zone (e.g. a sheet-crossing leader
+                        // line): draw only a faint dashed boundary so it recedes;
+                        // the centroid pin (sibling) carries the location. No
+                        // bold scallop, no inner ring.
+                        if (cloudWrapper._oversized) {
+                            var geom = modelData.geometry
+                            if (geom && geom.length >= 2) {
+                                // B안 — draw the entity's REAL shape (CAD-world mm
+                                // → wrapper-local px) so the cloud follows the
+                                // actual leader line, not its bbox. The wrapper
+                                // spans the world bbox, so map each point relative
+                                // to (modelData.x, top = modelData.y + h).
+                                ctx.lineWidth = 3
+                                ctx.globalAlpha = 0.95
+                                ctx.strokeStyle = cloudWrapper.cloudColor
+                                ctx.beginPath()
+                                for (var gi = 0; gi < geom.length; gi++) {
+                                    var lx = ((geom[gi][0] || 0) - (modelData.x || 0)) * cloudWrapper._s
+                                    var ly = ((modelData.y || 0) + (modelData.h || 0) - (geom[gi][1] || 0)) * cloudWrapper._s
+                                    if (gi === 0) ctx.moveTo(lx, ly)
+                                    else ctx.lineTo(lx, ly)
+                                }
+                                ctx.stroke()
+                                return
+                            }
+                            // Phase A fallback — faint dashed bbox boundary so it
+                            // recedes; the centroid pin (sibling) carries location.
+                            ctx.lineWidth = 1.5
+                            ctx.globalAlpha = 0.5
+                            ctx.setLineDash([8, 6])
+                            ctx.strokeStyle = cloudWrapper.cloudColor
+                            ctx.beginPath()
+                            ctx.rect(0.75, 0.75, Math.max(1, w - 1.5), Math.max(1, h - 1.5))
+                            ctx.stroke()
+                            return
+                        }
 
                         // G2.7-COORDFIX-2 — for very small markers (<32px on
                         // either axis) the scallops degenerate to sub-pixel
@@ -372,6 +436,22 @@ Item {
                     }
                 }
 
+                // Phase A — centroid pin for oversized zones. Screen-fixed
+                // small marker at the bbox centre so a sheet-crossing change
+                // stays locatable without a blanketing cloud. Shown only when
+                // the zone is oversized; normal zones use the scallop above.
+                Rectangle {
+                    visible: cloudWrapper._oversized
+                    width: 14
+                    height: 14
+                    radius: 7
+                    color: cloudWrapper.cloudColor
+                    border.color: "#FFFFFF"
+                    border.width: 2
+                    x: (cloudWrapper.width - width) / 2
+                    y: (cloudWrapper.height - height) / 2
+                }
+
                 // Optional area label rendered above the bbox.
                 Rectangle {
                     visible: !!(modelData.label)
@@ -431,21 +511,20 @@ Item {
                     border.width: 4
                     radius: 2
                     opacity: 1.0 * root.overlayOpacityScale
+                    // Phase Q1 — same minimum-footprint + centred expansion as
+                    // the cloud layer so the selected zone stays visible even
+                    // before the camera zooms to it (whole-drawing fit).
+                    width: Math.max(root.minCloudPx, (modelData.w || 0) / Math.max(0.0001, root.unitsPerPixel))
+                    height: Math.max(root.minCloudPx, (modelData.h || 0) / Math.max(0.0001, root.unitsPerPixel))
                     x: {
                         var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                        return root.width / 2 + (modelData.x - root.cameraCenterX) * s
+                        var cx = root.width / 2 + ((modelData.x || 0) + (modelData.w || 0) / 2 - root.cameraCenterX) * s
+                        return cx - width / 2
                     }
                     y: {
                         var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                        return root.height / 2 - ((modelData.y + (modelData.h || 0)) - root.cameraCenterY) * s
-                    }
-                    width: {
-                        var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                        return Math.max(8, (modelData.w || 0) * s)
-                    }
-                    height: {
-                        var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-                        return Math.max(8, (modelData.h || 0) * s)
+                        var cy = root.height / 2 - ((modelData.y || 0) + (modelData.h || 0) / 2 - root.cameraCenterY) * s
+                        return cy - height / 2
                     }
                 }
             }

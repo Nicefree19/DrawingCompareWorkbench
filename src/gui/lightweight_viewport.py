@@ -1371,6 +1371,14 @@ class LightweightDrawingViewport(QWidget):
             root.setProperty("cameraCenterX", cx)
             root.setProperty("cameraCenterY", cy)
             root.setProperty("unitsPerPixel", upp)
+            # Q2 — a deliberate camera placement (e.g. the post-comparison
+            # auto-zoom to the first change zone) must not be clobbered by a
+            # late first-time fitToView. The QML onWidthChanged/onHeightChanged
+            # fit-once guard only fits while ``cameraInitialized`` is false, so
+            # mark it true here. Without this, on first app open the viewport
+            # often sizes AFTER the zone-zoom and fitToView snaps the camera
+            # back to the whole drawing (changes shrink to sub-pixel again).
+            root.setProperty("cameraInitialized", True)
         except Exception:
             logger.exception("LightweightViewport: setProperty failed")
         # Phase G2.7-FU2 follow-up — a programmatic zone-focus zoom sets
@@ -1577,6 +1585,24 @@ class LightweightDrawingViewport(QWidget):
                 "dimmed": bool(focus_zone_id and focus_zone_id != zid),
                 "zoneId": zid,  # required for QML overlayClicked routing
             }
+
+            # B안 — pass the entity's real geometry (CAD-world mm) so the QML can
+            # draw the cloud along the actual shape (e.g. a long leader line)
+            # instead of its bbox. DXF/DWG only: PDF overlays live in a different
+            # coordinate space, so skip them (the viewer keeps the bbox outline).
+            geom = ov.get("geometry")
+            if (
+                isinstance(geom, dict)
+                and not str(ov.get("bbox_coordinate_space") or "")
+                and isinstance(geom.get("points"), list)
+            ):
+                pts = [
+                    [float(p[0]), float(p[1])]
+                    for p in geom["points"]
+                    if isinstance(p, (list, tuple)) and len(p) >= 2
+                ]
+                if len(pts) >= 2:
+                    entry["geometry"] = pts
 
             if focus_zone_id and zid == focus_zone_id:
                 focus.append(entry)
