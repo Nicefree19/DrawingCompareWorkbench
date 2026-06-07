@@ -1,13 +1,13 @@
 # Collaboration Status
 
-Last updated: 2026-06-07
+Last updated: 2026-06-08
 
 ## Active Work
 
 - Current owner: Codex
 - Current thread: Integrate Claude visual/PVH work onto latest re-origin main
 - Branch: `codex/integrate-claude-p0-visuals`
-- State: runtime fix implemented and targeted verification complete, uncommitted
+- State: post-push runtime review and lightweight PDF rerender hardening complete, uncommitted
 
 ## Current Decision
 
@@ -31,10 +31,16 @@ Last updated: 2026-06-07
 - `python -m pytest tests\unit\gui\test_compare_runtime_diagnostics.py tests\unit\services\comparison\test_dwg_dxf_fallback.py -q`
 - `python -m pytest tests\unit\gui\test_compare_runtime_diagnostics.py tests\unit\services\comparison\test_folder_compare_pipeline.py::test_folder_compare_pipeline_uses_converted_dxf_fallback_for_unsupported_dwg_folder tests\unit\services\comparison\test_import_compare_pipeline.py::test_oda_fallback_is_disabled_by_default_for_dwg_failures -q`
 - Final smoke after runtime fix: `DRAWING_COMPARE_SMOKE_EXIT_MS=2000 python -u start_drawing_compare_workbench.py`, exit code 0, `logs\error_20260607.log` delta 0.
+- 2026-06-08 smoke: `DRAWING_COMPARE_SMOKE_EXIT_MS=2500 python -u start_drawing_compare_workbench.py`, exit code 0, `logs\error_20260608.log` delta 0.
+- 2026-06-08 visible UI run: `logs\runtime_monitor\codex_verify_20260608_000349\run_manifest.json`, PID `550808`, window title `도면 변경 비교`, responding `true`, app error delta 0.
+- `python -m pytest tests\unit\gui\test_pdf_lightweight_hardening.py::TestQ2AutoZoomCameraLock tests\unit\services\comparison\test_zone_focus_pdf_rerender.py -q`
+- Post-hardening smoke: `DRAWING_COMPARE_SMOKE_EXIT_MS=2500 python -u start_drawing_compare_workbench.py`, exit code 0, `logs\error_20260608.log` delta 0.
+- Post-hardening visible UI run: `logs\runtime_monitor\codex_verify_postfix_20260608_000808\run_manifest.json`, PID `556284`, window title `도면 변경 비교`, responding `true`, app error delta 0.
+- `python -m pytest tests\unit\gui\test_pdf_lightweight_hardening.py tests\unit\services\comparison\test_zone_focus_pdf_rerender.py tests\unit\gui\test_compare_runtime_diagnostics.py -q`
 
 ## Open Notes
 
 - Changes are intentionally not staged or committed yet.
 - Existing untracked Claude/probe files remain intentionally untouched.
 - `logs\error_20260607.log` contains unsupported-AC1032 preflight errors from direct DWG file runs; the subsequent folder run completed through converted DXF fallback.
-- Previous visible GUI and monitor processes were stopped before the final smoke run.
+- Current visible 2026-06-08 run remains open for inspection at PID `556284`.

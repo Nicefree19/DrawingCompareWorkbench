@@ -616,6 +616,14 @@ class TestQ2AutoZoomCameraLock:
         names = {call.args[0] for call in root.setProperty.call_args_list}
         assert {"cameraCenterX", "cameraCenterY", "unitsPerPixel"} <= names
 
+    def test_missing_pdf_render_state_is_noop_without_debug_failure(self, caplog):
+        vp, _root = self._viewport_with_mock_root()
+
+        with caplog.at_level(logging.DEBUG, logger="src.gui.lightweight_viewport"):
+            vp.set_camera_to_world_bbox((10.0, 20.0, 110.0, 220.0), padding_ratio=0.25)
+
+        assert "zone-focus PDF rerender schedule failed" not in caplog.text
+
     def test_degenerate_bbox_leaves_camera_and_guard_untouched(self):
         # A zero-extent bbox is rejected before any setProperty, so neither the
         # camera nor the fit-once guard is altered.

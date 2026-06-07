@@ -1706,7 +1706,7 @@ class LightweightDrawingViewport(QWidget):
         coalesce into a single render at the final DPI.
         """
 
-        state = self._pdf_render_state
+        state = getattr(self, "_pdf_render_state", None)
         if not state:
             return
         try:
@@ -1729,7 +1729,7 @@ class LightweightDrawingViewport(QWidget):
         except Exception:
             return
         # Reset the timer (so consecutive zooms restart the 400ms wait)
-        if self._pdf_rerender_timer is None:
+        if getattr(self, "_pdf_rerender_timer", None) is None:
             self._pdf_rerender_timer = QTimer(self)
             self._pdf_rerender_timer.setSingleShot(True)
             self._pdf_rerender_timer.timeout.connect(self._fire_pdf_rerender)
@@ -1744,7 +1744,7 @@ class LightweightDrawingViewport(QWidget):
         cache instantly.
         """
 
-        state = self._pdf_render_state
+        state = getattr(self, "_pdf_render_state", None)
         if not state:
             return
         target_dpi = state.get("pending_dpi")
