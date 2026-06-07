@@ -529,6 +529,9 @@ def change_record_old_bbox(
     bbox = _bbox_from_entity_data(entity_type, change.old_value, zone_options)
     if bbox is not None:
         return bbox
+    raw_old_bbox = _coerce_bbox(metadata.get("old_bbox"))
+    if raw_old_bbox is not None:
+        return _ensure_min_bbox(raw_old_bbox, zone_options.min_marker_size)
     if metadata.get("old_x") is not None and metadata.get("old_y") is not None:
         try:
             x = float(metadata["old_x"])
@@ -1712,6 +1715,22 @@ def _coerce_bbox(value: Any) -> Optional[BBox]:
             return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
         except Exception:
             return None
+    if isinstance(value, dict):
+        try:
+            if all(key in value for key in ("min_x", "min_y", "max_x", "max_y")):
+                x1 = float(value["min_x"])
+                y1 = float(value["min_y"])
+                x2 = float(value["max_x"])
+                y2 = float(value["max_y"])
+                return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            if all(key in value for key in ("x_min", "y_min", "x_max", "y_max")):
+                x1 = float(value["x_min"])
+                y1 = float(value["y_min"])
+                x2 = float(value["x_max"])
+                y2 = float(value["y_max"])
+                return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        except Exception:
+            return None
     return None
 
 
@@ -1802,6 +1821,8 @@ def _change_has_moved_origin(
     if change.change_type != ChangeType.MODIFIED or old_bbox is None:
         return False
     metadata = change.metadata or {}
+    if metadata.get("registered_reorigin"):
+        return False
     if metadata.get("old_x") is not None and metadata.get("old_y") is not None:
         return True
     return _bbox_distance(bbox, old_bbox) > 1.0

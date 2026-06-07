@@ -20,6 +20,9 @@ from .dxf_importer import _hash_payload
 BBox2D = Dict[str, float]
 Point2D = Dict[str, float]
 
+_REORIGIN_TRANSLATION_MM = 1000.0
+_REORIGIN_RESIDUAL_MATCH_MM = 3.0
+
 
 @dataclass(frozen=True)
 class CompareTolerance:
@@ -338,6 +341,8 @@ class EntityMatch:
     old_entity: Dict[str, Any]
     new_entity: Dict[str, Any]
     candidate: MatchCandidate
+    registered_new_entity: Optional[Dict[str, Any]] = None
+    registration_translation: Optional[Tuple[float, float]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return self.candidate.to_dict()
@@ -439,6 +444,12 @@ class EntityMatcher:
 
         unmatched_old = [entity for entity in old_sorted if str(entity.get("id")) not in used_old]
         unmatched_new = [entity for entity in new_sorted if str(entity.get("id")) not in used_new]
+        recovered = self._recover_reorigin_matches(unmatched_old, unmatched_new)
+        if recovered.matches:
+            matches.extend(recovered.matches)
+            candidates.extend(recovered.candidates)
+            unmatched_old = recovered.unmatched_old
+            unmatched_new = recovered.unmatched_new
         matches.sort(key=lambda match: _entity_sort_key(match.old_entity))
         return EntityMatchResult(
             matches=matches,
@@ -496,6 +507,124 @@ class EntityMatcher:
             float(self.options.tolerance.position_tolerance_mm or 0.0),
             float(self.options.tolerance.bbox_tolerance_mm or 0.0),
             1e-9,
+        )
+
+    def _recover_reorigin_matches(
+        self,
+        old_entities: Sequence[Dict[str, Any]],
+        new_entities: Sequence[Dict[str, Any]],
+    ) -> EntityMatchResult:
+        translation = _estimate_reorigin_translation(old_entities, new_entities)
+        if translation is None:
+            return EntityMatchResult([], list(old_entities), list(new_entities), [])
+        dx, dy = translation
+        registered_pairs = [
+            (_translated_entity_for_registration(entity, -dx, -dy), entity)
+            for entity in sorted(new_entities, key=_entity_sort_key)
+        ]
+        index_by_type: Dict[str, _CanonicalSpatialIndex] = {}
+        native_by_registered_id: Dict[str, Dict[str, Any]] = {}
+        registered_by_id: Dict[str, Dict[str, Any]] = {}
+        for registered, native in registered_pairs:
+            entity_type = _entity_type_key(registered)
+            if not entity_type:
+                continue
+            index = index_by_type.get(entity_type)
+            if index is None:
+                index = _CanonicalSpatialIndex(
+                    cell_size=max(_REORIGIN_RESIDUAL_MATCH_MM, 1.0),
+                    max_cells_per_entity=self.options.max_spatial_cells_per_entity,
+                )
+                index_by_type[entity_type] = index
+            index.insert(registered)
+            entity_id = str(registered.get("id") or "")
+            native_by_registered_id[entity_id] = native
+            registered_by_id[entity_id] = registered
+
+        candidate_by_pair: Dict[Tuple[str, str], MatchCandidate] = {}
+        for old_entity in sorted(old_entities, key=_entity_sort_key):
+            index = index_by_type.get(_entity_type_key(old_entity))
+            if index is None:
+                continue
+            for registered_new in index.query(old_entity, radius=_REORIGIN_RESIDUAL_MATCH_MM):
+                candidate = self.score(old_entity, registered_new)
+                if candidate.score >= self.options.match_threshold:
+                    candidate = MatchCandidate(
+                        old_entity_id=candidate.old_entity_id,
+                        new_entity_id=candidate.new_entity_id,
+                        score=candidate.score,
+                        components={**candidate.components, "registered_reorigin": 1.0},
+                        centroid_distance_mm=candidate.centroid_distance_mm,
+                        bbox_iou=candidate.bbox_iou,
+                    )
+                    candidate_by_pair[(candidate.old_entity_id, candidate.new_entity_id)] = candidate
+
+        candidates = sorted(
+            candidate_by_pair.values(),
+            key=lambda item: (-item.score, item.centroid_distance_mm, item.old_entity_id, item.new_entity_id),
+        )
+        old_by_id = {str(entity.get("id")): entity for entity in old_entities}
+        used_old: set[str] = set()
+        used_new: set[str] = set()
+        matches: List[EntityMatch] = []
+        for candidate in candidates:
+            if candidate.old_entity_id in used_old or candidate.new_entity_id in used_new:
+                continue
+            native_new = native_by_registered_id.get(candidate.new_entity_id)
+            registered_new = registered_by_id.get(candidate.new_entity_id)
+            old_entity = old_by_id.get(candidate.old_entity_id)
+            if native_new is None or registered_new is None or old_entity is None:
+                continue
+            matches.append(
+                EntityMatch(
+                    old_entity=old_entity,
+                    new_entity=native_new,
+                    candidate=candidate,
+                    registered_new_entity=registered_new,
+                    registration_translation=translation,
+                )
+            )
+            used_old.add(candidate.old_entity_id)
+            used_new.add(candidate.new_entity_id)
+
+        denominator = max(1, min(len(old_entities), len(new_entities)))
+        if len(matches) < 4 or len(matches) / denominator < 0.5:
+            return EntityMatchResult([], list(old_entities), list(new_entities), [])
+
+        refined_translation = _median_translation_from_matches(matches) or translation
+        refined_matches: List[EntityMatch] = []
+        refined_candidates: List[MatchCandidate] = []
+        for match in matches:
+            registered_new = _translated_entity_for_registration(
+                match.new_entity,
+                -refined_translation[0],
+                -refined_translation[1],
+            )
+            candidate = self.score(match.old_entity, registered_new)
+            candidate = MatchCandidate(
+                old_entity_id=candidate.old_entity_id,
+                new_entity_id=candidate.new_entity_id,
+                score=candidate.score,
+                components={**candidate.components, "registered_reorigin": 1.0},
+                centroid_distance_mm=candidate.centroid_distance_mm,
+                bbox_iou=candidate.bbox_iou,
+            )
+            refined_candidates.append(candidate)
+            refined_matches.append(
+                EntityMatch(
+                    old_entity=match.old_entity,
+                    new_entity=match.new_entity,
+                    candidate=candidate,
+                    registered_new_entity=registered_new,
+                    registration_translation=refined_translation,
+                )
+            )
+
+        return EntityMatchResult(
+            matches=refined_matches,
+            unmatched_old=[entity for entity in old_entities if str(entity.get("id")) not in used_old],
+            unmatched_new=[entity for entity in new_entities if str(entity.get("id")) not in used_new],
+            candidates=refined_candidates,
         )
 
 
@@ -567,6 +696,8 @@ class DrawingDiffChange:
             "change_category": ",".join((self.geometry_diff.categories if self.geometry_diff else []) or []),
             "detection_source": "canonical-drawing-compare",
         }
+        if self.match and "registered_reorigin" in self.match.components:
+            metadata["registered_reorigin"] = True
         return ChangeRecord(
             key=self.change_id,
             change_type=change_type,
@@ -657,7 +788,8 @@ class DrawingCompareEngine:
         summary_counts = {"added": 0, "removed": 0, "modified": 0, "unchanged": 0}
         for match in match_result.matches:
             tolerance = _tolerance_for_match(match, self.options, old_layers, new_layers, global_translation)
-            geometry_diff = GeometryDiff.compare(match.old_entity, match.new_entity, tolerance)
+            diff_new_entity = match.registered_new_entity or match.new_entity
+            geometry_diff = GeometryDiff.compare(match.old_entity, diff_new_entity, tolerance)
             attribute_diffs = _attribute_diffs(match.old_entity, match.new_entity)
             style_only_diff = _is_style_only_diff(geometry_diff, attribute_diffs)
             changed = (geometry_diff.changed or bool(attribute_diffs)) and not style_only_diff
@@ -711,7 +843,9 @@ class DrawingCompareEngine:
     ) -> DrawingDiffChange:
         old_bbox = _bbox2(match.old_entity.get("bbox"))
         new_bbox = _bbox2(match.new_entity.get("bbox"))
-        bbox = _bbox_union([old_bbox, new_bbox])
+        comparison_new = match.registered_new_entity or match.new_entity
+        comparison_new_bbox = _bbox2(comparison_new.get("bbox"))
+        bbox = _bbox_union([old_bbox, comparison_new_bbox])
         location = _centroid(bbox)
         layer_id = match.new_entity.get("layer_id") or match.old_entity.get("layer_id")
         layer_name = _layer_name(layer_id, new_layers) or _layer_name(match.old_entity.get("layer_id"), old_layers)
@@ -866,6 +1000,12 @@ def _tolerance_for_match(
         return options.tolerance
     if not _is_structural_match(match, old_layers, new_layers):
         return options.tolerance
+    if match.registration_translation is not None and _matches_translation(
+        match,
+        match.registration_translation,
+        options.tolerance.position_tolerance_mm,
+    ):
+        return options.tolerance
     if global_translation is not None and _matches_translation(match, global_translation, options.tolerance.position_tolerance_mm):
         return options.tolerance
     position = min(options.tolerance.position_tolerance_mm, float(structural_tolerance))
@@ -933,6 +1073,94 @@ def _match_translation(match: EntityMatch) -> Optional[Tuple[float, float]]:
     if old_centroid is None or new_centroid is None:
         return None
     return (new_centroid["x"] - old_centroid["x"], new_centroid["y"] - old_centroid["y"])
+
+
+def _median_translation_from_matches(matches: Sequence[EntityMatch]) -> Optional[Tuple[float, float]]:
+    translations = [translation for match in matches if (translation := _match_translation(match)) is not None]
+    if not translations:
+        return None
+    dx_values = sorted(dx for dx, _dy in translations)
+    dy_values = sorted(dy for _dx, dy in translations)
+    mid = len(translations) // 2
+    if len(translations) % 2:
+        return dx_values[mid], dy_values[mid]
+    return (
+        (dx_values[mid - 1] + dx_values[mid]) / 2.0,
+        (dy_values[mid - 1] + dy_values[mid]) / 2.0,
+    )
+
+
+def _estimate_reorigin_translation(
+    old_entities: Sequence[Dict[str, Any]],
+    new_entities: Sequence[Dict[str, Any]],
+) -> Optional[Tuple[float, float]]:
+    if len(old_entities) < 4 or len(new_entities) < 4:
+        return None
+    old_bbox = _entities_bbox(old_entities)
+    new_bbox = _entities_bbox(new_entities)
+    if old_bbox is None or new_bbox is None:
+        return None
+    old_center = _centroid(old_bbox)
+    new_center = _centroid(new_bbox)
+    dx = new_center["x"] - old_center["x"]
+    dy = new_center["y"] - old_center["y"]
+    if math.hypot(dx, dy) <= _REORIGIN_TRANSLATION_MM:
+        return None
+    return dx, dy
+
+
+def _entities_bbox(entities: Sequence[Dict[str, Any]]) -> Optional[BBox2D]:
+    boxes = [_bbox2(entity.get("bbox")) for entity in entities]
+    boxes = [box for box in boxes if math.isfinite(box["min_x"]) and math.isfinite(box["min_y"])]
+    if not boxes:
+        return None
+    return _bbox_union(boxes)
+
+
+def _translated_entity_for_registration(entity: Dict[str, Any], dx: float, dy: float) -> Dict[str, Any]:
+    copied = copy.deepcopy(entity)
+    copied["bbox"] = _translate_bbox(_bbox2(copied.get("bbox")), dx, dy)
+    geometry = copied.get("geometry")
+    if not isinstance(geometry, dict):
+        return copied
+    entity_type = str(copied.get("type") or "")
+    if entity_type == "line":
+        _translate_point_inplace(geometry.get("start"), dx, dy)
+        _translate_point_inplace(geometry.get("end"), dx, dy)
+    elif entity_type in {"circle", "arc"}:
+        _translate_point_inplace(geometry.get("center"), dx, dy)
+    elif entity_type == "polyline":
+        for vertex in geometry.get("vertices") or []:
+            if isinstance(vertex, dict):
+                _translate_point_inplace(vertex.get("point"), dx, dy)
+    elif entity_type in {"text", "mtext"}:
+        _translate_point_inplace(geometry.get("insert"), dx, dy)
+    elif entity_type == "block_reference":
+        _translate_point_inplace(geometry.get("insert"), dx, dy)
+        for attribute in geometry.get("attributes") or []:
+            if isinstance(attribute, dict):
+                _translate_point_inplace(attribute.get("insert"), dx, dy)
+    return copied
+
+
+def _translate_bbox(bbox: BBox2D, dx: float, dy: float) -> BBox2D:
+    return {
+        **bbox,
+        "min_x": bbox["min_x"] + dx,
+        "max_x": bbox["max_x"] + dx,
+        "min_y": bbox["min_y"] + dy,
+        "max_y": bbox["max_y"] + dy,
+    }
+
+
+def _translate_point_inplace(point: Any, dx: float, dy: float) -> None:
+    if not isinstance(point, dict):
+        return
+    try:
+        point["x"] = float(point.get("x", 0.0) or 0.0) + dx
+        point["y"] = float(point.get("y", 0.0) or 0.0) + dy
+    except Exception:
+        return
 
 
 def _drawing_source(drawing: Dict[str, Any]) -> Dict[str, Any]:

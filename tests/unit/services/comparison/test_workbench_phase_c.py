@@ -1504,6 +1504,93 @@ def test_pdf_crop_does_not_schedule_full_detail_upgrade(qapp, tmp_path, monkeypa
         workbench.deleteLater()
 
 
+def test_failed_full_detail_upgrade_keeps_fast_crop_out_of_fallback_counts(qapp, tmp_path) -> None:
+    from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
+    from src.services.comparison.viewer_perf_summary import summarize_viewer_perf
+
+    workbench = DrawingCompareWorkbenchV2()
+    try:
+        _prepare_zone_finish_workbench(workbench, tmp_path)
+        status_calls: list[tuple] = []
+        apply_calls: list[tuple] = []
+        drain_calls: list[str] = []
+        workbench._set_preview_status_v2 = lambda *args, **_kwargs: status_calls.append(args)  # type: ignore[method-assign]
+        workbench._apply_zone_crop_to_lightweight_v2 = lambda *args, **_kwargs: apply_calls.append(args)  # type: ignore[method-assign]
+        workbench._start_pending_zone_render_v2 = lambda: drain_calls.append("drain")  # type: ignore[method-assign]
+        request_id = workbench._begin_selected_zone_render_request_v2("pair", "z1")
+
+        payload = _cad_crop_payload(request_id)
+        payload.update(
+            {
+                "prefer_source_render": True,
+                "render_lifecycle": "fallback_visible",
+                "visual_fidelity": "relative_overlay",
+                "renderer_backend": "relative-overlay-fallback",
+                "reason_code": "source_render_failed",
+            }
+        )
+        workbench._on_zone_crop_render_finished_v2(
+            "pair", "z1", payload, {"pair_id": "pair"}, [{"zone_id": "z1"}],
+        )
+
+        summary = summarize_viewer_perf(tmp_path)
+        assert apply_calls == []
+        assert status_calls == []
+        assert drain_calls == ["drain"]
+        assert workbench._viewer_pairs_by_id["pair"] == {"pair_id": "pair"}
+        assert summary["selected_zone_fallback_count"] == 0
+        assert summary["zone_crop_count"] == 0
+        assert summary["event_count"] == 1
+    finally:
+        workbench.deleteLater()
+
+
+def test_redacted_viewer_source_restores_from_compare_summary(qapp, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
+
+    before = tmp_path / "S-REORIGIN_REV0.dxf"
+    after = tmp_path / "S-REORIGIN_REV1.dxf"
+    before.write_text("0\nEOF\n", encoding="utf-8")
+    after.write_text("0\nEOF\n", encoding="utf-8")
+    candidate = SimpleNamespace(
+        source_a=SimpleNamespace(path=str(before)),
+        source_b=SimpleNamespace(path=str(after)),
+    )
+    result = SimpleNamespace(
+        compare_summary=SimpleNamespace(
+            items=[SimpleNamespace(candidate=candidate)]
+        )
+    )
+
+    workbench = DrawingCompareWorkbenchV2()
+    try:
+        workbench._result = result
+        pair_id = "pair-fe7b"
+        import src.services.comparison.pair_identity as pair_identity
+
+        original = pair_identity.candidate_pair_uuid
+        pair_identity.candidate_pair_uuid = lambda _candidate: pair_id
+        try:
+            repaired = workbench._repair_viewer_pair_source_paths_v2(
+                pair_id,
+                {
+                    "pair_id": pair_id,
+                    "source_a": "<redacted>/S-REORIGIN_REV0.dxf",
+                    "source_b": "<redacted>/S-REORIGIN_REV1.dxf",
+                },
+                {},
+            )
+        finally:
+            pair_identity.candidate_pair_uuid = original
+
+        assert repaired["source_a"] == str(before)
+        assert repaired["source_b"] == str(after)
+    finally:
+        workbench.deleteLater()
+
+
 def test_full_detail_upgrade_fires_once_and_respects_busy_and_pending(qapp, tmp_path) -> None:
     # Guard matrix for _maybe_start_zone_full_detail_v2: busy/pending/stale skip,
     # fires once per request, repeat is a no-op (never loops).

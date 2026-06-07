@@ -240,6 +240,7 @@ def _review_issue_from_zone(
     source_a = str(row.get("source_a") or artifact.get("source_a") or "")
     source_b = str(row.get("source_b") or artifact.get("source_b") or "")
     bbox = _bbox_from_row(row)
+    old_bbox = _bbox_from_row(row, prefix="old_bbox")
     raw = _int_cell(row.get("raw_change_count"))
     category = _structural_category(row, layers=layers, entity_types=entity_types)
     source_format = _source_format(row, source_a=source_a, source_b=source_b, entity_types=entity_types)
@@ -294,6 +295,7 @@ def _review_issue_from_zone(
         "major_layers": " | ".join(layers[:4]),
         "entity_types": entity_types,
         "bbox": list(bbox) if bbox else [],
+        "old_bbox": list(old_bbox) if old_bbox else [],
         "bbox_text": _bbox_text(bbox),
         "bbox_area": _bbox_area(bbox),
         "priority_score": round(score, 3),
@@ -649,6 +651,7 @@ def _queue_item_from_issue(issue: dict[str, Any]) -> dict[str, Any]:
         "major_layers": issue.get("major_layers") or "",
         "entity_types": issue.get("entity_types") or [],
         "bbox": issue.get("bbox") or [],
+        "old_bbox": issue.get("old_bbox") or [],
         "bbox_text": issue.get("bbox_text") or "",
         "preview_status": issue.get("preview_status") or "",
         "before_bbox_px": issue.get("before_bbox_px") or [],
@@ -1078,13 +1081,17 @@ def _repetitive_pattern_for_layers(layers: Sequence[str]) -> tuple[str, str]:
     return "", ""
 
 
-def _bbox_from_row(row: dict[str, Any]) -> Optional[tuple[float, float, float, float]]:
+def _bbox_from_row(
+    row: dict[str, Any],
+    *,
+    prefix: str = "bbox",
+) -> Optional[tuple[float, float, float, float]]:
     try:
         return (
-            float(row.get("bbox_min_x")),
-            float(row.get("bbox_min_y")),
-            float(row.get("bbox_max_x")),
-            float(row.get("bbox_max_y")),
+            float(row.get(f"{prefix}_min_x")),
+            float(row.get(f"{prefix}_min_y")),
+            float(row.get(f"{prefix}_max_x")),
+            float(row.get(f"{prefix}_max_y")),
         )
     except (TypeError, ValueError):
         return None

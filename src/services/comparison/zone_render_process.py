@@ -20,6 +20,21 @@ def _world_window_from_payload(payload: dict[str, Any]) -> WorldWindow:
     )
 
 
+def _optional_world_window_from_payload(payload: dict[str, Any], key: str) -> WorldWindow | None:
+    window = payload.get(key)
+    if not isinstance(window, dict):
+        return None
+    try:
+        return WorldWindow(
+            xmin=float(window["xmin"]),
+            ymin=float(window["ymin"]),
+            xmax=float(window["xmax"]),
+            ymax=float(window["ymax"]),
+        )
+    except Exception:
+        return None
+
+
 def _job_from_request(request: dict[str, Any]) -> RenderJob:
     return RenderJob(
         pair_uuid=str(request.get("pair_uuid") or ""),
@@ -28,6 +43,8 @@ def _job_from_request(request: dict[str, Any]) -> RenderJob:
         source_before=Path(str(request["source_before"])),
         source_after=Path(str(request["source_after"])),
         world_window=_world_window_from_payload(request),
+        before_world_window=_optional_world_window_from_payload(request, "before_world_window"),
+        after_world_window=_optional_world_window_from_payload(request, "after_world_window"),
         cache_root=Path(str(request["cache_root"])),
         dxf_cache_dir=Path(str(request["dxf_cache_dir"])),
         output_width=int(request.get("output_width") or 1600),
@@ -68,6 +85,7 @@ def main() -> int:
                 return 0
             job = _job_from_request(request)
             result = render_zone_pair(job).to_dict()
+            result["prefer_source_render"] = bool(job.prefer_source_render)
             _write_response(
                 {
                     "ok": True,

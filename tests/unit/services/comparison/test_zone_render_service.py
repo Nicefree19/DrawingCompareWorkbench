@@ -34,6 +34,18 @@ def test_canonical_window_expands_tiny_bbox_to_stable_16_9_view() -> None:
     assert abs((window.width / window.height) - (16 / 9)) < 0.01
 
 
+def test_canonical_window_accepts_dict_bbox() -> None:
+    window = canonical_window_from_bbox(
+        {"min_x": 6970.0, "min_y": 6945.0, "max_x": 7230.0, "max_y": 7055.0},
+        min_size=250.0,
+    )
+
+    assert window.xmin < 6970.0
+    assert window.xmax > 7230.0
+    assert window.ymin < 6945.0
+    assert window.ymax > 7055.0
+
+
 def test_transform_round_trip_for_window_center() -> None:
     window = canonical_window_from_bbox([100.0, 200.0, 300.0, 260.0], min_size=100.0)
     transform = transform_for_window(window, output_width=1600, output_height=900)
@@ -680,6 +692,80 @@ def test_dxf_prefilter_skipped_for_small_modelspace(tmp_path: Path) -> None:
     # And no "applied" warning when below the threshold.
     applied_warnings = [w for w in result.warnings if w.startswith("dxf_prefilter:applied")]
     assert not applied_warnings
+
+
+def test_source_render_uses_side_specific_windows_for_reorigin_pair(tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    pytest.importorskip("matplotlib")
+
+    before_path = tmp_path / "before.dxf"
+    after_path = tmp_path / "after.dxf"
+
+    before_doc = ezdxf.new()
+    before_msp = before_doc.modelspace()
+    before_msp.add_line((0, 0), (10, 0))
+    before_msp.add_line((10, 0), (10, 10))
+    before_msp.add_text("B").set_placement((2, 4))
+    before_doc.saveas(before_path)
+
+    after_doc = ezdxf.new()
+    after_msp = after_doc.modelspace()
+    after_msp.add_line((1000, 0), (1010, 0))
+    after_msp.add_line((1010, 0), (1010, 10))
+    after_msp.add_text("A").set_placement((1002, 4))
+    after_doc.saveas(after_path)
+
+    result = render_zone_pair(
+        RenderJob(
+            pair_uuid="pair-reorigin",
+            zone_id="Z-reorigin",
+            request_id="r-reorigin",
+            source_before=before_path,
+            source_after=after_path,
+            world_window=canonical_window_from_bbox([0, 0, 1010, 10]),
+            before_world_window=canonical_window_from_bbox([0, 0, 10, 10], min_size=20),
+            after_world_window=canonical_window_from_bbox([1000, 0, 1010, 10], min_size=20),
+            cache_root=tmp_path / "cache",
+            dxf_cache_dir=tmp_path / "dxf_cache",
+            output_width=160,
+            output_height=90,
+        )
+    )
+
+    assert result.renderer_backend == "ezdxf-matplotlib-zone"
+    assert result.render_lifecycle == "ready"
+    assert result.reason_code == ""
+    assert Path(result.before_image).exists()
+    assert Path(result.after_image).exists()
+    assert result.before_transform["min_x"] < 0
+    assert result.after_transform["min_x"] > result.before_transform["min_x"] + 900
+    assert render_cache_key(
+        RenderJob(
+            pair_uuid="pair-reorigin",
+            zone_id="Z-reorigin",
+            source_before=before_path,
+            source_after=after_path,
+            world_window=canonical_window_from_bbox([0, 0, 1010, 10]),
+            cache_root=tmp_path / "cache",
+            dxf_cache_dir=tmp_path / "dxf_cache",
+            output_width=160,
+            output_height=90,
+        )
+    ) != render_cache_key(
+        RenderJob(
+            pair_uuid="pair-reorigin",
+            zone_id="Z-reorigin",
+            source_before=before_path,
+            source_after=after_path,
+            world_window=canonical_window_from_bbox([0, 0, 1010, 10]),
+            before_world_window=canonical_window_from_bbox([0, 0, 10, 10], min_size=20),
+            after_world_window=canonical_window_from_bbox([1000, 0, 1010, 10], min_size=20),
+            cache_root=tmp_path / "cache",
+            dxf_cache_dir=tmp_path / "dxf_cache",
+            output_width=160,
+            output_height=90,
+        )
+    )
 
 
 def test_render_result_elapsed_ms_defaults_to_zero_for_legacy_construction() -> None:

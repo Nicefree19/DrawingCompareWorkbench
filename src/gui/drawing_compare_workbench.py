@@ -1761,6 +1761,7 @@ class ZoneRenderProcessController(QObject):
             "request_id": str(request.get("request_id") or ""),
             "pair_id": str(request.get("pair_uuid") or ""),
             "zone_id": str(request.get("zone_id") or ""),
+            "prefer_source_render": bool(request.get("prefer_source_render")),
             "started_at": perf_counter(),
             "viewer_pair": dict(viewer_pair or {}),
             "overlay": dict(overlay or {}),
@@ -1846,6 +1847,7 @@ class ZoneRenderProcessController(QObject):
             self.error.emit(pair_id, zone_id, str(payload.get("error") or "렌더 실패"), status, request_id)
             return
         result_payload = payload.get("result") or {}
+        result_payload.setdefault("prefer_source_render", bool(context.get("prefer_source_render")))
         try:
             result_payload.setdefault(
                 "elapsed_ms",
@@ -11581,7 +11583,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 return str(value)
 
         result = getattr(self, "_result", None)
-        summary = getattr(result, "summary", None)
+        summary = getattr(result, "summary", None) or getattr(result, "compare_summary", None)
         try:
             from src.services.comparison.pair_identity import candidate_pair_uuid
 
@@ -11907,6 +11909,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         if not render_bbox:
             render_bbox = bbox
+        before_render_bbox = _bbox_for_zone_crop_transform(overlay, viewer_pair, before=True) or render_bbox
+        after_render_bbox = _bbox_for_zone_crop_transform(overlay, viewer_pair, before=False) or render_bbox
         request = {
             "request_id": request_id,
             "pair_uuid": pair_id,
@@ -11914,6 +11918,8 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             "source_before": str(viewer_pair.get("source_a") or ""),
             "source_after": str(viewer_pair.get("source_b") or ""),
             "world_window": canonical_window_from_bbox(render_bbox, padding_ratio=0.18, min_size=250.0).to_dict(),
+            "before_world_window": canonical_window_from_bbox(before_render_bbox, padding_ratio=0.18, min_size=250.0).to_dict(),
+            "after_world_window": canonical_window_from_bbox(after_render_bbox, padding_ratio=0.18, min_size=250.0).to_dict(),
             "cache_root": str(self._viewer_cache_root_v2()),
             "dxf_cache_dir": str(self._dxf_cache_dir),
             "renderer_backend": "ezdxf-matplotlib-zone",
@@ -12088,9 +12094,13 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 warning_items = [str(warning_payload)]
             else:
                 warning_items = []
+            is_failed_full_detail_upgrade = bool(result_payload.get("prefer_source_render")) and (
+                str(result_payload.get("render_lifecycle") or "").lower() != "ready"
+                or str(result_payload.get("visual_fidelity") or "").lower() != "cad_render"
+            )
             append_viewer_perf_event(
                 self._viewer_root,
-                "zone_crop_render",
+                "zone_full_detail_upgrade_failed" if is_failed_full_detail_upgrade else "zone_crop_render",
                 pair_uuid=pair_id,
                 zone_id=zone_id,
                 render_ms=elapsed_ms,
@@ -12104,6 +12114,9 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 **dxf_index_metrics,
             )
             self._refresh_viewer_perf_summary_only()
+            if is_failed_full_detail_upgrade:
+                self._start_pending_zone_render_v2()
+                return
         for overlay in local_overlays:
             key = str(overlay.get("zone_id") or "")
             if key:

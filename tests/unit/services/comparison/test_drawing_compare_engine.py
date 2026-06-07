@@ -452,6 +452,74 @@ def test_structural_position_tolerance_keeps_global_micro_shift_suppressed() -> 
     assert result.to_dict()["changes"] == []
 
 
+def test_canonical_reorigin_registered_matching_surfaces_real_changes() -> None:
+    dx, dy = 150000.0, -90000.0
+    grid = [
+        _line(f"grid:a:{index}", 1000 + index * 137, 2000 + (index % 7) * 211, 1100 + index * 137, 2000 + (index % 7) * 211, layer_id="layer:grid")
+        for index in range(30)
+    ]
+    before = _drawing(
+        [
+            *grid,
+            _text("text:a", 1500, 2500, "OLD"),
+            _line("delete:a", 3000, 2500, 3050, 2500, layer_id="layer:grid"),
+            _line("beam:a", 7000, 7000, 7200, 7000, layer_id="layer:beam"),
+        ],
+        title="before",
+    )
+    after = _drawing(
+        [
+            *[
+                _line(
+                    f"grid:b:{index}",
+                    1000 + index * 137 + dx,
+                    2000 + (index % 7) * 211 + dy,
+                    1100 + index * 137 + dx,
+                    2000 + (index % 7) * 211 + dy,
+                    layer_id="layer:grid",
+                )
+                for index in range(30)
+            ],
+            _text("text:b", 1500 + dx, 2500 + dy, "NEW"),
+            _line("add:b", 3500 + dx, 2600 + dy, 3550 + dx, 2600 + dy, layer_id="layer:grid"),
+            _line("beam:b", 7000 + dx + 0.5, 7000 + dy, 7200 + dx + 0.5, 7000 + dy, layer_id="layer:beam"),
+        ],
+        title="after",
+    )
+    options = DrawingCompareOptions(
+        tolerance=CompareTolerance(position_tolerance_mm=1.0, bbox_tolerance_mm=1.0),
+        structural_position_tolerance_mm=0.1,
+        include_unchanged=False,
+    )
+
+    result = DrawingCompareEngine(options).compare(before, after)
+    payload = result.to_dict()
+
+    assert result.summary == {
+        "added": 1,
+        "removed": 1,
+        "modified": 2,
+        "unchanged": 30,
+        "total_changes": 4,
+        "total_records": 34,
+    }
+    assert [change["change_type"] for change in payload["changes"]] == [
+        "removed",
+        "added",
+        "modified",
+        "modified",
+    ]
+    assert all(
+        "registered_reorigin" in (change.get("match") or {}).get("components", {})
+        for change in payload["changes"]
+        if change["change_type"] == "modified"
+    )
+    text_change = next(change for change in payload["changes"] if change["entity_type"] == "text")
+    assert text_change["geometry_diff"]["categories"] == ["text"]
+    beam_change = next(change for change in payload["changes"] if change["entity_type"] == "line" and change["layer_name"] == "BEAM")
+    assert beam_change["geometry_diff"]["fields"][0]["delta"] == 0.5
+
+
 def test_compact_mode_preserves_unchanged_summary_without_records() -> None:
     before = _drawing([
         _line("line:same:a", 0, 0, 10, 0),

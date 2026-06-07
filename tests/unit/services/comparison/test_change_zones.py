@@ -585,6 +585,39 @@ def test_stream_backed_zones_use_all_records_when_memory_details_are_truncated(t
     assert result.metadata["change_zone_coverage_complete"] is True
 
 
+def test_canonical_dict_bboxes_preserve_side_specific_modified_zone() -> None:
+    change = ChangeRecord(
+        key="diff:modified_reorigin",
+        change_type=ChangeType.MODIFIED,
+        old_value={
+            "bbox": {"min_x": 1000.0, "min_y": 2000.0, "max_x": 1100.0, "max_y": 2000.0},
+        },
+        new_value={
+            "bbox": {"min_x": 151000.5, "min_y": -88000.0, "max_x": 151100.5, "max_y": -88000.0},
+        },
+        metadata={
+            "layer": "BEAM",
+            "entity_type": "LINE",
+            "bbox": {"min_x": 1000.0, "min_y": 2000.0, "max_x": 1100.5, "max_y": 2000.0},
+            "old_bbox": {"min_x": 1000.0, "min_y": 2000.0, "max_x": 1100.0, "max_y": 2000.0},
+            "new_bbox": {"min_x": 151000.5, "min_y": -88000.0, "max_x": 151100.5, "max_y": -88000.0},
+            "detection_source": "canonical-drawing-compare",
+            "registered_reorigin": True,
+        },
+    )
+
+    zones = build_change_zones(
+        _result([change]),
+        options=ChangeZoneOptions(cluster_distance=10, bbox_margin=0),
+    )
+
+    assert len(zones) == 1
+    zone = zones[0]
+    assert zone.change_type == "modified"
+    assert zone.old_bbox == (1000.0, 1975.0, 1100.0, 2025.0)
+    assert zone.bbox == (151000.5, -88025.0, 151100.5, -87975.0)
+
+
 def test_stream_text_evidence_reaches_review_queue_summary(tmp_path: Path) -> None:
     change = ChangeRecord(
         key="attrib_rebar_spacing",

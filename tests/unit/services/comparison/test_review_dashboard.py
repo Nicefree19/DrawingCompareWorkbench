@@ -32,6 +32,10 @@ def _write_artifacts(base: Path) -> Path:
         "bbox_min_y",
         "bbox_max_x",
         "bbox_max_y",
+        "old_bbox_min_x",
+        "old_bbox_min_y",
+        "old_bbox_max_x",
+        "old_bbox_max_y",
         "layers",
         "entity_types",
         "source_a",
@@ -57,6 +61,10 @@ def _write_artifacts(base: Path) -> Path:
             "bbox_min_y": "0",
             "bbox_max_x": "100",
             "bbox_max_y": "100",
+            "old_bbox_min_x": "10",
+            "old_bbox_min_y": "10",
+            "old_bbox_max_x": "90",
+            "old_bbox_max_y": "90",
             "layers": "REBAR-TEXT",
             "entity_types": "ATTRIB | TEXT",
             "source_a": "old.dxf",
@@ -81,6 +89,10 @@ def _write_artifacts(base: Path) -> Path:
             "bbox_min_y": "200",
             "bbox_max_x": "260",
             "bbox_max_y": "260",
+            "old_bbox_min_x": "200",
+            "old_bbox_min_y": "200",
+            "old_bbox_max_x": "260",
+            "old_bbox_max_y": "260",
             "layers": "AA-AXIS-LINE | AA-XXXX-DIMS",
             "entity_types": "LINE",
             "source_a": "old.dxf",
@@ -156,6 +168,7 @@ def test_review_dashboard_folds_repetitive_layers_and_prioritizes_structural_iss
     assert package.top_project_issues[0]["zone_id"] == "C-001"
     assert package.top_project_issues[0]["preview_available"] is True
     assert package.top_project_issues[0]["after_bbox_px"] == [1, 1, 11, 11]
+    assert package.top_project_issues[0]["old_bbox"] == [10.0, 10.0, 90.0, 90.0]
     dashboard = json.loads(Path(package.output_paths["review_dashboard_json"]).read_text(encoding="utf-8"))
     assert dashboard["top_drawings"][0]["drawing_number"] == "S21-0001"
     assert dashboard["top_issues"][0]["zone_id"] == "C-001"
@@ -165,6 +178,7 @@ def test_review_dashboard_folds_repetitive_layers_and_prioritizes_structural_iss
     assert queue_item["queue_key"] == "S21-0001:C-001"
     assert queue_item["pair_uuid"] == "S21-0001"
     assert queue_item["zone_id"] == "C-001"
+    assert queue_item["old_bbox"] == [10.0, 10.0, 90.0, 90.0]
     assert queue_item["category"] == "rebar"
     assert queue_item["source_format"] == "cad"
     assert queue_item["detection_source"] == "cad_entity"

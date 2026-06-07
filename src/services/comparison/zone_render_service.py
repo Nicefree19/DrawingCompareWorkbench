@@ -63,6 +63,8 @@ class RenderJob:
     world_window: WorldWindow
     cache_root: Path
     dxf_cache_dir: Path
+    before_world_window: Optional[WorldWindow] = None
+    after_world_window: Optional[WorldWindow] = None
     request_id: str = ""
     output_width: int = DEFAULT_OUTPUT_SIZE[0]
     output_height: int = DEFAULT_OUTPUT_SIZE[1]
@@ -450,7 +452,7 @@ def union_bboxes(*values: object) -> Optional[tuple[float, float, float, float]]
 
 
 def canonical_window_from_bbox(
-    bbox: Sequence[float],
+    bbox: object,
     *,
     padding_ratio: float = 0.18,
     min_size: float = 250.0,
@@ -458,7 +460,10 @@ def canonical_window_from_bbox(
 ) -> WorldWindow:
     """Build a shared before/after review window around a zone bbox."""
 
-    x1, y1, x2, y2 = (float(item) for item in bbox[:4])
+    normalized = bbox_from_value(bbox)
+    if normalized is None:
+        raise ValueError(f"Invalid bbox for canonical window: {bbox!r}")
+    x1, y1, x2, y2 = normalized
     cx = (x1 + x2) / 2.0
     cy = (y1 + y2) / 2.0
     width = max(abs(x2 - x1), float(min_size))
@@ -619,6 +624,8 @@ def render_cache_key(job: RenderJob) -> str:
         "before": file_signature(job.source_before),
         "after": file_signature(job.source_after),
         "world_window": job.world_window.to_dict(),
+        "before_world_window": job.before_world_window.to_dict() if job.before_world_window else {},
+        "after_world_window": job.after_world_window.to_dict() if job.after_world_window else {},
         "output": {"width": job.output_width, "height": job.output_height},
         "renderer_backend": job.renderer_backend,
         "font_manifest_hash": job.font_manifest_hash,
@@ -808,6 +815,8 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
     # the field, so every GUI-side render_ms event was 0. The validator's
     # own perf_counter wrap measured the same thing redundantly.
     _render_start_perf = time.perf_counter()
+    before_window = job.before_world_window or job.world_window
+    after_window = job.after_world_window or job.world_window
 
     cache_key = render_cache_key(job)
     def _with_perf(result: RenderResult) -> RenderResult:
@@ -856,12 +865,17 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
     if _requires_page_space_bbox(job.source_before) or _requires_page_space_bbox(job.source_after):
         if _can_render_pdf_image_crop(job):
             before_transform = transform_for_image_pixel_window(
-                job.world_window,
+                before_window,
                 output_width=job.output_width,
                 output_height=job.output_height,
                 renderer_backend="pdf-image-crop",
             )
-            after_transform = dict(before_transform)
+            after_transform = transform_for_image_pixel_window(
+                after_window,
+                output_width=job.output_width,
+                output_height=job.output_height,
+                renderer_backend="pdf-image-crop",
+            )
             # Plan §17 Phase B-1b — extract source PDF + page index from
             # the background transforms so the DisplayList path can be
             # used instead of opening the full-page PNG via PIL. The
@@ -883,7 +897,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
             before_pdf_cache = _render_pdf_image_crop(
                 Path(job.before_background_image),
                 before_image,
-                job.world_window,
+                before_window,
                 before_transform,
                 warnings=warnings,
                 source_pdf=Path(job.source_before),
@@ -894,7 +908,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
             after_pdf_cache = _render_pdf_image_crop(
                 Path(job.after_background_image),
                 after_image,
-                job.world_window,
+                after_window,
                 after_transform,
                 warnings=warnings,
                 source_pdf=Path(job.source_after),
@@ -956,17 +970,22 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
         )
     if not job.prefer_source_render and _can_render_background_image_crop(job):
         before_transform = transform_for_window(
-            job.world_window,
+            before_window,
             output_width=job.output_width,
             output_height=job.output_height,
             renderer_backend="cad-background-image-crop",
         )
-        after_transform = dict(before_transform)
+        after_transform = transform_for_window(
+            after_window,
+            output_width=job.output_width,
+            output_height=job.output_height,
+            renderer_backend="cad-background-image-crop",
+        )
         try:
             _render_background_image_crop(
                 Path(job.before_background_image),
                 before_image,
-                job.world_window,
+                before_window,
                 before_transform,
                 job.before_background_transform or {},
                 warnings=warnings,
@@ -974,7 +993,7 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
             _render_background_image_crop(
                 Path(job.after_background_image),
                 after_image,
-                job.world_window,
+                after_window,
                 after_transform,
                 job.after_background_transform or {},
                 warnings=warnings,
@@ -1020,18 +1039,23 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
                 f"cad_background_crop:fallback_to_source:{type(exc).__name__}:{exc}"
             )
     before_transform = transform_for_window(
-        job.world_window,
+        before_window,
         output_width=job.output_width,
         output_height=job.output_height,
         renderer_backend=job.renderer_backend,
     )
-    after_transform = dict(before_transform)
+    after_transform = transform_for_window(
+        after_window,
+        output_width=job.output_width,
+        output_height=job.output_height,
+        renderer_backend=job.renderer_backend,
+    )
     index_cache_before = render_index_cache_stats()
     try:
         _render_source_crop(
             job.source_before,
             before_image,
-            job.world_window,
+            before_window,
             before_transform,
             dxf_cache_dir=job.dxf_cache_dir,
             render_environment_hash=job.render_environment_hash or job.font_manifest_hash or "unknown",
@@ -1040,14 +1064,16 @@ def render_zone_pair(job: RenderJob) -> RenderResult:
         _render_source_crop(
             job.source_after,
             after_image,
-            job.world_window,
+            after_window,
             after_transform,
             dxf_cache_dir=job.dxf_cache_dir,
             render_environment_hash=job.render_environment_hash or job.font_manifest_hash or "unknown",
             warnings=warnings,
         )
     except Exception as exc:
-        warnings.append(f"zone_render_fallback:source_render_failed:{type(exc).__name__}")
+        message = str(exc).replace("\n", " ").strip()
+        suffix = f":{message}" if message else ""
+        warnings.append(f"zone_render_fallback:source_render_failed:{type(exc).__name__}{suffix}")
         return _with_perf(
             _visible_fallback_result(
                 job,
