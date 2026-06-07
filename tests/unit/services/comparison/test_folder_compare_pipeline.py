@@ -92,6 +92,14 @@ def test_region_compare_source_keeps_commercial_sdk_dwg_on_canonical_path(
     assert reason == "commercial_sdk_canonical_dwg"
 
 
+def test_oda_autoconvert_requires_explicit_backend() -> None:
+    assert pipeline._is_explicit_oda_converter_backend(None) is False
+    assert pipeline._is_explicit_oda_converter_backend("user_converter") is False
+    assert pipeline._is_explicit_oda_converter_backend("commercial_sdk") is False
+    assert pipeline._is_explicit_oda_converter_backend("oda") is True
+    assert pipeline._is_explicit_oda_converter_backend("legacy-oda") is True
+
+
 def test_folder_compare_pipeline_runs_all_outputs_without_input_cache(tmp_path, monkeypatch) -> None:
     old_dir = tmp_path / "old"
     new_dir = tmp_path / "new"
@@ -211,6 +219,11 @@ def test_folder_compare_pipeline_runs_all_outputs_without_input_cache(tmp_path, 
     monkeypatch.setattr(pipeline, "export_preview_artifacts", fake_preview)
     monkeypatch.setattr(pipeline, "export_executive_review_from_artifacts", fake_executive)
     monkeypatch.setattr(pipeline, "export_viewer_package", fake_viewer)
+    monkeypatch.setattr(
+        pipeline,
+        "auto_convert_unsupported_dwg",
+        lambda *args, **kwargs: pytest.fail("ODA auto-convert must be explicit opt-in"),
+    )
 
     # Audit-gates §11.4 — pipeline now invokes the subprocess proxy; stub it
     # to wrap fake_viewer so this in-tree test does not need real fixtures.

@@ -17,6 +17,16 @@ from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
+
+def _is_explicit_oda_converter_backend(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return normalize_dwg_backend_mode(str(value)) == DWG_BACKEND_ODA_CONVERTER
+    except ValueError:
+        return False
+
+
 from .change_zones import (
     CloudMarkOptions,
     ExecutiveReviewPackage,
@@ -49,6 +59,7 @@ from .dwg_dxf_fallback import (
     fallback_review_notice,
     resolve_dwg_dxf_fallback_pair,
 )
+from .dwg_backend import DWG_BACKEND_ODA_CONVERTER, normalize_dwg_backend_mode
 from .confirmed_cloud_export import export_selected_cloud_marks
 from .export_profiles import (
     apply_export_profile_to_file,
@@ -346,30 +357,27 @@ class FolderComparePipeline:
                     fallback_resolution.source_b,
                     source_b_input,
                 )
-            # When no pre-converted sibling DXF exists, auto-convert an
-            # unsupported DWG (e.g. AC1032) with ODA File Converter so "just give
-            # a DWG" works. No-op when ODA is absent -> the preflight still emits
-            # its actionable message instead of a silent pass.
-            source_a_input, _oda_conv_a, _oda_note_a = auto_convert_unsupported_dwg(
-                source_a_input, dxf_cache_dir
-            )
-            source_b_input, _oda_conv_b, _oda_note_b = auto_convert_unsupported_dwg(
-                source_b_input, dxf_cache_dir
-            )
-            if _oda_conv_a or _oda_conv_b:
-                logger.info(
-                    "ODA auto-converted unsupported DWG -> DXF (a=%s, b=%s)",
-                    _oda_note_a,
-                    _oda_note_b,
+            if _is_explicit_oda_converter_backend(self.request.dwg_backend_mode):
+                source_a_input, _oda_conv_a, _oda_note_a = auto_convert_unsupported_dwg(
+                    source_a_input, dxf_cache_dir
                 )
-                run_manifest.stage(
-                    "dwg_oda_autoconvert",
-                    "completed",
-                    source_a_note=_oda_note_a,
-                    source_b_note=_oda_note_b,
-                    effective_source_a=str(source_a_input),
-                    effective_source_b=str(source_b_input),
+                source_b_input, _oda_conv_b, _oda_note_b = auto_convert_unsupported_dwg(
+                    source_b_input, dxf_cache_dir
                 )
+                if _oda_conv_a or _oda_conv_b:
+                    logger.info(
+                        "ODA auto-converted unsupported DWG -> DXF (a=%s, b=%s)",
+                        _oda_note_a,
+                        _oda_note_b,
+                    )
+                    run_manifest.stage(
+                        "dwg_oda_autoconvert",
+                        "completed",
+                        source_a_note=_oda_note_a,
+                        source_b_note=_oda_note_b,
+                        effective_source_a=str(source_a_input),
+                        effective_source_b=str(source_b_input),
+                    )
             preflight_started = time.perf_counter()
             preflight = run_preflight(
                 source_a=source_a_input,

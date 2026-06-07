@@ -209,3 +209,4 @@
 - 2026-06-04 Codex: Added evaluator ROI margin sweep and per-margin timeout retry tracking; AC1027_pair_016 now records sequential ROI attempts, but still skips on after-import ZWCAD timeout with cleanup confirmed.
 - 2026-06-04 Codex: Added a ZWCAD LISP-COM wall-time watchdog so blocked COM calls surface as controlled DWG_IMPORT_TIMEOUT results; rechecked AC1027_pair_016 ROI-first and confirmed no traceback or lingering ZWCAD process.
 - 2026-06-05 Codex: Added ZWCAD LISP-COM timeout stage reporting and adapter `timeout_stage` details; AC1027_pair_016 now classifies the current ZWCAD bottleneck as `open_document` timeout rather than ROI bbox or LISP extraction.
+- 2026-06-07 Codex: Continued Claude's re-origin comparison thread by restoring registered-space MODIFIED classification conservatively, keeping unsupported entity types as reported changes with metadata, and limiting ODA auto-convert to explicit `oda_converter` folder-compare runs.

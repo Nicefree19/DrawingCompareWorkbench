@@ -434,17 +434,12 @@ def auto_convert_unsupported_dwg(
         pass
 
     try:
-        from .dwg_converter import DwgConverter, ODAConverterNotFoundError
+        from .dwg_converter import convert_with_configured_converter
     except Exception as exc:  # pragma: no cover - import guard
         logger.warning("DWG converter module unavailable: %s", exc)
         return src, False, "converter_module_unavailable"
 
-    try:
-        converter = DwgConverter()
-    except ODAConverterNotFoundError:
-        # No converter installed — keep the original so the preflight emits its
-        # actionable "install ODA / pre-convert" message instead of a silent pass.
-        return src, False, "oda_unavailable"
+    # Conversion is delegated below through the quarantined converter shim.
 
     cache_dir = Path(dxf_cache_dir) / "oda_auto"
     cached = cache_dir / f"{source_cache_stem(src)}__{source_signature_hash(src)[:16]}.dxf"
@@ -455,10 +450,19 @@ def auto_convert_unsupported_dwg(
         pass
 
     try:
-        converted = converter.convert(src, output_version=output_version, timeout=timeout_seconds)
+        converted, convert_note = convert_with_configured_converter(
+            src,
+            output_version=output_version,
+            timeout_seconds=timeout_seconds,
+        )
     except Exception as exc:  # noqa: BLE001 — conversion failure stays non-fatal
         logger.warning("ODA auto-convert failed for %s: %s", src, exc)
         return src, False, f"oda_failed:{type(exc).__name__}"
+
+    if converted is None:
+        if convert_note.startswith("oda_failed:"):
+            logger.warning("ODA auto-convert failed for %s: %s", src, convert_note)
+        return src, False, convert_note
 
     converted = Path(converted)
     try:

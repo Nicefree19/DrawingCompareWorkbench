@@ -336,3 +336,33 @@ class DwgConverter:
             }
         except ODAConverterNotFoundError as e:
             return {"installed": False, "path": None, "message": str(e)}
+
+
+def convert_with_configured_converter(
+    source: str | Path,
+    *,
+    output_version: str = "ACAD2018",
+    timeout_seconds: int = 180,
+) -> Tuple[Optional[Path], str]:
+    """Quarantined conversion shim for policy-safe callers.
+
+    Returns ``(converted_path, note)`` where ``note`` is ``converted`` on
+    success, ``oda_unavailable`` when no local converter is installed, or
+    ``oda_failed:<ExceptionType>`` for non-fatal conversion failures.
+    """
+
+    try:
+        converter = DwgConverter()
+    except ODAConverterNotFoundError:
+        return None, "oda_unavailable"
+
+    try:
+        converted = converter.convert(
+            source,
+            output_version=output_version,
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 - explicit fallback stays non-fatal
+        return None, f"oda_failed:{type(exc).__name__}"
+
+    return Path(converted), "converted"
