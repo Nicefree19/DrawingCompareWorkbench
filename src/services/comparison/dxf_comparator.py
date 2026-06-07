@@ -47,6 +47,29 @@ from .priority_calculator import (
 
 logger = logging.getLogger(__name__)
 
+# Phase O2b — re-origin precision. A whole-drawing re-origin (revision re-inserted
+# at a different model-space origin) shifts EVERY entity by a large coherent
+# translation, so the hash compare reports everything added/deleted and the
+# legacy path widens near-match tolerance to the shift magnitude (hundreds of
+# km), pairing wrong counterparts into meaningless MODIFIED. These constants gate
+# a registered-space pass: (1) remove pairs that are geometrically IDENTICAL
+# after registration (false changes), (2) near-match the residual in registered
+# space so genuine same-position edits become MEANINGFUL MODIFIED (native coords,
+# accurate position diff). The threshold is far above any in-drawing edit (a
+# single moved detail yields an identity global RANSAC fit, not a 1m+ transform),
+# so normal drawings and every golden fixture (shifts <= 50mm) keep the legacy
+# path byte-for-byte.
+_REORIGIN_TRANSLATION_MM = 1000.0
+# Relaxed full-geometry tolerance used only to collect high-confidence unchanged
+# pairs for the median residual refit (drives the RANSAC residual toward 0 so the
+# layer-aware removal can separate genuine sub-mm structural shifts from
+# registration noise). The final removal uses the layer-aware Q6 threshold.
+_REORIGIN_REFIT_TOLERANCE_MM = 2.0
+# Bounded near-match tolerance for the registered residual pass (replaces the
+# pathological shift-magnitude widen). Generous enough to absorb the sub-mm
+# registration residual while pairing only true same-position counterparts.
+_REORIGIN_RESIDUAL_MATCH_MM = 3.0
+
 
 class DxfChangeType(Enum):
     """DXF 변경 타입"""
@@ -2122,10 +2145,240 @@ class DxfComparator:
             return structural_threshold
         return default_threshold
 
+    # ------------------------------------------------------------------
+    # Phase O2b — re-origin precision (registered removal + registered match)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pt_close(p: Any, q: Any, tol: float) -> bool:
+        return abs(float(p[0]) - float(q[0])) <= tol and abs(float(p[1]) - float(q[1])) <= tol
+
+    @staticmethod
+    def _angle_close(a_ang: Any, b_ang: Any, theta_rad: float, tol_deg: float = 0.2) -> bool:
+        # B's angle rotates by the alignment rotation; for a pure-translation
+        # re-origin (theta~0) this compares directly.
+        diff = (float(b_ang) + math.degrees(theta_rad) - float(a_ang)) % 360.0
+        return diff <= tol_deg or diff >= 360.0 - tol_deg
+
+    def _registered_geometry_unchanged(
+        self, d_change: DxfChange, a_change: DxfChange, alignment: Any, tol: float
+    ) -> bool:
+        """True iff the DELETED (A) and ADDED (B) changes are the SAME entity,
+        geometrically identical after registering B into A space within ``tol``.
+
+        Compares FULL geometry (not just centroid) per type so duplicated
+        geometry (dense bolt grids/hatch) is disambiguated. Conservative: any
+        missing field / unparseable data -> False (never drop on doubt).
+        """
+        et = d_change.entity_type
+        ad = d_change.old_data or {}
+        bd = a_change.new_data or {}
+        T = alignment.apply
+        try:
+            if et == "LINE":
+                ap = [tuple(ad["start"]), tuple(ad["end"])]
+                bp = [T(*bd["start"]), T(*bd["end"])]
+                # endpoints are order-independent (hash sorts them)
+                return (
+                    (self._pt_close(ap[0], bp[0], tol) and self._pt_close(ap[1], bp[1], tol))
+                    or (self._pt_close(ap[0], bp[1], tol) and self._pt_close(ap[1], bp[0], tol))
+                )
+            if et == "CIRCLE":
+                return (
+                    self._pt_close(ad["center"], T(*bd["center"]), tol)
+                    and abs(float(ad["radius"]) - float(bd["radius"])) <= tol
+                )
+            if et == "ARC":
+                return (
+                    self._pt_close(ad["center"], T(*bd["center"]), tol)
+                    and abs(float(ad["radius"]) - float(bd["radius"])) <= tol
+                    and self._angle_close(ad["start_angle"], bd["start_angle"], alignment.theta_rad)
+                    and self._angle_close(ad["end_angle"], bd["end_angle"], alignment.theta_rad)
+                )
+            if et in ("LWPOLYLINE", "POLYLINE"):
+                apts = [tuple(p) for p in ad.get("points", [])]
+                bpts = [T(*p) for p in bd.get("points", [])]
+                if not apts or len(apts) != len(bpts):
+                    return False
+                if bool(ad.get("closed")) != bool(bd.get("closed")):
+                    return False
+                return all(self._pt_close(apts[i], bpts[i], tol) for i in range(len(apts)))
+            if et in ("TEXT", "MTEXT"):
+                a_pos = ad.get("position") or d_change.location
+                b_pos = bd.get("position") or a_change.location
+                return (
+                    str(ad.get("content")) == str(bd.get("content"))
+                    and a_pos is not None and b_pos is not None
+                    and self._pt_close(a_pos, T(*b_pos), tol)
+                )
+            if et == "DIMENSION":
+                a_pos = ad.get("defpoint") or d_change.location
+                b_pos = bd.get("defpoint") or a_change.location
+                return (
+                    abs(float(ad.get("measurement", 0)) - float(bd.get("measurement", 0))) <= tol
+                    and str(ad.get("text_override")) == str(bd.get("text_override"))
+                    and a_pos is not None and b_pos is not None
+                    and self._pt_close(a_pos, T(*b_pos), tol)
+                )
+            # INSERT + fallback types: centroid + non-positional discriminators.
+            if d_change.location is None or a_change.location is None:
+                return False
+            if not self._pt_close(d_change.location, T(*a_change.location), tol):
+                return False
+            if et == "INSERT":
+                return (
+                    str(ad.get("block_name")) == str(bd.get("block_name"))
+                    and abs(float(ad.get("xscale", 1)) - float(bd.get("xscale", 1))) <= 1e-3
+                    and abs(float(ad.get("yscale", 1)) - float(bd.get("yscale", 1))) <= 1e-3
+                    and self._angle_close(ad.get("rotation", 0), bd.get("rotation", 0), alignment.theta_rad)
+                )
+            # Generic fallback (HATCH/SOLID/SPLINE/...): require centroid match
+            # AND all non-coordinate scalar data fields equal; refuse if there is
+            # no scalar discriminator (don't drop on centroid alone).
+            scalars_a = {k: v for k, v in ad.items() if isinstance(v, (str, int, float, bool))}
+            scalars_b = {k: v for k, v in bd.items() if isinstance(v, (str, int, float, bool))}
+            if not scalars_a:
+                return False
+            return scalars_a == scalars_b
+        except (KeyError, TypeError, ValueError, IndexError):
+            return False
+
+    def _remove_reorigin_unchanged_pairs(
+        self,
+        deleted: List[DxfChange],
+        added: List[DxfChange],
+        alignment: Any,
+    ) -> Tuple[List[DxfChange], List[DxfChange], set, int, Any]:
+        """Remove (deleted_A, added_B) pairs that are geometrically IDENTICAL
+        after registering B into A space -- the false changes a whole-drawing
+        re-origin produces. Two passes: (1) collect high-confidence unchanged
+        pairs at a relaxed tolerance and refit the transform on their MEDIAN
+        residual (drives the RANSAC residual toward 0), (2) remove pairs that
+        match within the LAYER-AWARE Q6 threshold under the refined transform so
+        genuine sub-mm structural shifts (> 0.1mm) survive.
+
+        Returns (kept_deleted, kept_added, removed_change_ids, removed_count,
+        refined_alignment). 1:1; conservative (uncertainty -> keep).
+        """
+        if not deleted or not added or alignment is None:
+            return deleted, added, set(), 0, alignment
+
+        from .global_alignment import RigidTransform  # local import (avoid cycle)
+
+        default_tol = float(self.sensitivity.get("position", 1.0))
+        cell = max(default_tol, 1.0)
+
+        # Bucket added (B) by (type, layer, transformed-centroid cell). Built once
+        # on the coarse ``alignment``; the sub-mm refit is far below ``cell`` so
+        # the 3x3 neighbourhood still covers refined positions.
+        buckets: Dict[Tuple[str, str, int, int], List[int]] = {}
+        for idx, a in enumerate(added):
+            loc = a.location
+            if loc is None:
+                continue
+            tx, ty = alignment.apply(float(loc[0]), float(loc[1]))
+            buckets.setdefault((a.entity_type, a.layer, int(tx // cell), int(ty // cell)), []).append(idx)
+
+        def _match(align: Any, layer_aware: bool) -> List[Tuple[int, int]]:
+            used: set = set()
+            pairs: List[Tuple[int, int]] = []
+            for di, d in enumerate(deleted):
+                loc = d.location
+                if loc is None:
+                    continue
+                tol = (
+                    self._position_threshold_for_layer(self._extract_change_layer(d))
+                    if layer_aware
+                    else _REORIGIN_REFIT_TOLERANCE_MM
+                )
+                qx, qy = int(float(loc[0]) // cell), int(float(loc[1]) // cell)
+                found = -1
+                for cx in (qx - 1, qx, qx + 1):
+                    for cy in (qy - 1, qy, qy + 1):
+                        for aidx in buckets.get((d.entity_type, d.layer, cx, cy), ()):
+                            if aidx in used:
+                                continue
+                            if self._registered_geometry_unchanged(d, added[aidx], align, tol):
+                                found = aidx
+                                break
+                        if found >= 0:
+                            break
+                    if found >= 0:
+                        break
+                if found >= 0:
+                    used.add(found)
+                    pairs.append((di, found))
+            return pairs
+
+        # Pass 1 -- relaxed match -> median residual refit.
+        refined = alignment
+        coarse_pairs = _match(alignment, layer_aware=False)
+        if len(coarse_pairs) >= 4:
+            rxs: List[float] = []
+            rys: List[float] = []
+            for di, ai in coarse_pairs:
+                dl = deleted[di].location
+                al = added[ai].location
+                if dl is None or al is None:
+                    continue
+                bx, by = alignment.apply(float(al[0]), float(al[1]))
+                rxs.append(float(dl[0]) - bx)
+                rys.append(float(dl[1]) - by)
+            if rxs:
+                rxs.sort()
+                rys.sort()
+                mx = rxs[len(rxs) // 2]
+                my = rys[len(rys) // 2]
+                if abs(mx) > 1e-9 or abs(my) > 1e-9:
+                    refined = RigidTransform(
+                        dx=alignment.dx + mx,
+                        dy=alignment.dy + my,
+                        theta_rad=alignment.theta_rad,
+                        inlier_ratio=getattr(alignment, "inlier_ratio", 1.0),
+                        candidate_count=getattr(alignment, "candidate_count", 0),
+                    )
+
+        # Pass 2 -- final layer-aware removal under the refined transform.
+        final_pairs = _match(refined, layer_aware=True)
+        removed_ids: set = set()
+        used_added: set = set()
+        for di, ai in final_pairs:
+            removed_ids.add(id(deleted[di]))
+            removed_ids.add(id(added[ai]))
+            used_added.add(ai)
+        removed_del = {di for di, _ in final_pairs}
+        kept_deleted = [d for i, d in enumerate(deleted) if i not in removed_del]
+        kept_added = [a for i, a in enumerate(added) if i not in used_added]
+        return kept_deleted, kept_added, removed_ids, len(final_pairs), refined
+
+    def _registered_added_view(
+        self, added: List[DxfChange], alignment: Any
+    ) -> Tuple[List[DxfChange], Dict[int, DxfChange]]:
+        """Shallow-copy added (B) changes with locations transformed into A space,
+        for near-matching residual genuine modifies in registered space. Returns
+        the registered copies and a map id(copy) -> original (to emit NATIVE
+        coordinates so overlays stay in B-space)."""
+        import copy as _copy
+
+        reg: List[DxfChange] = []
+        back: Dict[int, DxfChange] = {}
+        for a in added:
+            if a.location is None:
+                reg.append(a)
+                back[id(a)] = a
+                continue
+            c = _copy.copy(a)
+            c.location = alignment.apply(float(a.location[0]), float(a.location[1]))
+            reg.append(c)
+            back[id(c)] = a
+        return reg, back
+
     def _create_modified_change(
         self,
         d_change: DxfChange,
         a_change: DxfChange,
+        *,
+        alignment: Any = None,
     ) -> Optional[DxfChange]:
         """매칭된 (삭제, 추가) 쌍으로부터 MODIFIED DxfChange 생성
 
@@ -2134,6 +2387,11 @@ class DxfComparator:
         Args:
             d_change: 삭제된 변경 (Old 엔티티)
             a_change: 추가된 변경 (New 엔티티)
+            alignment: Phase O2b — re-origin 시 위치 변경량을 REGISTERED 공간에서
+                측정하기 위한 transform (B→A). 주면 pos_diff/위치 카테고리는
+                ``alignment.apply(new_loc)`` 기준으로 계산해 전역 re-origin 시프트가
+                거대 이동으로 오보고되지 않게 한다. 방출되는 ``location`` 은 항상
+                NATIVE (B) — 오버레이 좌표계 보존. None 이면 기존 동작과 동일.
 
         Returns:
             MODIFIED DxfChange 또는 None (무시 가능한 변경 시)
@@ -2143,6 +2401,12 @@ class DxfComparator:
         old_loc = d_change.location
         new_loc = a_change.location
 
+        # Phase O2b — re-origin: measure position change in REGISTERED space so the
+        # global shift is not mis-reported as a huge move. Emission stays NATIVE.
+        measure_new_loc = new_loc
+        if alignment is not None and new_loc is not None:
+            measure_new_loc = alignment.apply(float(new_loc[0]), float(new_loc[1]))
+
         # 변경 상세 분석 — Phase Q6: layer 전달로 구조 layer 의 sub-mm
         # shift 가 categories 에 정확히 분류되도록 함.
         categories, details = self._analyze_change_details(
@@ -2150,12 +2414,12 @@ class DxfComparator:
             new_data=new_data,
             entity_type=d_change.entity_type,
             old_loc=old_loc,
-            new_loc=new_loc,
+            new_loc=measure_new_loc,
             layer=d_change.layer,
         )
 
         # 위치 변경량 계산
-        pos_diff = self._calculate_position_diff(old_loc, new_loc)
+        pos_diff = self._calculate_position_diff(old_loc, measure_new_loc)
 
         # 민감도 체크
         if not self._is_significant_change(
@@ -2262,6 +2526,33 @@ class DxfComparator:
         deleted = [c for c in result.changes if c.change_type == DxfChangeType.DELETED]
         added = [c for c in result.changes if c.change_type == DxfChangeType.ADDED]
 
+        # Phase O2b — re-origin precision. When the whole drawing was re-inserted
+        # at a different origin the hash compare flags every entity added/deleted.
+        # Remove pairs that are geometrically IDENTICAL after registration (false
+        # changes) here; the residual genuine edits are then near-matched in
+        # REGISTERED space below (not at the legacy shift-magnitude tolerance,
+        # which pairs wrong counterparts). Gated far above any in-drawing edit, so
+        # every golden fixture (shifts <= 50mm) keeps the legacy path.
+        is_reorigin = bool(
+            alignment is not None
+            and alignment.is_significant
+            and alignment.translation_magnitude > _REORIGIN_TRANSLATION_MM
+        )
+        reorigin_alignment = alignment
+        if is_reorigin:
+            deleted, added, reorigin_removed_ids, reorigin_removed, reorigin_alignment = (
+                self._remove_reorigin_unchanged_pairs(deleted, added, alignment)
+            )
+            if reorigin_removed:
+                result.changes = [
+                    c for c in result.changes if id(c) not in reorigin_removed_ids
+                ]
+                result.stats["reorigin_unchanged_removed"] = reorigin_removed
+                result.metadata["reorigin_unchanged_removed"] = reorigin_removed
+                if reorigin_alignment is not None:
+                    result.metadata["alignment_refined"] = reorigin_alignment.to_dict()
+                self._refresh_change_count_stats(result)
+
         if not deleted or not added:
             if finalize_for_large:
                 self._finalize_large_result(result)
@@ -2279,7 +2570,13 @@ class DxfComparator:
         # Phase O2 — alignment 가 있으면 tolerance 를 그만큼 확장해 매칭률 ↑
         # (alignment.translation_magnitude 가 tolerance 보다 크면 near-match
         #  실패 → MODIFIED 추출 못함 → suppress 도 못함)
-        if alignment is not None and alignment.is_significant:
+        # Phase O2b — for a re-origin we near-match in REGISTERED space (added
+        # locations transformed into A-space below), so keep a small bounded
+        # tolerance instead of the (hundreds-of-km) shift magnitude that pairs
+        # wrong counterparts across the whole drawing.
+        if is_reorigin:
+            self.tolerance = max(self.tolerance, _REORIGIN_RESIDUAL_MATCH_MM)
+        elif alignment is not None and alignment.is_significant:
             shift_mag = alignment.translation_magnitude
             self.tolerance = max(self.tolerance, shift_mag + self.sensitivity["position"])
 
@@ -2302,6 +2599,16 @@ class DxfComparator:
                 "skipped_added": len(added) - len(near_added),
             }
             result.metadata["large_near_match_policy"] = "structural_text_dimension_block_only"
+
+        # Phase O2b — for a re-origin, near-match in REGISTERED space: transform the
+        # added (B) locations into A-space so true same-position counterparts pair
+        # at the bounded tolerance. Emission maps back to the NATIVE added change
+        # (overlay coords stay in B-space).
+        reorigin_back: Optional[Dict[int, DxfChange]] = None
+        if is_reorigin:
+            near_added, reorigin_back = self._registered_added_view(
+                near_added, reorigin_alignment
+            )
 
         try:
             # 공간 기반 매칭으로 MODIFIED 탐지
@@ -2331,11 +2638,22 @@ class DxfComparator:
         alignment_suppressed = 0
 
         for d_change, a_change in matches:
+            # Phase O2b — re-origin near-match returns REGISTERED added copies; map
+            # back to the NATIVE added change so emission keeps B-space coords and
+            # the result-rebuild excludes the original. Position diff is measured in
+            # registered space (so the global shift is not seen as a move).
+            if reorigin_back is not None:
+                a_change = reorigin_back.get(id(a_change), a_change)
             # 상세 분석 및 민감도 체크
-            modified = self._create_modified_change(d_change, a_change)
+            modified = self._create_modified_change(
+                d_change, a_change, alignment=reorigin_alignment if is_reorigin else None
+            )
             if modified is not None:
-                # Phase O2 — alignment artifact 인지 검사
-                if alignment is not None and alignment.is_significant:
+                # Phase O2 — alignment artifact 인지 검사. For a re-origin the
+                # position-only artifact check would suppress GENUINE same-position
+                # edits (every entity moved by the global shift); the true unchanged
+                # were already removed by full-geometry above, so skip it here.
+                if not is_reorigin and alignment is not None and alignment.is_significant:
                     if self._is_pure_alignment_artifact(d_change, a_change, alignment):
                         alignment_suppressed += 1
                         matched_deleted.add(id(d_change))
