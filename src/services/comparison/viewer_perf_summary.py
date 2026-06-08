@@ -140,7 +140,9 @@ def summarize_viewer_perf(viewer_root: Optional[Path]) -> dict[str, Any]:
     zone_selection_gui_block_ms: list[float] = []
     selected_zone_stale_count = 0
     selected_zone_cancel_count = 0
-    selected_zone_fallback_count = 0
+    selected_zone_fallback_without_key_count = 0
+    selected_zone_fallback_keys: set[tuple[str, str]] = set()
+    selected_zone_resolved_keys: set[tuple[str, str]] = set()
     pdf_display_list_render_count = 0
     pdf_display_list_cache_lookup_count = 0
     pdf_display_list_cache_hit_count = 0
@@ -304,8 +306,14 @@ def summarize_viewer_perf(viewer_root: Optional[Path]) -> dict[str, Any]:
                 pdf_pil_fallback_count += explicit_pil_fallback_count
             elif _warning_contains(event_payload, "renderer:pdf-pil-fallback"):
                 pdf_pil_fallback_count += 1
+            zone_key = _zone_event_key(event_payload)
             if _is_selected_zone_fallback(event_payload):
-                selected_zone_fallback_count += 1
+                if zone_key:
+                    selected_zone_fallback_keys.add(zone_key)
+                else:
+                    selected_zone_fallback_without_key_count += 1
+            elif _is_selected_zone_resolved_render(event_payload) and zone_key:
+                selected_zone_resolved_keys.add(zone_key)
         elif event_name == "package_background_render":
             package_background_render_count += 1
             _append_non_negative(package_background_render_ms, event_payload.get("render_ms"))
@@ -512,9 +520,18 @@ def summarize_viewer_perf(viewer_root: Optional[Path]) -> dict[str, Any]:
         elif event_name in {"zone_render_cancelled", "zone_render_pending_replaced", "zone_render_pending_dropped"}:
             selected_zone_cancel_count += 1
         elif event_name == "zone_render_fallback":
-            selected_zone_fallback_count += 1
+            zone_key = _zone_event_key(event_payload)
+            if zone_key:
+                selected_zone_fallback_keys.add(zone_key)
+            else:
+                selected_zone_fallback_without_key_count += 1
             _count_value_into(fidelity_counts, event_payload.get("visual_fidelity"))
             _count_value_into(reason_code_counts, event_payload.get("reason_code"))
+
+    selected_zone_fallback_count = (
+        selected_zone_fallback_without_key_count
+        + len(selected_zone_fallback_keys - selected_zone_resolved_keys)
+    )
 
     summary["event_count"] = event_count
     if not event_count:
@@ -1051,3 +1068,18 @@ def _is_selected_zone_fallback(payload: dict[str, Any]) -> bool:
         or fidelity == "relative_overlay"
         or reason_code
     )
+
+
+def _is_selected_zone_resolved_render(payload: dict[str, Any]) -> bool:
+    lifecycle = str(payload.get("render_lifecycle") or "").strip().lower()
+    fidelity = str(payload.get("visual_fidelity") or "").strip().lower()
+    reason_code = str(payload.get("reason_code") or "").strip()
+    return lifecycle == "ready" and fidelity in {"cad_render", "pdf_render"} and not reason_code
+
+
+def _zone_event_key(payload: dict[str, Any]) -> tuple[str, str] | None:
+    pair_id = str(payload.get("pair_uuid") or payload.get("pair_id") or "").strip()
+    zone_id = str(payload.get("zone_id") or "").strip()
+    if not pair_id or not zone_id:
+        return None
+    return pair_id, zone_id

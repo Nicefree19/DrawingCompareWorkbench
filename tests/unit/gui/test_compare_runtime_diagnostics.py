@@ -10,6 +10,7 @@ from src.gui.compare_runtime_diagnostics import (
     default_gui_dwg_backend_mode,
     format_auto_compare_error,
 )
+from src.gui.source_path_repair import has_lossy_path_text, registered_dxf_fallback_for_source
 
 
 def test_default_gui_dwg_backend_mode_propagates_explicit_oda_env() -> None:
@@ -68,3 +69,21 @@ def test_format_auto_compare_error_preserves_unrelated_exception() -> None:
     exc = RuntimeError("something else failed")
 
     assert format_auto_compare_error(exc, SimpleNamespace()) == "something else failed"
+
+
+def test_registered_dxf_fallback_for_source_uses_side_folder(tmp_path: Path) -> None:
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1032")
+    before_dxf = tmp_path / "dxf_registered" / "before" / "detail.dxf"
+    before_dxf.parent.mkdir(parents=True)
+    before_dxf.write_text("0\nEOF\n", encoding="utf-8")
+
+    assert registered_dxf_fallback_for_source(source, "before") == before_dxf
+    assert registered_dxf_fallback_for_source(source, "after") is None
+
+
+def test_has_lossy_path_text_detects_surrogate_and_replacement_chars() -> None:
+    assert has_lossy_path_text("D:/bad/\udcebname.dxf") is True
+    assert has_lossy_path_text("D:/bad/\ufffdname.dxf") is True
+    assert has_lossy_path_text("D:/bad/\u5360\uc3d9\uc619name.dxf") is True
+    assert has_lossy_path_text("D:/ok/detail.dxf") is False

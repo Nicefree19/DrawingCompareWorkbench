@@ -2317,9 +2317,18 @@ def _normalize_bbox(
 def _pixel_bbox(
     box: Optional[Tuple[float, float, float, float]],
     transform: Optional[Dict[str, Any]],
+    *,
+    bbox_coordinate_space: str = "",
+    pdf_dpi: float = 0.0,
 ) -> Optional[Dict[str, float]]:
     if not box or not transform:
         return None
+    box = _scale_image_pixel_bbox_for_transform(
+        box,
+        transform,
+        bbox_coordinate_space=bbox_coordinate_space,
+        pdf_dpi=pdf_dpi,
+    )
     try:
         pixel = _bbox_to_pixel_bbox(box, transform)
     except Exception:
@@ -2341,6 +2350,35 @@ def _pixel_bbox(
         "width": float(pixel["width"]),
         "height": float(pixel["height"]),
     }
+
+
+def _scale_image_pixel_bbox_for_transform(
+    box: Tuple[float, float, float, float],
+    transform: Dict[str, Any],
+    *,
+    bbox_coordinate_space: str = "",
+    pdf_dpi: float = 0.0,
+) -> Tuple[float, float, float, float]:
+    if str(bbox_coordinate_space or "").lower() != "image_pixels":
+        return box
+    if str(transform.get("coordinate_space") or "").lower() != "image_pixels":
+        return box
+    try:
+        source_dpi = float(pdf_dpi or 0.0)
+    except (TypeError, ValueError):
+        source_dpi = 0.0
+    target_dpi = _pdf_dpi_from_transforms(transform, None)
+    if source_dpi <= 0.0 or target_dpi <= 0.0:
+        return box
+    if abs(source_dpi - target_dpi) < 1e-6:
+        return box
+    scale = target_dpi / source_dpi
+    return (
+        float(box[0]) * scale,
+        float(box[1]) * scale,
+        float(box[2]) * scale,
+        float(box[3]) * scale,
+    )
 
 
 def _clamp01(value: float) -> float:
@@ -2388,8 +2426,18 @@ def _overlay_from_zone_row(
         "bbox": _bbox_dict(bbox),
         "old_bbox": _bbox_dict(old_bbox),
         "normalized_bbox": _normalize_bbox(bbox, extents),
-        "before_bbox_px": _pixel_bbox(old_bbox, before_transform),
-        "after_bbox_px": _pixel_bbox(bbox, after_transform),
+        "before_bbox_px": _pixel_bbox(
+            old_bbox,
+            before_transform,
+            bbox_coordinate_space=bbox_coordinate_space,
+            pdf_dpi=pdf_dpi,
+        ),
+        "after_bbox_px": _pixel_bbox(
+            bbox,
+            after_transform,
+            bbox_coordinate_space=bbox_coordinate_space,
+            pdf_dpi=pdf_dpi,
+        ),
         "selected_for_review": bool(selected),
         "priority_rank": priority_rank,
         "priority_score": priority_score,

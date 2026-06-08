@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 from scripts.direct_workbench_compare import (
     _descriptor_root,
+    _first_zone_leaf,
     _manifest_fallback_fields,
+    _process_events_for,
+    _zone_item_id,
+    _zone_item_text,
 )
 
 
@@ -101,3 +105,66 @@ def test_descriptor_root_uses_common_parent_for_multiple_descriptors(tmp_path: P
     assert _descriptor_root(
         [SimpleNamespace(path=str(first)), SimpleNamespace(path=str(second))]
     ) == str(root.resolve())
+
+
+class _FakeItem:
+    def __init__(
+        self,
+        text: str,
+        zone_id: str = "",
+        children: list["_FakeItem"] | None = None,
+    ) -> None:
+        self._text = text
+        self._zone_id = zone_id
+        self._children = children or []
+
+    def childCount(self) -> int:
+        return len(self._children)
+
+    def child(self, idx: int) -> "_FakeItem":
+        return self._children[idx]
+
+    def text(self, column: int) -> str:
+        assert column == 0
+        return self._text
+
+    def data(self, column: int, role: object) -> str:
+        assert column == 0
+        return self._zone_id
+
+
+class _FakeTree:
+    def __init__(self, items: list[_FakeItem]) -> None:
+        self._items = items
+
+    def topLevelItemCount(self) -> int:
+        return len(self._items)
+
+    def topLevelItem(self, idx: int) -> _FakeItem:
+        return self._items[idx]
+
+
+def test_first_zone_leaf_prefers_workbench_leaf_helper() -> None:
+    leaf = _FakeItem("C-001 change", "C-001")
+    workbench = SimpleNamespace(_zone_leaf_items_v2=lambda: [leaf])
+
+    assert _first_zone_leaf(workbench) is leaf
+    assert _zone_item_id(leaf) == "C-001"
+    assert _zone_item_text(leaf) == "C-001 change"
+
+
+def test_first_zone_leaf_falls_back_to_tree_leaf_not_header() -> None:
+    leaf = _FakeItem("C-002 add", "C-002")
+    header = _FakeItem("other changes", children=[leaf])
+    workbench = SimpleNamespace(zone_list_v2=_FakeTree([header]))
+
+    assert _first_zone_leaf(workbench) is leaf
+
+
+def test_process_events_for_zero_duration_still_processes_once() -> None:
+    calls: list[str] = []
+    app = SimpleNamespace(processEvents=lambda: calls.append("tick"))
+
+    _process_events_for(app, 0)
+
+    assert calls

@@ -861,6 +861,93 @@ def test_viewer_package_preserves_pdf_compare_dpi_from_change_zones(tmp_path: Pa
     assert overlay["overlays"][0]["pdf_dpi"] == 200
 
 
+def test_pdf_overlay_pixel_bbox_scales_to_render_background_dpi(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    before = tmp_path / "old.pdf"
+    after = tmp_path / "new.pdf"
+    before.write_bytes(b"%PDF-1.4 before")
+    after.write_bytes(b"%PDF-1.4 after")
+    artifact_dir = _write_base_artifacts(
+        tmp_path,
+        source_a=str(before),
+        source_b=str(after),
+    )
+    rows = [
+        {
+            "pair_id": "S21-0001",
+            "zone_id": "C-001",
+            "drawing_number": "S21-0001",
+            "change_type": "modified",
+            "severity": "high",
+            "raw_change_count": "5",
+            "bbox_min_x": "455.5",
+            "bbox_min_y": "2660.0",
+            "bbox_max_x": "566.0",
+            "bbox_max_y": "3137.0",
+            "source_a": str(before),
+            "source_b": str(after),
+            "bbox_coordinate_space": "image_pixels",
+            "pdf_dpi": "200",
+        },
+    ]
+    with (artifact_dir / "change_zones.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    def fake_render_pdf_to_png(
+        _pdf_path: Path,
+        output_path: Path,
+        *,
+        dpi: int,
+        max_edge_px: int,
+        page_index: int = 0,
+    ) -> dict:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (936, 1323), "white").save(output_path)
+        return {
+            "min_x": 0.0,
+            "min_y": 0.0,
+            "max_x": 936.0,
+            "max_y": 1323.0,
+            "img_width": 936,
+            "img_height": 1323,
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+            "coordinate_space": "image_pixels",
+            "page": int(page_index),
+            "dpi": 80.0,
+            "pdf_dpi": 80.0,
+            "effective_dpi": 80.0,
+            "requested_dpi": float(dpi),
+        }
+
+    monkeypatch.setattr(
+        viewer_package_module,
+        "_render_pdf_to_png",
+        fake_render_pdf_to_png,
+    )
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        review_dashboard=artifact_dir / "review_dashboard.json",
+        render_policy="top-issues",
+        preview_dpi=150,
+    )
+
+    overlay = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
+    first = overlay["overlays"][0]
+    assert first["pdf_dpi"] == 200
+    assert first["after_bbox_px"] == pytest.approx(
+        {"x": 182.2, "y": 1064.0, "width": 44.2, "height": 190.8},
+        abs=0.01,
+    )
+
+
 def test_top_issues_policy_renders_png_tiles_and_pixel_bboxes(tmp_path: Path, monkeypatch) -> None:
     Image = pytest.importorskip("PIL.Image")
     old_dxf = tmp_path / "old.dxf"

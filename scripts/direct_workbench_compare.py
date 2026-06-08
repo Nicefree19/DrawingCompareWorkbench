@@ -45,6 +45,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Use the active Qt platform instead of forcing offscreen mode.",
     )
+    parser.add_argument(
+        "--settle-ms",
+        type=int,
+        default=1500,
+        help="Milliseconds to process Qt events after loading/selecting before screenshots.",
+    )
     return parser.parse_args(argv)
 
 
@@ -95,6 +101,87 @@ def _descriptor_root(descriptors: object) -> str:
         return str(Path(os.path.commonpath([str(path.parent) for path in paths])).resolve())
     except Exception:
         return str(paths[0].parent)
+
+
+def _process_events_for(app: object, milliseconds: int) -> None:
+    """Let delayed Qt paints/timers run before grabbing verification screenshots."""
+
+    duration = max(0, int(milliseconds or 0)) / 1000.0
+    deadline = time.perf_counter() + duration
+    process_events = getattr(app, "processEvents", None)
+    if not callable(process_events):
+        return
+    process_events()
+    while time.perf_counter() < deadline:
+        time.sleep(min(0.05, max(0.0, deadline - time.perf_counter())))
+        process_events()
+    process_events()
+
+
+def _first_zone_leaf(workbench: object):
+    helper = getattr(workbench, "_zone_leaf_items_v2", None)
+    if callable(helper):
+        leaves = helper()
+        if leaves:
+            return leaves[0]
+
+    tree = getattr(workbench, "zone_list_v2", None)
+    if tree is None:
+        return None
+
+    def _walk(item):
+        if item is None:
+            return None
+        child_count = getattr(item, "childCount", lambda: 0)()
+        if child_count == 0:
+            return item
+        child = getattr(item, "child", None)
+        if not callable(child):
+            return item
+        for idx in range(child_count):
+            found = _walk(child(idx))
+            if found is not None:
+                return found
+        return None
+
+    count = getattr(tree, "topLevelItemCount", lambda: 0)()
+    top_item = getattr(tree, "topLevelItem", None)
+    if not callable(top_item):
+        return None
+    for idx in range(count):
+        found = _walk(top_item(idx))
+        if found is not None:
+            return found
+    return None
+
+
+def _zone_item_text(item: object | None) -> str:
+    if item is None:
+        return ""
+    text = getattr(item, "text", None)
+    if not callable(text):
+        return ""
+    try:
+        return str(text(0))
+    except Exception:
+        return ""
+
+
+def _zone_item_id(item: object | None) -> str:
+    if item is None:
+        return ""
+    data = getattr(item, "data", None)
+    if not callable(data):
+        return ""
+    try:
+        from PySide6.QtCore import Qt
+
+        return str(data(0, Qt.UserRole) or "")
+    except Exception:
+        try:
+            return str(data(0, 256) or "")
+        except Exception:
+            return ""
 
 
 def _manifest_fallback_fields(results_dir: Path, result: object | None = None) -> dict[str, object]:
@@ -172,19 +259,33 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
 
     app = QApplication.instance() or QApplication(sys.argv)
     workbench = DrawingCompareWorkbenchV2()
+    effective_sources = _manifest_fallback_fields(results_dir, result)
+    workbench._source_a = str(effective_sources.get("effective_source_a") or source_a)
+    workbench._source_b = str(effective_sources.get("effective_source_b") or source_b)
     workbench._on_auto_finished_v2(result)
     app.processEvents()
     workbench.resize(1440, 900)
-    app.processEvents()
+    if args.show:
+        workbench.show()
+    _process_events_for(app, int(args.settle_ms))
 
     screenshots: list[str] = []
+    selected_zone_id = ""
+    selected_zone_text = ""
     if not args.skip_screenshots:
         main_shot = screenshots_dir / "01_workbench_result_loaded.png"
         workbench.grab().save(str(main_shot))
         screenshots.append(str(main_shot))
-        if workbench.zone_list_v2.topLevelItemCount():
-            workbench.zone_list_v2.setCurrentItem(workbench.zone_list_v2.topLevelItem(0))
-            app.processEvents()
+        leaf = _first_zone_leaf(workbench)
+        if leaf is not None:
+            selected_zone_id = _zone_item_id(leaf)
+            selected_zone_text = _zone_item_text(leaf)
+            selector = getattr(workbench, "_select_zone_leaf_v2", None)
+            if callable(selector):
+                selector(leaf)
+            else:
+                workbench.zone_list_v2.setCurrentItem(leaf)
+            _process_events_for(app, int(args.settle_ms))
             selected_shot = screenshots_dir / "02_first_zone_selected.png"
             workbench.grab().save(str(selected_shot))
             screenshots.append(str(selected_shot))
@@ -201,6 +302,8 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
         "failed_pairs": getattr(compare_summary, "failed_pairs", None),
         "total_changes": getattr(compare_summary, "total_changes", None),
         "zone_count": workbench.zone_list_v2.topLevelItemCount(),
+        "selected_zone_id": selected_zone_id,
+        "selected_zone_text": selected_zone_text,
         "status_label": workbench.lbl_status_v2.text(),
         "queue_label": workbench.lbl_review_queue_v2.text(),
         "viewer_perf_label": workbench.lbl_viewer_perf_v2.text(),
@@ -208,6 +311,8 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
     }
     summary_path = out_root / "direct_compare_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    workbench.close()
+    app.processEvents()
     return summary
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, List, Mapping, Optional
 
-from PySide6.QtCore import QObject, QProcess, QRectF, Qt, QThread, QTimer, Signal, QUrl
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QRectF, Qt, QThread, QTimer, Signal, QUrl
 from PySide6.QtGui import QColor, QBrush, QDesktopServices, QIcon, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -65,6 +65,7 @@ except Exception:
 
 from src.gui import workbench_visual_extensions as visual_ext
 from src.gui.compare_runtime_diagnostics import default_gui_dwg_backend_mode, format_auto_compare_error
+from src.gui.source_path_repair import has_lossy_path_text, registered_dxf_fallback_for_source
 from src.gui.theme import NanoColors, get_stylesheet
 from src.services.comparison import ComparisonConfig
 from src.services.comparison.cache_budget import resolve_cache_byte_limit
@@ -1704,9 +1705,16 @@ class ZoneRenderProcessController(QObject):
     finished = Signal(str, str, object, object, object)
     error = Signal(str, str, str, str, str)
 
-    def __init__(self, *, timeout_ms: int = 10_000, parent: Optional[QObject] = None):
+    def __init__(
+        self,
+        *,
+        timeout_ms: int = 10_000,
+        source_timeout_ms: int = 30_000,
+        parent: Optional[QObject] = None,
+    ):
         super().__init__(parent)
         self.timeout_ms = int(timeout_ms)
+        self.source_timeout_ms = max(int(source_timeout_ms), self.timeout_ms)
         self._process: Optional[QProcess] = None
         self._process_key = ""
         self._stdout_buffer = ""
@@ -1759,11 +1767,13 @@ class ZoneRenderProcessController(QObject):
                 str(request.get("request_id") or ""),
             )
             return False
+        timeout_ms = self.source_timeout_ms if bool(request.get("prefer_source_render")) else self.timeout_ms
         self._active_context = {
             "request_id": str(request.get("request_id") or ""),
             "pair_id": str(request.get("pair_uuid") or ""),
             "zone_id": str(request.get("zone_id") or ""),
             "prefer_source_render": bool(request.get("prefer_source_render")),
+            "timeout_ms": timeout_ms,
             "started_at": perf_counter(),
             "viewer_pair": dict(viewer_pair or {}),
             "overlay": dict(overlay or {}),
@@ -1774,9 +1784,9 @@ class ZoneRenderProcessController(QObject):
         self._process.write(line.encode("utf-8"))
         self._process.waitForBytesWritten(1000)
         if self._process_ready:
-            self._timeout_timer.start(self.timeout_ms)
+            self._timeout_timer.start(timeout_ms)
         else:
-            self._timeout_timer.start(max(self.timeout_ms, 30_000))
+            self._timeout_timer.start(max(timeout_ms, 30_000))
         return True
 
     def _ensure_process(self, process_key: str) -> bool:
@@ -1788,6 +1798,10 @@ class ZoneRenderProcessController(QObject):
         self._stderr_buffer = ""
         self._process_ready = False
         process = QProcess(self)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
+        process.setProcessEnvironment(env)
         program, args = worker_command_for_module(ZONE_RENDER_PROCESS_MODULE)
         process.setProgram(program)
         process.setArguments(args)
@@ -1827,7 +1841,8 @@ class ZoneRenderProcessController(QObject):
         if payload.get("event") == "ready":
             self._process_ready = True
             if self._active_context:
-                self._timeout_timer.start(self.timeout_ms)
+                timeout_ms = int(self._active_context.get("timeout_ms") or self.timeout_ms)
+                self._timeout_timer.start(timeout_ms)
             return
         context = self._active_context
         if not context:
@@ -1895,7 +1910,7 @@ class ZoneRenderProcessController(QObject):
             pair_id,
             zone_id,
             "렌더 시간 초과, 상대 위치만 표시합니다.",
-            "render_timeout",
+            "full_detail_render_timeout" if context.get("prefer_source_render") else "render_timeout",
             str(context.get("request_id") or ""),
         )
 
@@ -1909,7 +1924,7 @@ class ZoneRenderProcessController(QObject):
                 str(context.get("pair_id") or ""),
                 str(context.get("zone_id") or ""),
                 message,
-                "render_failed",
+                "full_detail_render_failed" if context.get("prefer_source_render") else "render_failed",
                 str(context.get("request_id") or ""),
             )
         self._process = None
@@ -11583,6 +11598,15 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         return repaired
 
     def _source_path_replacement_v2(self, pair_id: str, row: dict, key: str) -> str:
+        # Single-file runs can safely derive registered DXF fallbacks from
+        # the current GUI inputs before consulting redacted package metadata.
+        if len(self._viewer_pairs_by_id) <= 1:
+            value = self._source_a if key == "source_a" else self._source_b
+            side = "before" if key == "source_a" else "after"
+            for candidate in (registered_dxf_fallback_for_source(value, side), value):
+                if self._is_usable_zone_render_source_v2(candidate):
+                    return str(candidate)
+
         issue = (row.get("top_issues") or [{}])[0] if isinstance(row.get("top_issues"), list) else {}
         for value in (issue.get(key), row.get(key)):
             if self._is_usable_zone_render_source_v2(value):
@@ -11604,17 +11628,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         except Exception:
             logger.debug("Could not restore source path from comparison summary", exc_info=True)
 
-        # Single-file runs can safely fall back to the current input fields.
-        if len(self._viewer_pairs_by_id) <= 1:
-            value = self._source_a if key == "source_a" else self._source_b
-            if self._is_usable_zone_render_source_v2(value):
-                return str(value)
         return ""
 
     @staticmethod
     def _is_usable_zone_render_source_v2(value: Any) -> bool:
         text = str(value or "").strip()
-        if not text or _is_redacted_artifact_path(text):
+        if not text or _is_redacted_artifact_path(text) or has_lossy_path_text(text):
             return False
         try:
             path = Path(text)
@@ -11828,6 +11847,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         overlay = self._active_overlays_by_zone.get(zone_id, {})
         if not overlay:
             return
+        viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
+        if _viewer_pair_is_pdf(viewer_pair):
+            overlay = self._backfill_pdf_overlay_coord_space_v2(pair_id, [overlay])[0]
+            self._active_overlays_by_zone[zone_id] = overlay
         bbox = union_bboxes(overlay.get("old_bbox"), overlay.get("bbox"))
         if not bbox:
             viewer_pair_for_fallback = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
@@ -11871,7 +11894,6 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self._pending_zone_render_request_v2 = (pair_id, zone_id, request_id)
             self._set_preview_status_v2(pair_id, "rendering", "현재 구역 렌더가 끝나면 이어서 준비합니다.")
             return
-        viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
         if not viewer_pair.get("source_a") or not viewer_pair.get("source_b"):
             self._record_zone_render_perf_event_v2(
                 "zone_render_fallback",
@@ -11994,6 +12016,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not self._is_current_zone_render_request_v2(pair_id, zone_id, request_id):
             return
         if self._zone_render_controller_v2.is_busy() or self._pending_zone_render_request_v2:
+            return
+        viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
+        if any(
+            _is_redacted_artifact_path(viewer_pair.get(k)) or has_lossy_path_text(viewer_pair.get(k))
+            for k in ("source_a", "source_b")
+        ):
             return
         key = (pair_id, zone_id, request_id)
         if self._zone_full_detail_started_request_v2 == key:
@@ -12441,6 +12469,21 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 zone_id,
                 request_id,
             )
+            self._start_pending_zone_render_v2()
+            return
+        if str(status or "").startswith("full_detail_"):
+            self._record_zone_render_perf_event_v2(
+                "zone_full_detail_upgrade_failed",
+                pair_id,
+                zone_id,
+                render_lifecycle="timeout" if status == "full_detail_render_timeout" else "failed",
+                visual_fidelity="cad_render",
+                reason_code=status,
+                renderer_backend="ezdxf-matplotlib-zone",
+                error_message=str(message or "")[:500],
+                request_id=request_id,
+            )
+            self._refresh_viewer_perf_summary_only()
             self._start_pending_zone_render_v2()
             return
         current_pair = str((self._active_row or {}).get("pair_id") or "")

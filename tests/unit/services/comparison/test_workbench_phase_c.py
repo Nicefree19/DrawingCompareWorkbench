@@ -1545,6 +1545,41 @@ def test_failed_full_detail_upgrade_keeps_fast_crop_out_of_fallback_counts(qapp,
         workbench.deleteLater()
 
 
+def test_full_detail_timeout_keeps_fast_crop_status_and_logs_upgrade_failure(qapp, tmp_path) -> None:
+    from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
+
+    workbench = DrawingCompareWorkbenchV2()
+    try:
+        _prepare_zone_finish_workbench(workbench, tmp_path)
+        status_calls: list[tuple] = []
+        drain_calls: list[str] = []
+        workbench._set_preview_status_v2 = lambda *args, **_kwargs: status_calls.append(args)  # type: ignore[method-assign]
+        workbench._start_pending_zone_render_v2 = lambda: drain_calls.append("drain")  # type: ignore[method-assign]
+        request_id = workbench._begin_selected_zone_render_request_v2("pair", "z1")
+
+        workbench._on_zone_crop_render_error_v2(
+            "pair",
+            "z1",
+            "source render took longer than the full-detail budget",
+            "full_detail_render_timeout",
+            request_id,
+        )
+
+        lines = [
+            line
+            for line in (tmp_path / "viewer_perf.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        payload = json.loads(lines[-1])
+        assert status_calls == []
+        assert drain_calls == ["drain"]
+        assert payload["event"] == "zone_full_detail_upgrade_failed"
+        assert payload["reason_code"] == "full_detail_render_timeout"
+        assert payload["render_lifecycle"] == "timeout"
+    finally:
+        workbench.deleteLater()
+
+
 def test_redacted_viewer_source_restores_from_compare_summary(qapp, tmp_path) -> None:
     from types import SimpleNamespace
 
