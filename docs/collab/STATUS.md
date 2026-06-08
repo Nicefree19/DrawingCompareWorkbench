@@ -51,6 +51,6 @@ Last updated: 2026-06-08
 
 ## Open Notes
 
-- Existing untracked Claude/probe files remain intentionally untouched.
+- Accidental Claude scratch/probe artifacts from the branch have been removed before PR creation.
 - `logs\error_20260607.log` contains unsupported-AC1032 preflight errors from direct DWG file runs; the subsequent folder run completed through converted DXF fallback.
 - Direct GUI test artifacts are under `build\manual_runtime_debug\gui_compare_20260608\pdf_file_pair_windows_qpa_final_verify`, `build\manual_runtime_debug\gui_compare_20260608\pdf_file_pair_computer_verify_20260608_110852`, `build\manual_runtime_debug\gui_compare_20260608\cad_dwg_file_pair_windows_qpa_source_timeout_30s`, `build\manual_runtime_debug\gui_compare_20260608\cad_dwg_file_pair_computer_verify_20260608_111104`, and `build\manual_runtime_debug\gui_compare_20260608\cad_dwg_file_pair_cleanup_verify_20260608_111916`.

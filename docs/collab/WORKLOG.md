@@ -220,3 +220,4 @@
 - 2026-06-08 Codex: Split selected-zone render timeouts so CAD full-detail source upgrades get a 30s budget while fast crops stay at 10s, and verified the real DWG full-detail upgrade now completes as `ezdxf-matplotlib-zone` instead of being cut off near 10s.
 - 2026-06-08 Codex: Adjusted viewer performance fallback aggregation to clear transient fast-crop fallback counts when the same pair/zone later succeeds with full-detail source rendering.
 - 2026-06-08 Codex: Re-ran visible Computer Use PDF/DWG GUI verification and made the direct Workbench smoke script close the window so zone-render QProcess cleanup runs before exit.
+- 2026-06-08 Codex: Removed accidentally committed Claude scratch/probe artifacts from the PR branch before opening the integration PR.
