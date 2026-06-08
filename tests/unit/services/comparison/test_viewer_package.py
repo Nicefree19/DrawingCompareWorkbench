@@ -1256,3 +1256,106 @@ def test_all_policy_respects_max_viewer_pages(tmp_path: Path, monkeypatch) -> No
     manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
     statuses = {pair["pair_id"]: pair["render_status"] for pair in manifest["pairs"]}
     assert sorted(statuses.values()) == ["rendered", "skipped_by_page_cap"]
+
+
+def test_sheet_frame_bboxes_annotate_transforms_without_world_bbox_fallback() -> None:
+    before_transform = {
+        "min_x": -1000.0,
+        "min_y": -1000.0,
+        "max_x": 1000.0,
+        "max_y": 1000.0,
+        "img_width": 200,
+        "img_height": 200,
+    }
+    after_transform = dict(before_transform)
+    annotated_before, annotated_after, before_frame, after_frame = (
+        viewer_package_module._attach_sheet_frame_bboxes_to_transforms(
+            rows=[
+                {
+                    "before_cad_frame_bbox": "0,0,420,297",
+                    "after_cad_frame_bbox": "1000,2000,1420,2297",
+                }
+            ],
+            artifact={},
+            before_transform=before_transform,
+            after_transform=after_transform,
+        )
+    )
+
+    assert before_frame == (0.0, 0.0, 420.0, 297.0)
+    assert after_frame == (1000.0, 2000.0, 1420.0, 2297.0)
+    assert annotated_before["sheet_frame_bbox"] == [0.0, 0.0, 420.0, 297.0]
+    assert annotated_before["cad_frame_bbox"] == [0.0, 0.0, 420.0, 297.0]
+    assert annotated_after["sheet_frame_bbox"] == [1000.0, 2000.0, 1420.0, 2297.0]
+
+    world_before, world_after, world_before_frame, world_after_frame = (
+        viewer_package_module._attach_sheet_frame_bboxes_to_transforms(
+            rows=[{"world_bbox": "0,0,9999,9999", "cad_world_bbox": "0,0,9999,9999"}],
+            artifact={},
+            before_transform=before_transform,
+            after_transform=after_transform,
+        )
+    )
+
+    assert world_before_frame is None
+    assert world_after_frame is None
+    assert "sheet_frame_bbox" not in world_before
+    assert "sheet_frame_bbox" not in world_after
+
+
+def test_viewer_package_propagates_sheet_frame_bboxes_to_cad_pair_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    old_dxf = tmp_path / "old.dxf"
+    new_dxf = tmp_path / "new.dxf"
+    old_dxf.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+    new_dxf.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+    artifact_dir = _write_base_artifacts(tmp_path, source_a=str(old_dxf), source_b=str(new_dxf))
+    zones_path = artifact_dir / "change_zones.csv"
+    rows = list(csv.DictReader(zones_path.open("r", encoding="utf-8-sig")))
+    for row in rows:
+        row["before_cad_frame_bbox"] = "0,0,420,297"
+        row["after_cad_frame_bbox"] = "1000,2000,1420,2297"
+    with zones_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    def fake_ensure(path: Path, _cache_dir: Path) -> Path:
+        return path
+
+    def fake_render(_dxf: Path, image_path: Path, *, dpi: int, max_edge_px: int):
+        Image.new("RGB", (200, 200), "white").save(image_path)
+        return {
+            "min_x": -500.0,
+            "min_y": -500.0,
+            "max_x": 1500.0,
+            "max_y": 1500.0,
+            "scale_x": 0.1,
+            "scale_y": 0.1,
+            "img_width": 200,
+            "img_height": 200,
+        }
+
+    monkeypatch.setattr("src.services.comparison.viewer_package._ensure_preview_dxf", fake_ensure)
+    monkeypatch.setattr("src.services.comparison.viewer_package._render_dxf_to_png", fake_render)
+
+    export_viewer_package(
+        artifact_dir,
+        tmp_path / "viewer",
+        render_policy="all",
+        max_zone_tiles=0,
+    )
+
+    manifest = json.loads((tmp_path / "viewer" / "viewer_manifest.json").read_text(encoding="utf-8"))
+    pair = manifest["pairs"][0]
+    assert pair["before_cad_frame_bbox"] == [0.0, 0.0, 420.0, 297.0]
+    assert pair["after_cad_frame_bbox"] == [1000.0, 2000.0, 1420.0, 2297.0]
+    assert pair["before_transform"]["sheet_frame_bbox"] == [0.0, 0.0, 420.0, 297.0]
+    assert pair["after_transform"]["sheet_frame_bbox"] == [1000.0, 2000.0, 1420.0, 2297.0]
+
+    overlay = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
+    assert overlay["before_cad_frame_bbox"] == [0.0, 0.0, 420.0, 297.0]
+    assert overlay["after_cad_frame_bbox"] == [1000.0, 2000.0, 1420.0, 2297.0]

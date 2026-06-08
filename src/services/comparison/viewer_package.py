@@ -484,6 +484,17 @@ def export_viewer_package(
                 after_transform,
                 hybrid_after_alignment,
             )
+        (
+            before_transform,
+            after_transform,
+            before_sheet_frame_bbox,
+            after_sheet_frame_bbox,
+        ) = _attach_sheet_frame_bboxes_to_transforms(
+            rows=rows,
+            artifact=pair_artifact,
+            before_transform=before_transform,
+            after_transform=after_transform,
+        )
         has_pdf_visual_background = is_pdf_pair or is_hybrid_pdf_visual_pair
         pdf_page_size = (
             _pdf_page_size_from_transforms(after_transform, before_transform)
@@ -755,6 +766,10 @@ def export_viewer_package(
             "overlay_legacy_truncated": legacy_overlay_truncated,
             "overlays": legacy_overlays,
         }
+        if before_sheet_frame_bbox is not None:
+            overlay_payload["before_cad_frame_bbox"] = _bbox_to_manifest_list(before_sheet_frame_bbox)
+        if after_sheet_frame_bbox is not None:
+            overlay_payload["after_cad_frame_bbox"] = _bbox_to_manifest_list(after_sheet_frame_bbox)
         overlay_payload.update(overlay_page_fields)
         overlay_path = overlay_dir / f"{safe_pair}.json"
         _write_json(overlay_path, overlay_payload)
@@ -838,6 +853,10 @@ def export_viewer_package(
         }
         if cad_visual_conversion:
             pair_entry["cad_visual_conversion"] = cad_visual_conversion
+        if before_sheet_frame_bbox is not None:
+            pair_entry["before_cad_frame_bbox"] = _bbox_to_manifest_list(before_sheet_frame_bbox)
+        if after_sheet_frame_bbox is not None:
+            pair_entry["after_cad_frame_bbox"] = _bbox_to_manifest_list(after_sheet_frame_bbox)
         pair_entries.append(pair_entry)
         warnings.extend([f"{pair_id}: {warning}" for warning in pair_warning if warning])
 
@@ -2130,6 +2149,104 @@ def _cad_frame_bbox_for_pair_side(
             if bbox is not None:
                 return bbox
     return None
+
+
+def _sheet_frame_bbox_for_pair_side(
+    *,
+    rows: Sequence[Dict[str, str]],
+    artifact: Dict[str, Any],
+    side: str,
+) -> Optional[Tuple[float, float, float, float]]:
+    side_keys = (
+        (
+            "sheet_frame_bbox_a",
+            "before_sheet_frame_bbox",
+            "cad_frame_bbox_a",
+            "before_cad_frame_bbox",
+            "dwg_frame_bbox_a",
+            "before_dwg_frame_bbox",
+            "source_a_frame_bbox",
+            "frame_bbox_a",
+        )
+        if side == "a"
+        else (
+            "sheet_frame_bbox_b",
+            "after_sheet_frame_bbox",
+            "cad_frame_bbox_b",
+            "after_cad_frame_bbox",
+            "dwg_frame_bbox_b",
+            "after_dwg_frame_bbox",
+            "source_b_frame_bbox",
+            "frame_bbox_b",
+        )
+    )
+    common_keys = (
+        "sheet_frame_bbox",
+        "cad_frame_bbox",
+        "dwg_frame_bbox",
+        "drawing_frame_bbox",
+        "frame_bbox",
+    )
+    for container in (artifact, *rows):
+        if not isinstance(container, dict):
+            continue
+        for key in (*side_keys, *common_keys):
+            raw = container.get(key)
+            bbox = normalise_bbox(raw)
+            if bbox is None:
+                bbox = _parse_bbox(raw)
+            if bbox is not None:
+                return bbox
+    return None
+
+
+def _bbox_to_manifest_list(
+    bbox: Tuple[float, float, float, float],
+) -> List[float]:
+    return [float(value) for value in bbox]
+
+
+def _annotate_transform_with_sheet_frame(
+    transform: Optional[Dict[str, Any]],
+    frame_bbox: Optional[Tuple[float, float, float, float]],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(transform, dict) or frame_bbox is None:
+        return transform
+    frame_values = _bbox_to_manifest_list(frame_bbox)
+    annotated = dict(transform)
+    annotated.setdefault("sheet_frame_bbox", frame_values)
+    annotated.setdefault("cad_frame_bbox", frame_values)
+    return annotated
+
+
+def _attach_sheet_frame_bboxes_to_transforms(
+    *,
+    rows: Sequence[Dict[str, str]],
+    artifact: Dict[str, Any],
+    before_transform: Optional[Dict[str, Any]],
+    after_transform: Optional[Dict[str, Any]],
+) -> Tuple[
+    Optional[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+    Optional[Tuple[float, float, float, float]],
+    Optional[Tuple[float, float, float, float]],
+]:
+    before_frame_bbox = _sheet_frame_bbox_for_pair_side(
+        rows=rows,
+        artifact=artifact,
+        side="a",
+    )
+    after_frame_bbox = _sheet_frame_bbox_for_pair_side(
+        rows=rows,
+        artifact=artifact,
+        side="b",
+    )
+    return (
+        _annotate_transform_with_sheet_frame(before_transform, before_frame_bbox),
+        _annotate_transform_with_sheet_frame(after_transform, after_frame_bbox),
+        before_frame_bbox,
+        after_frame_bbox,
+    )
 
 
 def _pixel_size_from_transform(transform: Optional[Dict[str, Any]]) -> Tuple[int, int]:

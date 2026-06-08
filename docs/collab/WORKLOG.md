@@ -222,3 +222,5 @@
 - 2026-06-08 Codex: Re-ran visible Computer Use PDF/DWG GUI verification and made the direct Workbench smoke script close the window so zone-render QProcess cleanup runs before exit.
 - 2026-06-08 Codex: Removed accidentally committed Claude scratch/probe artifacts from the PR branch before opening the integration PR.
 - 2026-06-08 Codex: Fixed selected-zone before/after crop desynchronization by giving blank sides a shared world frame, restored v2 manifest pixel sizes from v1-style transforms, and rendered DXF text with Korean-capable fonts in overview/full-detail crops.
+- 2026-06-08 Codex: Added sheet-frame based lightweight viewer alignment so detected 도곽 metadata maps both panes through a shared sheet-local coordinate system before falling back to the existing world-union camera frame.
+- 2026-06-08 Codex: Propagated sheet-frame bbox metadata through CAD-CAD viewer package manifests, overlays, and transforms so lightweight pane alignment can use detected drawing frames instead of raw world extents.

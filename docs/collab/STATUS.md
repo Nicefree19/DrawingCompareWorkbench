@@ -7,7 +7,7 @@ Last updated: 2026-06-08
 - Current owner: Codex
 - Current thread: Integrate Claude visual/PVH work onto latest re-origin main
 - Branch: `codex/integrate-claude-p0-visuals`
-- State: selected-zone before/after shared-frame alignment and DXF text rendering hardening complete
+- State: sheet-frame viewer alignment, manifest propagation, and DXF text rendering hardening complete
 
 ## Current Decision
 
@@ -58,10 +58,21 @@ Last updated: 2026-06-08
 - Post font-selection hardening: `python -m pytest tests\unit\services\comparison\test_dxf_renderer_backends.py::test_fast_renderer_draws_text_entities tests\unit\services\comparison\test_dxf_renderer_backends.py::test_preferred_cad_text_font_replaces_arial_style_for_cjk_labels -q` (2 passed).
 - Post final alignment check: `python -m pytest tests\unit\gui\test_lightweight_zone_crop.py tests\unit\services\comparison\test_viewer_frame_p0_3.py tests\unit\gui\test_zone_focus_zoom_match.py tests\unit\services\comparison\test_viewer_package.py::test_v2_manifest_accepts_v1_img_width_height_transforms -q` (21 passed).
 - Restarted visible Workbench after the latest patch: `logs\runtime_monitor\user_live_fixed_20260608_204442\run_manifest.json`, PID `1461460`, responding `true`, app error delta `0`.
+- 2026-06-08 sheet-frame alignment research check: ezdxf docs confirm layout extents are not automatically reliable and bbox support has entity limitations, so detected drawing-frame geometry is a better primary viewport anchor than raw full extents; OpenCV affine/homography RANSAC remains a secondary fallback/validation path for raster-only cases.
+- Added `src\services\comparison\sheet_frame_alignment.py` and wired `src\gui\workbench_visual_extensions.py` so before/after panes use side-specific native camera bboxes for the same 0..1 sheet-local 도곽 window when frame metadata exists, then fall back to existing world-union framing.
+- Sheet-frame verification: `python -m pytest tests\unit\services\comparison\test_sheet_frame_alignment.py tests\unit\gui\test_workbench_visual_extensions.py -q` (7 passed).
+- Sheet-frame regression check: `python -m pytest tests\unit\services\comparison\test_viewer_frame_p0_3.py tests\unit\services\comparison\test_sheet_frame_alignment.py tests\unit\gui\test_workbench_visual_extensions.py tests\unit\gui\test_zone_focus_zoom_match.py -q` (18 passed).
+- Static checks after sheet-frame alignment: `python -m py_compile src\services\comparison\sheet_frame_alignment.py src\gui\workbench_visual_extensions.py`; `git diff --check`.
+- Viewer package sheet-frame propagation now carries frame bbox metadata through CAD-CAD pair entries, overlay JSON, and before/after transforms; `world_bbox`/`cad_world_bbox` are deliberately excluded from sheet-frame hints.
+- Sheet-frame package propagation check: `python -m pytest tests\unit\services\comparison\test_viewer_package.py::test_sheet_frame_bboxes_annotate_transforms_without_world_bbox_fallback tests\unit\services\comparison\test_viewer_package.py::test_viewer_package_propagates_sheet_frame_bboxes_to_cad_pair_manifest tests\unit\services\comparison\test_sheet_frame_alignment.py tests\unit\gui\test_workbench_visual_extensions.py -q` (9 passed).
+- Viewer package regression check: `python -m pytest tests\unit\services\comparison\test_viewer_package.py -q` (27 passed).
+- Static checks after package propagation: `python -m py_compile src\services\comparison\viewer_package.py src\services\comparison\sheet_frame_alignment.py src\gui\workbench_visual_extensions.py`; `git diff --check`.
+- Restarted visible Workbench after sheet-frame alignment: `logs\runtime_monitor\user_live_sheet_frame_20260608_214627\run_manifest.json`, PID `1513704`, responding `true`, app error delta `0`.
+- Restarted visible Workbench after sheet-frame package propagation: `logs\runtime_monitor\user_live_sheet_frame_pkg_20260608_220817\run_manifest.json`, PID `1526804`, window title `도면 변경 비교`, responding `true`, app error delta `0`.
 
 ## Open Notes
 
 - Accidental Claude scratch/probe artifacts from the branch have been removed before PR creation.
 - `logs\error_20260607.log` contains unsupported-AC1032 preflight errors from direct DWG file runs; the subsequent folder run completed through converted DXF fallback.
 - Direct GUI test artifacts are under `build\manual_runtime_debug\gui_compare_20260608\pdf_file_pair_windows_qpa_final_verify`, `build\manual_runtime_debug\gui_compare_20260608\pdf_file_pair_computer_verify_20260608_110852`, `build\manual_runtime_debug\gui_compare_20260608\cad_dwg_file_pair_windows_qpa_source_timeout_30s`, `build\manual_runtime_debug\gui_compare_20260608\cad_dwg_file_pair_computer_verify_20260608_111104`, and `build\manual_runtime_debug\gui_compare_20260608\cad_dwg_file_pair_cleanup_verify_20260608_111916`.
-- Existing visible app PID `1393064` was stopped; current visible app is PID `1461460` under `logs\runtime_monitor\user_live_fixed_20260608_204442`.
+- Existing visible app PID `1513704` was stopped; current visible app is PID `1526804` under `logs\runtime_monitor\user_live_sheet_frame_pkg_20260608_220817`.
