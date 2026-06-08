@@ -895,6 +895,49 @@ class LightweightDrawingViewport(QWidget):
         )
         return True
 
+    def show_empty_world_bbox(
+        self,
+        world_bbox: tuple[float, float, float, float],
+        *,
+        empty_notice: str = "No drawing content is available for this side.",
+    ) -> bool:
+        """Show an empty background that still owns a real world frame.
+
+        Selected-zone crops can legitimately exist on only one side of a
+        before/after pair. Keeping the other viewport on its previous raster
+        silently shows a different drawing region, so callers use this method
+        to clear the image while preserving the same CAD-world camera frame.
+        """
+
+        root = self._quick.rootObject()
+        if root is None:
+            logger.warning(
+                "LightweightViewport: QML root not ready, deferring empty frame"
+            )
+            return False
+        bbox = _normalise_bbox(world_bbox)
+        if bbox is None:
+            return False
+        self._world_bbox = bbox
+        _clear_pdf_background_state(self, root)
+        root.setProperty("worldBbox", list(bbox))
+        root.setProperty("backgroundImageWorldBbox", list(bbox))
+        root.setProperty("primitives", [])
+        root.setProperty("emptyNotice", _readable_pdf_notice(empty_notice))
+        self._loaded_pack_path = None
+        self._primitive_count = 0
+        self._pdf_render_state = None
+        logger.info(
+            "LightweightViewport(%s): empty raster frame "
+            "world_bbox=(%.1f, %.1f, %.1f, %.1f)",
+            self._side,
+            bbox[0],
+            bbox[1],
+            bbox[2],
+            bbox[3],
+        )
+        return True
+
     # ------------------------------------------------------------------
     # PDF page loading (Phase G2.7)
     # ------------------------------------------------------------------

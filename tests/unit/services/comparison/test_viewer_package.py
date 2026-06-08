@@ -514,6 +514,47 @@ def test_v2_and_v3_manifests_preserve_cad_visual_backend_capabilities(tmp_path: 
     assert "cad_visual:fake_pdf:1.2.3:test_license" in v3.before_source_signature.backend_sig
 
 
+def test_v2_manifest_accepts_v1_img_width_height_transforms() -> None:
+    v1 = {
+        "schema_version": 2,
+        "pairs": [
+            {
+                "pair_id": "S21-0001",
+                "source_a": "old.dxf",
+                "source_b": "new.dxf",
+                "coordinate_source": "cad_world",
+                "before_image": "before.png",
+                "after_image": "after.png",
+                "before_transform": {
+                    "min_x": -60.0,
+                    "min_y": -100.0,
+                    "max_x": 460000.0,
+                    "max_y": 9000.0,
+                    "img_width": 8000,
+                    "img_height": 1779,
+                },
+                "after_transform": {
+                    "min_x": -60.0,
+                    "min_y": -90.0,
+                    "max_x": 378000.0,
+                    "max_y": 9000.0,
+                    "img_width": 8000,
+                    "img_height": 2079,
+                },
+            }
+        ],
+    }
+
+    v2 = _build_v2_manifest_from_v1(v1_manifest=v1, options=ViewerPackageOptions())
+
+    pair = v2.pairs[0]
+    assert pair.before is not None
+    assert pair.after is not None
+    assert pair.before.pixel_size == (8000, 1779)
+    assert pair.after.pixel_size == (8000, 2079)
+    assert v2.shared_world_bbox == (-60.0, -100.0, 460000.0, 9000.0)
+
+
 def test_viewer_package_limits_overlay_rows_before_materialisation(
     tmp_path: Path,
     monkeypatch,

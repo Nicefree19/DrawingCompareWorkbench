@@ -19,6 +19,7 @@ The tests render a tiny synthetic DXF (a few primitives) so they finish in
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,8 @@ from src.services.comparison.dxf_renderer import (
     DxfRenderer,
     PYMUPDF_AVAILABLE,
     RENDERER_AVAILABLE,
+    apply_preferred_cad_text_font,
+    preferred_text_font_file,
     _resolve_backend_choice,
 )
 
@@ -240,6 +243,71 @@ def test_explicit_fast_backend_works_standalone(tiny_dxf: Path) -> None:
     assert transform["backend_used"] == "fast"
     assert img.shape[2] == 3 and img.dtype == np.uint8
     assert img.min() < 100  # something drawn
+
+
+def test_fast_renderer_draws_text_entities(tmp_path: Path, caplog) -> None:
+    import ezdxf
+
+    def _write(path: Path, *, with_text: bool) -> None:
+        doc = ezdxf.new("R2010")
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (120, 0), (120, 80), (0, 80), (0, 0)])
+        if with_text:
+            msp.add_text(
+                "ROOM-A",
+                dxfattribs={"height": 16, "insert": (10, 35)},
+            )
+            msp.add_mtext(
+                "NOTE\\P123",
+                dxfattribs={"char_height": 10, "insert": (10, 58)},
+            )
+            dim = msp.add_aligned_dim(p1=(10, 10), p2=(110, 10), distance=12)
+            dim_entity = getattr(dim, "dimension", dim)
+            dim_entity.dxf.text = "100"
+        doc.saveas(str(path))
+
+    base = tmp_path / "base.dxf"
+    text = tmp_path / "text.dxf"
+    _write(base, with_text=False)
+    _write(text, with_text=True)
+
+    base_img, _ = DxfRenderer(backend="fast").render_with_transform(
+        base, dpi=72, max_edge_px=512
+    )
+    caplog.set_level(logging.INFO, logger="src.services.comparison.dxf_renderer")
+    text_img, transform = DxfRenderer(backend="fast").render_with_transform(
+        text, dpi=72, max_edge_px=512
+    )
+
+    dark_base = int(np.count_nonzero(np.min(base_img, axis=2) < 128))
+    dark_text = int(np.count_nonzero(np.min(text_img, axis=2) < 128))
+    assert transform["backend_used"] == "fast"
+    assert dark_text > dark_base + 100
+    skipped_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "DXF fast render skipped entity types" in record.getMessage()
+    ]
+    assert not any("TEXT" in message for message in skipped_messages)
+    assert not any("MTEXT" in message for message in skipped_messages)
+    assert not any("DIMENSION" in message for message in skipped_messages)
+
+
+def test_preferred_cad_text_font_replaces_arial_style_for_cjk_labels() -> None:
+    import ezdxf
+
+    if not preferred_text_font_file():
+        pytest.skip("No Korean-capable Matplotlib font is available")
+
+    doc = ezdxf.new("R2010")
+    standard = doc.styles.get("Standard")
+    standard.dxf.font = "arial.ttf"
+
+    replacements = apply_preferred_cad_text_font(doc)
+
+    assert replacements >= 1
+    assert standard.dxf.font
+    assert standard.dxf.font.lower() != "arial.ttf"
 
 
 def test_renderer_sanitizes_missing_lwpolyline_subclass_before_dispatch() -> None:

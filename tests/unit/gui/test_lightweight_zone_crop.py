@@ -31,6 +31,7 @@ from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
 class _FakeViewport:
     def __init__(self):
         self.raster_calls: list[tuple] = []
+        self.empty_frame_calls: list[tuple] = []
         self.fidelity: list[tuple] = []
         self.camera_calls: list[tuple] = []
         self.fit_calls: int = 0
@@ -44,6 +45,10 @@ class _FakeViewport:
 
     def set_camera_to_world_bbox(self, world_bbox, padding_ratio=0.0):
         self.camera_calls.append((world_bbox, padding_ratio))
+
+    def show_empty_world_bbox(self, world_bbox, *, empty_notice=""):
+        self.empty_frame_calls.append((world_bbox, empty_notice))
+        return True
 
     def fit_to_view(self):
         self.fit_calls += 1
@@ -115,10 +120,12 @@ def test_ready_crop_loads_into_both_lightweight_viewports_and_refocuses():
     assert ns._lightweight_zone_crop_pair_v2 == "pair-1"
     # overlays re-pushed with the zone as focus
     assert ns.push_calls == [("pair-1", "C-004")]
-    # each loaded side framed via QML-native fitToView (timing-robust; the
-    # Python-side set_camera read stale root size live -> crop zoomed-out/tiny)
-    assert before.fit_calls == 1
-    assert after.fit_calls == 1
+    # Both sides are driven to the same CAD-world crop frame so before/after
+    # panes inspect the same place even when their side transforms differ.
+    assert before.camera_calls == [((10.0, 20.0, 112.0, 72.0), 0.0)]
+    assert after.camera_calls == [((10.0, 20.0, 112.0, 72.0), 0.0)]
+    assert before.fit_calls == 0
+    assert after.fit_calls == 0
 
 
 def test_pdf_render_status_is_left_to_pdf_path():
@@ -202,7 +209,7 @@ def test_ready_crop_with_both_images_missing_keeps_relative_only():
     assert ns.push_calls == [] and ns.focus_calls == []
 
 
-def test_blank_side_skipped_when_zone_window_outside_that_side_background():
+def test_blank_side_gets_empty_frame_when_zone_window_outside_that_side_background():
     """Disjoint-coord DWG: the zone window sits inside the AFTER background but
     far outside the BEFORE background (revised drawing re-originated), so the
     worker wrote a blank white before-crop. The before side must degrade to
@@ -234,18 +241,30 @@ def test_blank_side_skipped_when_zone_window_outside_that_side_background():
 
     _call(ns, "pair-1", "C-040", payload, "ready")
 
-    # before side: zone window outside its background -> NOT loaded, honest degrade
+    # before side: zone window outside its background -> empty frame, honest degrade
     assert before.raster_calls == []
+    assert before.empty_frame_calls == [
+        (
+            (507000.0, -105000.0, 517000.0, -101000.0),
+            "이 면에는 선택 구역에 해당하는 도면이 없습니다.",
+        )
+    ]
     assert before.fidelity[-1][0] == "relative_only"
     # after side: zone window inside its background -> crisp crop loaded
     assert len(after.raster_calls) == 1
     assert str(after.raster_calls[0][0]).endswith("zone_after.png")
     assert after.fidelity[-1][0] == "raster_refined"
-    # one side loaded -> pair tracked, overlays pushed, fitToView on AFTER only
+    # loaded/empty sides share the same camera frame.
     assert ns._lightweight_zone_crop_pair_v2 == "pair-1"
     assert ns.push_calls == [("pair-1", "C-040")]
-    assert before.fit_calls == 0  # blank side: no crop, no fit
-    assert after.fit_calls == 1
+    assert before.camera_calls == [
+        ((507000.0, -105000.0, 517000.0, -101000.0), 0.0)
+    ]
+    assert after.camera_calls == [
+        ((507000.0, -105000.0, 517000.0, -101000.0), 0.0)
+    ]
+    assert before.fit_calls == 0
+    assert after.fit_calls == 0
 
 
 def test_noop_when_lightweight_viewports_absent():

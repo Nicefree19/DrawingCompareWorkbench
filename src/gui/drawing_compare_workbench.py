@@ -64,6 +64,7 @@ except Exception:
     QT_QUICK_AVAILABLE = False
 
 from src.gui import workbench_visual_extensions as visual_ext
+from src.gui import zone_crop_alignment as zone_align
 from src.gui.compare_runtime_diagnostics import default_gui_dwg_backend_mode, format_auto_compare_error
 from src.gui.source_path_repair import has_lossy_path_text, registered_dxf_fallback_for_source
 from src.gui.theme import NanoColors, get_stylesheet
@@ -12303,29 +12304,48 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         def _overlaps(a, b) -> bool:
             return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
+        before_crop_bbox = self._transform_world_bbox_v2(
+            result_payload.get("before_transform")
+        )
+        after_crop_bbox = self._transform_world_bbox_v2(
+            result_payload.get("after_transform")
+        )
+        shared_crop_bbox = zone_align.union_bboxes(
+            before_crop_bbox,
+            after_crop_bbox,
+            zone_window,
+        )
+
         specs = (
             ("before", before_vp, result_payload.get("before_image"),
-             result_payload.get("before_transform"), viewer_pair.get("before_transform")),
+             before_crop_bbox, viewer_pair.get("before_transform")),
             ("after", after_vp, result_payload.get("after_image"),
-             result_payload.get("after_transform"), viewer_pair.get("after_transform")),
+             after_crop_bbox, viewer_pair.get("after_transform")),
         )
         loaded_before = False
         loaded_after = False
         loaded_frames: list[tuple] = []  # (viewport, crop world_bbox) for camera fit
-        for side, viewport, image_value, crop_transform, bg_transform in specs:
+        for side, viewport, image_value, world_bbox, bg_transform in specs:
             bg_bbox = self._transform_world_bbox_v2(bg_transform)
             if zone_window and bg_bbox and not _overlaps(zone_window, bg_bbox):
                 # Blank crop on this side (zone window outside its background).
+                empty_bbox = shared_crop_bbox or zone_window
+                shown_empty = zone_align.show_empty_side_frame(viewport, empty_bbox)
                 try:
                     viewport.set_fidelity_state(
                         "relative_only",
-                        status_text="이 면에는 선택 구역에 해당하는 도면이 없습니다.",
+                        status_text=zone_align.EMPTY_SIDE_NOTICE,
                     )
                 except Exception:
                     logger.debug("zone crop blank-side fidelity failed", exc_info=True)
+                if shown_empty:
+                    loaded_frames.append((viewport, empty_bbox))
+                    if side == "before":
+                        loaded_before = True
+                    else:
+                        loaded_after = True
                 continue
             image_path = _resolve_viewer_artifact_path(image_value, self._viewer_root)
-            world_bbox = self._transform_world_bbox_v2(crop_transform)
             try:
                 loaded = viewport.load_raster_image(
                     image_path,
@@ -12369,7 +12389,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # had just swapped the world frame under a camera fit to the old frame.
         self._lightweight_camera_sync_in_progress = True
         try:
-            for viewport, _world_bbox in loaded_frames:
+            for viewport, world_bbox in loaded_frames:
                 try:
                     # Use the QML-native fitToView (the "전체 보기" button's path):
                     # it computes the fit IN QML from the live root size + the
@@ -12378,8 +12398,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                     # the world-frame swap and got a stale value live, so the crop
                     # rendered zoomed-out/tiny in the corner. fitToView reads the
                     # size at QML-execution time and frames the crop reliably.
-                    viewport.fit_to_view()
-                    self._log_zone_crop_camera_state_v2(viewport, zone_id)
+                    zone_align.sync_crop_camera(
+                        viewport,
+                        shared_bbox=shared_crop_bbox,
+                        loaded_frame_count=len(loaded_frames),
+                    )
+                    zone_align.maybe_log_camera_state(self, viewport, zone_id)
                 except Exception:
                     logger.exception("zone crop fit_to_view failed for %s", zone_id)
         finally:

@@ -221,3 +221,4 @@
 - 2026-06-08 Codex: Adjusted viewer performance fallback aggregation to clear transient fast-crop fallback counts when the same pair/zone later succeeds with full-detail source rendering.
 - 2026-06-08 Codex: Re-ran visible Computer Use PDF/DWG GUI verification and made the direct Workbench smoke script close the window so zone-render QProcess cleanup runs before exit.
 - 2026-06-08 Codex: Removed accidentally committed Claude scratch/probe artifacts from the PR branch before opening the integration PR.
+- 2026-06-08 Codex: Fixed selected-zone before/after crop desynchronization by giving blank sides a shared world frame, restored v2 manifest pixel sizes from v1-style transforms, and rendered DXF text with Korean-capable fonts in overview/full-detail crops.

@@ -3335,6 +3335,17 @@ def _v2_pixel_size_from_transform(transform: Optional[Dict[str, Any]]) -> Tuple[
             return (int(px[0]), int(px[1]))
         except (TypeError, ValueError):
             pass
+    for width_key, height_key in (
+        ("img_width", "img_height"),
+        ("width", "height"),
+    ):
+        try:
+            width = int(float(transform.get(width_key) or 0))
+            height = int(float(transform.get(height_key) or 0))
+        except (TypeError, ValueError):
+            continue
+        if width > 0 and height > 0:
+            return (width, height)
     return (0, 0)
 
 
