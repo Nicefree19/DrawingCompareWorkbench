@@ -1700,6 +1700,20 @@ class FullZoneTreePlanWorker(QThread):
             self.failed.emit(self.pair_id, self.generation, str(exc))
 
 
+# A cold "source render" upgrade parses BOTH sides of the pair, each a large
+# DXF. Measured (scripts/p4_worker_sim.py): a 2-sided cold render of an ~88 MB
+# pair = ~29 s wall (ezdxf parse ~7 s + envelope build per side), right at the
+# old 30 s ceiling. When that crossed 30 s on slower hardware / bigger drawings
+# the worker was killed mid-parse, destroying the warm render-index cache before
+# any zone could reuse it — so every subsequent zone re-parsed cold. That is the
+# "DXF idx hit 0.0%" + repeated ~13-29 s symptom: the in-process cache is
+# verified to give a 7.7x speedup (29 s -> 3.8 s) once it survives one render.
+# The deferred sharp upgrade runs behind the already-painted fast crop, so a
+# generous ceiling costs the user no perceived latency and lets the cache warm
+# once and be reused for every following zone. Bounds a genuine hang at 90 s.
+SOURCE_RENDER_TIMEOUT_MS = 90_000
+
+
 class ZoneRenderProcessController(QObject):
     """Persistent JSONL render subprocess for one active drawing pair."""
 
@@ -1710,7 +1724,7 @@ class ZoneRenderProcessController(QObject):
         self,
         *,
         timeout_ms: int = 10_000,
-        source_timeout_ms: int = 30_000,
+        source_timeout_ms: int = SOURCE_RENDER_TIMEOUT_MS,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
