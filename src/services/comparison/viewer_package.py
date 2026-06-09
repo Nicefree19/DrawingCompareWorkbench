@@ -484,6 +484,17 @@ def export_viewer_package(
                 after_transform,
                 hybrid_after_alignment,
             )
+        (
+            before_transform,
+            after_transform,
+            before_sheet_frame_bbox,
+            after_sheet_frame_bbox,
+        ) = _attach_sheet_frame_bboxes_to_transforms(
+            rows=rows,
+            artifact=pair_artifact,
+            before_transform=before_transform,
+            after_transform=after_transform,
+        )
         has_pdf_visual_background = is_pdf_pair or is_hybrid_pdf_visual_pair
         pdf_page_size = (
             _pdf_page_size_from_transforms(after_transform, before_transform)
@@ -755,6 +766,10 @@ def export_viewer_package(
             "overlay_legacy_truncated": legacy_overlay_truncated,
             "overlays": legacy_overlays,
         }
+        if before_sheet_frame_bbox is not None:
+            overlay_payload["before_cad_frame_bbox"] = _bbox_to_manifest_list(before_sheet_frame_bbox)
+        if after_sheet_frame_bbox is not None:
+            overlay_payload["after_cad_frame_bbox"] = _bbox_to_manifest_list(after_sheet_frame_bbox)
         overlay_payload.update(overlay_page_fields)
         overlay_path = overlay_dir / f"{safe_pair}.json"
         _write_json(overlay_path, overlay_payload)
@@ -838,6 +853,10 @@ def export_viewer_package(
         }
         if cad_visual_conversion:
             pair_entry["cad_visual_conversion"] = cad_visual_conversion
+        if before_sheet_frame_bbox is not None:
+            pair_entry["before_cad_frame_bbox"] = _bbox_to_manifest_list(before_sheet_frame_bbox)
+        if after_sheet_frame_bbox is not None:
+            pair_entry["after_cad_frame_bbox"] = _bbox_to_manifest_list(after_sheet_frame_bbox)
         pair_entries.append(pair_entry)
         warnings.extend([f"{pair_id}: {warning}" for warning in pair_warning if warning])
 
@@ -2132,6 +2151,104 @@ def _cad_frame_bbox_for_pair_side(
     return None
 
 
+def _sheet_frame_bbox_for_pair_side(
+    *,
+    rows: Sequence[Dict[str, str]],
+    artifact: Dict[str, Any],
+    side: str,
+) -> Optional[Tuple[float, float, float, float]]:
+    side_keys = (
+        (
+            "sheet_frame_bbox_a",
+            "before_sheet_frame_bbox",
+            "cad_frame_bbox_a",
+            "before_cad_frame_bbox",
+            "dwg_frame_bbox_a",
+            "before_dwg_frame_bbox",
+            "source_a_frame_bbox",
+            "frame_bbox_a",
+        )
+        if side == "a"
+        else (
+            "sheet_frame_bbox_b",
+            "after_sheet_frame_bbox",
+            "cad_frame_bbox_b",
+            "after_cad_frame_bbox",
+            "dwg_frame_bbox_b",
+            "after_dwg_frame_bbox",
+            "source_b_frame_bbox",
+            "frame_bbox_b",
+        )
+    )
+    common_keys = (
+        "sheet_frame_bbox",
+        "cad_frame_bbox",
+        "dwg_frame_bbox",
+        "drawing_frame_bbox",
+        "frame_bbox",
+    )
+    for container in (artifact, *rows):
+        if not isinstance(container, dict):
+            continue
+        for key in (*side_keys, *common_keys):
+            raw = container.get(key)
+            bbox = normalise_bbox(raw)
+            if bbox is None:
+                bbox = _parse_bbox(raw)
+            if bbox is not None:
+                return bbox
+    return None
+
+
+def _bbox_to_manifest_list(
+    bbox: Tuple[float, float, float, float],
+) -> List[float]:
+    return [float(value) for value in bbox]
+
+
+def _annotate_transform_with_sheet_frame(
+    transform: Optional[Dict[str, Any]],
+    frame_bbox: Optional[Tuple[float, float, float, float]],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(transform, dict) or frame_bbox is None:
+        return transform
+    frame_values = _bbox_to_manifest_list(frame_bbox)
+    annotated = dict(transform)
+    annotated.setdefault("sheet_frame_bbox", frame_values)
+    annotated.setdefault("cad_frame_bbox", frame_values)
+    return annotated
+
+
+def _attach_sheet_frame_bboxes_to_transforms(
+    *,
+    rows: Sequence[Dict[str, str]],
+    artifact: Dict[str, Any],
+    before_transform: Optional[Dict[str, Any]],
+    after_transform: Optional[Dict[str, Any]],
+) -> Tuple[
+    Optional[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+    Optional[Tuple[float, float, float, float]],
+    Optional[Tuple[float, float, float, float]],
+]:
+    before_frame_bbox = _sheet_frame_bbox_for_pair_side(
+        rows=rows,
+        artifact=artifact,
+        side="a",
+    )
+    after_frame_bbox = _sheet_frame_bbox_for_pair_side(
+        rows=rows,
+        artifact=artifact,
+        side="b",
+    )
+    return (
+        _annotate_transform_with_sheet_frame(before_transform, before_frame_bbox),
+        _annotate_transform_with_sheet_frame(after_transform, after_frame_bbox),
+        before_frame_bbox,
+        after_frame_bbox,
+    )
+
+
 def _pixel_size_from_transform(transform: Optional[Dict[str, Any]]) -> Tuple[int, int]:
     if not isinstance(transform, dict):
         return (0, 0)
@@ -2317,9 +2434,18 @@ def _normalize_bbox(
 def _pixel_bbox(
     box: Optional[Tuple[float, float, float, float]],
     transform: Optional[Dict[str, Any]],
+    *,
+    bbox_coordinate_space: str = "",
+    pdf_dpi: float = 0.0,
 ) -> Optional[Dict[str, float]]:
     if not box or not transform:
         return None
+    box = _scale_image_pixel_bbox_for_transform(
+        box,
+        transform,
+        bbox_coordinate_space=bbox_coordinate_space,
+        pdf_dpi=pdf_dpi,
+    )
     try:
         pixel = _bbox_to_pixel_bbox(box, transform)
     except Exception:
@@ -2341,6 +2467,35 @@ def _pixel_bbox(
         "width": float(pixel["width"]),
         "height": float(pixel["height"]),
     }
+
+
+def _scale_image_pixel_bbox_for_transform(
+    box: Tuple[float, float, float, float],
+    transform: Dict[str, Any],
+    *,
+    bbox_coordinate_space: str = "",
+    pdf_dpi: float = 0.0,
+) -> Tuple[float, float, float, float]:
+    if str(bbox_coordinate_space or "").lower() != "image_pixels":
+        return box
+    if str(transform.get("coordinate_space") or "").lower() != "image_pixels":
+        return box
+    try:
+        source_dpi = float(pdf_dpi or 0.0)
+    except (TypeError, ValueError):
+        source_dpi = 0.0
+    target_dpi = _pdf_dpi_from_transforms(transform, None)
+    if source_dpi <= 0.0 or target_dpi <= 0.0:
+        return box
+    if abs(source_dpi - target_dpi) < 1e-6:
+        return box
+    scale = target_dpi / source_dpi
+    return (
+        float(box[0]) * scale,
+        float(box[1]) * scale,
+        float(box[2]) * scale,
+        float(box[3]) * scale,
+    )
 
 
 def _clamp01(value: float) -> float:
@@ -2388,8 +2543,18 @@ def _overlay_from_zone_row(
         "bbox": _bbox_dict(bbox),
         "old_bbox": _bbox_dict(old_bbox),
         "normalized_bbox": _normalize_bbox(bbox, extents),
-        "before_bbox_px": _pixel_bbox(old_bbox, before_transform),
-        "after_bbox_px": _pixel_bbox(bbox, after_transform),
+        "before_bbox_px": _pixel_bbox(
+            old_bbox,
+            before_transform,
+            bbox_coordinate_space=bbox_coordinate_space,
+            pdf_dpi=pdf_dpi,
+        ),
+        "after_bbox_px": _pixel_bbox(
+            bbox,
+            after_transform,
+            bbox_coordinate_space=bbox_coordinate_space,
+            pdf_dpi=pdf_dpi,
+        ),
         "selected_for_review": bool(selected),
         "priority_rank": priority_rank,
         "priority_score": priority_score,
@@ -2398,6 +2563,17 @@ def _overlay_from_zone_row(
         "bbox_coordinate_space": bbox_coordinate_space,
         "pdf_dpi": pdf_dpi,
     }
+    # B안 — carry the entity geometry (JSON in the zone CSV) so the reloaded
+    # overlay path draws the cloud along the real shape, matching the live
+    # fresh-compare path (ZoneOverlay.geometry). Absent/blank → omitted.
+    geometry_raw = str(row.get("geometry") or "").strip()
+    if geometry_raw:
+        try:
+            geometry = json.loads(geometry_raw)
+        except (ValueError, TypeError):
+            geometry = None
+        if isinstance(geometry, dict):
+            overlay["geometry"] = geometry
     if page_pair is not None:
         page_a, page_b = page_pair
         overlay["page_a"] = page_a
@@ -3276,6 +3452,17 @@ def _v2_pixel_size_from_transform(transform: Optional[Dict[str, Any]]) -> Tuple[
             return (int(px[0]), int(px[1]))
         except (TypeError, ValueError):
             pass
+    for width_key, height_key in (
+        ("img_width", "img_height"),
+        ("width", "height"),
+    ):
+        try:
+            width = int(float(transform.get(width_key) or 0))
+            height = int(float(transform.get(height_key) or 0))
+        except (TypeError, ValueError):
+            continue
+        if width > 0 and height > 0:
+            return (width, height)
     return (0, 0)
 
 

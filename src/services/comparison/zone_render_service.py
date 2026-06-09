@@ -1552,6 +1552,12 @@ def _render_dxf_window(
 
     doc = render_index.doc
     msp = render_index.modelspace
+    try:
+        replacements = dxf_module.apply_preferred_cad_text_font(doc)
+        if replacements:
+            logger.debug("zone render text styles remapped to CJK font: %d", replacements)
+    except Exception:
+        logger.debug("zone render text style remap failed", exc_info=True)
     total_count = len(render_index.envelopes)
     # Plan §17 Phase B-3 — skip the envelope filter when the modelspace
     # is small. The filter callback's per-entity overhead exceeds the
@@ -1568,6 +1574,21 @@ def _render_dxf_window(
         def filter_func(entity: Any) -> bool:  # type: ignore[misc]
             handle = getattr(getattr(entity, "dxf", None), "handle", None)
             return str(handle) in visible_handles
+
+    font_family = dxf_module.preferred_text_font_family()
+    if font_family:
+        try:
+            dxf_module.plt.rcParams["font.family"] = font_family
+            dxf_module.plt.rcParams["font.sans-serif"] = [
+                font_family,
+                "Malgun Gothic",
+                "Gulim",
+                "Dotum",
+                "DejaVu Sans",
+            ]
+            dxf_module.plt.rcParams["axes.unicode_minus"] = False
+        except Exception:
+            logger.debug("zone render font rc setup failed", exc_info=True)
 
     fig = dxf_module.plt.figure(
         figsize=(int(transform["img_width"]) / 100.0, int(transform["img_height"]) / 100.0),

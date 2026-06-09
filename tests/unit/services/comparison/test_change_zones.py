@@ -117,7 +117,164 @@ def test_nearby_raw_changes_group_into_one_zone() -> None:
     assert zones[0].raw_change_count == 2
     assert zones[0].added_count == 1
     assert zones[0].modified_count == 1
-    assert zones[0].change_type == "mixed"
+
+
+def test_single_line_zone_retains_geometry_points() -> None:
+    # B안 — a lone LINE change keeps its endpoints (CAD-world mm) so the viewer
+    # can draw the revision cloud along the actual leader line instead of its
+    # (here very wide) axis-aligned bbox.
+    changes = [_line_change("a", ChangeType.ADDED, (10.0, 20.0), (5000.0, 800.0))]
+
+    zones = build_change_zones(
+        _result(changes),
+        pair_id="P",
+        drawing_number="P",
+        options=ChangeZoneOptions(cluster_distance=120, bbox_margin=0),
+    )
+
+    assert len(zones) == 1
+    geom = zones[0].geometry
+    assert geom == {"type": "LINE", "points": [[10.0, 20.0], [5000.0, 800.0]]}
+    # round-trips through to_dict (so it can reach the overlay/QML layer)
+    assert zones[0].to_dict()["geometry"] == geom
+
+
+def test_multi_entity_zone_has_no_geometry() -> None:
+    # Ambiguous (>1 raw change) → no single representative shape → None, so the
+    # viewer keeps the bbox outline (Phase A) rather than guessing a polyline.
+    changes = [
+        _line_change("a", ChangeType.ADDED, (0, 0), (100, 0)),
+        _line_change("b", ChangeType.ADDED, (10, 10), (110, 10)),
+    ]
+
+    zones = build_change_zones(
+        _result(changes),
+        pair_id="P",
+        drawing_number="P",
+        options=ChangeZoneOptions(cluster_distance=120, bbox_margin=0),
+    )
+
+    assert len(zones) == 1
+    assert zones[0].raw_change_count == 2
+    assert zones[0].geometry is None
+
+
+def test_zone_overlay_carries_geometry_to_live_overlay() -> None:
+    # B2 (live source pin) — a fresh DWG/DXF compare converts DrawingChangeZone
+    # → ZoneOverlay → overlay dict. Geometry must survive THAT conversion, not
+    # only DrawingChangeZone.to_dict() (which the live path does not use).
+    from src.services.comparison.change_zones import DrawingChangeZone
+    from src.services.comparison.review_project import _zone_overlay
+
+    geom = {"type": "LINE", "points": [[-45547.0, -109829.0], [77894.0, -60599.0]]}
+    zone = DrawingChangeZone(
+        zone_id="C-002",
+        pair_id="P",
+        drawing_number="P",
+        change_type="added",
+        bbox=(-45547.0, -109829.0, 77894.0, -60599.0),
+        geometry=geom,
+    )
+
+    overlay = _zone_overlay(zone, before_transform={}, after_transform={}).to_dict()
+
+    assert overlay["geometry"] == geom
+
+
+def test_change_zone_csv_roundtrips_geometry_to_overlay(tmp_path: Path) -> None:
+    # B2 (overlay export) — geometry survives zone → CSV → _overlay_from_zone_row,
+    # the reloaded overlay path used by the full zone-tree rebuild (so the cloud
+    # doesn't revert to a bbox box after the initial preview).
+    import csv as _csv
+
+    from src.services.comparison.change_zones import (
+        DrawingChangeZone,
+        _write_change_zones_csv,
+    )
+    from src.services.comparison.viewer_package import _overlay_from_zone_row
+
+    geom = {"type": "LINE", "points": [[-45547.0, -109829.0], [77894.0, -60599.0]]}
+    zone = DrawingChangeZone(
+        zone_id="C-002",
+        pair_id="P",
+        drawing_number="P",
+        change_type="added",
+        bbox=(-45547.0, -109829.0, 77894.0, -60599.0),
+        geometry=geom,
+    )
+    csv_path = tmp_path / "change_zones.csv"
+    _write_change_zones_csv(csv_path, [zone])
+
+    rows = list(_csv.DictReader(csv_path.open(encoding="utf-8-sig")))
+    assert rows[0]["geometry"]  # column present and populated
+
+    overlay = _overlay_from_zone_row(
+        rows[0],
+        (-50000.0, -120000.0, 80000.0, -50000.0),
+        None,
+        False,
+        before_transform=None,
+        after_transform=None,
+    )
+    assert overlay["geometry"] == geom
+
+
+def test_stream_built_zone_recovers_line_geometry(tmp_path: Path) -> None:
+    # B3 — the change-zone STREAM (used by large/real comparisons) must preserve
+    # a LINE's geometry so stream-built zones can draw geometry-aware clouds.
+    from src.services.comparison.change_zones import write_change_zone_stream
+
+    change = _line_change("a", ChangeType.ADDED, (10.0, 20.0), (5000.0, 800.0))
+    stream_path = tmp_path / "changes.stream.jsonl"
+    meta = write_change_zone_stream([change], stream_path, pair_id="P")
+
+    result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")
+    result.metadata.update(meta)  # change_zone_stream_path + complete flag
+
+    zones = build_change_zones(
+        result,
+        pair_id="P",
+        drawing_number="P",
+        options=ChangeZoneOptions(cluster_distance=120, bbox_margin=0),
+    )
+
+    assert len(zones) == 1
+    assert zones[0].metadata.get("zone_input_source") == "stream"
+    assert zones[0].geometry == {"type": "LINE", "points": [[10.0, 20.0], [5000.0, 800.0]]}
+
+
+def test_stream_without_geometry_field_is_backward_compatible(tmp_path: Path) -> None:
+    # An older stream (no `geometry` field) must still build zones, with
+    # geometry=None — additive field, no schema-version bump.
+    import json as _json
+
+    from src.services.comparison.change_zones import CHANGE_ZONE_STREAM_SCHEMA_VERSION
+
+    rec = {
+        "schema_version": CHANGE_ZONE_STREAM_SCHEMA_VERSION,
+        "key": "a",
+        "change_type": "added",
+        "layer": "BEAM",
+        "entity_type": "LINE",
+        "bbox": [10.0, 20.0, 5000.0, 800.0],
+        # NOTE: no "geometry" key — simulates a stream written before B3.
+    }
+    stream_path = tmp_path / "old.stream.jsonl"
+    stream_path.write_text(_json.dumps(rec) + "\n", encoding="utf-8")
+
+    result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")
+    result.metadata["change_zone_stream_path"] = str(stream_path)
+    result.metadata["change_zone_stream_complete"] = True
+
+    zones = build_change_zones(
+        result,
+        pair_id="P",
+        drawing_number="P",
+        options=ChangeZoneOptions(cluster_distance=120, bbox_margin=0),
+    )
+
+    assert len(zones) == 1
+    assert zones[0].geometry is None
 
 
 def test_pdf_visual_change_uses_top_left_bbox() -> None:

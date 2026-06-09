@@ -895,6 +895,49 @@ class LightweightDrawingViewport(QWidget):
         )
         return True
 
+    def show_empty_world_bbox(
+        self,
+        world_bbox: tuple[float, float, float, float],
+        *,
+        empty_notice: str = "No drawing content is available for this side.",
+    ) -> bool:
+        """Show an empty background that still owns a real world frame.
+
+        Selected-zone crops can legitimately exist on only one side of a
+        before/after pair. Keeping the other viewport on its previous raster
+        silently shows a different drawing region, so callers use this method
+        to clear the image while preserving the same CAD-world camera frame.
+        """
+
+        root = self._quick.rootObject()
+        if root is None:
+            logger.warning(
+                "LightweightViewport: QML root not ready, deferring empty frame"
+            )
+            return False
+        bbox = _normalise_bbox(world_bbox)
+        if bbox is None:
+            return False
+        self._world_bbox = bbox
+        _clear_pdf_background_state(self, root)
+        root.setProperty("worldBbox", list(bbox))
+        root.setProperty("backgroundImageWorldBbox", list(bbox))
+        root.setProperty("primitives", [])
+        root.setProperty("emptyNotice", _readable_pdf_notice(empty_notice))
+        self._loaded_pack_path = None
+        self._primitive_count = 0
+        self._pdf_render_state = None
+        logger.info(
+            "LightweightViewport(%s): empty raster frame "
+            "world_bbox=(%.1f, %.1f, %.1f, %.1f)",
+            self._side,
+            bbox[0],
+            bbox[1],
+            bbox[2],
+            bbox[3],
+        )
+        return True
+
     # ------------------------------------------------------------------
     # PDF page loading (Phase G2.7)
     # ------------------------------------------------------------------
@@ -1371,6 +1414,14 @@ class LightweightDrawingViewport(QWidget):
             root.setProperty("cameraCenterX", cx)
             root.setProperty("cameraCenterY", cy)
             root.setProperty("unitsPerPixel", upp)
+            # Q2 — a deliberate camera placement (e.g. the post-comparison
+            # auto-zoom to the first change zone) must not be clobbered by a
+            # late first-time fitToView. The QML onWidthChanged/onHeightChanged
+            # fit-once guard only fits while ``cameraInitialized`` is false, so
+            # mark it true here. Without this, on first app open the viewport
+            # often sizes AFTER the zone-zoom and fitToView snaps the camera
+            # back to the whole drawing (changes shrink to sub-pixel again).
+            root.setProperty("cameraInitialized", True)
         except Exception:
             logger.exception("LightweightViewport: setProperty failed")
         # Phase G2.7-FU2 follow-up — a programmatic zone-focus zoom sets
@@ -1578,6 +1629,24 @@ class LightweightDrawingViewport(QWidget):
                 "zoneId": zid,  # required for QML overlayClicked routing
             }
 
+            # B안 — pass the entity's real geometry (CAD-world mm) so the QML can
+            # draw the cloud along the actual shape (e.g. a long leader line)
+            # instead of its bbox. DXF/DWG only: PDF overlays live in a different
+            # coordinate space, so skip them (the viewer keeps the bbox outline).
+            geom = ov.get("geometry")
+            if (
+                isinstance(geom, dict)
+                and not str(ov.get("bbox_coordinate_space") or "")
+                and isinstance(geom.get("points"), list)
+            ):
+                pts = [
+                    [float(p[0]), float(p[1])]
+                    for p in geom["points"]
+                    if isinstance(p, (list, tuple)) and len(p) >= 2
+                ]
+                if len(pts) >= 2:
+                    entry["geometry"] = pts
+
             if focus_zone_id and zid == focus_zone_id:
                 focus.append(entry)
             else:
@@ -1680,7 +1749,7 @@ class LightweightDrawingViewport(QWidget):
         coalesce into a single render at the final DPI.
         """
 
-        state = self._pdf_render_state
+        state = getattr(self, "_pdf_render_state", None)
         if not state:
             return
         try:
@@ -1703,7 +1772,7 @@ class LightweightDrawingViewport(QWidget):
         except Exception:
             return
         # Reset the timer (so consecutive zooms restart the 400ms wait)
-        if self._pdf_rerender_timer is None:
+        if getattr(self, "_pdf_rerender_timer", None) is None:
             self._pdf_rerender_timer = QTimer(self)
             self._pdf_rerender_timer.setSingleShot(True)
             self._pdf_rerender_timer.timeout.connect(self._fire_pdf_rerender)
@@ -1718,7 +1787,7 @@ class LightweightDrawingViewport(QWidget):
         cache instantly.
         """
 
-        state = self._pdf_render_state
+        state = getattr(self, "_pdf_render_state", None)
         if not state:
             return
         target_dpi = state.get("pending_dpi")

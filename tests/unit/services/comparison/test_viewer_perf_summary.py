@@ -234,6 +234,42 @@ def test_summary_computes_selected_zone_crop_latency(tmp_path: Path) -> None:
     assert summary["reason_code_counts"]["missing_page_bbox"] == 1
 
 
+def test_summary_clears_transient_fast_crop_fallback_after_source_success(tmp_path: Path) -> None:
+    events = [
+        {
+            "event": "zone_crop_render",
+            "pair_uuid": "pair",
+            "zone_id": "C-001",
+            "cache_hit": False,
+            "render_ms": 46.0,
+            "render_lifecycle": "ready",
+            "visual_fidelity": "cad_render",
+            "renderer_backend": "cad-background-image-crop",
+            "reason_code": "outside_background_bounds",
+        },
+        {
+            "event": "zone_crop_render",
+            "pair_uuid": "pair",
+            "zone_id": "C-001",
+            "cache_hit": False,
+            "render_ms": 14410.0,
+            "render_lifecycle": "ready",
+            "visual_fidelity": "cad_render",
+            "renderer_backend": "ezdxf-matplotlib-zone",
+            "reason_code": "",
+        },
+    ]
+    _write_perf_jsonl(tmp_path, events)
+
+    summary = summarize_viewer_perf(tmp_path)
+    rendered = format_viewer_perf_summary_korean(summary)
+
+    assert summary["zone_crop_count"] == 2
+    assert summary["selected_zone_fallback_count"] == 0
+    assert "outside_background_bounds" in summary["reason_code_counts"]
+    assert "stale/drop/fallback" not in rendered
+
+
 def test_summary_aggregates_pdf_display_list_cache_telemetry(tmp_path: Path) -> None:
     events = [
         {

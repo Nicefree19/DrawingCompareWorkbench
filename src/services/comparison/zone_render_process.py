@@ -68,13 +68,32 @@ def _write_response(payload: dict[str, Any]) -> None:
     # as "선택 구역 렌더 실패 - 상대 위치 표시를 유지합니다".
     from .safe_unicode import safe_unicode
 
-    sys.stdout.write(json.dumps(safe_unicode(payload), ensure_ascii=False) + "\n")
+    line = json.dumps(safe_unicode(payload), ensure_ascii=False) + "\n"
+    stdout_buffer = getattr(sys.stdout, "buffer", None)
+    if stdout_buffer is not None:
+        stdout_buffer.write(line.encode("utf-8", errors="surrogatepass"))
+        stdout_buffer.flush()
+        return
+    sys.stdout.write(line)
     sys.stdout.flush()
+
+
+def _decode_request_line(line: bytes | str) -> str:
+    if isinstance(line, bytes):
+        return line.decode("utf-8", errors="surrogatepass")
+    return str(line)
+
+
+def _stdin_request_lines(stdin: Any | None = None):
+    stream = sys.stdin if stdin is None else stdin
+    raw_stream = getattr(stream, "buffer", stream)
+    for line in raw_stream:
+        yield _decode_request_line(line)
 
 
 def main() -> int:
     _write_response({"ok": True, "event": "ready"})
-    for line in sys.stdin:
+    for line in _stdin_request_lines():
         line = line.strip()
         if not line:
             continue

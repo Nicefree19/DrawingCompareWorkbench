@@ -13,7 +13,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, List, Mapping, Optional
 
-from PySide6.QtCore import QObject, QProcess, QRectF, Qt, QThread, QTimer, Signal, QUrl
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QRectF, Qt, QThread, QTimer, Signal, QUrl
 from PySide6.QtGui import QColor, QBrush, QDesktopServices, QIcon, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -63,6 +63,10 @@ except Exception:
     QQuickWidget = None  # type: ignore[assignment]
     QT_QUICK_AVAILABLE = False
 
+from src.gui import workbench_visual_extensions as visual_ext
+from src.gui import zone_crop_alignment as zone_align
+from src.gui.compare_runtime_diagnostics import default_gui_dwg_backend_mode, format_auto_compare_error
+from src.gui.source_path_repair import has_lossy_path_text, registered_dxf_fallback_for_source
 from src.gui.theme import NanoColors, get_stylesheet
 from src.services.comparison import ComparisonConfig
 from src.services.comparison.cache_budget import resolve_cache_byte_limit
@@ -1158,7 +1162,7 @@ class AutoFolderCompareWorker(QThread):
             )
         except Exception as exc:
             logger.exception("Korean folder comparison flow failed")
-            self.error.emit(str(exc))
+            self.error.emit(format_auto_compare_error(exc, self.request))
         finally:
             try:
                 sampler.stop()
@@ -1702,9 +1706,16 @@ class ZoneRenderProcessController(QObject):
     finished = Signal(str, str, object, object, object)
     error = Signal(str, str, str, str, str)
 
-    def __init__(self, *, timeout_ms: int = 10_000, parent: Optional[QObject] = None):
+    def __init__(
+        self,
+        *,
+        timeout_ms: int = 10_000,
+        source_timeout_ms: int = 30_000,
+        parent: Optional[QObject] = None,
+    ):
         super().__init__(parent)
         self.timeout_ms = int(timeout_ms)
+        self.source_timeout_ms = max(int(source_timeout_ms), self.timeout_ms)
         self._process: Optional[QProcess] = None
         self._process_key = ""
         self._stdout_buffer = ""
@@ -1757,11 +1768,13 @@ class ZoneRenderProcessController(QObject):
                 str(request.get("request_id") or ""),
             )
             return False
+        timeout_ms = self.source_timeout_ms if bool(request.get("prefer_source_render")) else self.timeout_ms
         self._active_context = {
             "request_id": str(request.get("request_id") or ""),
             "pair_id": str(request.get("pair_uuid") or ""),
             "zone_id": str(request.get("zone_id") or ""),
             "prefer_source_render": bool(request.get("prefer_source_render")),
+            "timeout_ms": timeout_ms,
             "started_at": perf_counter(),
             "viewer_pair": dict(viewer_pair or {}),
             "overlay": dict(overlay or {}),
@@ -1772,9 +1785,9 @@ class ZoneRenderProcessController(QObject):
         self._process.write(line.encode("utf-8"))
         self._process.waitForBytesWritten(1000)
         if self._process_ready:
-            self._timeout_timer.start(self.timeout_ms)
+            self._timeout_timer.start(timeout_ms)
         else:
-            self._timeout_timer.start(max(self.timeout_ms, 30_000))
+            self._timeout_timer.start(max(timeout_ms, 30_000))
         return True
 
     def _ensure_process(self, process_key: str) -> bool:
@@ -1786,6 +1799,10 @@ class ZoneRenderProcessController(QObject):
         self._stderr_buffer = ""
         self._process_ready = False
         process = QProcess(self)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
+        process.setProcessEnvironment(env)
         program, args = worker_command_for_module(ZONE_RENDER_PROCESS_MODULE)
         process.setProgram(program)
         process.setArguments(args)
@@ -1825,7 +1842,8 @@ class ZoneRenderProcessController(QObject):
         if payload.get("event") == "ready":
             self._process_ready = True
             if self._active_context:
-                self._timeout_timer.start(self.timeout_ms)
+                timeout_ms = int(self._active_context.get("timeout_ms") or self.timeout_ms)
+                self._timeout_timer.start(timeout_ms)
             return
         context = self._active_context
         if not context:
@@ -1884,6 +1902,7 @@ class ZoneRenderProcessController(QObject):
         process = self._process
         if process and process.state() != QProcess.NotRunning:
             process.kill()
+            process.waitForFinished(1500)
             process.deleteLater()
         self._process = None
         self._process_key = ""
@@ -1892,7 +1911,7 @@ class ZoneRenderProcessController(QObject):
             pair_id,
             zone_id,
             "렌더 시간 초과, 상대 위치만 표시합니다.",
-            "render_timeout",
+            "full_detail_render_timeout" if context.get("prefer_source_render") else "render_timeout",
             str(context.get("request_id") or ""),
         )
 
@@ -1906,7 +1925,7 @@ class ZoneRenderProcessController(QObject):
                 str(context.get("pair_id") or ""),
                 str(context.get("zone_id") or ""),
                 message,
-                "render_failed",
+                "full_detail_render_failed" if context.get("prefer_source_render") else "render_failed",
                 str(context.get("request_id") or ""),
             )
         self._process = None
@@ -5007,6 +5026,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         settings_menu.addAction(noise_filter_action)
 
+        visual_ext.attach_visual_extensions(self, menu_bar)
         help_menu = menu_bar.addMenu("&도움말")
         tutorial_action = QAction("📘 시작 가이드 (5단계 튜토리얼)", self)
         tutorial_action.setShortcut(QKeySequence("F1"))
@@ -5673,6 +5693,14 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                     "Viewport %r has no overlayClicked signal — skipping",
                     type(vp).__name__,
                 )
+        # Spatial map: a thin strip of per-detail-cluster jump buttons above the
+        # before/after panes (helper module; hidden unless >=2 clusters).
+        try:
+            from src.gui.cluster_navigator import attach_cluster_navigator
+
+            attach_cluster_navigator(self, layout)
+        except Exception:
+            logger.debug("cluster navigator attach hook failed", exc_info=True)
         layout.addWidget(views, stretch=1)
         return panel
 
@@ -7074,6 +7102,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             max_zone_tiles=0,
             export_marked_pdf=False,
             marked_pdf_mode="off",
+            dwg_backend_mode=default_gui_dwg_backend_mode(),
             auto_export_structural_clouds=(
                 self.chk_auto_structural_clouds_v2.isChecked()
                 if hasattr(self, "chk_auto_structural_clouds_v2") else False
@@ -8236,6 +8265,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             for overlay in overlays
             if isinstance(overlay, dict) and overlay.get("zone_id")
         }
+        try:
+            from src.gui.cluster_navigator import update_cluster_navigator
+
+            update_cluster_navigator(self)
+        except Exception:
+            logger.debug("cluster navigator refresh hook failed", exc_info=True)
 
     def _top_issue_overlays_for_selection_v2(self, row: dict, pair_id: str) -> list[dict]:
         overlays: list[dict] = []
@@ -9978,6 +10013,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 stats["loaded_after"] = bool(loaded)
         if loaded_before or loaded_after:
             self._lightweight_raster_pairs.add(pair_id)
+            visual_ext.apply_shared_lightweight_camera_frame(self, viewer_pair)
             for viewport, loaded in (
                 (self.preview_before_lightweight_v2, loaded_before),
                 (self.preview_after_lightweight_v2, loaded_after),
@@ -11577,6 +11613,15 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         return repaired
 
     def _source_path_replacement_v2(self, pair_id: str, row: dict, key: str) -> str:
+        # Single-file runs can safely derive registered DXF fallbacks from
+        # the current GUI inputs before consulting redacted package metadata.
+        if len(self._viewer_pairs_by_id) <= 1:
+            value = self._source_a if key == "source_a" else self._source_b
+            side = "before" if key == "source_a" else "after"
+            for candidate in (registered_dxf_fallback_for_source(value, side), value):
+                if self._is_usable_zone_render_source_v2(candidate):
+                    return str(candidate)
+
         issue = (row.get("top_issues") or [{}])[0] if isinstance(row.get("top_issues"), list) else {}
         for value in (issue.get(key), row.get(key)):
             if self._is_usable_zone_render_source_v2(value):
@@ -11598,17 +11643,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         except Exception:
             logger.debug("Could not restore source path from comparison summary", exc_info=True)
 
-        # Single-file runs can safely fall back to the current input fields.
-        if len(self._viewer_pairs_by_id) <= 1:
-            value = self._source_a if key == "source_a" else self._source_b
-            if self._is_usable_zone_render_source_v2(value):
-                return str(value)
         return ""
 
     @staticmethod
     def _is_usable_zone_render_source_v2(value: Any) -> bool:
         text = str(value or "").strip()
-        if not text or _is_redacted_artifact_path(text):
+        if not text or _is_redacted_artifact_path(text) or has_lossy_path_text(text):
             return False
         try:
             path = Path(text)
@@ -11822,6 +11862,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         overlay = self._active_overlays_by_zone.get(zone_id, {})
         if not overlay:
             return
+        viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
+        if _viewer_pair_is_pdf(viewer_pair):
+            overlay = self._backfill_pdf_overlay_coord_space_v2(pair_id, [overlay])[0]
+            self._active_overlays_by_zone[zone_id] = overlay
         bbox = union_bboxes(overlay.get("old_bbox"), overlay.get("bbox"))
         if not bbox:
             viewer_pair_for_fallback = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
@@ -11865,7 +11909,6 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self._pending_zone_render_request_v2 = (pair_id, zone_id, request_id)
             self._set_preview_status_v2(pair_id, "rendering", "현재 구역 렌더가 끝나면 이어서 준비합니다.")
             return
-        viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
         if not viewer_pair.get("source_a") or not viewer_pair.get("source_b"):
             self._record_zone_render_perf_event_v2(
                 "zone_render_fallback",
@@ -11880,6 +11923,18 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             # Deferred full-detail upgrade keeps the fast crop on screen (no
             # "rendering" reset) and replaces it silently when it completes.
             self._set_preview_status_v2(pair_id, "rendering", "선택 변경구역 실도면 crop을 렌더 중입니다.")
+        else:
+            # ② Full-detail upgrade keeps the fast crop visible. The first zone of
+            # a drawing pays a one-time cold cost (source DXF parse + render) that
+            # is otherwise silent; surface a non-disruptive badge hint so the wait
+            # reads as progress, not a hang, and set the expectation that later
+            # zones in the same drawing reuse the warm DXF and appear instantly.
+            # Status is preserved (no reset) so the fast crop badge does not flip.
+            self._set_preview_status_v2(
+                pair_id,
+                self._render_status_by_pair.get(pair_id, "ready"),
+                "고해상 실도면 준비 중… 첫 구역만 잠시 걸리고, 같은 도면의 이후 구역은 즉시 표시됩니다.",
+            )
         if _viewer_pair_is_pdf(viewer_pair):
             has_pdf_background = bool(viewer_pair.get("before_image")) and bool(viewer_pair.get("after_image"))
             has_pdf_transform = bool(viewer_pair.get("before_transform")) and bool(viewer_pair.get("after_transform"))
@@ -11988,6 +12043,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not self._is_current_zone_render_request_v2(pair_id, zone_id, request_id):
             return
         if self._zone_render_controller_v2.is_busy() or self._pending_zone_render_request_v2:
+            return
+        viewer_pair = self._viewer_pair_from_row_v2(pair_id, self._active_row or {})
+        if any(
+            _is_redacted_artifact_path(viewer_pair.get(k)) or has_lossy_path_text(viewer_pair.get(k))
+            for k in ("source_a", "source_b")
+        ):
             return
         key = (pair_id, zone_id, request_id)
         if self._zone_full_detail_started_request_v2 == key:
@@ -12269,29 +12330,48 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         def _overlaps(a, b) -> bool:
             return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
+        before_crop_bbox = self._transform_world_bbox_v2(
+            result_payload.get("before_transform")
+        )
+        after_crop_bbox = self._transform_world_bbox_v2(
+            result_payload.get("after_transform")
+        )
+        shared_crop_bbox = zone_align.union_bboxes(
+            before_crop_bbox,
+            after_crop_bbox,
+            zone_window,
+        )
+
         specs = (
             ("before", before_vp, result_payload.get("before_image"),
-             result_payload.get("before_transform"), viewer_pair.get("before_transform")),
+             before_crop_bbox, viewer_pair.get("before_transform")),
             ("after", after_vp, result_payload.get("after_image"),
-             result_payload.get("after_transform"), viewer_pair.get("after_transform")),
+             after_crop_bbox, viewer_pair.get("after_transform")),
         )
         loaded_before = False
         loaded_after = False
         loaded_frames: list[tuple] = []  # (viewport, crop world_bbox) for camera fit
-        for side, viewport, image_value, crop_transform, bg_transform in specs:
+        for side, viewport, image_value, world_bbox, bg_transform in specs:
             bg_bbox = self._transform_world_bbox_v2(bg_transform)
             if zone_window and bg_bbox and not _overlaps(zone_window, bg_bbox):
                 # Blank crop on this side (zone window outside its background).
+                empty_bbox = shared_crop_bbox or zone_window
+                shown_empty = zone_align.show_empty_side_frame(viewport, empty_bbox)
                 try:
                     viewport.set_fidelity_state(
                         "relative_only",
-                        status_text="이 면에는 선택 구역에 해당하는 도면이 없습니다.",
+                        status_text=zone_align.EMPTY_SIDE_NOTICE,
                     )
                 except Exception:
                     logger.debug("zone crop blank-side fidelity failed", exc_info=True)
+                if shown_empty:
+                    loaded_frames.append((viewport, empty_bbox))
+                    if side == "before":
+                        loaded_before = True
+                    else:
+                        loaded_after = True
                 continue
             image_path = _resolve_viewer_artifact_path(image_value, self._viewer_root)
-            world_bbox = self._transform_world_bbox_v2(crop_transform)
             try:
                 loaded = viewport.load_raster_image(
                     image_path,
@@ -12335,7 +12415,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         # had just swapped the world frame under a camera fit to the old frame.
         self._lightweight_camera_sync_in_progress = True
         try:
-            for viewport, _world_bbox in loaded_frames:
+            for viewport, world_bbox in loaded_frames:
                 try:
                     # Use the QML-native fitToView (the "전체 보기" button's path):
                     # it computes the fit IN QML from the live root size + the
@@ -12344,8 +12424,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                     # the world-frame swap and got a stale value live, so the crop
                     # rendered zoomed-out/tiny in the corner. fitToView reads the
                     # size at QML-execution time and frames the crop reliably.
-                    viewport.fit_to_view()
-                    self._log_zone_crop_camera_state_v2(viewport, zone_id)
+                    zone_align.sync_crop_camera(
+                        viewport,
+                        shared_bbox=shared_crop_bbox,
+                        loaded_frame_count=len(loaded_frames),
+                    )
+                    zone_align.maybe_log_camera_state(self, viewport, zone_id)
                 except Exception:
                     logger.exception("zone crop fit_to_view failed for %s", zone_id)
         finally:
@@ -12435,6 +12519,21 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 zone_id,
                 request_id,
             )
+            self._start_pending_zone_render_v2()
+            return
+        if str(status or "").startswith("full_detail_"):
+            self._record_zone_render_perf_event_v2(
+                "zone_full_detail_upgrade_failed",
+                pair_id,
+                zone_id,
+                render_lifecycle="timeout" if status == "full_detail_render_timeout" else "failed",
+                visual_fidelity="cad_render",
+                reason_code=status,
+                renderer_backend="ezdxf-matplotlib-zone",
+                error_message=str(message or "")[:500],
+                request_id=request_id,
+            )
+            self._refresh_viewer_perf_summary_only()
             self._start_pending_zone_render_v2()
             return
         current_pair = str((self._active_row or {}).get("pair_id") or "")

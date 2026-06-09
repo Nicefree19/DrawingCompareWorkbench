@@ -27,6 +27,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from .dxf_read import read_dxf_document, read_dxf_document_result
+from .layer_filter import layer_matches_any
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +112,139 @@ def _make_light_filter(skip_types):
     return _filter
 
 
+_PREFERRED_TEXT_FONT_FAMILY: Optional[str] = None
+_PREFERRED_TEXT_FONT_FILE: Optional[str] = None
+_PREFERRED_TEXT_FONT_PATH: Optional[Path] = None
+
+_KOREAN_TEXT_FONT_CANDIDATES = (
+    "Malgun Gothic",
+    "NanumGothic",
+    "NanumBarunGothic",
+    "Noto Sans CJK KR",
+    "Noto Sans KR",
+    "Source Han Sans KR",
+    "Gulim",
+    "Dotum",
+    "AppleGothic",
+    "Arial Unicode MS",
+)
+_KOREAN_GLYPH_PROBES = (ord("가"), ord("형"), ord("도"))
+
+
+def _font_supports_korean(font_path: Path) -> bool:
+    try:
+        from matplotlib.ft2font import FT2Font
+
+        charmap = FT2Font(str(font_path)).get_charmap()
+        return any(codepoint in charmap for codepoint in _KOREAN_GLYPH_PROBES)
+    except Exception:
+        return False
+
+
+def _resolve_preferred_text_font() -> tuple[str, Optional[Path]]:
+    if not RENDERER_AVAILABLE:
+        return "", None
+    try:
+        from matplotlib import font_manager as _font_manager
+    except Exception:
+        return "", None
+
+    for family in _KOREAN_TEXT_FONT_CANDIDATES:
+        try:
+            font_path = Path(_font_manager.findfont(family, fallback_to_default=False))
+        except Exception:
+            continue
+        if _font_supports_korean(font_path):
+            return family, font_path
+
+    keywords = ("malgun", "nanum", "noto sans cjk", "noto sans kr", "source han", "gulim", "dotum")
+    try:
+        candidates = list(_font_manager.fontManager.ttflist)
+    except Exception:
+        candidates = []
+    for entry in candidates:
+        try:
+            name = str(getattr(entry, "name", "") or "")
+            if not any(keyword in name.lower() for keyword in keywords):
+                continue
+            font_path = Path(getattr(entry, "fname", "") or "")
+            if font_path and _font_supports_korean(font_path):
+                return name, font_path
+        except Exception:
+            continue
+    return "", None
+
+
+def preferred_text_font_family() -> str:
+    """Return a Matplotlib font family that can render Korean CAD labels."""
+
+    global _PREFERRED_TEXT_FONT_FAMILY, _PREFERRED_TEXT_FONT_FILE, _PREFERRED_TEXT_FONT_PATH
+    if _PREFERRED_TEXT_FONT_FAMILY is not None:
+        return _PREFERRED_TEXT_FONT_FAMILY
+    family, font_path = _resolve_preferred_text_font()
+    _PREFERRED_TEXT_FONT_FAMILY = family
+    _PREFERRED_TEXT_FONT_PATH = font_path
+    _PREFERRED_TEXT_FONT_FILE = font_path.name if font_path else ""
+    return family
+
+
+def preferred_text_font_file() -> str:
+    global _PREFERRED_TEXT_FONT_FILE
+    if _PREFERRED_TEXT_FONT_FILE is not None:
+        return _PREFERRED_TEXT_FONT_FILE
+    preferred_text_font_family()
+    return _PREFERRED_TEXT_FONT_FILE or ""
+
+
+def preferred_text_font_properties():
+    family = preferred_text_font_family()
+    if not family or _PREFERRED_TEXT_FONT_PATH is None:
+        return None
+    from matplotlib import font_manager as _font_manager
+
+    return _font_manager.FontProperties(fname=str(_PREFERRED_TEXT_FONT_PATH))
+
+
+def apply_preferred_cad_text_font(doc) -> int:
+    """Point CJK-unsafe CAD text styles at a Korean-capable TTF for rendering."""
+
+    font_file = preferred_text_font_file()
+    if not font_file:
+        return 0
+    replacements = 0
+    unsafe_fonts = {"", "arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"}
+    try:
+        styles = list(doc.styles)
+    except Exception:
+        return 0
+    for style in styles:
+        try:
+            current = str(getattr(style.dxf, "font", "") or "").strip()
+            if current.lower() not in unsafe_fonts:
+                continue
+            if current == font_file:
+                continue
+            style.dxf.font = font_file
+            replacements += 1
+        except Exception:
+            continue
+    return replacements
+
+
 def _valid_extents(min_x: float, min_y: float, max_x: float, max_y: float) -> bool:
     values = (min_x, min_y, max_x, max_y)
     return bool(np.all(np.isfinite(values)) and max_x > min_x and max_y > min_y)
 
 
-def _simple_entity_extents(msp) -> Optional[Tuple[float, float, float, float]]:
-    """Recover render extents without ezdxf's recursive bbox engine."""
+def _simple_entity_extents(
+    msp, ignore_layer_patterns: Tuple[str, ...] = ()
+) -> Optional[Tuple[float, float, float, float]]:
+    """Recover render extents without ezdxf's recursive bbox engine.
+
+    P0-4 — entities on ``ignore_layer_patterns`` (far-flung review markup) are
+    excluded from the extents so the viewer frame is the real 도곽, not the
+    inflated markup span. Default empty = no-op (prior behaviour).
+    """
 
     xs: list[float] = []
     ys: list[float] = []
@@ -144,6 +271,10 @@ def _simple_entity_extents(msp) -> Optional[Tuple[float, float, float, float]]:
 
     for entity in msp:
         try:
+            if ignore_layer_patterns and layer_matches_any(
+                getattr(entity.dxf, "layer", ""), ignore_layer_patterns
+            ):
+                continue
             entity_type = entity.dxftype()
             if entity_type == "LINE":
                 add_point(entity.dxf.start)
@@ -477,6 +608,27 @@ class DxfRenderer:
         if fallback_reason:
             transform["fallback_reason"] = fallback_reason
 
+        # Sheet-frame (도곽) producer — emit the outer drawing-frame bbox while the
+        # modelspace is already open, so the viewer can align before/after panes by
+        # the sheet frame instead of raw world extents. Additive + best-effort: when
+        # no confident frame is found the key is absent and the viewer keeps its
+        # existing world-union camera fallback. Consumed by sheet_frame_alignment
+        # via the transform's ``cad_frame_bbox`` key (see workbench_visual_extensions).
+        try:
+            from .sheet_frame_detector import detect_sheet_frame_from_modelspace
+
+            # Pass the renderer's already-computed (outlier-filtered) extents so
+            # the coverage ratio is measured against the TRUE drawing extent.
+            frame_result = detect_sheet_frame_from_modelspace(
+                msp, extents=(min_x, min_y, max_x, max_y)
+            )
+            if frame_result is not None:
+                transform["cad_frame_bbox"] = [float(v) for v in frame_result.bbox]
+                transform["cad_frame_bbox_method"] = frame_result.method
+                transform["cad_frame_bbox_confidence"] = frame_result.confidence
+        except Exception:  # noqa: BLE001 - frame detection must never break rendering
+            logger.debug("sheet-frame detection skipped", exc_info=True)
+
         logger.info(
             "DXF 렌더링 완료 [%s]: %dx%d @ %.1fdpi, %.0fms",
             backend_used,
@@ -581,6 +733,7 @@ class DxfRenderer:
         PNG 바이트를 받아 PIL → numpy 배열로 변환한다.
         """
 
+        apply_preferred_cad_text_font(doc)
         ctx = RenderContext(doc)
         backend = PyMuPdfBackend()
         # 배경색을 흰색으로 강제 (Matplotlib 경로와 동일한 시각 정책).
@@ -691,7 +844,79 @@ class DxfRenderer:
         line_segments: list = []
         circles: list = []
         arcs: list = []
+        text_items: list = []
         skipped: dict[str, int] = {}
+        points_per_world_y = (
+            float(fig_height_inches) * 72.0 / max(abs(max_y - min_y), 1.0)
+        )
+        text_font = preferred_text_font_properties()
+
+        def _point_xy(value):
+            try:
+                return (
+                    float(value[0] if not hasattr(value, "x") else value.x),
+                    float(value[1] if not hasattr(value, "y") else value.y),
+                )
+            except Exception:
+                return None
+
+        def _clean_text(value) -> str:
+            text = str(value or "")
+            if not text:
+                return ""
+            return (
+                text.replace("\\P", "\n")
+                .replace("%%u", "")
+                .replace("%%U", "")
+                .strip()
+            )
+
+        def _append_text_entity(entity, entity_type: str) -> bool:
+            raw_text = ""
+            if entity_type == "MTEXT":
+                try:
+                    raw_text = entity.plain_text()
+                except Exception:
+                    raw_text = getattr(entity.dxf, "text", "")
+            elif entity_type == "DIMENSION":
+                raw_text = getattr(entity.dxf, "text", "")
+                if not raw_text or raw_text == "<>":
+                    try:
+                        raw_text = f"{float(entity.get_measurement()):g}"
+                    except Exception:
+                        raw_text = ""
+            else:
+                raw_text = getattr(entity.dxf, "text", "")
+            label = _clean_text(raw_text)
+            if not label:
+                return False
+            point = None
+            for attr_name in ("insert", "text_midpoint", "defpoint", "location"):
+                try:
+                    point = _point_xy(getattr(entity.dxf, attr_name))
+                except Exception:
+                    point = None
+                if point is not None:
+                    break
+            if point is None:
+                return False
+            try:
+                height = float(
+                    getattr(
+                        entity.dxf,
+                        "height",
+                        getattr(entity.dxf, "char_height", 0.0),
+                    )
+                    or 0.0
+                )
+            except Exception:
+                height = 0.0
+            try:
+                rotation = float(getattr(entity.dxf, "rotation", 0.0) or 0.0)
+            except Exception:
+                rotation = 0.0
+            text_items.append((point[0], point[1], label, height, rotation))
+            return True
 
         try:
             for entity in msp:
@@ -723,6 +948,9 @@ class DxfRenderer:
                         a0 = float(entity.dxf.start_angle)
                         a1 = float(entity.dxf.end_angle)
                         arcs.append((c.x, c.y, r, a0, a1))
+                    elif t in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "DIMENSION"}:
+                        if not _append_text_entity(entity, t):
+                            skipped[t] = skipped.get(t, 0) + 1
                     elif t in {"POINT"}:
                         # Use a tiny line segment so points are visible
                         p = entity.dxf.location
@@ -761,6 +989,23 @@ class DxfRenderer:
                         color="black", linewidth=0.5,
                     )
                 )
+            for x, y, label, height, rotation in text_items:
+                fontsize = max(3.0, min(float(height or 0.0) * points_per_world_y, 18.0))
+                text_kwargs = {}
+                if text_font is not None:
+                    text_kwargs["fontproperties"] = text_font
+                ax.text(
+                    x,
+                    y,
+                    label,
+                    fontsize=fontsize,
+                    rotation=rotation,
+                    color="black",
+                    ha="left",
+                    va="center",
+                    clip_on=True,
+                    **text_kwargs,
+                )
 
             if skipped:
                 logger.info(
@@ -795,6 +1040,7 @@ class DxfRenderer:
         ax.set_facecolor(background_color)
 
         try:
+            apply_preferred_cad_text_font(doc)
             ctx = RenderContext(doc)
             out = MatplotlibBackend(ax)
             # WHITE bg config forces dark foreground so lines are visible on

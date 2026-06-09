@@ -104,6 +104,12 @@ class DrawingChangeZone:
     severity: str = "medium"
     bbox: BBox = (0.0, 0.0, 0.0, 0.0)
     old_bbox: Optional[BBox] = None
+    # B안 — defining geometry of a single representative entity in CAD-world mm
+    # (e.g. ``{"type": "LINE", "points": [[x0, y0], [x1, y1]]}``) so a revision
+    # cloud can follow the actual shape (a long leader line) instead of its
+    # axis-aligned bbox. None for ambiguous multi-entity zones → viewer falls
+    # back to the bbox outline.
+    geometry: Optional[dict[str, Any]] = None
     centroid: Tuple[float, float] = (0.0, 0.0)
     raw_change_count: int = 0
     added_count: int = 0
@@ -131,6 +137,7 @@ class DrawingChangeZone:
             "severity": self.severity,
             "bbox": list(self.bbox),
             "old_bbox": list(self.old_bbox) if self.old_bbox else None,
+            "geometry": self.geometry,
             "centroid": list(self.centroid),
             "raw_change_count": self.raw_change_count,
             "added_count": self.added_count,
@@ -601,6 +608,14 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
         old_bbox = metadata_bbox
     old_text = _text_value_from_change_data(old_data)
     new_text = _text_value_from_change_data(new_data)
+    # B3 — preserve the entity's real geometry through the stream so large
+    # (stream-built) comparisons can draw geometry-aware clouds. Optional field;
+    # absent on older streams → recovered as None (backward compatible, no
+    # schema-version bump needed since this is purely additive).
+    geometry = (
+        _geometry_points_from_entity_data(entity_type, new_data)
+        or _geometry_points_from_entity_data(entity_type, old_data)
+    )
     key = getattr(change, "key", "") or f"{entity_type}_{change_type}_{index}"
     return {
         "schema_version": CHANGE_ZONE_STREAM_SCHEMA_VERSION,
@@ -611,6 +626,7 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
         "entity_type": entity_type,
         "bbox": list(bbox) if bbox else None,
         "old_bbox": list(old_bbox) if old_bbox else None,
+        "geometry": geometry,
         "location": list(location) if location else None,
         "old_location": list(old_location) if old_location else None,
         "change_category": getattr(change, "change_category", None) or metadata.get("change_category"),
@@ -719,6 +735,10 @@ def _change_record_from_stream_record(record: dict[str, Any]) -> ChangeRecord:
     if record.get("old_location"):
         metadata["old_x"] = record["old_location"][0]
         metadata["old_y"] = record["old_location"][1]
+    # B3 — recover the entity geometry stashed by change_to_stream_record so
+    # stream-built zones can render geometry-aware clouds (see _geometry_from_envelopes).
+    if isinstance(record.get("geometry"), dict):
+        metadata["geometry"] = record["geometry"]
     return ChangeRecord(
         key=str(record.get("key") or ""),
         change_type=_stream_change_type(record.get("change_type")),
@@ -1469,11 +1489,15 @@ def _build_zone(
     added = int(type_counts.get("added", 0))
     deleted = int(type_counts.get("deleted", 0))
     modified = int(type_counts.get("modified", 0))
-    severity, severity_reasons = _zone_severity(envelopes, type_counts, layer_counts, entity_counts)
+    severity, severity_reasons = _zone_severity(
+        envelopes, type_counts, layer_counts, entity_counts, change_type=change_type
+    )
     reasons = [f"clustered {len(envelopes)} raw change(s)"] + severity_reasons
     text_evidence = _zone_text_evidence(envelopes)
     if text_evidence.get("reason_text"):
         reasons.append(str(text_evidence["reason_text"]))
+
+    geometry = _geometry_from_envelopes(envelopes)
 
     bbox = _inflate_bbox(_ensure_min_bbox(bbox, options.min_marker_size), options.bbox_margin)
     if old_bbox:
@@ -1489,6 +1513,7 @@ def _build_zone(
         severity=severity,
         bbox=bbox,
         old_bbox=old_bbox,
+        geometry=geometry,
         centroid=((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0),
         raw_change_count=len(envelopes),
         added_count=added,
@@ -1520,6 +1545,56 @@ def _build_zone(
             **text_evidence,
         },
     )
+
+
+def _geometry_points_from_entity_data(
+    entity_type: str, data: Any
+) -> Optional[dict[str, Any]]:
+    """Return ``{"type", "points"}`` (CAD-world mm) for a single LINE / polyline
+    entity, else None. Shared by the memory path and the change-zone stream (B3).
+    """
+    if not isinstance(data, dict):
+        return None
+    et = str(entity_type or "").upper()
+    if et == "LINE":
+        start = _point(data.get("start"))
+        end = _point(data.get("end"))
+        if start and end:
+            return {"type": "LINE", "points": [[start[0], start[1]], [end[0], end[1]]]}
+    if et in {"LWPOLYLINE", "POLYLINE"}:
+        pts = [_point(point) for point in data.get("points", [])]
+        pts = [[point[0], point[1]] for point in pts if point]
+        if len(pts) >= 2:
+            return {"type": et, "points": pts}
+    return None
+
+
+def _geometry_from_envelopes(
+    envelopes: Sequence[_ChangeEnvelope],
+) -> Optional[dict[str, Any]]:
+    """B안 — capture a single representative entity's defining geometry (CAD-world
+    mm) so a revision cloud can follow the actual shape instead of the bbox.
+
+    Emitted only for an unambiguous single LINE / polyline change (the long
+    leader-line case that Phase A draws as an oversized bbox). Multi-entity or
+    non-polyline zones return None so the viewer keeps the bbox outline.
+
+    Stream-built zones (B3, large files) recover the geometry from
+    ``metadata["geometry"]`` stashed by ``_change_record_from_stream_record``;
+    memory-built zones derive it directly from the entity data.
+    """
+    if len(envelopes) != 1:
+        return None
+    change = envelopes[0].change
+    metadata = change.metadata or {}
+    stashed = metadata.get("geometry")
+    if isinstance(stashed, dict) and stashed.get("points"):
+        return stashed
+    entity_type = str(metadata.get("entity_type") or "").upper()
+    data = change.new_value if change.change_type != ChangeType.DELETED else change.old_value
+    if not isinstance(data, dict):
+        data = change.old_value if isinstance(change.old_value, dict) else change.new_value
+    return _geometry_points_from_entity_data(entity_type, data)
 
 
 def _zone_text_evidence(envelopes: Sequence[_ChangeEnvelope]) -> dict[str, Any]:
@@ -1828,13 +1903,83 @@ def _change_has_moved_origin(
     return _bbox_distance(bbox, old_bbox) > 1.0
 
 
+# Annotation/markup entity types whose pure repositioning is review noise, not a
+# structural change. A dimension/text that merely MOVED must not be flagged
+# critical just for being a DIMENSION.
+_ANNOTATION_ENTITY_TYPES = frozenset(
+    {
+        "TEXT",
+        "MTEXT",
+        "DIMENSION",
+        "ARC_DIMENSION",
+        "MULTILEADER",
+        "MLEADER",
+        "LEADER",
+        "ATTRIB",
+        "ATTDEF",
+    }
+)
+# Change categories that mean "position-only" (no value/content/size/geometry
+# change). Empty category on a ``moved`` zone is treated as position-only. These
+# are the fine-grained categories the production comparator (DxfComparator, used
+# by DwgDiffer) emits. Do NOT add the canonical drawing_compare_engine's umbrella
+# "geometry" category here: it covers BOTH pure moves (geometry.insert/start) AND
+# real shape/value changes (geometry.radius/height/vertex_count), so demoting on
+# it would silently hide genuine structural changes.
+_POSITION_ONLY_CATEGORIES = frozenset({"position", "layer_move", "cosmetic"})
+
+
+def _zone_is_annotation_reposition(
+    envelopes: Sequence[_ChangeEnvelope],
+    layer_counts: Counter[str],
+    entity_counts: Counter[str],
+    change_type: str,
+) -> bool:
+    """True when a zone is purely a repositioning of annotation/markup
+    (text/dimension/leader) on non-structural layers — review noise.
+
+    Such zones are DEMOTED (kept visible at low severity with a reason), never
+    dropped, so structural changes surface first without hiding anything.
+    """
+
+    if change_type != "moved":
+        return False
+    entity_types = {str(name).upper() for name in entity_counts if name}
+    if not entity_types or not entity_types <= _ANNOTATION_ENTITY_TYPES:
+        return False
+    from .structural_layer_patterns import is_structural_layer  # local import
+
+    if any(is_structural_layer(layer) for layer in layer_counts if layer):
+        return False
+    # Every change must be position-only (no content/size/rotation/scale change),
+    # so a moved-AND-edited annotation is NOT demoted.
+    for item in envelopes:
+        change = item.change
+        raw = str(
+            getattr(change, "change_category", None)
+            or (change.metadata or {}).get("change_category")
+            or ""
+        )
+        categories = {part.strip().lower() for part in raw.split(",") if part.strip()}
+        if categories and not categories <= _POSITION_ONLY_CATEGORIES:
+            return False
+    return True
+
+
 def _zone_severity(
     envelopes: Sequence[_ChangeEnvelope],
     type_counts: Counter[str],
     layer_counts: Counter[str],
     entity_counts: Counter[str],
+    *,
+    change_type: str = "",
 ) -> tuple[str, list[str]]:
     reasons: list[str] = []
+    # Pure annotation/markup repositioning is layout cleanup, not a structural
+    # change — demote (keep visible, ranked low) instead of letting the
+    # DIMENSION→critical rule below over-flag every moved dimension.
+    if _zone_is_annotation_reposition(envelopes, layer_counts, entity_counts, change_type):
+        return "low", ["주석/치수 위치 이동 (annotation reposition)"]
     if entity_counts.get("DIMENSION", 0) > 0:
         return "critical", ["contains dimension changes"]
     structural = any(
@@ -1969,6 +2114,10 @@ def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> N
         "zone_input_count",
         "zone_coverage_complete",
         "reasons",
+        # B안 — entity geometry (JSON) so the reloaded overlay_json path can draw
+        # the cloud along the real shape. Appended last to keep column order
+        # stable for existing readers.
+        "geometry",
     ]
     with open(path, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
@@ -2023,6 +2172,11 @@ def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> N
                     "zone_input_count": zone.metadata.get("zone_input_count", ""),
                     "zone_coverage_complete": zone.metadata.get("zone_coverage_complete", ""),
                     "reasons": " | ".join(zone.reasons),
+                    "geometry": (
+                        json.dumps(zone.geometry, separators=(",", ":"))
+                        if zone.geometry
+                        else ""
+                    ),
                 }
             )
 

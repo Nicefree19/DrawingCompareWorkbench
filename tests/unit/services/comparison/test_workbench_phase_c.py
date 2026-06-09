@@ -1545,6 +1545,89 @@ def test_failed_full_detail_upgrade_keeps_fast_crop_out_of_fallback_counts(qapp,
         workbench.deleteLater()
 
 
+def test_full_detail_timeout_keeps_fast_crop_status_and_logs_upgrade_failure(qapp, tmp_path) -> None:
+    from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
+
+    workbench = DrawingCompareWorkbenchV2()
+    try:
+        _prepare_zone_finish_workbench(workbench, tmp_path)
+        status_calls: list[tuple] = []
+        drain_calls: list[str] = []
+        workbench._set_preview_status_v2 = lambda *args, **_kwargs: status_calls.append(args)  # type: ignore[method-assign]
+        workbench._start_pending_zone_render_v2 = lambda: drain_calls.append("drain")  # type: ignore[method-assign]
+        request_id = workbench._begin_selected_zone_render_request_v2("pair", "z1")
+
+        workbench._on_zone_crop_render_error_v2(
+            "pair",
+            "z1",
+            "source render took longer than the full-detail budget",
+            "full_detail_render_timeout",
+            request_id,
+        )
+
+        lines = [
+            line
+            for line in (tmp_path / "viewer_perf.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        payload = json.loads(lines[-1])
+        assert status_calls == []
+        assert drain_calls == ["drain"]
+        assert payload["event"] == "zone_full_detail_upgrade_failed"
+        assert payload["reason_code"] == "full_detail_render_timeout"
+        assert payload["render_lifecycle"] == "timeout"
+    finally:
+        workbench.deleteLater()
+
+
+def test_full_detail_upgrade_shows_progress_hint_without_resetting_fast_crop(qapp, tmp_path) -> None:
+    """② The first-zone full-detail upgrade is otherwise silent during the
+    one-time cold DXF parse+render. Surface a non-disruptive badge hint so the
+    wait reads as progress, while preserving the fast-crop status (no reset)."""
+    from src.gui.drawing_compare_workbench import DrawingCompareWorkbenchV2
+
+    workbench = DrawingCompareWorkbenchV2()
+    try:
+        workbench._viewer_root = tmp_path
+        workbench._dxf_cache_dir = tmp_path
+        workbench._active_row = {"pair_id": "pair"}
+        workbench._active_zone_id = "z1"
+        workbench._render_status_by_pair = {"pair": "ready"}
+        workbench._active_overlays_by_zone = {
+            "z1": {
+                "old_bbox": [0.0, 0.0, 100.0, 100.0],
+                "bbox": [0.0, 0.0, 100.0, 100.0],
+                "change_type": "modified",
+            }
+        }
+        workbench._viewer_pair_from_row_v2 = lambda *_a, **_k: {  # type: ignore[method-assign]
+            "pair_id": "pair",
+            "source_a": str(tmp_path / "a.dxf"),
+            "source_b": str(tmp_path / "b.dxf"),
+            "before_image": "b.png",
+            "after_image": "a.png",
+        }
+        workbench._viewer_cache_root_v2 = lambda: tmp_path  # type: ignore[method-assign]
+        render_calls: list = []
+        workbench._zone_render_controller_v2.is_busy = lambda: False  # type: ignore[method-assign]
+        workbench._zone_render_controller_v2.render = (  # type: ignore[method-assign]
+            lambda **kwargs: (render_calls.append(kwargs) or True)
+        )
+
+        # ② full-detail upgrade → progress hint, fast-crop status preserved.
+        workbench._start_zone_crop_render_v2("z1", prefer_source_render=True)
+        full_detail_label = workbench.lbl_preview_status_v2.text()
+        assert "고해상" in full_detail_label
+        assert "실미리보기" in full_detail_label  # preserved status, not reset to 렌더 중
+        assert render_calls and render_calls[-1]["request"]["prefer_source_render"] is True
+
+        # ① fast crop keeps its existing render message (contrast guard).
+        workbench._start_zone_crop_render_v2("z1", prefer_source_render=False)
+        assert "실도면 crop을 렌더" in workbench.lbl_preview_status_v2.text()
+    finally:
+        workbench.deleteLater()
+
+
 def test_redacted_viewer_source_restores_from_compare_summary(qapp, tmp_path) -> None:
     from types import SimpleNamespace
 

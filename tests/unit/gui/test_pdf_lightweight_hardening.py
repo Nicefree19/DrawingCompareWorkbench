@@ -583,3 +583,50 @@ class TestLightweightQmlFallback:
         finally:
             viewport.deleteLater()
             app.processEvents()
+
+
+class TestQ2AutoZoomCameraLock:
+    """Q2 — the post-comparison auto-zoom to the first change zone runs through
+    set_camera_to_world_bbox. On first app open the viewport often sizes AFTER
+    that zoom, so the QML onWidthChanged fit-once guard fires a late fitToView
+    and snaps the camera back to the whole drawing (changes shrink to sub-pixel
+    again). set_camera_to_world_bbox must therefore lock cameraInitialized so a
+    deliberate placement is never clobbered."""
+
+    def _viewport_with_mock_root(self):
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        vp = LightweightDrawingViewport.__new__(LightweightDrawingViewport)
+        root = MagicMock()
+        root.property.side_effect = lambda name: {"width": 800.0, "height": 600.0}.get(
+            name, 0.0
+        )
+        vp._quick = MagicMock()
+        vp._quick.rootObject.return_value = root
+        return vp, root
+
+    def test_set_camera_to_world_bbox_locks_camera_initialized(self):
+        vp, root = self._viewport_with_mock_root()
+        vp.set_camera_to_world_bbox((10.0, 20.0, 110.0, 220.0), padding_ratio=0.25)
+        root.setProperty.assert_any_call("cameraInitialized", True)
+
+    def test_set_camera_to_world_bbox_still_sets_centre_and_zoom(self):
+        vp, root = self._viewport_with_mock_root()
+        vp.set_camera_to_world_bbox((10.0, 20.0, 110.0, 220.0), padding_ratio=0.25)
+        names = {call.args[0] for call in root.setProperty.call_args_list}
+        assert {"cameraCenterX", "cameraCenterY", "unitsPerPixel"} <= names
+
+    def test_missing_pdf_render_state_is_noop_without_debug_failure(self, caplog):
+        vp, _root = self._viewport_with_mock_root()
+
+        with caplog.at_level(logging.DEBUG, logger="src.gui.lightweight_viewport"):
+            vp.set_camera_to_world_bbox((10.0, 20.0, 110.0, 220.0), padding_ratio=0.25)
+
+        assert "zone-focus PDF rerender schedule failed" not in caplog.text
+
+    def test_degenerate_bbox_leaves_camera_and_guard_untouched(self):
+        # A zero-extent bbox is rejected before any setProperty, so neither the
+        # camera nor the fit-once guard is altered.
+        vp, root = self._viewport_with_mock_root()
+        vp.set_camera_to_world_bbox((50.0, 50.0, 50.0, 50.0))
+        root.setProperty.assert_not_called()
