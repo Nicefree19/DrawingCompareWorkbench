@@ -1489,7 +1489,9 @@ def _build_zone(
     added = int(type_counts.get("added", 0))
     deleted = int(type_counts.get("deleted", 0))
     modified = int(type_counts.get("modified", 0))
-    severity, severity_reasons = _zone_severity(envelopes, type_counts, layer_counts, entity_counts)
+    severity, severity_reasons = _zone_severity(
+        envelopes, type_counts, layer_counts, entity_counts, change_type=change_type
+    )
     reasons = [f"clustered {len(envelopes)} raw change(s)"] + severity_reasons
     text_evidence = _zone_text_evidence(envelopes)
     if text_evidence.get("reason_text"):
@@ -1901,13 +1903,78 @@ def _change_has_moved_origin(
     return _bbox_distance(bbox, old_bbox) > 1.0
 
 
+# Annotation/markup entity types whose pure repositioning is review noise, not a
+# structural change. A dimension/text that merely MOVED must not be flagged
+# critical just for being a DIMENSION.
+_ANNOTATION_ENTITY_TYPES = frozenset(
+    {
+        "TEXT",
+        "MTEXT",
+        "DIMENSION",
+        "ARC_DIMENSION",
+        "MULTILEADER",
+        "MLEADER",
+        "LEADER",
+        "ATTRIB",
+        "ATTDEF",
+    }
+)
+# Change categories that mean "position-only" (no value/content/size/geometry
+# change). Empty category on a ``moved`` zone is treated as position-only.
+_POSITION_ONLY_CATEGORIES = frozenset({"position", "layer_move", "cosmetic"})
+
+
+def _zone_is_annotation_reposition(
+    envelopes: Sequence[_ChangeEnvelope],
+    layer_counts: Counter[str],
+    entity_counts: Counter[str],
+    change_type: str,
+) -> bool:
+    """True when a zone is purely a repositioning of annotation/markup
+    (text/dimension/leader) on non-structural layers — review noise.
+
+    Such zones are DEMOTED (kept visible at low severity with a reason), never
+    dropped, so structural changes surface first without hiding anything.
+    """
+
+    if change_type != "moved":
+        return False
+    entity_types = {str(name).upper() for name in entity_counts if name}
+    if not entity_types or not entity_types <= _ANNOTATION_ENTITY_TYPES:
+        return False
+    from .structural_layer_patterns import is_structural_layer  # local import
+
+    if any(is_structural_layer(layer) for layer in layer_counts if layer):
+        return False
+    # Every change must be position-only (no content/size/rotation/scale change),
+    # so a moved-AND-edited annotation is NOT demoted.
+    for item in envelopes:
+        change = item.change
+        raw = str(
+            getattr(change, "change_category", None)
+            or (change.metadata or {}).get("change_category")
+            or ""
+        )
+        categories = {part.strip().lower() for part in raw.split(",") if part.strip()}
+        if categories and not categories <= _POSITION_ONLY_CATEGORIES:
+            return False
+    return True
+
+
 def _zone_severity(
     envelopes: Sequence[_ChangeEnvelope],
     type_counts: Counter[str],
     layer_counts: Counter[str],
     entity_counts: Counter[str],
+    *,
+    change_type: str = "",
 ) -> tuple[str, list[str]]:
     reasons: list[str] = []
+    # Pure annotation/markup repositioning is layout cleanup, not a structural
+    # change — demote (keep visible, ranked low) instead of letting the
+    # DIMENSION→critical rule below over-flag every moved dimension.
+    if _zone_is_annotation_reposition(envelopes, layer_counts, entity_counts, change_type):
+        return "low", ["주석/치수 위치 이동 (annotation reposition)"]
     if entity_counts.get("DIMENSION", 0) > 0:
         return "critical", ["contains dimension changes"]
     structural = any(
