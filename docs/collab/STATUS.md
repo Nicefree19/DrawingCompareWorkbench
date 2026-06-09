@@ -7,7 +7,7 @@ Last updated: 2026-06-09
 - Current owner: Claude
 - Current thread: Content-aware framing (verified root-cause fix for the multi-detail viewer)
 - Branch: `codex/integrate-claude-p0-visuals`
-- State: 16-agent root-cause workflow identified the verified root cause — the viewer frames both cameras to the FULL render extents (whole ~459k sheet) at load, discarding the change-zone bboxes it already holds. P1 SHIPPED: `content_frame.py` frames both panes to the PRIMARY change zone via the existing `apply_shared_lightweight_camera_frame` helper (no monolith growth, safe-degrades). Verified end-to-end on the real 240111_P5 pair (both panes → C-001 area ~7% of sheet, aligned). Next: P2 cluster navigator, P3 title-block noise filter (conditional), P4 render sidecar (deferred). See `docs/work-memory/CONTENT_AWARE_FRAMING_PLAN.md`.
+- State: 16-agent root-cause workflow identified the verified root cause — the viewer frames both cameras to the FULL render extents (whole ~459k sheet) at load, discarding the change-zone bboxes it already holds. P1 SHIPPED (frame both panes to the PRIMARY change zone) + P2 SHIPPED (cluster navigator: per-detail jump buttons via new `cluster_navigator.py` + `content_frame.cluster_zone_bboxes`). Both verified end-to-end on the real 240111_P5 pair (P1: both panes → C-001 area ~7%, aligned; P2: 3 cluster buttons, click pans both panes to a detail). Helper-only, no monolith logic growth. Next: P3 title-block noise filter (conditional on a layer dump), P4 render sidecar (deferred). See `docs/work-memory/CONTENT_AWARE_FRAMING_PLAN.md`.
 
 ## Current Decision
 

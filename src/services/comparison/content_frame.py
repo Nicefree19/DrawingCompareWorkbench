@@ -23,7 +23,8 @@ gating the per-zone focus path uses (``convert_bbox_to_world_space`` +
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
+import math
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .transform import normalise_bbox
 
@@ -170,4 +171,141 @@ def content_frame_from_zone_bboxes(
     return None
 
 
-__all__ = ["BBox", "ToWorld", "content_frame_from_zone_bboxes"]
+def _zone_world_bbox(overlay: Mapping[str, Any], to_world: ToWorld) -> Optional[BBox]:
+    """Union of an overlay's present-side world bboxes, or None."""
+
+    boxes = _overlay_world_boxes(overlay, to_world)
+    if not boxes:
+        return None
+    return (
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    )
+
+
+def _bbox_edge_gap(a: BBox, b: BBox) -> float:
+    """Edge-to-edge distance between two bboxes (0 when they overlap)."""
+
+    dx = max(0.0, a[0] - b[2], b[0] - a[2])
+    dy = max(0.0, a[1] - b[3], b[1] - a[3])
+    return math.hypot(dx, dy)
+
+
+def _pad_bbox(bbox: BBox, padding_ratio: float, min_span: float) -> BBox:
+    x0, y0, x1, y1 = bbox
+    floor = max(0.0, float(min_span))
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    if x1 - x0 < floor:
+        x0, x1 = cx - floor / 2.0, cx + floor / 2.0
+    if y1 - y0 < floor:
+        y0, y1 = cy - floor / 2.0, cy + floor / 2.0
+    pad = max(0.0, float(padding_ratio))
+    w, h = x1 - x0, y1 - y0
+    return (x0 - w * pad, y0 - h * pad, x1 + w * pad, y1 + h * pad)
+
+
+def cluster_zone_bboxes(
+    overlays: Sequence[Mapping[str, Any]],
+    to_world: ToWorld,
+    *,
+    padding_ratio: float = 0.15,
+    min_span: float = 1.0,
+    min_split_ratio: float = 3.0,
+) -> List[dict]:
+    """Group change zones into spatial detail clusters.
+
+    Single-linkage on the zone bboxes' edge gaps, cut at the LARGEST RELATIVE
+    (ratio) jump in the merge gaps. This is scale-free and outlier-resistant — it
+    deliberately does NOT use a fraction of the zone-set diagonal as the gap (a
+    single far-flung zone would otherwise reproduce the whole-sheet collapse the
+    region detector suffers). Returns ``[]`` for no zones, one cluster when the
+    zones do not separate cleanly (largest jump below ``min_split_ratio``).
+
+    Each cluster: ``{"bbox": padded_union, "zone_ids": [...], "count": n}``,
+    ordered left-to-right by x.
+    """
+
+    items: List[Tuple[str, BBox]] = []
+    for overlay in overlays or ():
+        if not isinstance(overlay, Mapping):
+            continue
+        bbox = _zone_world_bbox(overlay, to_world)
+        if bbox is not None:
+            items.append((str(overlay.get("zone_id") or ""), bbox))
+
+    def _make(members: List[Tuple[str, BBox]]) -> dict:
+        x0 = min(m[1][0] for m in members)
+        y0 = min(m[1][1] for m in members)
+        x1 = max(m[1][2] for m in members)
+        y1 = max(m[1][3] for m in members)
+        return {
+            "bbox": _pad_bbox((x0, y0, x1, y1), padding_ratio, min_span),
+            "zone_ids": [m[0] for m in members],
+            "count": len(members),
+        }
+
+    n = len(items)
+    if n == 0:
+        return []
+    if n == 1:
+        return [_make(items)]
+
+    edges = sorted(
+        (_bbox_edge_gap(items[i][1], items[j][1]), i, j)
+        for i in range(n)
+        for j in range(i + 1, n)
+    )
+
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    merge_gaps: List[float] = []
+    for gap, i, j in edges:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+            merge_gaps.append(gap)
+
+    # Largest RATIO jump between consecutive merge gaps marks the intra→inter
+    # boundary. Cut just below it.
+    cut_gap: Optional[float] = None
+    best_ratio = 1.0
+    for k in range(len(merge_gaps) - 1):
+        lo = max(merge_gaps[k], 1.0)
+        ratio = merge_gaps[k + 1] / lo
+        if ratio > best_ratio:
+            best_ratio = ratio
+            cut_gap = merge_gaps[k]
+
+    if cut_gap is None or best_ratio < float(min_split_ratio):
+        return [_make(items)]
+
+    parent = list(range(n))
+    for gap, i, j in edges:
+        if gap > cut_gap + 1e-6:
+            break
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    grouped: dict = {}
+    for idx in range(n):
+        grouped.setdefault(find(idx), []).append(items[idx])
+    clusters = [_make(members) for members in grouped.values()]
+    clusters.sort(key=lambda c: c["bbox"][0])
+    return clusters
+
+
+__all__ = [
+    "BBox",
+    "ToWorld",
+    "cluster_zone_bboxes",
+    "content_frame_from_zone_bboxes",
+]

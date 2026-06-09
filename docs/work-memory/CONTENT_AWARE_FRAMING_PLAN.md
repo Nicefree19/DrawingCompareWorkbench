@@ -58,7 +58,10 @@ Tasks:
 - **Live windows-controller** (headless can't reproduce framing/surrogate bugs — see memory): on load, details visible at real size WITHOUT clicking a zone; first meaningful change visible before any cold crop.
 - Regression: bordered single-sheet drawings frame identically; PDF pairs unaffected (excluded/converted); full unit suite green.
 
-### P2 — Cluster navigator (spatial map) · effort L
+### P2 — Cluster navigator (spatial map) · effort L · ✅ DONE (verified on real pair)
+
+> **Implemented**: `content_frame.cluster_zone_bboxes` (single-linkage on zone bboxes, cut at the **largest RELATIVE/ratio jump** in merge gaps — scale-free, outlier-resistant, NOT a diagonal-fraction gap per the verifier) + new helper widget `src/gui/cluster_navigator.py` (a thin strip of per-cluster jump buttons; hidden when <2 clusters; click → `set_camera_to_world_bbox` pans BOTH panes to that cluster). Two thin monolith hooks: `attach_cluster_navigator` in the viewer-panel build (above the panes) and `update_cluster_navigator` in `_set_active_overlays_v2`. Verified on the real 240111_P5 pair: clusters into **3 distinct details** ({C-005/6/7 far-left notes}, {C-002/4 mid-right}, {C-001/3 far-right}); live run confirms the navigator is **visible with 3 buttons** and clicking the far-left cluster pans **both panes (aligned) to the notes area** (center ~(4122,4647), view ~3.3k). Thumbnails deferred (text buttons "디테일 N · 변경 K" deliver the spatial-jump value without the PNG-crop complexity).
+
 **Goal**: a "which detail changed" map + instant cluster jump, without enabling the frozen region pipeline.
 
 Tasks:

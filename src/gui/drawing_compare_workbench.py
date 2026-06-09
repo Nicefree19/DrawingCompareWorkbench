@@ -5693,6 +5693,14 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                     "Viewport %r has no overlayClicked signal — skipping",
                     type(vp).__name__,
                 )
+        # Spatial map: a thin strip of per-detail-cluster jump buttons above the
+        # before/after panes (helper module; hidden unless >=2 clusters).
+        try:
+            from src.gui.cluster_navigator import attach_cluster_navigator
+
+            attach_cluster_navigator(self, layout)
+        except Exception:
+            logger.debug("cluster navigator attach hook failed", exc_info=True)
         layout.addWidget(views, stretch=1)
         return panel
 
@@ -8257,6 +8265,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             for overlay in overlays
             if isinstance(overlay, dict) and overlay.get("zone_id")
         }
+        try:
+            from src.gui.cluster_navigator import update_cluster_navigator
+
+            update_cluster_navigator(self)
+        except Exception:
+            logger.debug("cluster navigator refresh hook failed", exc_info=True)
 
     def _top_issue_overlays_for_selection_v2(self, row: dict, pair_id: str) -> list[dict]:
         overlays: list[dict] = []

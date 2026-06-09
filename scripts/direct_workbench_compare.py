@@ -291,6 +291,24 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
     }
     selected_cameras: dict = {}
 
+    # Cluster navigator diagnostic: confirm it populated and that a cluster
+    # button pans BOTH viewports to that detail cluster.
+    navigator = getattr(workbench, "cluster_navigator_v2", None)
+    navigator_state: dict = {
+        "visible": bool(navigator.isVisible()) if navigator is not None else None,
+        "button_count": len(getattr(navigator, "_buttons", [])) if navigator is not None else None,
+    }
+    if navigator is not None and getattr(navigator, "_buttons", None):
+        try:
+            navigator._buttons[0].click()  # left-most detail cluster
+            _process_events_for(app, 1500)
+            navigator_state["after_click_cluster0"] = {
+                "before": _camera_state(workbench.preview_before_lightweight_v2),
+                "after": _camera_state(workbench.preview_after_lightweight_v2),
+            }
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            navigator_state["click_error"] = str(exc)
+
     screenshots: list[str] = []
     selected_zone_id = ""
     selected_zone_text = ""
@@ -332,6 +350,7 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
         "selected_zone_text": selected_zone_text,
         "on_load_cameras": on_load_cameras,
         "selected_cameras": selected_cameras,
+        "navigator_state": navigator_state,
         "status_label": workbench.lbl_status_v2.text(),
         "queue_label": workbench.lbl_review_queue_v2.text(),
         "viewer_perf_label": workbench.lbl_viewer_perf_v2.text(),
