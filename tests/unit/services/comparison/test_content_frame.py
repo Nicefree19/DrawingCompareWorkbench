@@ -174,3 +174,20 @@ def test_clusters_empty_and_single():
     assert cluster_zone_bboxes([], _to_world) == []
     one = cluster_zone_bboxes([{"zone_id": "X", "change_type": "added", "bbox": _box(0, 0, 100, 100)}], _to_world)
     assert len(one) == 1 and one[0]["zone_ids"] == ["X"] and one[0]["count"] == 1
+
+
+def test_clusters_caps_zone_count_on_dense_pairs():
+    # A dense pair (many tiny zones) must not blow up the O(n^2) clustering: the
+    # cap keeps only the largest-area zones (the most significant changes).
+    zones = [
+        {"zone_id": f"S{i}", "change_type": "added", "bbox": _box(i * 10.0, 0.0, i * 10.0 + 5.0, 5.0)}
+        for i in range(50)
+    ]
+    zones += [
+        {"zone_id": "BIG1", "change_type": "added", "bbox": _box(0.0, 1000.0, 500.0, 1500.0)},
+        {"zone_id": "BIG2", "change_type": "added", "bbox": _box(9000.0, 1000.0, 9500.0, 1500.0)},
+    ]
+    clusters = cluster_zone_bboxes(zones, _to_world, max_zones=4)
+    assert sum(c["count"] for c in clusters) <= 4
+    kept = {z for c in clusters for z in c["zone_ids"]}
+    assert "BIG1" in kept and "BIG2" in kept  # biggest-area zones survive the cap

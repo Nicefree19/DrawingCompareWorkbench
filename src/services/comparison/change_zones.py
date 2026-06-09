@@ -1920,7 +1920,12 @@ _ANNOTATION_ENTITY_TYPES = frozenset(
     }
 )
 # Change categories that mean "position-only" (no value/content/size/geometry
-# change). Empty category on a ``moved`` zone is treated as position-only.
+# change). Empty category on a ``moved`` zone is treated as position-only. These
+# are the fine-grained categories the production comparator (DxfComparator, used
+# by DwgDiffer) emits. Do NOT add the canonical drawing_compare_engine's umbrella
+# "geometry" category here: it covers BOTH pure moves (geometry.insert/start) AND
+# real shape/value changes (geometry.radius/height/vertex_count), so demoting on
+# it would silently hide genuine structural changes.
 _POSITION_ONLY_CATEGORIES = frozenset({"position", "layer_move", "cosmetic"})
 
 

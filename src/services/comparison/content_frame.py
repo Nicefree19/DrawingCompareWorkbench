@@ -213,6 +213,7 @@ def cluster_zone_bboxes(
     padding_ratio: float = 0.15,
     min_span: float = 1.0,
     min_split_ratio: float = 3.0,
+    max_zones: int = 96,
 ) -> List[dict]:
     """Group change zones into spatial detail clusters.
 
@@ -234,6 +235,17 @@ def cluster_zone_bboxes(
         bbox = _zone_world_bbox(overlay, to_world)
         if bbox is not None:
             items.append((str(overlay.get("zone_id") or ""), bbox))
+
+    # Bound the O(n^2) single-linkage on the UI thread: a dense pair can produce
+    # hundreds of change zones, but the navigator only needs the few largest
+    # detail clusters. When over the cap keep the biggest-area zones (the most
+    # significant changes); the long tail is still reachable via the zone list.
+    if len(items) > max(1, int(max_zones)):
+        items = sorted(
+            items,
+            key=lambda it: (it[1][2] - it[1][0]) * (it[1][3] - it[1][1]),
+            reverse=True,
+        )[: int(max_zones)]
 
     def _make(members: List[Tuple[str, BBox]]) -> dict:
         x0 = min(m[1][0] for m in members)

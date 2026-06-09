@@ -81,10 +81,10 @@ def apply_shared_lightweight_camera_frame(
         if aligned is not None:
             return
 
-        # 2) Content-aware framing — frame both panes to the union of the active
-        #    change-zone bboxes so a multi-detail sheet shows its changed details
-        #    at real size on load instead of a near-blank full sheet. Falls
-        #    through when there are no usable change zones.
+        # 2) Content-aware framing — frame both panes to the PRIMARY change zone
+        #    so a multi-detail sheet shows its most important changed detail at
+        #    real size on load instead of a near-blank full sheet. Falls through
+        #    when there are no usable change zones.
         if _apply_content_frame_to_change_zones(workbench, before_vp, after_vp):
             return
 
@@ -100,8 +100,8 @@ def apply_shared_lightweight_camera_frame(
 
 
 def _apply_content_frame_to_change_zones(workbench: Any, before_vp: Any, after_vp: Any) -> bool:
-    """Frame both lightweight viewports to the union of the active change-zone
-    bboxes; return True when a content frame was computed and applied.
+    """Frame both lightweight viewports to the PRIMARY active change zone;
+    return True when a content frame was computed and applied.
 
     Root-cause fix: the default path fits the camera to the whole multi-detail
     sheet, making every detail sub-pixel on load. The change-zone world bboxes are

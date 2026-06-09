@@ -113,6 +113,18 @@ def update_cluster_navigator(workbench: Any) -> None:
         if not overlays:
             navigator.clear()
             return
+        # The navigator is a DWG-modelspace multi-detail aid; PDF pairs are
+        # page-scale (no sub-pixel problem) and their bboxes are image_pixels,
+        # whose Y conversion needs a page height not yet available at overlay-set
+        # time (the viewport's world_bbox is still 0). Skip PDF pairs to avoid
+        # mis-clustered / wrong-Y pan targets.
+        if any(
+            str((o or {}).get("bbox_coordinate_space") or "") == "image_pixels"
+            for o in overlays
+            if isinstance(o, dict)
+        ):
+            navigator.clear()
+            return
         from src.services.comparison.content_frame import cluster_zone_bboxes
         from src.gui.lightweight_viewport import (
             _page_height_points_from_world_bbox,

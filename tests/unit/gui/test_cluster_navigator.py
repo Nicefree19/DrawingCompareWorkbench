@@ -87,6 +87,21 @@ def test_update_is_safe_without_navigator_attribute():
     update_cluster_navigator(_Bare())  # must not raise
 
 
+def test_update_skips_pdf_pairs():
+    # PDF overlays (image_pixels) lack a usable page height at overlay-set time,
+    # and PDF is page-scale anyway → the navigator must be cleared, not populated.
+    pdf_zones = [
+        {"zone_id": "P1", "change_type": "modified", "bbox_coordinate_space": "image_pixels",
+         "pdf_dpi": 200, "old_bbox": _box(0, 0, 10, 10), "bbox": _box(0, 0, 10, 10)},
+        {"zone_id": "P2", "change_type": "modified", "bbox_coordinate_space": "image_pixels",
+         "pdf_dpi": 200, "old_bbox": _box(500, 500, 510, 510), "bbox": _box(500, 500, 510, 510)},
+    ]
+    wb = _FakeWorkbench(pdf_zones)
+    update_cluster_navigator(wb)
+    assert wb.cluster_navigator_v2.cleared == 1
+    assert wb.cluster_navigator_v2.clusters in (None, [])
+
+
 def test_pan_both_viewports_sets_sync_guard():
     wb = _FakeWorkbench(_REAL_ZONES)
     _pan_both_viewports(wb, (1.0, 2.0, 3.0, 4.0))
