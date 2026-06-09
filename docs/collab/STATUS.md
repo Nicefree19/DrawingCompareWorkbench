@@ -1,13 +1,17 @@
 # Collaboration Status
 
-Last updated: 2026-06-09
+Last updated: 2026-06-10
 
 ## Active Work
 
 - Current owner: Claude
-- Current thread: Content-aware framing (verified root-cause fix for the multi-detail viewer)
-- Branch: `codex/integrate-claude-p0-visuals`
-- State: 16-agent root-cause workflow identified the verified root cause — the viewer frames both cameras to the FULL render extents (whole ~459k sheet) at load, discarding the change-zone bboxes it already holds. P1 SHIPPED (frame both panes to the PRIMARY change zone) + P2 SHIPPED (cluster navigator: per-detail jump buttons via new `cluster_navigator.py` + `content_frame.cluster_zone_bboxes`). Both verified end-to-end on the real 240111_P5 pair (P1: both panes → C-001 area ~7%, aligned; P2: 3 cluster buttons, click pans both panes to a detail). Helper-only, no monolith logic growth. Next: P3 title-block noise filter (conditional on a layer dump), P4 render sidecar (deferred). See `docs/work-memory/CONTENT_AWARE_FRAMING_PLAN.md`.
+- Current thread: Overnight reliability run — full-suite health + first accuracy baseline
+- Branch: `codex/overnight-2026-06-10` (the PR #5 viewer thread below and the PR #6 zone-render timeout fix are merged to `main`)
+- State: First documented full-suite execution + failure classification (`docs/FULL_SUITE_HEALTH_REPORT.md`): 3,872 collected; the 5 failures hiding behind the never-run full suite were classified by isolated re-runs — 2 REAL release-gate regressions (`peak_comparator_changes=None` on the canonical default compare path; fixed in `431a33f`), 1 stale pre-ODA-free test (converted into a policy guard, `20d0d49`), 2 intermittent QML-accumulation worker crashes (test-harness ceiling, low production risk). After fixes: **3,869 passed / 0 failed / 3 skipped** under `-n auto`. Also shipped the first measured accuracy baseline (`scripts/measure_golden_accuracy_baseline.py` + `docs/GOLDEN_ACCURACY_BASELINE_REPORT.md`): heuristic-only engine on the 15 golden truth pairs = precision 0.556 / recall 0.714 / F1 0.625 with noise-fixture FP 0; all 4 FNs are representation differences (modified-vs-add/delete granularity, block-LOCAL coordinate reporting, ATTRIB vocabulary, borderline 51.5mm vs 50mm tolerance) — zero engine silence. Follow-up candidates: expand CI beyond the 12-file subset (full suite `-n auto`), report block-internal changes in world coordinates (fixture 11).
+
+## Previous Thread (merged)
+
+- Content-aware framing (PR #5, merged): viewer framed cameras to the FULL render extents at load, discarding change-zone bboxes. P1 frame-to-primary-zone + P2 cluster navigator shipped and verified on the real 240111_P5 pair; helper-only, no monolith logic growth. P4 zone-render cold latency (PR #6, merged): 30s source timeout was killing the warm DXF index cache mid-parse; raised to 90s (`SOURCE_RENDER_TIMEOUT_MS`), protecting the measured 7.7x warm-cache reuse.
 
 ## Current Decision
 
