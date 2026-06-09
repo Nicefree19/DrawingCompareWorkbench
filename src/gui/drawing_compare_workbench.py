@@ -11909,6 +11909,18 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             # Deferred full-detail upgrade keeps the fast crop on screen (no
             # "rendering" reset) and replaces it silently when it completes.
             self._set_preview_status_v2(pair_id, "rendering", "선택 변경구역 실도면 crop을 렌더 중입니다.")
+        else:
+            # ② Full-detail upgrade keeps the fast crop visible. The first zone of
+            # a drawing pays a one-time cold cost (source DXF parse + render) that
+            # is otherwise silent; surface a non-disruptive badge hint so the wait
+            # reads as progress, not a hang, and set the expectation that later
+            # zones in the same drawing reuse the warm DXF and appear instantly.
+            # Status is preserved (no reset) so the fast crop badge does not flip.
+            self._set_preview_status_v2(
+                pair_id,
+                self._render_status_by_pair.get(pair_id, "ready"),
+                "고해상 실도면 준비 중… 첫 구역만 잠시 걸리고, 같은 도면의 이후 구역은 즉시 표시됩니다.",
+            )
         if _viewer_pair_is_pdf(viewer_pair):
             has_pdf_background = bool(viewer_pair.get("before_image")) and bool(viewer_pair.get("after_image"))
             has_pdf_transform = bool(viewer_pair.get("before_transform")) and bool(viewer_pair.get("after_transform"))
