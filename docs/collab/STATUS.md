@@ -5,9 +5,9 @@ Last updated: 2026-06-09
 ## Active Work
 
 - Current owner: Claude
-- Current thread: Sheet-frame producer (continuing Codex sheet-frame alignment thread)
+- Current thread: Content-aware framing (verified root-cause fix for the multi-detail viewer)
 - Branch: `codex/integrate-claude-p0-visuals`
-- State: sheet-frame PRODUCER added (renderer-emit `cad_frame_bbox`); revives the previously-dead consumer for bordered drawings. Live verification proved the primary multi-detail drawing shares before/after origin → world-union framing is already correct and content-extents overlay is contraindicated. See `docs/work-memory/SHEET_FRAME_PRODUCER_IMPLEMENTATION_PLAN.md`.
+- State: 16-agent root-cause workflow identified the verified root cause — the viewer frames both cameras to the FULL render extents (whole ~459k sheet) at load, discarding the change-zone bboxes it already holds. P1 SHIPPED: `content_frame.py` frames both panes to the PRIMARY change zone via the existing `apply_shared_lightweight_camera_frame` helper (no monolith growth, safe-degrades). Verified end-to-end on the real 240111_P5 pair (both panes → C-001 area ~7% of sheet, aligned). Next: P2 cluster navigator, P3 title-block noise filter (conditional), P4 render sidecar (deferred). See `docs/work-memory/CONTENT_AWARE_FRAMING_PLAN.md`.
 
 ## Current Decision
 

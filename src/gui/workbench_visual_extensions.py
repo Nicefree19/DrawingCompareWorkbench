@@ -56,6 +56,9 @@ def apply_shared_lightweight_camera_frame(
         )
         from src.services.comparison.viewer_frame import apply_shared_camera_frame
 
+        before_vp = getattr(workbench, "preview_before_lightweight_v2", None)
+        after_vp = getattr(workbench, "preview_after_lightweight_v2", None)
+
         before_transform = _transform_with_pair_frame(
             viewer_pair.get("before_transform"),
             viewer_pair,
@@ -66,23 +69,86 @@ def apply_shared_lightweight_camera_frame(
             viewer_pair,
             side="after",
         )
+
+        # 1) Sheet-frame (도곽) alignment — returns None for multi-detail sheets
+        #    that have no single modelspace drawing frame.
         aligned = apply_sheet_frame_camera_alignment(
             before_transform,
             after_transform,
-            getattr(workbench, "preview_before_lightweight_v2", None),
-            getattr(workbench, "preview_after_lightweight_v2", None),
+            before_vp,
+            after_vp,
         )
         if aligned is not None:
             return
 
+        # 2) Content-aware framing — frame both panes to the union of the active
+        #    change-zone bboxes so a multi-detail sheet shows its changed details
+        #    at real size on load instead of a near-blank full sheet. Falls
+        #    through when there are no usable change zones.
+        if _apply_content_frame_to_change_zones(workbench, before_vp, after_vp):
+            return
+
+        # 3) Fallback — the existing shared full-extents camera frame.
         apply_shared_camera_frame(
             before_transform,
             after_transform,
-            getattr(workbench, "preview_before_lightweight_v2", None),
-            getattr(workbench, "preview_after_lightweight_v2", None),
+            before_vp,
+            after_vp,
         )
     except Exception:  # noqa: BLE001
         logger.debug("Shared lightweight camera frame hook failed", exc_info=True)
+
+
+def _apply_content_frame_to_change_zones(workbench: Any, before_vp: Any, after_vp: Any) -> bool:
+    """Frame both lightweight viewports to the union of the active change-zone
+    bboxes; return True when a content frame was computed and applied.
+
+    Root-cause fix: the default path fits the camera to the whole multi-detail
+    sheet, making every detail sub-pixel on load. The change-zone world bboxes are
+    already in ``workbench._active_overlays_by_zone``; reuse the SAME coordinate
+    conversion the per-zone focus path uses (CAD pass-through; PDF pixel→points).
+    Keeps ONE shared frame for both panes (preserves before/after alignment).
+    """
+
+    overlays = list((getattr(workbench, "_active_overlays_by_zone", {}) or {}).values())
+    if not overlays:
+        return False
+    try:
+        from src.services.comparison.content_frame import content_frame_from_zone_bboxes
+        from src.gui.lightweight_viewport import (
+            _page_height_points_from_world_bbox,
+            convert_bbox_to_world_space,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+    page_height = _page_height_points_from_world_bbox(
+        getattr(before_vp, "world_bbox", (0.0, 0.0, 0.0, 0.0))
+    )
+
+    def _to_world(raw: Any, space: str, dpi: float):
+        return convert_bbox_to_world_space(
+            raw,
+            coordinate_space=space,
+            pdf_dpi=dpi,
+            page_height_points=page_height,
+        )
+
+    frame = content_frame_from_zone_bboxes(overlays, _to_world)
+    if frame is None:
+        return False
+
+    applied = False
+    for viewport in (before_vp, after_vp):
+        setter = getattr(viewport, "set_camera_to_world_bbox", None) if viewport is not None else None
+        if not callable(setter):
+            continue
+        try:
+            setter(frame)
+            applied = True
+        except Exception:  # noqa: BLE001
+            continue
+    return applied
 
 
 def _transform_with_pair_frame(

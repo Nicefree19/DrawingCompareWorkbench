@@ -269,6 +269,28 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
         workbench.show()
     _process_events_for(app, int(args.settle_ms))
 
+    def _camera_state(vp) -> dict:
+        # Diagnostic: read the lightweight viewport's live QML camera so framing
+        # can be verified precisely (not via a coarse screenshot).
+        try:
+            root = vp._quick.rootObject()
+            upp = float(root.property("unitsPerPixel") or 0.0)
+            width = float(root.property("width") or 0.0)
+            return {
+                "cx": round(float(root.property("cameraCenterX") or 0.0), 1),
+                "cy": round(float(root.property("cameraCenterY") or 0.0), 1),
+                "unitsPerPixel": round(upp, 4),
+                "view_world_width": round(upp * width, 1),
+            }
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            return {"error": str(exc)}
+
+    on_load_cameras = {
+        "before": _camera_state(workbench.preview_before_lightweight_v2),
+        "after": _camera_state(workbench.preview_after_lightweight_v2),
+    }
+    selected_cameras: dict = {}
+
     screenshots: list[str] = []
     selected_zone_id = ""
     selected_zone_text = ""
@@ -286,6 +308,10 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
             else:
                 workbench.zone_list_v2.setCurrentItem(leaf)
             _process_events_for(app, int(args.settle_ms))
+            selected_cameras = {
+                "before": _camera_state(workbench.preview_before_lightweight_v2),
+                "after": _camera_state(workbench.preview_after_lightweight_v2),
+            }
             selected_shot = screenshots_dir / "02_first_zone_selected.png"
             workbench.grab().save(str(selected_shot))
             screenshots.append(str(selected_shot))
@@ -304,6 +330,8 @@ def run_direct_compare(args: argparse.Namespace) -> dict[str, object]:
         "zone_count": workbench.zone_list_v2.topLevelItemCount(),
         "selected_zone_id": selected_zone_id,
         "selected_zone_text": selected_zone_text,
+        "on_load_cameras": on_load_cameras,
+        "selected_cameras": selected_cameras,
         "status_label": workbench.lbl_status_v2.text(),
         "queue_label": workbench.lbl_review_queue_v2.text(),
         "viewer_perf_label": workbench.lbl_viewer_perf_v2.text(),
