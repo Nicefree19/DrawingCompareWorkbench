@@ -608,6 +608,27 @@ class DxfRenderer:
         if fallback_reason:
             transform["fallback_reason"] = fallback_reason
 
+        # Sheet-frame (도곽) producer — emit the outer drawing-frame bbox while the
+        # modelspace is already open, so the viewer can align before/after panes by
+        # the sheet frame instead of raw world extents. Additive + best-effort: when
+        # no confident frame is found the key is absent and the viewer keeps its
+        # existing world-union camera fallback. Consumed by sheet_frame_alignment
+        # via the transform's ``cad_frame_bbox`` key (see workbench_visual_extensions).
+        try:
+            from .sheet_frame_detector import detect_sheet_frame_from_modelspace
+
+            # Pass the renderer's already-computed (outlier-filtered) extents so
+            # the coverage ratio is measured against the TRUE drawing extent.
+            frame_result = detect_sheet_frame_from_modelspace(
+                msp, extents=(min_x, min_y, max_x, max_y)
+            )
+            if frame_result is not None:
+                transform["cad_frame_bbox"] = [float(v) for v in frame_result.bbox]
+                transform["cad_frame_bbox_method"] = frame_result.method
+                transform["cad_frame_bbox_confidence"] = frame_result.confidence
+        except Exception:  # noqa: BLE001 - frame detection must never break rendering
+            logger.debug("sheet-frame detection skipped", exc_info=True)
+
         logger.info(
             "DXF 렌더링 완료 [%s]: %dx%d @ %.1fdpi, %.0fms",
             backend_used,

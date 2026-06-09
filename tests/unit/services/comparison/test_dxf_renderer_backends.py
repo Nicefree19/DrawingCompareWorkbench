@@ -515,3 +515,72 @@ def test_matplotlib_render_returns_independent_buffer(tiny_dxf: Path) -> None:
     # remain accessible after the renderer call returned.
     assert not np.all(img == 255)
     assert img.flags.owndata or img.base is None  # detached from figure
+
+
+# ---------------------------------------------------------------------------
+# Sheet-frame (도곽) producer — renderer emits cad_frame_bbox into the transform
+# ---------------------------------------------------------------------------
+
+
+def _sheet_with_frame_dxf(tmp_path: Path) -> Path:
+    """A DXF whose outer geometry is a clear non-square 도곽 rectangle."""
+
+    import ezdxf
+
+    doc = ezdxf.new("R2010")
+    msp = doc.modelspace()
+    # Outer drawing frame (도곽): 3000 x 2000 closed rectangle on a BORDER layer.
+    msp.add_lwpolyline(
+        [(0, 0), (3000, 0), (3000, 2000), (0, 2000)],
+        close=True,
+        dxfattribs={"layer": "BORDER"},
+    )
+    # Inner content (must not be mistaken for the frame).
+    msp.add_line((500, 500), (2500, 500), dxfattribs={"layer": "BEAM"})
+    text = msp.add_text("PLAN", dxfattribs={"height": 80})
+    text.set_placement((600, 1500))
+    path = tmp_path / "sheet_with_frame.dxf"
+    doc.saveas(str(path))
+    return path
+
+
+def test_render_transform_emits_cad_frame_bbox(tmp_path: Path) -> None:
+    """The render path must publish the detected 도곽 as ``cad_frame_bbox`` so the
+    viewer can align before/after panes by sheet frame. This is the producer that
+    was missing while sheet-frame alignment sat dead in production.
+    """
+
+    dxf_path = _sheet_with_frame_dxf(tmp_path)
+
+    _img, transform = DxfRenderer(backend="matplotlib").render_with_transform(
+        dxf_path, dpi=72, max_edge_px=512
+    )
+
+    assert "cad_frame_bbox" in transform
+    bbox = transform["cad_frame_bbox"]
+    assert bbox == pytest.approx([0.0, 0.0, 3000.0, 2000.0])
+    assert transform["cad_frame_bbox_method"] == "cad_polyline_frame"
+    assert transform["cad_frame_bbox_confidence"] >= 0.8
+
+
+def test_render_transform_omits_cad_frame_bbox_without_frame(tmp_path: Path) -> None:
+    """Additive contract: when no confident outer frame exists, the key is absent
+    and the viewer keeps its world-union fallback (no false 도곽)."""
+
+    import ezdxf
+
+    doc = ezdxf.new("R2010")
+    msp = doc.modelspace()
+    # Scattered geometry, no closed rectangle spanning the sheet.
+    msp.add_line((0, 0), (2000, 50), dxfattribs={"layer": "BEAM"})
+    msp.add_circle((1000, 1000), 300)
+    text = msp.add_text("NOTES", dxfattribs={"height": 80})
+    text.set_placement((100, 1800))
+    dxf_path = tmp_path / "no_frame.dxf"
+    doc.saveas(str(dxf_path))
+
+    _img, transform = DxfRenderer(backend="matplotlib").render_with_transform(
+        dxf_path, dpi=72, max_edge_px=512
+    )
+
+    assert "cad_frame_bbox" not in transform

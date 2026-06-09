@@ -1,13 +1,13 @@
 # Collaboration Status
 
-Last updated: 2026-06-08
+Last updated: 2026-06-09
 
 ## Active Work
 
-- Current owner: Codex
-- Current thread: Integrate Claude visual/PVH work onto latest re-origin main
+- Current owner: Claude
+- Current thread: Sheet-frame producer (continuing Codex sheet-frame alignment thread)
 - Branch: `codex/integrate-claude-p0-visuals`
-- State: sheet-frame viewer alignment, manifest propagation, and DXF text rendering hardening complete
+- State: sheet-frame PRODUCER added (renderer-emit `cad_frame_bbox`); revives the previously-dead consumer for bordered drawings. Live verification proved the primary multi-detail drawing shares before/after origin → world-union framing is already correct and content-extents overlay is contraindicated. See `docs/work-memory/SHEET_FRAME_PRODUCER_IMPLEMENTATION_PLAN.md`.
 
 ## Current Decision
 
