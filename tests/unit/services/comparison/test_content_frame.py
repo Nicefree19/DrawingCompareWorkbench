@@ -97,6 +97,34 @@ def test_empty_or_unusable_returns_none():
     ) is None
 
 
+def test_modified_zone_frames_both_sides_tightly():
+    # A genuine MODIFIED detail (both sides present at ~the same position — the
+    # shared-origin case the registered DXFs always produce): the frame must
+    # contain both before+after and stay a tight zoom (both panes overlay-align).
+    overlays = [
+        {"change_type": "modified", "priority_rank": 1,
+         "old_bbox": _box(100.0, 100.0, 200.0, 200.0),
+         "bbox": _box(108.0, 104.0, 208.0, 204.0)},
+    ]
+    frame = content_frame_from_zone_bboxes(overlays, _to_world)
+    assert frame is not None
+    assert frame[0] <= 100.0 and frame[1] <= 100.0 and frame[2] >= 208.0 and frame[3] >= 204.0
+    assert (frame[2] - frame[0]) < 400.0  # tight zoom around the change, not the sheet
+
+
+def test_moved_zone_frames_both_positions_so_the_move_is_visible():
+    # A reposition (before at A, after at the shifted B): the frame spans BOTH so
+    # the user sees the move; both panes share that one frame (aligned world window).
+    overlays = [
+        {"change_type": "moved", "priority_rank": 1,
+         "old_bbox": _box(100.0, 100.0, 200.0, 200.0),
+         "bbox": _box(900.0, 100.0, 1000.0, 200.0)},
+    ]
+    frame = content_frame_from_zone_bboxes(overlays, _to_world)
+    assert frame is not None
+    assert frame[0] <= 100.0 and frame[2] >= 1000.0  # spans both A and B
+
+
 # --- cluster_zone_bboxes (spatial detail clusters for the navigator) ---
 
 # Real-like: far-left notes (3), mid-right (2), far-right (2) — must split into 3.
