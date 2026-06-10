@@ -60,6 +60,15 @@ class ChangeZoneOptions:
     # zone 으로 promote 안 함. default=1 → 기존 동작 보존 (모든 group 이 zone).
     # 권장 운영 값: 2 (단일 entity 변경은 noise_score 가 높을 때만 살림).
     min_changes_per_zone: int = 1
+    # Block-DEFINITION-space records (entity ``space == "block"``) carry
+    # block-LOCAL coordinates — a bbox like (0,0)-(20,0) for a block inserted
+    # at (500,400) — so their zones land near the origin instead of at the
+    # change (golden fixture 11_block_geometry_change). The realized INSERT
+    # sibling (space "model") carries the correct world-space zone, and the
+    # definition record itself stays in the change list/counts; only zone
+    # creation skips it. Suppressed records are surfaced via
+    # ``change_zone_block_definition_skipped_count`` (demote-not-drop).
+    suppress_block_definition_zones: bool = True
     single_entity_noise_score_threshold: float = 0.7
     # Prevent one transitive cluster chain from becoming a drawing-wide
     # review/cloud zone. Large groups are split into stable spatial buckets
@@ -345,6 +354,9 @@ class _ZoneInput:
     skipped_count: int = 0
     coverage_complete: bool = True
     warning: str = ""
+    # Intentional suppressions (block-LOCAL-coordinate definition records) —
+    # separate from ``skipped_count`` so they do not flag coverage as broken.
+    block_definition_skipped: int = 0
 
 
 def build_change_zones(
@@ -364,6 +376,10 @@ def build_change_zones(
     result.metadata["change_zone_coverage_complete"] = zone_input.coverage_complete
     if zone_input.warning:
         result.metadata["change_zone_warning"] = zone_input.warning
+    if zone_input.block_definition_skipped:
+        result.metadata["change_zone_block_definition_skipped_count"] = (
+            zone_input.block_definition_skipped
+        )
     envelopes = zone_input.envelopes
 
     if not envelopes:
@@ -423,8 +439,12 @@ def _zone_input_from_result(
 
     envelopes: list[_ChangeEnvelope] = []
     skipped = 0
+    block_definition_skipped = 0
     for index, change in enumerate(result.changes):
         if _change_ignored(change, zone_options):
+            continue
+        if zone_options.suppress_block_definition_zones and _is_block_definition_change(change):
+            block_definition_skipped += 1
             continue
         bbox = change_record_bbox(change, zone_options)
         if bbox is None:
@@ -446,6 +466,7 @@ def _zone_input_from_result(
         skipped_count=skipped,
         coverage_complete=not truncated and skipped == 0,
         warning=warning,
+        block_definition_skipped=block_definition_skipped,
     )
 
 
@@ -458,6 +479,7 @@ def _zone_input_from_stream(
         raise ChangeZoneStreamError(f"change-zone stream does not exist: {path}")
     envelopes: list[_ChangeEnvelope] = []
     skipped = 0
+    block_definition_skipped = 0
     total = 0
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -485,6 +507,9 @@ def _zone_input_from_stream(
                 change = _change_record_from_stream_record(record)
                 if _change_ignored(change, zone_options):
                     continue
+                if zone_options.suppress_block_definition_zones and _is_block_definition_change(change):
+                    block_definition_skipped += 1
+                    continue
                 envelopes.append(
                     _ChangeEnvelope(
                         index=line_number - 1,
@@ -503,6 +528,7 @@ def _zone_input_from_stream(
         input_count=total,
         skipped_count=skipped,
         coverage_complete=stream_complete and skipped == 0,
+        block_definition_skipped=block_definition_skipped,
     )
 
 
@@ -616,6 +642,16 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
         _geometry_points_from_entity_data(entity_type, new_data)
         or _geometry_points_from_entity_data(entity_type, old_data)
     )
+    # Preserve the canonical entity ``space`` through the compact stream so
+    # stream-built zones can suppress block-DEFINITION-space records (their
+    # bboxes are block-LOCAL, not world). Additive optional field — absent on
+    # older streams → None → no suppression (backward compatible, same
+    # convention as the B3 ``geometry`` field above).
+    entity_space = ""
+    for data in (new_data, old_data):
+        if isinstance(data, dict) and data.get("space"):
+            entity_space = str(data.get("space"))
+            break
     key = getattr(change, "key", "") or f"{entity_type}_{change_type}_{index}"
     return {
         "schema_version": CHANGE_ZONE_STREAM_SCHEMA_VERSION,
@@ -631,6 +667,7 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
         "old_location": list(old_location) if old_location else None,
         "change_category": getattr(change, "change_category", None) or metadata.get("change_category"),
         "change_detail": getattr(change, "change_detail", None) or metadata.get("change_detail"),
+        "entity_space": entity_space or None,
         "page": metadata.get("page"),
         "page_a": metadata.get("page_a"),
         "page_b": metadata.get("page_b"),
@@ -716,6 +753,7 @@ def _change_record_from_stream_record(record: dict[str, Any]) -> ChangeRecord:
         "change_type": record.get("change_type") or "",
         "change_category": record.get("change_category"),
         "change_detail": record.get("change_detail"),
+        "entity_space": record.get("entity_space"),
         "page": record.get("page"),
         "page_a": record.get("page_a"),
         "page_b": record.get("page_b"),
@@ -1648,6 +1686,27 @@ def _first_metadata_value(envelopes: Sequence[_ChangeEnvelope], key: str) -> str
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def _is_block_definition_change(change: ChangeRecord) -> bool:
+    """True when this record describes a BLOCK-DEFINITION-space entity.
+
+    The canonical importer (expand_blocks) realizes INSERT instances into
+    model space AND keeps the definition entities (``space == "block"``) in
+    the compared entity list, so one block edit yields two records: the
+    realized instance in world coordinates and the definition in block-LOCAL
+    coordinates (e.g. bbox (0,0)-(20,0) for a block inserted at (500,400)).
+    A block-local bbox is meaningless in the drawing's world zone map — it
+    placed the change zone near the origin (verified on golden fixture
+    ``11_block_geometry_change``). Canonical entity dicts carry ``space``
+    directly; stream-rebuilt records carry it as ``metadata.entity_space``.
+    """
+
+    for value in (change.new_value, change.old_value):
+        if isinstance(value, dict) and str(value.get("space") or "").lower() == "block":
+            return True
+    meta = change.metadata or {}
+    return str(meta.get("entity_space") or "").lower() == "block"
 
 
 def _change_ignored(change: ChangeRecord, options: ChangeZoneOptions) -> bool:

@@ -277,6 +277,145 @@ def test_stream_without_geometry_field_is_backward_compatible(tmp_path: Path) ->
     assert zones[0].geometry is None
 
 
+def _canonical_change(
+    key: str,
+    *,
+    space: str,
+    bbox: dict[str, float],
+    layer: str = "Q3_LAYER",
+) -> ChangeRecord:
+    """Canonical-pipeline-shaped record: entity dicts carry ``space``,
+    metadata carries the bbox/centroid (mirrors DrawingDiffChange.to_change_record)."""
+
+    entity = {"space": space, "bbox": bbox, "type": "line"}
+    cx = (bbox["min_x"] + bbox["max_x"]) / 2.0
+    cy = (bbox["min_y"] + bbox["max_y"]) / 2.0
+    return ChangeRecord(
+        key=key,
+        change_type=ChangeType.MODIFIED,
+        old_value=entity,
+        new_value=entity,
+        location=f"{cx},{cy}",
+        metadata={
+            "layer": layer,
+            "entity_type": "line",
+            "change_type": "modified",
+            "bbox": dict(bbox),
+            "x": cx,
+            "y": cy,
+        },
+    )
+
+
+def test_block_definition_record_does_not_create_a_zone() -> None:
+    # Golden fixture 11_block_geometry_change: one block edit yields a
+    # realized-instance record in WORLD coords AND a definition record in
+    # block-LOCAL coords (bbox near origin). The local record's zone landed at
+    # a meaningless origin-area position — suppress its ZONE only; the change
+    # record itself stays in the list (demote-not-drop).
+    block_local = _canonical_change(
+        "def", space="block", bbox={"min_x": 0.0, "min_y": 0.0, "max_x": 20.0, "max_y": 0.0}
+    )
+    realized = _canonical_change(
+        "inst", space="model", bbox={"min_x": 500.0, "min_y": 400.0, "max_x": 520.0, "max_y": 400.0}
+    )
+    result = _result([block_local, realized])
+
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    assert len(zones) == 1
+    assert zones[0].bbox[0] > 400.0, "the surviving zone must be the WORLD-space one"
+    assert result.metadata.get("change_zone_block_definition_skipped_count") == 1
+    assert len(result.changes) == 2, "the change record itself must NOT be dropped"
+    assert result.metadata.get("change_zone_coverage_complete") is True
+
+
+def test_block_definition_zone_suppression_can_be_disabled() -> None:
+    block_local = _canonical_change(
+        "def", space="block", bbox={"min_x": 0.0, "min_y": 0.0, "max_x": 20.0, "max_y": 0.0}
+    )
+    realized = _canonical_change(
+        "inst", space="model", bbox={"min_x": 500.0, "min_y": 400.0, "max_x": 520.0, "max_y": 400.0}
+    )
+    result = _result([block_local, realized])
+
+    zones = build_change_zones(
+        result,
+        pair_id="P",
+        drawing_number="P",
+        options=ChangeZoneOptions(suppress_block_definition_zones=False),
+    )
+
+    assert len(zones) == 2
+    assert result.metadata.get("change_zone_block_definition_skipped_count") is None
+
+
+def test_stream_preserves_entity_space_and_suppresses_block_definition_zone(
+    tmp_path: Path,
+) -> None:
+    # Large/real comparisons build zones from the compact STREAM, which does
+    # not keep the entity dicts — ``entity_space`` must ride the stream record
+    # so the block-definition suppression works on that path too.
+    import json as _json
+
+    from src.services.comparison.change_zones import write_change_zone_stream
+
+    block_local = ChangeRecord(
+        key="def",
+        change_type=ChangeType.MODIFIED,
+        old_value={"space": "block", "start": (0.0, 0.0), "end": (20.0, 0.0)},
+        new_value={"space": "block", "start": (0.0, 0.0), "end": (20.0, 0.0)},
+        metadata={"layer": "Q3_LAYER", "entity_type": "LINE", "change_type": "modified"},
+    )
+    realized = _line_change("inst", ChangeType.MODIFIED, (500.0, 400.0), (520.0, 400.0))
+    stream_path = tmp_path / "changes.stream.jsonl"
+    meta = write_change_zone_stream([block_local, realized], stream_path, pair_id="P")
+
+    records = [
+        _json.loads(line)
+        for line in stream_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert records[0]["entity_space"] == "block"
+    assert records[1]["entity_space"] is None
+
+    result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")
+    result.metadata.update(meta)
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    assert len(zones) == 1
+    assert zones[0].bbox[0] > 400.0
+    assert result.metadata.get("change_zone_block_definition_skipped_count") == 1
+
+
+def test_stream_without_entity_space_field_is_backward_compatible(tmp_path: Path) -> None:
+    # Streams written before this field must keep building zones unchanged.
+    import json as _json
+
+    from src.services.comparison.change_zones import CHANGE_ZONE_STREAM_SCHEMA_VERSION
+
+    rec = {
+        "schema_version": CHANGE_ZONE_STREAM_SCHEMA_VERSION,
+        "key": "a",
+        "change_type": "added",
+        "layer": "BEAM",
+        "entity_type": "LINE",
+        "bbox": [10.0, 20.0, 5000.0, 800.0],
+        # NOTE: no "entity_space" key — pre-field stream.
+    }
+    stream_path = tmp_path / "old.stream.jsonl"
+    stream_path.write_text(_json.dumps(rec) + "\n", encoding="utf-8")
+
+    result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")
+    result.metadata["change_zone_stream_path"] = str(stream_path)
+    result.metadata["change_zone_stream_complete"] = True
+
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    assert len(zones) == 1
+    assert result.metadata.get("change_zone_block_definition_skipped_count") is None
+
+
 def test_pdf_visual_change_uses_top_left_bbox() -> None:
     change = ChangeRecord(
         key="page_0_Region_1",
