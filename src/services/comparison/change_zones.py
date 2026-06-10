@@ -547,7 +547,9 @@ def change_record_bbox(
         bbox = _bbox_from_metadata(metadata, zone_options)
     if bbox is None:
         bbox = _bbox_from_location(change.location, zone_options)
-    return bbox
+    # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+    anchored, _delta = _anchor_bbox_to_location(bbox, _location_point(change.location))
+    return anchored
 
 
 def change_record_old_bbox(
@@ -561,7 +563,14 @@ def change_record_old_bbox(
     entity_type = str(metadata.get("entity_type") or "").upper()
     bbox = _bbox_from_entity_data(entity_type, change.old_value, zone_options)
     if bbox is not None:
-        return bbox
+        # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+        anchor = (
+            _point_from_metadata(metadata, "old_x", "old_y")
+            or _point(metadata.get("old_location"))
+            or _location_point(change.location)
+        )
+        anchored, _delta = _anchor_bbox_to_location(bbox, anchor)
+        return anchored
     raw_old_bbox = _coerce_bbox(metadata.get("old_bbox"))
     if raw_old_bbox is not None:
         return _ensure_min_bbox(raw_old_bbox, zone_options.min_marker_size)
@@ -621,8 +630,8 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
     new_data = getattr(change, "new_data", None)
     if new_data is None:
         new_data = getattr(change, "new_value", None)
-    location = _point(getattr(change, "location", None)) or _point_from_metadata(metadata, "x", "y")
-    old_location = _point(getattr(change, "old_location", None)) or _point_from_metadata(
+    location = _location_point(getattr(change, "location", None)) or _point_from_metadata(metadata, "x", "y")
+    old_location = _location_point(getattr(change, "old_location", None)) or _point_from_metadata(
         metadata,
         "old_x",
         "old_y",
@@ -632,16 +641,33 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
     old_bbox = _bbox_for_stream_old_change(entity_type, old_data, old_location)
     if old_bbox is None and metadata_bbox is not None and change_type in {"deleted", "modified"}:
         old_bbox = metadata_bbox
+    # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+    # Without this every block-internal change zone/cloud on the legacy path
+    # pointed at the origin area instead of the actual drawing location.
+    bbox, new_delta = _anchor_bbox_to_location(bbox, location)
+    old_bbox, old_delta = _anchor_bbox_to_location(old_bbox, old_location or location)
     old_text = _text_value_from_change_data(old_data)
     new_text = _text_value_from_change_data(new_data)
     # B3 — preserve the entity's real geometry through the stream so large
     # (stream-built) comparisons can draw geometry-aware clouds. Optional field;
     # absent on older streams → recovered as None (backward compatible, no
     # schema-version bump needed since this is purely additive).
-    geometry = (
-        _geometry_points_from_entity_data(entity_type, new_data)
-        or _geometry_points_from_entity_data(entity_type, old_data)
-    )
+    geometry = _geometry_points_from_entity_data(entity_type, new_data)
+    geometry_delta = new_delta
+    if not geometry:
+        geometry = _geometry_points_from_entity_data(entity_type, old_data)
+        geometry_delta = old_delta
+    if geometry and (geometry_delta[0] or geometry_delta[1]):
+        # Shift the geometry by the SAME world anchor delta as its source
+        # side's bbox so clouds stay congruent with the zone.
+        gdx, gdy = geometry_delta
+        try:
+            geometry = {
+                **geometry,
+                "points": [[p[0] + gdx, p[1] + gdy] for p in geometry.get("points", [])],
+            }
+        except (TypeError, IndexError):
+            pass
     # Preserve the canonical entity ``space`` through the compact stream so
     # stream-built zones can suppress block-DEFINITION-space records (their
     # bboxes are block-LOCAL, not world). Additive optional field — absent on
@@ -711,6 +737,57 @@ def _point_from_metadata(
         return (float(metadata[x_key]), float(metadata[y_key]))
     except Exception:
         return None
+
+
+def _location_point(value: Any) -> Optional[Tuple[float, float]]:
+    """Parse a change location given as a tuple/list OR a string.
+
+    Legacy ChangeRecords store ``location=str(tuple)`` (``"(x, y)"``), the
+    stream path passes real tuples — accept both.
+    """
+
+    point = _point(value)
+    if point is not None:
+        return point
+    if value is None:
+        return None
+    numbers = re.findall(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", str(value))
+    if len(numbers) >= 2:
+        try:
+            return (float(numbers[0]), float(numbers[1]))
+        except ValueError:
+            return None
+    return None
+
+
+def _anchor_bbox_to_location(
+    bbox: Optional[BBox],
+    location: Optional[Tuple[float, float]],
+) -> Tuple[Optional[BBox], Tuple[float, float]]:
+    """Re-anchor a data-derived bbox to the record's WORLD location.
+
+    Legacy block-expanded entities keep their geometry data in BLOCK-LOCAL
+    coordinates while ``change.location`` is world (verified on the POT
+    BEARING pair: ARC data center ``(0,0)`` vs world location
+    ``(516460,-107284)``), so a data-derived bbox lands near the origin and
+    every zone/cloud built from it points at the wrong place. When the bbox
+    centre disagrees with the world location by more than the bbox diagonal
+    (+1 mm) — far beyond any legitimate centre/anchor offset such as TEXT
+    inserted at a corner — translate the bbox so its centre sits at the
+    location, preserving its size. Returns the (possibly translated) bbox
+    and the applied ``(dx, dy)`` so callers can shift companion payloads
+    (the stream ``geometry`` points) coherently.
+    """
+
+    if bbox is None or location is None:
+        return bbox, (0.0, 0.0)
+    cx = (bbox[0] + bbox[2]) / 2.0
+    cy = (bbox[1] + bbox[3]) / 2.0
+    diagonal = math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    if math.hypot(location[0] - cx, location[1] - cy) <= diagonal + 1.0:
+        return bbox, (0.0, 0.0)
+    dx, dy = location[0] - cx, location[1] - cy
+    return (bbox[0] + dx, bbox[1] + dy, bbox[2] + dx, bbox[3] + dy), (dx, dy)
 
 
 def _bbox_for_stream_change(

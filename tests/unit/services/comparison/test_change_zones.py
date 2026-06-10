@@ -13,6 +13,7 @@ from src.services.comparison.change_zones import (
     ChangeZoneOptions,
     CloudMarkOptions,
     build_change_zones,
+    change_record_bbox,
     export_change_artifacts,
     export_executive_review_from_artifacts,
     write_change_zone_stream,
@@ -990,3 +991,59 @@ def test_corrupt_stream_is_reported_without_silent_memory_fallback(tmp_path: Pat
     assert package.zone_coverage_complete is False
     assert package.artifacts[0].zone_input_source == "stream"
     assert any("invalid change-zone stream JSON" in warning for warning in package.warnings)
+
+
+def test_anchor_translates_block_local_bbox_to_world_location() -> None:
+    # Legacy block-expanded entities keep data in BLOCK-LOCAL coords while
+    # change.location is world (POT BEARING: arc data center (0,0) vs world
+    # (516460,-107284)) — zones built from the local bbox pointed at the
+    # origin area. Far disagreement (> bbox diagonal) must translate.
+    from src.services.comparison.change_zones import _anchor_bbox_to_location
+
+    local = (-23.14, 7.98, -10.12, 21.0)
+    world = (516460.35, -107284.12)
+    anchored, delta = _anchor_bbox_to_location(local, world)
+    acx = (anchored[0] + anchored[2]) / 2.0
+    acy = (anchored[1] + anchored[3]) / 2.0
+    assert abs(acx - world[0]) < 1e-6 and abs(acy - world[1]) < 1e-6
+    assert abs((anchored[2] - anchored[0]) - (local[2] - local[0])) < 1e-9  # size kept
+    assert delta != (0.0, 0.0)
+
+    # A legitimate centre/anchor offset (TEXT inserted at a corner: distance
+    # within the bbox diagonal) must NOT be re-anchored.
+    text_bbox = (100.0, 100.0, 140.0, 110.0)
+    near_anchor = (100.0, 100.0)  # corner insert
+    kept, delta2 = _anchor_bbox_to_location(text_bbox, near_anchor)
+    assert kept == text_bbox and delta2 == (0.0, 0.0)
+
+
+def test_stream_anchors_block_local_data_and_geometry_to_world() -> None:
+    from src.services.comparison.change_zones import change_to_stream_record
+
+    change = ChangeRecord(
+        key="blk",
+        change_type=ChangeType.ADDED,
+        old_value=None,
+        new_value={"start": (0.0, 0.0), "end": (20.0, 0.0)},  # block-LOCAL
+        location="(516460.35, -107284.12)",  # world (legacy str(tuple) form)
+        metadata={"layer": "Zero", "entity_type": "LINE", "change_type": "added"},
+    )
+    rec = change_to_stream_record(change, pair_id="p", index=0)
+    bbox = rec["bbox"]
+    assert bbox is not None and bbox[0] > 500000.0, f"bbox not world-anchored: {bbox}"
+    # geometry must ride the SAME delta so clouds stay congruent with zones
+    geom = rec.get("geometry")
+    assert geom and all(p[0] > 500000.0 for p in geom["points"])
+
+
+def test_memory_path_anchors_block_local_bbox() -> None:
+    change = ChangeRecord(
+        key="blk2",
+        change_type=ChangeType.ADDED,
+        old_value=None,
+        new_value={"start": (0.0, 0.0), "end": (20.0, 0.0)},
+        location="(516460.35, -107284.12)",
+        metadata={"layer": "Zero", "entity_type": "LINE", "change_type": "added"},
+    )
+    bbox = change_record_bbox(change)
+    assert bbox is not None and bbox[0] > 500000.0, f"memory bbox not anchored: {bbox}"
