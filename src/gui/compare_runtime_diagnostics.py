@@ -48,10 +48,26 @@ def format_auto_compare_error(exc: BaseException, request: Any) -> str:
     output_dir = str(getattr(request, "output_dir", "") or "")
     fallback_line = _fallback_diagnostic_line(request)
     code_suffix = f" ({', '.join(codes)})" if codes else ""
+    # Live-failure finding (2026-06-10 22:37 run): ODA was installed on the
+    # machine, yet an AC1032 pair with no sibling DXF was rejected — the
+    # pipeline's auto-convert is gated behind an EXPLICIT backend opt-in
+    # (CAD_FORMAT_SUPPORT_POLICY forbids automatic ODA invocation), and the
+    # error never told the user that the opt-in exists. Name it here so the
+    # failure is self-explanatory; enabling stays a deliberate user/policy
+    # decision.
+    oda_optin_line = ""
+    if oda_available and default_gui_dwg_backend_mode() is None:
+        oda_optin_line = (
+            "ODA is installed but automatic conversion requires an explicit "
+            "opt-in: set DRAWING_COMPARE_DWG_BACKEND=oda_converter and restart "
+            "the app (ODA-free default per CAD_FORMAT_SUPPORT_POLICY — confirm "
+            "your organization's policy before enabling)."
+        )
     lines = [
         f"Compare cannot read the selected DWG version with the native adapter{code_suffix}.",
         f"Native DWG support in this environment is limited to: {supported}.",
         f"ODA File Converter available: {'yes' if oda_available else 'no'}.",
+        oda_optin_line,
         fallback_line,
         (
             "Use converted DXF inputs, or place converted files under "
