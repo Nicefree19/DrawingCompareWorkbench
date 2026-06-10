@@ -95,6 +95,19 @@ def profile_path_value(
     text = str(value)
     if profile != "sharable":
         return text
+    # FAST PATH (profile-perf, 2026-06-11): sharable redaction walks EVERY
+    # string in every artifact JSON — measured 262,140 profile_path_value
+    # calls / 775,592 redact nodes on ONE real pair, costing ~40 s (26% of
+    # the whole pipeline) almost entirely on strings that are not paths at
+    # all (zone ids, layer names, Korean notes). For a non-sensitive string
+    # with no path separator the existing machinery always falls through to
+    # "return text unchanged" (resolve → not under root → not absolute →
+    # text), so skipping resolve/relative_to for them is behavior-identical
+    # while eliminating the per-string Windows _getfinalpathname syscalls.
+    # Sensitive-keyed values keep the full logic (a bare "before.dxf" under
+    # a sensitive key must still redact to "<redacted>/before.dxf").
+    if not sensitive and "/" not in text and "\\" not in text:
+        return text
     path = Path(text)
     # §14: route through `_cached_resolve` so the same string inputs (notably
     # `package_root`, which arrives once per redact-payload recursion level)

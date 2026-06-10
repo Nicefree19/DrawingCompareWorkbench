@@ -283,3 +283,39 @@ def test_redact_payload_paths_internal_profile_passthrough(tmp_path: Path):
     payload = {"source_a": "C:\\customer\\old.dxf"}
     out = redact_payload_paths(payload, profile="internal", package_root=tmp_path)
     assert out == payload  # identity-preserving for internal profile
+
+
+def test_non_path_strings_skip_resolve_entirely(monkeypatch, tmp_path):
+    # Perf contract (2026-06-11): redaction walks every string in every
+    # artifact JSON (262k calls measured on one real pair, ~40s = 26% of the
+    # pipeline). Non-sensitive separator-less strings (zone ids, layer names,
+    # Korean notes) must return unchanged WITHOUT touching Path.resolve.
+    import src.services.comparison.export_profiles as ep
+
+    calls = []
+    real = ep._cached_resolve.__wrapped__
+
+    def counting(path_str):
+        calls.append(path_str)
+        return real(path_str)
+
+    counting.cache_clear = lambda: None  # autouse teardown clears the lru cache
+    counting.cache_info = lambda: None
+    monkeypatch.setattr(ep, "_cached_resolve", counting)
+
+    payload = {
+        "zone_id": "C-001",
+        "layer": "Anchor Bolt",
+        "notes": "층고 변경 — 검토 필요",
+        "count": 13,
+        "source_a": "before.dxf",  # sensitive key, bare name → must still redact
+        "preview": str(tmp_path / "img.png"),  # real path → still processed
+    }
+    out = ep.redact_payload_paths(payload, profile="sharable", package_root=tmp_path)
+
+    assert out["zone_id"] == "C-001"
+    assert out["layer"] == "Anchor Bolt"
+    assert out["notes"] == "층고 변경 — 검토 필요"
+    assert out["source_a"] == "<redacted>/before.dxf"
+    # resolve was reached ONLY for the sensitive value and the real path
+    assert not any(c in ("C-001", "Anchor Bolt") for c in calls)
