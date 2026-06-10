@@ -122,7 +122,9 @@ class DxfCloudMarker:
         logger.info(f"구름마크 DXF 생성 시작: {len(changes)}개 변경점")
 
         # DXF 파일 열기
-        doc = read_dxf_document(base_dxf_path, ezdxf_module=ezdxf)
+        # mutable=True: this doc gets cloud entities added and saveas-ed — it
+        # must be a PRIVATE parse, never a dxf_document_cache_scope shared copy.
+        doc = read_dxf_document(base_dxf_path, ezdxf_module=ezdxf, mutable=True)
         msp = doc.modelspace()
 
         # 레이어 생성
@@ -162,7 +164,9 @@ class DxfCloudMarker:
         if not base_dxf_path.exists():
             raise FileNotFoundError(f"Base DXF file not found: {base_dxf_path}")
 
-        doc = read_dxf_document(base_dxf_path, ezdxf_module=ezdxf)
+        # mutable=True: this doc gets cloud entities added and saveas-ed — it
+        # must be a PRIVATE parse, never a dxf_document_cache_scope shared copy.
+        doc = read_dxf_document(base_dxf_path, ezdxf_module=ezdxf, mutable=True)
         msp = doc.modelspace()
         self._create_layers(doc)
 

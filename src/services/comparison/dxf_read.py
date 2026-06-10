@@ -4,11 +4,70 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Run-scoped parsed-document cache (issue-1 lever #2, 2026-06-11)
+#
+# cProfile of one real-pair pipeline run showed the SAME 71.9 MB converted DXF
+# parsed SEVEN times (80.7 s cumulative, >50% of the run): descriptor scan x2,
+# compare x2, cloud-marker x1, sheet-region detect x2 — every one of them
+# funnels through read_dxf_document_result below, so a cache HERE covers all
+# consumers without threading new parameters through their call chains.
+#
+# Safety model:
+# - The cache only exists inside an explicit ``dxf_document_cache_scope()``
+#   (the pipeline run opens one). No scope → behavior identical to before.
+# - Consumers that MUTATE the document (dxf_cloud_marker adds cloud entities
+#   and saveas-es a copy) must pass ``mutable=True`` to get a private fresh
+#   parse; the cached pristine doc is never handed to them. All other in-repo
+#   consumers are read-only (verified: no saveas/add_entity/layer-state writes
+#   in drawing_batch descriptor, dwg_differ extraction, sheet_region_detector).
+# - Keyed by (resolved path, mtime_ns, size) so an on-disk change invalidates.
+# - Tiny LRU (default 4 docs): one pair's two sides + headroom — a folder run
+#   with many pairs evicts old pairs instead of pinning gigabytes.
+# ---------------------------------------------------------------------------
+
+_DOC_CACHE_LOCK = threading.Lock()
+_DOC_CACHE_SCOPES: list[dict[str, Any]] = []
+
+
+@contextmanager
+def dxf_document_cache_scope(maxsize: int = 4) -> Iterator[dict[str, Any]]:
+    """Enable parsed-DXF reuse for read_dxf_document_result within this scope."""
+
+    scope: dict[str, Any] = {
+        "entries": OrderedDict(),
+        "maxsize": max(1, int(maxsize)),
+        "hits": 0,
+        "misses": 0,
+    }
+    with _DOC_CACHE_LOCK:
+        _DOC_CACHE_SCOPES.append(scope)
+    try:
+        yield scope
+    finally:
+        with _DOC_CACHE_LOCK:
+            try:
+                _DOC_CACHE_SCOPES.remove(scope)
+            except ValueError:
+                pass
+        scope["entries"].clear()
+
+
+def _document_cache_key(path: Path) -> tuple[str, int, int] | None:
+    try:
+        stat = path.stat()
+        return (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return None
 
 _LWPOLYLINE_REPAIR_REASON = "missing AcDbPolyline subclass in LWPOLYLINE"
 
@@ -36,16 +95,22 @@ class DxfReadResult:
     diagnostics: DxfReadDiagnostics
 
 
-def read_dxf_document(path: str | Path, *, ezdxf_module: Any | None = None) -> Any:
+def read_dxf_document(
+    path: str | Path,
+    *,
+    ezdxf_module: Any | None = None,
+    mutable: bool = False,
+) -> Any:
     """Read a DXF document, applying narrowly-scoped in-memory repairs if needed."""
 
-    return read_dxf_document_result(path, ezdxf_module=ezdxf_module).doc
+    return read_dxf_document_result(path, ezdxf_module=ezdxf_module, mutable=mutable).doc
 
 
 def read_dxf_document_result(
     path: str | Path,
     *,
     ezdxf_module: Any | None = None,
+    mutable: bool = False,
 ) -> DxfReadResult:
     """Read a DXF document and return diagnostics about any repair fallback.
 
@@ -54,12 +119,48 @@ def read_dxf_document_result(
     ``ezdxf.recover`` does not repair this specific defect.  The fallback below
     leaves the source file untouched, injects only the missing LWPOLYLINE
     structural tags in memory, and then re-runs ezdxf on that sanitized stream.
+
+    ``mutable=True`` requests a PRIVATE fresh parse that bypasses any active
+    ``dxf_document_cache_scope`` — required by consumers that modify the
+    document (e.g. the cloud marker). Read-only consumers keep the default and
+    may receive a shared document inside a scope.
     """
 
+    dxf_path = Path(path)
+    scope: dict[str, Any] | None = None
+    key: tuple[str, int, int] | None = None
+    if not mutable:
+        with _DOC_CACHE_LOCK:
+            scope = _DOC_CACHE_SCOPES[-1] if _DOC_CACHE_SCOPES else None
+        if scope is not None:
+            key = _document_cache_key(dxf_path)
+            if key is not None:
+                with _DOC_CACHE_LOCK:
+                    cached = scope["entries"].get(key)
+                    if cached is not None:
+                        scope["entries"].move_to_end(key)
+                        scope["hits"] += 1
+                        return cached
+                    scope["misses"] += 1
+
+    result = _read_dxf_document_uncached(dxf_path, ezdxf_module)
+    if scope is not None and key is not None:
+        with _DOC_CACHE_LOCK:
+            entries = scope["entries"]
+            entries[key] = result
+            entries.move_to_end(key)
+            while len(entries) > scope["maxsize"]:
+                entries.popitem(last=False)
+    return result
+
+
+def _read_dxf_document_uncached(
+    dxf_path: Path,
+    ezdxf_module: Any | None,
+) -> DxfReadResult:
     if ezdxf_module is None:
         import ezdxf as ezdxf_module  # type: ignore[no-redef]
 
-    dxf_path = Path(path)
     primary_exc: BaseException | None = None
     try:
         doc = ezdxf_module.readfile(str(dxf_path))

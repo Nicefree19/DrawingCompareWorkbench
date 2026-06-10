@@ -54,6 +54,7 @@ from .drawing_batch import (
     match_drawing_sets,
     scan_drawing_inputs,
 )
+from .dxf_read import dxf_document_cache_scope
 from .dwg_dxf_fallback import (
     auto_convert_unsupported_dwg,
     fallback_review_notice,
@@ -335,7 +336,17 @@ class FolderComparePipeline:
             ),
         )
 
+        # Issue-1 lever #2 (2026-06-11): share parsed DXF documents across the
+        # scan/compare/region stages of THIS run — profiling showed the same
+        # 71.9 MB converted DXF parsed 7x per run (>50% of wall time), all via
+        # read_dxf_document_result. The cloud marker opts out (mutable=True)
+        # because it mutates and saveas-es its copy. Scope closes in finally,
+        # releasing the cached documents on success and failure alike.
+        from contextlib import ExitStack
+
+        _doc_cache_cm = ExitStack()
         try:
+            _doc_cache_cm.enter_context(dxf_document_cache_scope())
             output_dir.mkdir(parents=True, exist_ok=True)
             try:
                 perf_writer.path.unlink(missing_ok=True)
@@ -1426,6 +1437,8 @@ class FolderComparePipeline:
                 logger.debug("Failed to record perf failure event", exc_info=True)
             run_manifest.fail(active_stage, exc)
             raise
+        finally:
+            _doc_cache_cm.close()
 
     @staticmethod
     def _emit(
