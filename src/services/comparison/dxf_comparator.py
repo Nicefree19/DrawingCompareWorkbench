@@ -2154,6 +2154,21 @@ class DxfComparator:
         et = d_change.entity_type
         ad = d_change.old_data or {}
         bd = a_change.new_data or {}
+        # Block-expanded entities keep their data in BLOCK-LOCAL coordinates
+        # (only ``change.location`` is world), so applying the world transform
+        # to that data made every block-internal pair unverifiable — measured
+        # on the re-origined POT BEARING pair: 1,723 fully-identical pairs
+        # (bolt-detail ARCs/LINEs) survived as phantom add+delete, 29.5% of
+        # all added+deleted records. If both sides' data are identical AS-IS
+        # (the extractor normalises values to precision-rounded strings), the
+        # content is unchanged: the caller already matched their REGISTERED
+        # world locations within ``tol``, and same registered spot + same
+        # local content == no change. Top-level entities carry world
+        # coordinates in their data, which CANNOT be equal across a
+        # significant re-origin shift, so they fall through to the per-type
+        # world-frame proofs below unchanged.
+        if ad and ad == bd:
+            return True
         transform = alignment.apply
         try:
             if et == "LINE":
@@ -2239,11 +2254,6 @@ class DxfComparator:
             "LINE", "CIRCLE", "ARC", "LWPOLYLINE", "POLYLINE",
             "TEXT", "MTEXT", "DIMENSION", "INSERT",
         }
-        unverified_kept_by_type: Dict[str, int] = {}
-        for change in deleted:
-            if change.entity_type not in supported:
-                self._bump_count(unverified_kept_by_type, change.entity_type)
-
         buckets: Dict[Tuple[str, str, int, int], List[int]] = {}
         for idx, a_change in enumerate(added):
             loc = a_change.location
@@ -2323,6 +2333,14 @@ class DxfComparator:
         removed_del = {di for di, _ in final_pairs}
         kept_deleted = [d for i, d in enumerate(deleted) if i not in removed_del]
         kept_added = [a for i, a in enumerate(added) if i not in used_added]
+        # Counted AFTER matching: the identical-data fast path in
+        # _registered_geometry_unchanged can now prove types outside the
+        # per-type proof set (HATCH/LEADER/...), so only the ones actually
+        # KEPT are honest "unverified" counts.
+        unverified_kept_by_type: Dict[str, int] = {}
+        for i, change in enumerate(deleted):
+            if i not in removed_del and change.entity_type not in supported:
+                self._bump_count(unverified_kept_by_type, change.entity_type)
         return kept_deleted, kept_added, removed_ids, len(final_pairs), refined, {
             "removed_by_type": removed_by_type,
             "unverified_kept_by_type": unverified_kept_by_type,
