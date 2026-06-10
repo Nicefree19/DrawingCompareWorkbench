@@ -98,6 +98,14 @@ Item {
     // from loading.
     property string skeletonRenderer: "canvas"
 
+    // ---- PAINT DIAGNOSTICS (read by benchmarks / perf tooling) ---------
+    // Updated by vectorCanvas.onPaint on every completed paint. These are
+    // observability-only — nothing inside this QML binds to them.
+    property real lastPaintMs: 0
+    property int paintCount: 0
+    property int lastPaintDrawnSegments: 0
+    property int lastPaintCulledSegments: 0
+
     signal viewportChanged(real centerX, real centerY, real upp)
     // Phase I4 — emitted when the user clicks a cloud or focus marker.
     // Wired by LightweightDrawingViewport (Python) → workbench
@@ -180,34 +188,79 @@ Item {
         antialiasing: true
         visible: root.skeletonRenderer !== "qsg"
         z: 10
-        // Repaint whenever any input the paint code reads changes — wired
-        // via Connections on the root item so we catch every property
-        // assignment from Python regardless of binding cycles.
+        // CHEAP-PAN (T1, 2026-06-10): repainting the whole skeleton on EVERY
+        // camera tick made pan/zoom cost O(all segments) per wheel notch —
+        // measured 56 ms/paint × 29 paints for 30 ticks at 100k segments
+        // (scripts/benchmark_viewport_paint.py). Instead, paint at a SETTLED
+        // camera and track the live camera with an item-level affine (scale
+        // about the view centre + translate). While interacting, the already
+        // painted pixels follow the camera (slightly soft when zooming in);
+        // a short settle timer triggers ONE crisp repaint when input pauses.
+        // Content changes (primitives/worldBbox) settle immediately.
+        property real settledCenterX: 0
+        property real settledCenterY: 0
+        property real settledUnitsPerPixel: 1.0
+
+        function settle() {
+            settledCenterX = root.cameraCenterX
+            settledCenterY = root.cameraCenterY
+            settledUnitsPerPixel = root.unitsPerPixel
+            requestPaint()
+        }
+
+        Timer {
+            id: settleTimer
+            interval: 120
+            repeat: false
+            onTriggered: vectorCanvas.settle()
+        }
+
+        transform: [
+            Scale {
+                origin.x: vectorCanvas.width / 2.0
+                origin.y: vectorCanvas.height / 2.0
+                xScale: vectorCanvas.settledUnitsPerPixel / Math.max(0.0001, root.unitsPerPixel)
+                yScale: vectorCanvas.settledUnitsPerPixel / Math.max(0.0001, root.unitsPerPixel)
+            },
+            Translate {
+                x: (vectorCanvas.settledCenterX - root.cameraCenterX) / Math.max(0.0001, root.unitsPerPixel)
+                y: -(vectorCanvas.settledCenterY - root.cameraCenterY) / Math.max(0.0001, root.unitsPerPixel)
+            }
+        ]
 
         Connections {
             target: root
-            function onPrimitivesChanged() { vectorCanvas.requestPaint() }
-            function onWorldBboxChanged()  { vectorCanvas.requestPaint() }
-            function onCameraCenterXChanged() { vectorCanvas.requestPaint() }
-            function onCameraCenterYChanged() { vectorCanvas.requestPaint() }
-            function onUnitsPerPixelChanged() { vectorCanvas.requestPaint() }
+            function onPrimitivesChanged() { vectorCanvas.settle() }
+            function onWorldBboxChanged()  { vectorCanvas.settle() }
+            function onCameraCenterXChanged() { settleTimer.restart() }
+            function onCameraCenterYChanged() { settleTimer.restart() }
+            function onUnitsPerPixelChanged() { settleTimer.restart() }
         }
 
         onPaint: {
+            var __t0 = Date.now()
+            var __drawn = 0
             var ctx = getContext("2d")
             ctx.save()
             ctx.clearRect(0, 0, width, height)
 
             if (!root.primitives || root.primitives.length === 0) {
                 ctx.restore()
+                root.paintCount += 1
+                root.lastPaintMs = Date.now() - __t0
+                root.lastPaintDrawnSegments = 0
+                root.lastPaintCulledSegments = 0
                 return
             }
 
-            // World→pixel affine. We render around (cameraCenterX, cameraCenterY)
-            // with ``unitsPerPixel`` world units per screen pixel. Y axis flipped.
-            var s = 1.0 / Math.max(0.0001, root.unitsPerPixel)
-            var cx = root.cameraCenterX
-            var cy = root.cameraCenterY
+            // World→pixel affine at the SETTLED camera (cheap-pan: while the
+            // user interacts, the item transform above maps these pixels to
+            // the live camera; this paint runs once on settle). Y flipped.
+            var __culled = 0
+            var upp = Math.max(0.0001, vectorCanvas.settledUnitsPerPixel)
+            var s = 1.0 / upp
+            var cx = vectorCanvas.settledCenterX
+            var cy = vectorCanvas.settledCenterY
             var w  = width
             var h  = height
             // Translate so (cx, cy) maps to (w/2, h/2), with Y flipped.
@@ -216,31 +269,81 @@ Item {
             ctx.translate(-cx, -cy)
 
             // Pen — thin black line scaled to look ~1 px regardless of zoom.
-            ctx.lineWidth = root.unitsPerPixel
+            ctx.lineWidth = upp
             ctx.strokeStyle = "#0F172A"
             ctx.lineCap = "round"
             ctx.lineJoin = "round"
+
+            // Viewport culling (T1): segments fully outside the visible
+            // world rect (+32 px margin) are skipped. At fit-to-view this
+            // skips ~nothing; zoomed into one detail it skips almost the
+            // whole sheet — measured 100k drawn -> ~1k at a 1% window.
+            var mWorld = 32.0 * upp
+            var vxmin = cx - (w / 2.0) * upp - mWorld
+            var vxmax = cx + (w / 2.0) * upp + mWorld
+            var vymin = cy - (h / 2.0) * upp - mWorld
+            var vymax = cy + (h / 2.0) * upp + mWorld
+
+            // Stroke batching (T1): one path per colour run (chunked every
+            // 4000 segments) instead of beginPath/stroke per segment. Round
+            // caps render disjoint moveTo/lineTo subpaths identically to the
+            // old per-segment strokes.
+            var batchColor = "#0F172A"
+            var batchN = 0
 
             for (var i = 0; i < root.primitives.length; ++i) {
                 var prim = root.primitives[i]
                 if (!prim) continue
                 var props = prim.properties
-                if (props && props.color) {
-                    ctx.strokeStyle = props.color
-                }
+                var color = (props && props.color) ? props.color : "#0F172A"
                 var t = prim.type
                 var g = prim.geometry
                 if (!g) continue
                 if (t === "lines") {
+                    if (color !== batchColor) {
+                        if (batchN > 0) { ctx.stroke(); batchN = 0 }
+                        ctx.strokeStyle = color
+                        batchColor = color
+                    }
                     for (var k = 0; k < g.length; ++k) {
                         var seg = g[k]
                         if (!seg || seg.length < 4) continue
-                        ctx.beginPath()
-                        ctx.moveTo(seg[0], seg[1])
-                        ctx.lineTo(seg[2], seg[3])
-                        ctx.stroke()
+                        var ax = seg[0], ay = seg[1], bx = seg[2], by = seg[3]
+                        if ((ax < vxmin && bx < vxmin) || (ax > vxmax && bx > vxmax)
+                                || (ay < vymin && by < vymin) || (ay > vymax && by > vymax)) {
+                            __culled += 1
+                            continue
+                        }
+                        if (batchN === 0) ctx.beginPath()
+                        ctx.moveTo(ax, ay)
+                        ctx.lineTo(bx, by)
+                        __drawn += 1
+                        batchN += 1
+                        if (batchN >= 4000) { ctx.stroke(); batchN = 0 }
                     }
                 } else if (t === "path") {
+                    if (batchN > 0) { ctx.stroke(); batchN = 0 }
+                    // Quick bbox pre-pass over the command coordinates so an
+                    // off-screen path costs one scan, not a full stroke.
+                    var pxmin = Infinity, pxmax = -Infinity
+                    var pymin = Infinity, pymax = -Infinity
+                    for (var b = 0; b < g.length; ++b) {
+                        var pc = g[b]
+                        if (!pc) continue
+                        for (var a = 1; a + 1 < pc.length; a += 2) {
+                            var qx = pc[a], qy = pc[a + 1]
+                            if (qx < pxmin) pxmin = qx
+                            if (qx > pxmax) pxmax = qx
+                            if (qy < pymin) pymin = qy
+                            if (qy > pymax) pymax = qy
+                        }
+                    }
+                    if (pxmax < vxmin || pxmin > vxmax || pymax < vymin || pymin > vymax) {
+                        __culled += 1
+                        continue
+                    }
+                    ctx.strokeStyle = color
+                    batchColor = color
                     ctx.beginPath()
                     for (var j = 0; j < g.length; ++j) {
                         var cmd = g[j]
@@ -260,9 +363,15 @@ Item {
                         }
                     }
                     ctx.stroke()
+                    __drawn += 1
                 }
             }
+            if (batchN > 0) ctx.stroke()
             ctx.restore()
+            root.paintCount += 1
+            root.lastPaintMs = Date.now() - __t0
+            root.lastPaintDrawnSegments = __drawn
+            root.lastPaintCulledSegments = __culled
         }
     }
 
