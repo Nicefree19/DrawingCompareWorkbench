@@ -305,6 +305,18 @@ class FolderComparePipeline:
         export_profile = normalize_export_profile(self.request.export_profile)
         fast_first_review = bool(self.request.fast_first_review)
         run_manifest = RunManifestWriter(output_dir)
+        # Hang self-diagnosis (2026-06-11 live incident: GUI compare sat in
+        # one stage 65+ min with zero events while a headless rerun of the
+        # same pair took 62.7 s; py-spy could not attach, so the cause died
+        # with the process). If no stage transition happens for the timeout,
+        # every thread's stack is dumped into the run dir — observation
+        # only, the run is never interrupted.
+        from .stage_hang_watchdog import StageHangWatchdog
+
+        hang_watchdog = StageHangWatchdog(output_dir).start()
+        run_manifest.on_stage = (
+            lambda name, status: hang_watchdog.pet(f"{name}:{status}")
+        )
         perf_writer = PerfEventWriter(
             output_dir,
             run_id=str(run_manifest.payload.get("run_id") or ""),
@@ -1438,6 +1450,7 @@ class FolderComparePipeline:
             run_manifest.fail(active_stage, exc)
             raise
         finally:
+            hang_watchdog.stop()
             _doc_cache_cm.close()
 
     @staticmethod

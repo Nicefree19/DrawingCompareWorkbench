@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 RUN_MANIFEST_SCHEMA_VERSION = 1
 
@@ -20,6 +23,10 @@ class RunManifestWriter:
         self.path = self.output_dir / "run_manifest.json"
         self.success_path = self.output_dir / "_SUCCESS"
         self.failed_path = self.output_dir / "_FAILED"
+        # Optional progress hook (stage name, status) — the pipeline's
+        # hang watchdog pets through this so every transition counts as
+        # progress without the manifest knowing about watchdogs.
+        self.on_stage: Optional[Any] = None
         self.payload: dict[str, Any] = self._load_existing_payload() or {
             "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
             "run_id": run_id or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
@@ -60,6 +67,12 @@ class RunManifestWriter:
             **_json_safe(extra),
         }
         self.write()
+        hook = self.on_stage
+        if hook is not None:
+            try:
+                hook(name, status)
+            except Exception:  # noqa: BLE001 - progress hook must stay non-fatal
+                logger.debug("run manifest on_stage hook failed", exc_info=True)
 
     def complete(
         self,
