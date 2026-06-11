@@ -163,3 +163,45 @@ def test_focused_zone_also_wears_its_revision_cloud(viewport):
         (o.get("zoneId") if isinstance(o, dict) else o.property("zoneId")) == "C-001"
         for o in focus
     ), "focus marker must still exist"
+
+
+def test_zoom_band_lod_skips_subpixel_segments_until_zoomed_in(viewport):
+    """T2-B — segments shorter than ~0.75 px at the settled zoom are
+    skipped (they read as noise, not ink, yet dominated dense sheets:
+    real pack measured 65,711 of 65,902 segments sub-pixel at
+    fit-to-view). Zooming in shrinks the threshold so the same
+    segments draw again."""
+
+    qapp, vp, quick, root = viewport
+    tiny = [[1000.0 + i * 5.0, 1000.0, 1001.0 + i * 5.0, 1000.5]
+            for i in range(50)]  # |dx|+|dy| = 1.5 world units
+    prims = [
+        {"type": "lines", "geometry": tiny, "properties": {}},
+        {"type": "lines", "geometry": [[0.0, 0.0, 4000.0, 3000.0]],
+         "properties": {}},
+    ]
+    root.setProperty("worldBbox", [0.0, 0.0, 8000.0, 6000.0])
+    root.setProperty("cameraCenterX", 1100.0)
+    root.setProperty("cameraCenterY", 1000.0)
+    root.setProperty("unitsPerPixel", 10.0)  # lodMin = 7.5 > 1.5
+    root.setProperty("primitives", prims)
+    _pump(qapp, 200)
+    assert _wait_paint(qapp, quick, root, 1)
+    drawn = int(root.property("lastPaintDrawnSegments") or 0)
+    culled = int(root.property("lastPaintCulledSegments") or 0)
+    assert drawn == 1, f"only the long line should draw, got {drawn}"
+    assert culled >= 50, f"tiny segments must be LOD-culled, got {culled}"
+
+    # Zoom into the tiny cluster: lodMin = 0.3 < 1.5 → they draw. The
+    # camera window (800px * 0.4 = 320 world units, centred on the
+    # 246-unit-wide cluster) keeps every tiny segment inside the
+    # viewport so culling doesn't mask the LOD behaviour under test.
+    before = int(root.property("paintCount") or 0)
+    root.setProperty("cameraCenterX", 1123.0)
+    root.setProperty("unitsPerPixel", 0.4)
+    _pump(qapp, 200)
+    assert _wait_paint(qapp, quick, root, before + 1)
+    drawn_zoomed = int(root.property("lastPaintDrawnSegments") or 0)
+    assert drawn_zoomed >= 45, (
+        f"zoomed-in paint must include the tiny segments, got {drawn_zoomed}"
+    )

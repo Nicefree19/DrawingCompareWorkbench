@@ -297,17 +297,25 @@ def test_collect_viewport_failure_codes_empty_args_returns_empty_tuple() -> None
     assert collect_viewport_failure_codes() == ()
 
 
-def test_collect_viewport_failure_codes_integrates_with_real_lightweight_viewport() -> None:
+def test_collect_viewport_failure_codes_integrates_with_real_lightweight_viewport(
+    monkeypatch,
+) -> None:
     """S1.6: integration — real LightweightDrawingViewport works with the helper.
 
-    In the unit-test environment QSGLineItem is unavailable, so the
-    real viewport reports at least one code which the helper must
-    propagate.
+    T2 (2026-06-11): the QSG module now exists, so a fallback event is
+    SIMULATED by breaking the import — the real viewport must report the
+    code and the helper must propagate it.
     """
+    import sys
+    import types
+
     _ensure_app()
     from src.gui.lightweight_viewport import LightweightDrawingViewport
     from src.gui.failure_badge import collect_viewport_failure_codes
 
+    monkeypatch.setitem(
+        sys.modules, "src.gui.qsg_line_item", types.ModuleType("broken_qsg")
+    )
     vp = LightweightDrawingViewport()
     codes = collect_viewport_failure_codes(vp)
 

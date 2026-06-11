@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QObject, QUrl, Qt, Signal
 from PySide6.QtGui import QImageReader
+from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QStackedLayout, QWidget
 
@@ -116,6 +117,44 @@ def _create_quick_widget(parent: QWidget) -> QWidget:
             exc,
         )
         return _FallbackQuickWidget(parent)
+
+
+_SKELETON_INK = "#0F172A"
+
+
+def normalize_skeleton_ink(primitives: list) -> list:
+    """Map near-white stroke colours to dark ink, in place.
+
+    Real scene packs carry DXF colour 7 ("white", meant for dark CAD
+    backgrounds) verbatim — measured 1,229 of 1,256 primitives at
+    ``#ffffff`` on one real detail sheet — which is invisible on the
+    viewer's #FAFAFA background. Colours with relative luminance > 0.9
+    become the Canvas default ink; genuinely coloured layers (red/green
+    revision marks, mid greys) pass through untouched.
+    """
+
+    for prim in primitives or []:
+        if not isinstance(prim, dict):
+            continue
+        props = prim.get("properties")
+        if not isinstance(props, dict):
+            continue
+        color = props.get("color")
+        if not isinstance(color, str):
+            continue
+        value = color.lstrip("#")
+        if len(value) < 6:
+            continue
+        try:
+            r = int(value[0:2], 16)
+            g = int(value[2:4], 16)
+            b = int(value[4:6], 16)
+        except ValueError:
+            continue
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        if luminance > 0.9:
+            props["color"] = _SKELETON_INK
+    return primitives
 
 
 def _normalise_bbox(raw) -> Optional[tuple[float, float, float, float]]:
@@ -652,16 +691,32 @@ class LightweightDrawingViewport(QWidget):
             # can show ℹ️ "QSGLineItem 모듈 없음 — 표준 Canvas 사용".
             self._render_failure_codes.append("backend_fallback_canvas_skeleton")
 
-        # Resolve renderer choice from env var (operator override). This
-        # standalone QML is Canvas-safe; do not allow WORKBENCH_QSG=qsg to
-        # hide the Canvas when the optional QSG item is absent.
+        # Resolve renderer choice from env var (operator override). T2
+        # (2026-06-11): the GPU skeleton is the DEFAULT when the module
+        # imports — Canvas repainted ~40-60 ms on the GUI thread per camera
+        # settle at real sheet scale (66k segments), felt as a hitch after
+        # every pan/zoom. WORKBENCH_QSG=canvas keeps the old renderer as an
+        # explicit opt-out; a missing/broken QSG module still falls back to
+        # Canvas so the viewer root stays loadable.
         env_choice = os.environ.get("WORKBENCH_QSG", "auto").strip().lower()
-        if env_choice == "qsg":
-            logger.warning(
-                "WORKBENCH_QSG=qsg ignored in this build; using Canvas "
-                "skeleton so the lightweight viewer root remains loadable"
-            )
-        self._skeleton_renderer = "canvas"
+        if env_choice == "qsg" and self._qsg_available:
+            # EXPERIMENTAL opt-in only (2026-06-11): the Python-side
+            # QSGGeometryNode path showed nondeterministic access
+            # violations / invisible output under PySide6 6.10 +
+            # QQuickWidget on this stack (bisected live: identical node
+            # structures alternately rendered nothing or crashed at first
+            # render). Default stays Canvas, which T2-B makes responsive
+            # via threaded rasterisation + zoom-band LOD instead.
+            self._skeleton_renderer = "qsg"
+        else:
+            if env_choice == "qsg" and not self._qsg_available:
+                logger.warning(
+                    "WORKBENCH_QSG=qsg requested but the QSG module is "
+                    "unavailable; using Canvas skeleton"
+                )
+            self._skeleton_renderer = "canvas"
+        self._qsg_item = None
+        self._qsg_camera_sync = None
 
         self._quick = _create_quick_widget(self)
         # S1.3.4 Point 3: surface the QQuickWidget fallback so the badge
@@ -707,6 +762,22 @@ class LightweightDrawingViewport(QWidget):
                     "LightweightViewport: skeletonRenderer property unavailable",
                     exc_info=True,
                 )
+            # T2-B — threaded Canvas raster keeps the GUI thread free of
+            # the settle repaint. Offscreen (test) platforms keep the
+            # synchronous Immediate strategy so grab-based pixel
+            # assertions see the paint deterministically.
+            if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
+                try:
+                    root.setProperty("canvasThreadedRaster", False)
+                except Exception:
+                    logger.debug(
+                        "LightweightViewport: canvasThreadedRaster "
+                        "property unavailable", exc_info=True,
+                    )
+            # T2 — instantiate the GPU skeleton item inside the QML
+            # placeholder. Any failure downgrades to Canvas (and says so).
+            if self._skeleton_renderer == "qsg":
+                self._attach_qsg_skeleton(root)
 
     # ------------------------------------------------------------------
     # S1.3.4 — Silent fallback visibility
@@ -734,8 +805,71 @@ class LightweightDrawingViewport(QWidget):
         return tuple(self._render_failure_codes)
 
     # ------------------------------------------------------------------
-    # Phase G3 — QSG line layer plumbing
+    # Phase G3 / T2 — QSG line layer plumbing
     # ------------------------------------------------------------------
+
+    def _attach_qsg_skeleton(self, root) -> None:
+        """Create the GPU skeleton item inside the QML placeholder (T2).
+
+        The QML deliberately has no static QSG import (a missing optional
+        module must not blank the viewer), so the item is instantiated
+        here and parented into ``qsgSkeletonPlaceholder``. The item
+        follows the container size and the LIVE root camera properties —
+        unlike the Canvas (which paints at the SETTLED camera and rides
+        an item transform between settles), the GPU layer is exact on
+        every camera tick because a tick only updates a 4x4 matrix.
+        Any failure downgrades to the Canvas renderer and says so.
+        """
+
+        try:
+            from src.gui.qsg_line_item import QSGLineItem
+
+            container = root.findChild(QQuickItem, "qsgSkeletonPlaceholder")
+            if container is None:
+                raise RuntimeError("qsgSkeletonPlaceholder not found in QML")
+            item = QSGLineItem()
+            item.setParentItem(container)
+            item.setObjectName("qsgSkeleton")
+
+            def _resize() -> None:
+                item.setWidth(container.width())
+                item.setHeight(container.height())
+
+            container.widthChanged.connect(_resize)
+            container.heightChanged.connect(_resize)
+            _resize()
+
+            def _sync_camera() -> None:
+                try:
+                    item.setCamera(
+                        float(root.property("cameraCenterX") or 0.0),
+                        float(root.property("cameraCenterY") or 0.0),
+                        float(root.property("unitsPerPixel") or 1.0),
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+            root.cameraCenterXChanged.connect(_sync_camera)
+            root.cameraCenterYChanged.connect(_sync_camera)
+            root.unitsPerPixelChanged.connect(_sync_camera)
+            _sync_camera()
+
+            # Keep refs: the closures live as long as the viewport, and
+            # the item wrapper must not be garbage collected.
+            self._qsg_item = item
+            self._qsg_camera_sync = (_sync_camera, _resize)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "QSG skeleton attach failed; downgrading to Canvas renderer"
+            )
+            self._skeleton_renderer = "canvas"
+            self._qsg_item = None
+            self._render_failure_codes.append("backend_fallback_canvas_skeleton")
+            try:
+                root.setProperty("skeletonRenderer", "canvas")
+            except Exception:
+                logger.debug("Could not push canvas downgrade to QML",
+                             exc_info=True)
 
     def _push_primitives_to_qsg(
         self,
@@ -750,17 +884,12 @@ class LightweightDrawingViewport(QWidget):
 
         if self._skeleton_renderer != "qsg":
             return
-        root = self._quick.rootObject() if self._quick else None
-        if root is None:
+        qsg_item = self._qsg_item
+        if qsg_item is None:
+            logger.debug("QSG skeleton item not attached; skipping push")
             return
         try:
-            from src.gui.qsg_line_item import QSGLineItem
-            qsg_item = root.findChild(QSGLineItem, "qsgSkeleton")
-            if qsg_item is None:
-                # QML may not be ready yet, or the import failed silently.
-                logger.debug("QSGLineItem 'qsgSkeleton' not found in QML tree")
-                return
-            qsg_item.setPrimitives(primitives or [])
+            qsg_item.setPrimitives(list(primitives or []))
             logger.debug(
                 "QSG skeleton: pushed %d primitives → %d line segments",
                 len(primitives or []), qsg_item.lineCount(),
@@ -827,7 +956,7 @@ class LightweightDrawingViewport(QWidget):
             )
             return 0
 
-        primitives = data.get("primitives") or []
+        primitives = normalize_skeleton_ink(data.get("primitives") or [])
         world_bbox = data.get("world_bbox") or [0.0, 0.0, 1.0, 1.0]
         try:
             self._world_bbox = (
@@ -1559,12 +1688,15 @@ class LightweightDrawingViewport(QWidget):
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("LightweightViewport: zone focus read failed: %s", exc)
             return 0
-        focus_prims = data.get("primitives") or []
+        focus_prims = normalize_skeleton_ink(data.get("primitives") or [])
         if not focus_prims:
             return 0
         current = list(root.property("primitives") or [])
         merged = current + list(focus_prims)
         root.setProperty("primitives", merged)
+        # T2 — the GPU skeleton doesn't read the QML property; push the
+        # merged payload explicitly so focus detail shows there too.
+        self._push_primitives_to_qsg(merged)
         # Set badge to vector_focus while focus pack is in view.
         self._apply_fidelity_to_qml(
             "vector_focus",
