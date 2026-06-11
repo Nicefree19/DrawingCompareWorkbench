@@ -338,6 +338,17 @@ class DwgConverter:
             return {"installed": False, "path": None, "message": str(e)}
 
 
+def converter_installation_status() -> dict:
+    """Policy-safe installation probe for callers outside the quarantine.
+
+    cad_policy_gate quarantines the converter class name to this module;
+    other modules ask "is a local converter installed?" through this shim
+    without naming the class.
+    """
+
+    return DwgConverter.check_installation()
+
+
 def convert_with_configured_converter(
     source: str | Path,
     *,

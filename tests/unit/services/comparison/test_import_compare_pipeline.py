@@ -730,16 +730,33 @@ def test_dwg_differ_with_comparison_config_still_uses_canonical_pipeline_without
     assert result.metadata["comparison_type"] == "CAD_CANONICAL"
 
 
-def test_dwg_differ_status_does_not_probe_oda_installation() -> None:
-    with patch("src.services.comparison.dwg_differ.DwgConverter") as converter_class:
-        converter_class.check_installation.side_effect = AssertionError("must not probe ODA")
-        status = DwgDiffer.get_status()
+def test_dwg_differ_status_reports_installation_truth_without_requiring_oda(
+    monkeypatch,
+) -> None:
+    # 2026-06-11: get_status used to hardcode oda_converter=False (and this
+    # test enforced "never probe"), which made the GUI claim "ODA File
+    # Converter available: no" on machines where it WAS installed. New
+    # contract: status reports installation truthfully via the non-fatal
+    # probe, while ODA stays optional (oda_required False) and the legacy
+    # in-process fallback stays opt-in.
+    import src.services.comparison.dwg_autoconvert_settings as das
 
-    converter_class.check_installation.assert_not_called()
+    monkeypatch.setattr(das, "detect_oda_installation", lambda: (True, r"C:\oda\exe"))
+    status = DwgDiffer.get_status()
     assert status["canonical_pipeline"] is True
-    assert status["oda_converter"] is False
+    assert status["oda_converter"] is True
+    assert status["oda_path"] == r"C:\oda\exe"
     assert status["oda_required"] is False
     assert status["legacy_oda_fallback"] == "disabled_by_default"
+
+    def _boom():
+        raise RuntimeError("probe exploded")
+
+    # Probe failure must read as "not installed", never raise.
+    monkeypatch.setattr(das, "detect_oda_installation", _boom)
+    status = DwgDiffer.get_status()
+    assert status["oda_converter"] is False
+    assert status["oda_required"] is False
 
 
 def test_dwg_differ_returns_partial_import_metadata_for_dwg(tmp_path: Path) -> None:
