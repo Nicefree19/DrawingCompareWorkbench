@@ -1133,3 +1133,48 @@ def test_build_change_zones_links_relocation_and_counts_it() -> None:
 
     overlay = _zone_overlay(by_type["deleted"], before_transform={}, after_transform={}).to_dict()
     assert overlay["relocation"]["relocation_counterpart"] == by_type["added"].zone_id
+
+
+def test_pdf_records_are_never_anchored() -> None:
+    # 2026-06-11 PDF regression: PDF visual records keep bbox in image_pixels
+    # while location is prose ("page 1: ..."); the CAD block-local anchoring
+    # dragged every PDF zone bbox to x≈0 and collapsed 9 zones into 4.
+    # PDF records must pass through anchoring COMPLETELY untouched.
+    from src.services.comparison.change_zones import change_to_stream_record
+
+    pixel_bbox = {"x": 1859.0, "y": 1286.0, "w": 110.0, "h": 166.0}
+    change = ChangeRecord(
+        key="pdfv",
+        change_type=ChangeType.MODIFIED,
+        old_value={"region": "visual"},
+        new_value={"region": "visual"},
+        location="page 1: visual diff",
+        metadata={
+            "layer": "",
+            "entity_type": "REGION",
+            "change_type": "modified",
+            "source_format": "pdf",
+            "bbox_coordinate_space": "image_pixels",
+            "pdf_dpi": 200.0,
+            **pixel_bbox,
+        },
+    )
+    rec = change_to_stream_record(change, pair_id="p", index=0)
+    assert rec["bbox"] is not None
+    assert rec["bbox"][0] >= 0.0, f"PDF bbox must stay in pixel space: {rec['bbox']}"
+    assert rec["bbox"][0] == pytest.approx(1859.0, abs=1.0)
+    # memory path equally untouched
+    bbox = change_record_bbox(change)
+    assert bbox is not None and bbox[0] == pytest.approx(1859.0, abs=1.0)
+
+
+def test_location_point_rejects_prose_strings() -> None:
+    from src.services.comparison.change_zones import _location_point
+
+    assert _location_point("page 1") is None
+    assert _location_point("page 1: (123, 456)") is None
+    assert _location_point("(516460.35, -107284.12)") == pytest.approx(
+        (516460.35, -107284.12)
+    )
+    assert _location_point("500.0,400.0") == pytest.approx((500.0, 400.0))
+    assert _location_point((10.0, 20.0)) == (10.0, 20.0)
