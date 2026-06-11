@@ -177,12 +177,20 @@ class TestSprint9Core(unittest.TestCase):
         self.assertIsNotNone(differ.extractor)
         self.assertIsNotNone(differ.comparator)
 
-        # ODA 설치가 확인되면 converter도 로드되어야 함
-        if Path(self.oda_path).exists():
-            self.assertIsNotNone(differ.converter)
-            logger.info("DwgDiffer converter loaded successfully.")
-        else:
-            logger.warning("ODA not found at expected path, skipping converter check.")
+        # ODA-free policy (docs/CAD_FORMAT_SUPPORT_POLICY.md): DwgDiffer must NOT
+        # auto-load the ODA converter just because an ODA path is configured.
+        # The converter stays disabled until the caller explicitly opts in via
+        # allow_oda_fallback (dwg_differ.py:147-157), which keeps the default
+        # customer path ODA-free. The pre-policy version of this test asserted
+        # the opposite (path present -> converter loaded) and silently rotted
+        # until the full suite ran. Explicit-opt-in converter loading is covered
+        # by the DWG fallback tests (test_import_compare_pipeline /
+        # test_dwg_dxf_fallback); here we lock the ODA-free default.
+        self.assertIsNone(
+            differ.converter,
+            "ODA-free policy: converter must stay None without an explicit "
+            "allow_oda_fallback opt-in, even when an ODA path is present",
+        )
 
 
 if __name__ == "__main__":

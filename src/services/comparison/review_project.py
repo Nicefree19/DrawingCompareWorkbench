@@ -99,6 +99,11 @@ class ZoneOverlay:
     # (DrawingChangeZone → ZoneOverlay → overlay dict), so geometry must be
     # carried here, not only in DrawingChangeZone.to_dict().
     geometry: Optional[dict] = None
+    # Relocation-pair link (change_zones.link_relocation_zone_pairs): lets the
+    # viewer frame before=old location / after=new location for a deleted↔added
+    # pair that is really one block moved ("묶음 이동"). Carried on the live
+    # path for the same reason as ``geometry`` above.
+    relocation: Optional[dict] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,6 +124,7 @@ class ZoneOverlay:
             "entity_types": self.entity_types,
             "note": self.note,
             "geometry": self.geometry,
+            "relocation": self.relocation,
         }
 
 
@@ -595,6 +601,20 @@ def _zone_overlay(
         entity_types=list(zone.entity_types),
         note=note,
         geometry=zone.geometry,
+        relocation=(
+            {
+                key: zone.metadata[key]
+                for key in (
+                    "relocation_pair_id",
+                    "relocation_role",
+                    "relocation_counterpart",
+                    "relocation_counterpart_bbox",
+                    "relocation_offset",
+                )
+                if key in zone.metadata
+            }
+            or None
+        ),
     )
 
 

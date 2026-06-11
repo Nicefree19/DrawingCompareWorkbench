@@ -87,3 +87,56 @@ def test_has_lossy_path_text_detects_surrogate_and_replacement_chars() -> None:
     assert has_lossy_path_text("D:/bad/\ufffdname.dxf") is True
     assert has_lossy_path_text("D:/bad/\u5360\uc3d9\uc619name.dxf") is True
     assert has_lossy_path_text("D:/ok/detail.dxf") is False
+
+
+def test_unsupported_dwg_error_names_the_oda_optin_when_installed_but_unset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # 2026-06-10 live failure: ODA installed, AC1032 pair, no sibling DXF →
+    # rejected, and the message never said the opt-in exists. It must name
+    # DRAWING_COMPARE_DWG_BACKEND=oda_converter (enabling stays the user's
+    # explicit, policy-checked decision).
+    import src.gui.compare_runtime_diagnostics as crd
+
+    monkeypatch.delenv("DRAWING_COMPARE_DWG_BACKEND", raising=False)
+    monkeypatch.setattr(crd, "_dwg_status", lambda: {
+        "oda_converter": True,
+        "dwg_supported_versions": ["AC1015"],
+    })
+    source_a = tmp_path / "detail.dwg"
+    source_b = tmp_path / "detail_r1.dwg"
+    source_a.write_bytes(b"AC1032" + b"\0" * 32)
+    source_b.write_bytes(b"AC1032" + b"\0" * 32)
+    request = SimpleNamespace(source_a=source_a, source_b=source_b, output_dir=tmp_path / "run")
+    exc = RuntimeError(
+        "Preflight failed: DWG input version is unsupported by the native adapter: AC1032."
+    )
+
+    message = crd.format_auto_compare_error(exc, request)
+
+    assert "DRAWING_COMPARE_DWG_BACKEND=oda_converter" in message
+    assert "CAD_FORMAT_SUPPORT_POLICY" in message
+
+
+def test_unsupported_dwg_error_omits_optin_hint_when_already_enabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import src.gui.compare_runtime_diagnostics as crd
+
+    monkeypatch.setenv("DRAWING_COMPARE_DWG_BACKEND", "oda_converter")
+    monkeypatch.setattr(crd, "_dwg_status", lambda: {
+        "oda_converter": True,
+        "dwg_supported_versions": ["AC1015"],
+    })
+    source_a = tmp_path / "detail.dwg"
+    source_b = tmp_path / "detail_r1.dwg"
+    source_a.write_bytes(b"AC1032" + b"\0" * 32)
+    source_b.write_bytes(b"AC1032" + b"\0" * 32)
+    request = SimpleNamespace(source_a=source_a, source_b=source_b, output_dir=tmp_path / "run")
+    exc = RuntimeError(
+        "Preflight failed: DWG input version is unsupported by the native adapter: AC1032."
+    )
+
+    message = crd.format_auto_compare_error(exc, request)
+
+    assert "DRAWING_COMPARE_DWG_BACKEND=oda_converter" not in message

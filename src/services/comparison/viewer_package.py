@@ -2574,6 +2574,17 @@ def _overlay_from_zone_row(
             geometry = None
         if isinstance(geometry, dict):
             overlay["geometry"] = geometry
+    # Relocation-pair link (JSON in the zone CSV; see
+    # change_zones.link_relocation_zone_pairs) so the reloaded overlay path
+    # keeps the from→to navigation, matching the live ZoneOverlay.relocation.
+    relocation_raw = str(row.get("relocation") or "").strip()
+    if relocation_raw:
+        try:
+            relocation = json.loads(relocation_raw)
+        except (ValueError, TypeError):
+            relocation = None
+        if isinstance(relocation, dict) and relocation:
+            overlay["relocation"] = relocation
     if page_pair is not None:
         page_a, page_b = page_pair
         overlay["page_a"] = page_a

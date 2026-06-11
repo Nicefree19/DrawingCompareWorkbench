@@ -184,6 +184,32 @@ def _page_height_points_from_world_bbox(
     return height if height > 0 else 0.0
 
 
+def ensure_min_world_span(
+    bbox: tuple[float, float, float, float],
+    min_span: float,
+) -> tuple[float, float, float, float]:
+    """Expand ``bbox`` symmetrically so each axis spans at least ``min_span``.
+
+    Zone-focus context floor (live-review feedback 2026-06-11, "지나치게
+    확대되어 보여"): zooming the camera so a tiny zone (e.g. a 110 mm tag on a
+    460 m multi-detail sheet) fills the pane shows a few magnified line
+    fragments with ZERO surroundings — the reviewer cannot tell what or where
+    the change is. Callers pass a fraction of the sheet span as ``min_span``
+    so small zones keep enough context around them; the zone itself stays
+    findable via its (min-32 px) revision cloud. Only ever ENLARGES.
+    """
+
+    x0, y0, x1, y1 = (float(v) for v in bbox)
+    span = max(0.0, float(min_span))
+    if (x1 - x0) < span:
+        cx = (x0 + x1) / 2.0
+        x0, x1 = cx - span / 2.0, cx + span / 2.0
+    if (y1 - y0) < span:
+        cy = (y0 + y1) / 2.0
+        y0, y1 = cy - span / 2.0, cy + span / 2.0
+    return (x0, y0, x1, y1)
+
+
 def _stop_pdf_rerender_timer(viewport: Any) -> None:
     timer = getattr(viewport, "_pdf_rerender_timer", None)
     if timer is None:
@@ -1649,6 +1675,13 @@ class LightweightDrawingViewport(QWidget):
 
             if focus_zone_id and zid == focus_zone_id:
                 focus.append(entry)
+                # Live-review feedback (2026-06-11): the picked change must
+                # ALSO wear its revision cloud. The focus layer alone is a
+                # thin pin/box and every other cloud gets dimmed, so the one
+                # change the reviewer selected ended up the LEAST marked
+                # thing on screen. Duplicate it into the cloud layer, never
+                # dimmed, so the scalloped cloud sits on the change itself.
+                cloud.append({**entry, "dimmed": False})
             else:
                 cloud.append(entry)
 

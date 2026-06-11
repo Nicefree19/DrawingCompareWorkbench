@@ -90,3 +90,82 @@ def test_entity_extractor_uses_sanitized_reader(tmp_path: Path) -> None:
     entities = DxfEntityExtractor().extract_from_file(malformed)
 
     assert len(entities["LWPOLYLINE"]) == 1
+
+
+def test_document_cache_scope_reuses_parsed_doc(tmp_path):
+    # Issue-1 lever #2: within a scope the same on-disk DXF parses ONCE and
+    # read-only consumers share the document object.
+    import ezdxf
+
+    from src.services.comparison.dxf_read import (
+        dxf_document_cache_scope,
+        read_dxf_document_result,
+    )
+
+    p = tmp_path / "a.dxf"
+    doc = ezdxf.new()
+    doc.modelspace().add_line((0, 0), (10, 0))
+    doc.saveas(p)
+
+    with dxf_document_cache_scope() as scope:
+        r1 = read_dxf_document_result(p)
+        r2 = read_dxf_document_result(p)
+        assert r1.doc is r2.doc, "second read must reuse the cached document"
+        assert scope["hits"] == 1 and scope["misses"] == 1
+
+        # mutable consumers must get a PRIVATE parse (cloud marker contract)
+        r3 = read_dxf_document_result(p, mutable=True)
+        assert r3.doc is not r1.doc
+
+    # outside the scope: no caching (default behavior unchanged)
+    r4 = read_dxf_document_result(p)
+    assert r4.doc is not r1.doc
+
+
+def test_document_cache_invalidates_when_file_changes(tmp_path):
+    import ezdxf
+
+    from src.services.comparison.dxf_read import (
+        dxf_document_cache_scope,
+        read_dxf_document_result,
+    )
+
+    p = tmp_path / "a.dxf"
+    doc = ezdxf.new()
+    doc.modelspace().add_line((0, 0), (10, 0))
+    doc.saveas(p)
+
+    with dxf_document_cache_scope():
+        r1 = read_dxf_document_result(p)
+        doc2 = ezdxf.new()
+        doc2.modelspace().add_line((0, 0), (99, 0))
+        doc2.saveas(p)  # mtime/size change -> new key
+        import os
+        os.utime(p)  # ensure mtime tick even on coarse filesystems
+        r2 = read_dxf_document_result(p)
+        assert r2.doc is not r1.doc
+
+
+def test_document_cache_lru_evicts_oldest(tmp_path):
+    import ezdxf
+
+    from src.services.comparison.dxf_read import (
+        dxf_document_cache_scope,
+        read_dxf_document_result,
+    )
+
+    paths = []
+    for i in range(3):
+        p = tmp_path / f"f{i}.dxf"
+        d = ezdxf.new()
+        d.modelspace().add_line((0, 0), (i + 1, 0))
+        d.saveas(p)
+        paths.append(p)
+
+    with dxf_document_cache_scope(maxsize=2) as scope:
+        first = read_dxf_document_result(paths[0])
+        read_dxf_document_result(paths[1])
+        read_dxf_document_result(paths[2])  # evicts paths[0]
+        assert len(scope["entries"]) == 2
+        again = read_dxf_document_result(paths[0])
+        assert again.doc is not first.doc  # was evicted -> fresh parse

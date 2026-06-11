@@ -1,0 +1,64 @@
+# Full-suite health check — manual trigger (workflow_dispatch).
+#
+# Why this exists (docs/FULL_SUITE_HEALTH_REPORT.md, 2026-06-10): the fast
+# `cad-format-regression` gate runs 12 test files (~2.7% of 3,872 tests).
+# Two REAL release-gate regressions rotted undetected in that gap. This job
+# runs the ENTIRE suite the same way it was validated locally
+# (pytest>=9 + xdist `-n auto`; worker isolation also contains the known
+# intermittent QML-accumulation crash documented in the report).
+#
+# Deliberately NOT on pull_request/push: a full run costs 1-2+ hours on a
+# 2-core windows runner (2x billed minutes), and the QML crash is
+# intermittent — imposing that as a per-PR gate would be slow AND flaky.
+# Trigger it manually from the Actions tab (or before a release), and
+# uncomment the schedule below to make it nightly once the cost is accepted.
+
+name: Full Suite Health
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "30 17 * * *"  # 02:30 KST nightly — uncomment to enable
+
+jobs:
+  full-suite:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    env:
+      # The suite was validated headless; keep Qt off real GPU/window state.
+      QT_QPA_PLATFORM: offscreen
+      QSG_RHI_BACKEND: software
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          # The full suite is validated locally on the pytest 9 stack with
+          # xdist worker isolation and pytest-qt's qapp fixture; PyMuPDF backs
+          # the PDF compare paths. requirements-dev pins pytest 7 for the fast
+          # gate, so upgrade HERE only (this job), not in requirements-dev.
+          python -m pip install "pytest>=9,<10" "pytest-xdist>=3.6" "pytest-qt>=4.5" pymupdf
+
+      - name: Run the full test suite (worker-isolated)
+        run: |
+          python -m pytest -p no:cacheprovider -n auto -q -o log_cli=false -rfE --junitxml=build\reports\full-suite-junit.xml
+
+      - name: Upload full-suite report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-suite-junit
+          path: build/reports/full-suite-junit.xml
+          if-no-files-found: ignore

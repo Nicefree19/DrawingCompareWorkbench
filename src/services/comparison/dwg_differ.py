@@ -518,6 +518,16 @@ class DwgDiffer:
                         or str(importer_b).endswith("oda-fallback")
                     ),
                     "elapsed_seconds": time.perf_counter() - started,
+                    # Plan §16 Phase C-2.2 — the canonical pipeline (the DEFAULT
+                    # route used by BatchCompareJob) does not emit the legacy
+                    # DxfComparator in-band ``peak_changes_pre_truncate`` stat,
+                    # so the pipeline harvester in validate_drawing_compare_realset
+                    # was reading None on every default-path pair and the audit
+                    # gate's large-drawing change bound silently could not be
+                    # enforced. The canonical pipeline returns the FULL change
+                    # set (no in-band truncation like the legacy comparator), so
+                    # the realized change count IS the peak for this route.
+                    "peak_changes_pre_truncate": len(result.changes or []),
                 }
             )
             if pipeline_result.is_failed:

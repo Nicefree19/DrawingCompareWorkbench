@@ -60,6 +60,15 @@ class ChangeZoneOptions:
     # zone 으로 promote 안 함. default=1 → 기존 동작 보존 (모든 group 이 zone).
     # 권장 운영 값: 2 (단일 entity 변경은 noise_score 가 높을 때만 살림).
     min_changes_per_zone: int = 1
+    # Block-DEFINITION-space records (entity ``space == "block"``) carry
+    # block-LOCAL coordinates — a bbox like (0,0)-(20,0) for a block inserted
+    # at (500,400) — so their zones land near the origin instead of at the
+    # change (golden fixture 11_block_geometry_change). The realized INSERT
+    # sibling (space "model") carries the correct world-space zone, and the
+    # definition record itself stays in the change list/counts; only zone
+    # creation skips it. Suppressed records are surfaced via
+    # ``change_zone_block_definition_skipped_count`` (demote-not-drop).
+    suppress_block_definition_zones: bool = True
     single_entity_noise_score_threshold: float = 0.7
     # Prevent one transitive cluster chain from becoming a drawing-wide
     # review/cloud zone. Large groups are split into stable spatial buckets
@@ -345,6 +354,9 @@ class _ZoneInput:
     skipped_count: int = 0
     coverage_complete: bool = True
     warning: str = ""
+    # Intentional suppressions (block-LOCAL-coordinate definition records) —
+    # separate from ``skipped_count`` so they do not flag coverage as broken.
+    block_definition_skipped: int = 0
 
 
 def build_change_zones(
@@ -364,6 +376,10 @@ def build_change_zones(
     result.metadata["change_zone_coverage_complete"] = zone_input.coverage_complete
     if zone_input.warning:
         result.metadata["change_zone_warning"] = zone_input.warning
+    if zone_input.block_definition_skipped:
+        result.metadata["change_zone_block_definition_skipped_count"] = (
+            zone_input.block_definition_skipped
+        )
     envelopes = zone_input.envelopes
 
     if not envelopes:
@@ -410,7 +426,101 @@ def build_change_zones(
 
     if suppressed_count:
         result.metadata["change_zone_noise_suppressed_count"] = suppressed_count
+    linked_pairs = link_relocation_zone_pairs(zones)
+    if linked_pairs:
+        result.metadata["relocation_pair_count"] = linked_pairs
     return zones
+
+
+def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
+    """Link size-identical deleted↔added zone pairs as probable relocations.
+
+    Live review on the real 240111_P5 pair: C-001 (deleted, 13 records,
+    15,702×17,309 mm) and C-002 (added, 13 records, SAME bbox size) are one
+    notes block moved ~82 m. The comparator honestly reports delete+add (the
+    move exceeds every matching tolerance), but the reviewer should see the
+    relationship. This links such pairs via METADATA ONLY — zones, counts and
+    change types are untouched (demote-not-drop; no count cosmetics — the
+    341 km fake-consolidation lesson). Criteria are deliberately conservative:
+
+      * one zone deleted-only, the other added-only
+      * record counts equal (and > 0)
+      * bbox width AND height equal within max(2 mm, 1%)
+
+    Greedy best match (smallest size difference, then nearest centroid);
+    each zone links at most once. Returns the number of linked pairs.
+
+    Linked metadata (both zones): ``relocation_pair_id``,
+    ``relocation_role`` ("from"/"to"), ``relocation_counterpart`` (zone id),
+    ``relocation_counterpart_bbox`` (CAD-world list), ``relocation_offset``
+    ([dx, dy], from→to). The GUI uses the counterpart bbox to frame
+    before=old location / after=new location simultaneously.
+    """
+
+    deleted = [
+        z for z in zones
+        if z.change_type == "deleted" and z.deleted_count > 0 and z.added_count == 0
+    ]
+    added = [
+        z for z in zones
+        if z.change_type == "added" and z.added_count > 0 and z.deleted_count == 0
+    ]
+    if not deleted or not added:
+        return 0
+
+    def _dims(zone: "DrawingChangeZone") -> Tuple[float, float]:
+        box = zone.bbox
+        return (float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
+
+    candidates: list[tuple[float, float, "DrawingChangeZone", "DrawingChangeZone"]] = []
+    for d_zone in deleted:
+        dw, dh = _dims(d_zone)
+        for a_zone in added:
+            if d_zone.deleted_count != a_zone.added_count:
+                continue
+            aw, ah = _dims(a_zone)
+            tol_w = max(2.0, 0.01 * max(dw, aw))
+            tol_h = max(2.0, 0.01 * max(dh, ah))
+            if abs(dw - aw) > tol_w or abs(dh - ah) > tol_h:
+                continue
+            size_diff = abs(dw - aw) + abs(dh - ah)
+            dist = math.hypot(
+                float(a_zone.centroid[0]) - float(d_zone.centroid[0]),
+                float(a_zone.centroid[1]) - float(d_zone.centroid[1]),
+            )
+            candidates.append((size_diff, dist, d_zone, a_zone))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    used: set[int] = set()
+    pairs = 0
+    for _size_diff, _dist, d_zone, a_zone in candidates:
+        if id(d_zone) in used or id(a_zone) in used:
+            continue
+        used.add(id(d_zone))
+        used.add(id(a_zone))
+        pairs += 1
+        pair_id = f"R-{pairs:03d}"
+        offset = [
+            float(a_zone.centroid[0]) - float(d_zone.centroid[0]),
+            float(a_zone.centroid[1]) - float(d_zone.centroid[1]),
+        ]
+        d_zone.metadata.update({
+            "relocation_pair_id": pair_id,
+            "relocation_role": "from",
+            "relocation_counterpart": a_zone.zone_id,
+            "relocation_counterpart_bbox": [float(v) for v in a_zone.bbox],
+            "relocation_offset": offset,
+        })
+        a_zone.metadata.update({
+            "relocation_pair_id": pair_id,
+            "relocation_role": "to",
+            "relocation_counterpart": d_zone.zone_id,
+            "relocation_counterpart_bbox": [
+                float(v) for v in (d_zone.old_bbox or d_zone.bbox)
+            ],
+            "relocation_offset": offset,
+        })
+    return pairs
 
 
 def _zone_input_from_result(
@@ -423,8 +533,12 @@ def _zone_input_from_result(
 
     envelopes: list[_ChangeEnvelope] = []
     skipped = 0
+    block_definition_skipped = 0
     for index, change in enumerate(result.changes):
         if _change_ignored(change, zone_options):
+            continue
+        if zone_options.suppress_block_definition_zones and _is_block_definition_change(change):
+            block_definition_skipped += 1
             continue
         bbox = change_record_bbox(change, zone_options)
         if bbox is None:
@@ -446,6 +560,7 @@ def _zone_input_from_result(
         skipped_count=skipped,
         coverage_complete=not truncated and skipped == 0,
         warning=warning,
+        block_definition_skipped=block_definition_skipped,
     )
 
 
@@ -458,6 +573,7 @@ def _zone_input_from_stream(
         raise ChangeZoneStreamError(f"change-zone stream does not exist: {path}")
     envelopes: list[_ChangeEnvelope] = []
     skipped = 0
+    block_definition_skipped = 0
     total = 0
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -485,6 +601,9 @@ def _zone_input_from_stream(
                 change = _change_record_from_stream_record(record)
                 if _change_ignored(change, zone_options):
                     continue
+                if zone_options.suppress_block_definition_zones and _is_block_definition_change(change):
+                    block_definition_skipped += 1
+                    continue
                 envelopes.append(
                     _ChangeEnvelope(
                         index=line_number - 1,
@@ -503,6 +622,7 @@ def _zone_input_from_stream(
         input_count=total,
         skipped_count=skipped,
         coverage_complete=stream_complete and skipped == 0,
+        block_definition_skipped=block_definition_skipped,
     )
 
 
@@ -521,7 +641,9 @@ def change_record_bbox(
         bbox = _bbox_from_metadata(metadata, zone_options)
     if bbox is None:
         bbox = _bbox_from_location(change.location, zone_options)
-    return bbox
+    # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+    anchored, _delta = _anchor_bbox_to_location(bbox, _location_point(change.location))
+    return anchored
 
 
 def change_record_old_bbox(
@@ -535,7 +657,14 @@ def change_record_old_bbox(
     entity_type = str(metadata.get("entity_type") or "").upper()
     bbox = _bbox_from_entity_data(entity_type, change.old_value, zone_options)
     if bbox is not None:
-        return bbox
+        # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+        anchor = (
+            _point_from_metadata(metadata, "old_x", "old_y")
+            or _point(metadata.get("old_location"))
+            or _location_point(change.location)
+        )
+        anchored, _delta = _anchor_bbox_to_location(bbox, anchor)
+        return anchored
     raw_old_bbox = _coerce_bbox(metadata.get("old_bbox"))
     if raw_old_bbox is not None:
         return _ensure_min_bbox(raw_old_bbox, zone_options.min_marker_size)
@@ -595,8 +724,8 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
     new_data = getattr(change, "new_data", None)
     if new_data is None:
         new_data = getattr(change, "new_value", None)
-    location = _point(getattr(change, "location", None)) or _point_from_metadata(metadata, "x", "y")
-    old_location = _point(getattr(change, "old_location", None)) or _point_from_metadata(
+    location = _location_point(getattr(change, "location", None)) or _point_from_metadata(metadata, "x", "y")
+    old_location = _location_point(getattr(change, "old_location", None)) or _point_from_metadata(
         metadata,
         "old_x",
         "old_y",
@@ -606,16 +735,43 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
     old_bbox = _bbox_for_stream_old_change(entity_type, old_data, old_location)
     if old_bbox is None and metadata_bbox is not None and change_type in {"deleted", "modified"}:
         old_bbox = metadata_bbox
+    # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+    # Without this every block-internal change zone/cloud on the legacy path
+    # pointed at the origin area instead of the actual drawing location.
+    bbox, new_delta = _anchor_bbox_to_location(bbox, location)
+    old_bbox, old_delta = _anchor_bbox_to_location(old_bbox, old_location or location)
     old_text = _text_value_from_change_data(old_data)
     new_text = _text_value_from_change_data(new_data)
     # B3 — preserve the entity's real geometry through the stream so large
     # (stream-built) comparisons can draw geometry-aware clouds. Optional field;
     # absent on older streams → recovered as None (backward compatible, no
     # schema-version bump needed since this is purely additive).
-    geometry = (
-        _geometry_points_from_entity_data(entity_type, new_data)
-        or _geometry_points_from_entity_data(entity_type, old_data)
-    )
+    geometry = _geometry_points_from_entity_data(entity_type, new_data)
+    geometry_delta = new_delta
+    if not geometry:
+        geometry = _geometry_points_from_entity_data(entity_type, old_data)
+        geometry_delta = old_delta
+    if geometry and (geometry_delta[0] or geometry_delta[1]):
+        # Shift the geometry by the SAME world anchor delta as its source
+        # side's bbox so clouds stay congruent with the zone.
+        gdx, gdy = geometry_delta
+        try:
+            geometry = {
+                **geometry,
+                "points": [[p[0] + gdx, p[1] + gdy] for p in geometry.get("points", [])],
+            }
+        except (TypeError, IndexError):
+            pass
+    # Preserve the canonical entity ``space`` through the compact stream so
+    # stream-built zones can suppress block-DEFINITION-space records (their
+    # bboxes are block-LOCAL, not world). Additive optional field — absent on
+    # older streams → None → no suppression (backward compatible, same
+    # convention as the B3 ``geometry`` field above).
+    entity_space = ""
+    for data in (new_data, old_data):
+        if isinstance(data, dict) and data.get("space"):
+            entity_space = str(data.get("space"))
+            break
     key = getattr(change, "key", "") or f"{entity_type}_{change_type}_{index}"
     return {
         "schema_version": CHANGE_ZONE_STREAM_SCHEMA_VERSION,
@@ -631,6 +787,7 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
         "old_location": list(old_location) if old_location else None,
         "change_category": getattr(change, "change_category", None) or metadata.get("change_category"),
         "change_detail": getattr(change, "change_detail", None) or metadata.get("change_detail"),
+        "entity_space": entity_space or None,
         "page": metadata.get("page"),
         "page_a": metadata.get("page_a"),
         "page_b": metadata.get("page_b"),
@@ -676,6 +833,57 @@ def _point_from_metadata(
         return None
 
 
+def _location_point(value: Any) -> Optional[Tuple[float, float]]:
+    """Parse a change location given as a tuple/list OR a string.
+
+    Legacy ChangeRecords store ``location=str(tuple)`` (``"(x, y)"``), the
+    stream path passes real tuples — accept both.
+    """
+
+    point = _point(value)
+    if point is not None:
+        return point
+    if value is None:
+        return None
+    numbers = re.findall(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", str(value))
+    if len(numbers) >= 2:
+        try:
+            return (float(numbers[0]), float(numbers[1]))
+        except ValueError:
+            return None
+    return None
+
+
+def _anchor_bbox_to_location(
+    bbox: Optional[BBox],
+    location: Optional[Tuple[float, float]],
+) -> Tuple[Optional[BBox], Tuple[float, float]]:
+    """Re-anchor a data-derived bbox to the record's WORLD location.
+
+    Legacy block-expanded entities keep their geometry data in BLOCK-LOCAL
+    coordinates while ``change.location`` is world (verified on the POT
+    BEARING pair: ARC data center ``(0,0)`` vs world location
+    ``(516460,-107284)``), so a data-derived bbox lands near the origin and
+    every zone/cloud built from it points at the wrong place. When the bbox
+    centre disagrees with the world location by more than the bbox diagonal
+    (+1 mm) — far beyond any legitimate centre/anchor offset such as TEXT
+    inserted at a corner — translate the bbox so its centre sits at the
+    location, preserving its size. Returns the (possibly translated) bbox
+    and the applied ``(dx, dy)`` so callers can shift companion payloads
+    (the stream ``geometry`` points) coherently.
+    """
+
+    if bbox is None or location is None:
+        return bbox, (0.0, 0.0)
+    cx = (bbox[0] + bbox[2]) / 2.0
+    cy = (bbox[1] + bbox[3]) / 2.0
+    diagonal = math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    if math.hypot(location[0] - cx, location[1] - cy) <= diagonal + 1.0:
+        return bbox, (0.0, 0.0)
+    dx, dy = location[0] - cx, location[1] - cy
+    return (bbox[0] + dx, bbox[1] + dy, bbox[2] + dx, bbox[3] + dy), (dx, dy)
+
+
 def _bbox_for_stream_change(
     change_type: str,
     entity_type: str,
@@ -716,6 +924,7 @@ def _change_record_from_stream_record(record: dict[str, Any]) -> ChangeRecord:
         "change_type": record.get("change_type") or "",
         "change_category": record.get("change_category"),
         "change_detail": record.get("change_detail"),
+        "entity_space": record.get("entity_space"),
         "page": record.get("page"),
         "page_a": record.get("page_a"),
         "page_b": record.get("page_b"),
@@ -1650,6 +1859,27 @@ def _first_metadata_value(envelopes: Sequence[_ChangeEnvelope], key: str) -> str
     return ""
 
 
+def _is_block_definition_change(change: ChangeRecord) -> bool:
+    """True when this record describes a BLOCK-DEFINITION-space entity.
+
+    The canonical importer (expand_blocks) realizes INSERT instances into
+    model space AND keeps the definition entities (``space == "block"``) in
+    the compared entity list, so one block edit yields two records: the
+    realized instance in world coordinates and the definition in block-LOCAL
+    coordinates (e.g. bbox (0,0)-(20,0) for a block inserted at (500,400)).
+    A block-local bbox is meaningless in the drawing's world zone map — it
+    placed the change zone near the origin (verified on golden fixture
+    ``11_block_geometry_change``). Canonical entity dicts carry ``space``
+    directly; stream-rebuilt records carry it as ``metadata.entity_space``.
+    """
+
+    for value in (change.new_value, change.old_value):
+        if isinstance(value, dict) and str(value.get("space") or "").lower() == "block":
+            return True
+    meta = change.metadata or {}
+    return str(meta.get("entity_space") or "").lower() == "block"
+
+
 def _change_ignored(change: ChangeRecord, options: ChangeZoneOptions) -> bool:
     layer = str((change.metadata or {}).get("layer") or "")
     normalized = layer.upper()
@@ -2065,6 +2295,25 @@ def _write_change_zones_json(
     )
 
 
+_RELOCATION_METADATA_KEYS = (
+    "relocation_pair_id",
+    "relocation_role",
+    "relocation_counterpart",
+    "relocation_counterpart_bbox",
+    "relocation_offset",
+)
+
+
+def _relocation_payload(zone: "DrawingChangeZone") -> dict[str, Any]:
+    """Compact relocation-link dict from zone metadata (for CSV/overlay)."""
+
+    return {
+        key: zone.metadata[key]
+        for key in _RELOCATION_METADATA_KEYS
+        if key in zone.metadata
+    }
+
+
 def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
@@ -2118,6 +2367,9 @@ def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> N
         # the cloud along the real shape. Appended last to keep column order
         # stable for existing readers.
         "geometry",
+        # Relocation-pair link (JSON; see link_relocation_zone_pairs) so the
+        # reloaded overlay path keeps the from→to navigation. Appended last.
+        "relocation",
     ]
     with open(path, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
@@ -2175,6 +2427,11 @@ def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> N
                     "geometry": (
                         json.dumps(zone.geometry, separators=(",", ":"))
                         if zone.geometry
+                        else ""
+                    ),
+                    "relocation": (
+                        json.dumps(_relocation_payload(zone), separators=(",", ":"))
+                        if zone.metadata.get("relocation_pair_id")
                         else ""
                     ),
                 }

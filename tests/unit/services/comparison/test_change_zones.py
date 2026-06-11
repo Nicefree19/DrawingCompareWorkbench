@@ -13,6 +13,7 @@ from src.services.comparison.change_zones import (
     ChangeZoneOptions,
     CloudMarkOptions,
     build_change_zones,
+    change_record_bbox,
     export_change_artifacts,
     export_executive_review_from_artifacts,
     write_change_zone_stream,
@@ -275,6 +276,145 @@ def test_stream_without_geometry_field_is_backward_compatible(tmp_path: Path) ->
 
     assert len(zones) == 1
     assert zones[0].geometry is None
+
+
+def _canonical_change(
+    key: str,
+    *,
+    space: str,
+    bbox: dict[str, float],
+    layer: str = "Q3_LAYER",
+) -> ChangeRecord:
+    """Canonical-pipeline-shaped record: entity dicts carry ``space``,
+    metadata carries the bbox/centroid (mirrors DrawingDiffChange.to_change_record)."""
+
+    entity = {"space": space, "bbox": bbox, "type": "line"}
+    cx = (bbox["min_x"] + bbox["max_x"]) / 2.0
+    cy = (bbox["min_y"] + bbox["max_y"]) / 2.0
+    return ChangeRecord(
+        key=key,
+        change_type=ChangeType.MODIFIED,
+        old_value=entity,
+        new_value=entity,
+        location=f"{cx},{cy}",
+        metadata={
+            "layer": layer,
+            "entity_type": "line",
+            "change_type": "modified",
+            "bbox": dict(bbox),
+            "x": cx,
+            "y": cy,
+        },
+    )
+
+
+def test_block_definition_record_does_not_create_a_zone() -> None:
+    # Golden fixture 11_block_geometry_change: one block edit yields a
+    # realized-instance record in WORLD coords AND a definition record in
+    # block-LOCAL coords (bbox near origin). The local record's zone landed at
+    # a meaningless origin-area position — suppress its ZONE only; the change
+    # record itself stays in the list (demote-not-drop).
+    block_local = _canonical_change(
+        "def", space="block", bbox={"min_x": 0.0, "min_y": 0.0, "max_x": 20.0, "max_y": 0.0}
+    )
+    realized = _canonical_change(
+        "inst", space="model", bbox={"min_x": 500.0, "min_y": 400.0, "max_x": 520.0, "max_y": 400.0}
+    )
+    result = _result([block_local, realized])
+
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    assert len(zones) == 1
+    assert zones[0].bbox[0] > 400.0, "the surviving zone must be the WORLD-space one"
+    assert result.metadata.get("change_zone_block_definition_skipped_count") == 1
+    assert len(result.changes) == 2, "the change record itself must NOT be dropped"
+    assert result.metadata.get("change_zone_coverage_complete") is True
+
+
+def test_block_definition_zone_suppression_can_be_disabled() -> None:
+    block_local = _canonical_change(
+        "def", space="block", bbox={"min_x": 0.0, "min_y": 0.0, "max_x": 20.0, "max_y": 0.0}
+    )
+    realized = _canonical_change(
+        "inst", space="model", bbox={"min_x": 500.0, "min_y": 400.0, "max_x": 520.0, "max_y": 400.0}
+    )
+    result = _result([block_local, realized])
+
+    zones = build_change_zones(
+        result,
+        pair_id="P",
+        drawing_number="P",
+        options=ChangeZoneOptions(suppress_block_definition_zones=False),
+    )
+
+    assert len(zones) == 2
+    assert result.metadata.get("change_zone_block_definition_skipped_count") is None
+
+
+def test_stream_preserves_entity_space_and_suppresses_block_definition_zone(
+    tmp_path: Path,
+) -> None:
+    # Large/real comparisons build zones from the compact STREAM, which does
+    # not keep the entity dicts — ``entity_space`` must ride the stream record
+    # so the block-definition suppression works on that path too.
+    import json as _json
+
+    from src.services.comparison.change_zones import write_change_zone_stream
+
+    block_local = ChangeRecord(
+        key="def",
+        change_type=ChangeType.MODIFIED,
+        old_value={"space": "block", "start": (0.0, 0.0), "end": (20.0, 0.0)},
+        new_value={"space": "block", "start": (0.0, 0.0), "end": (20.0, 0.0)},
+        metadata={"layer": "Q3_LAYER", "entity_type": "LINE", "change_type": "modified"},
+    )
+    realized = _line_change("inst", ChangeType.MODIFIED, (500.0, 400.0), (520.0, 400.0))
+    stream_path = tmp_path / "changes.stream.jsonl"
+    meta = write_change_zone_stream([block_local, realized], stream_path, pair_id="P")
+
+    records = [
+        _json.loads(line)
+        for line in stream_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert records[0]["entity_space"] == "block"
+    assert records[1]["entity_space"] is None
+
+    result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")
+    result.metadata.update(meta)
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    assert len(zones) == 1
+    assert zones[0].bbox[0] > 400.0
+    assert result.metadata.get("change_zone_block_definition_skipped_count") == 1
+
+
+def test_stream_without_entity_space_field_is_backward_compatible(tmp_path: Path) -> None:
+    # Streams written before this field must keep building zones unchanged.
+    import json as _json
+
+    from src.services.comparison.change_zones import CHANGE_ZONE_STREAM_SCHEMA_VERSION
+
+    rec = {
+        "schema_version": CHANGE_ZONE_STREAM_SCHEMA_VERSION,
+        "key": "a",
+        "change_type": "added",
+        "layer": "BEAM",
+        "entity_type": "LINE",
+        "bbox": [10.0, 20.0, 5000.0, 800.0],
+        # NOTE: no "entity_space" key — pre-field stream.
+    }
+    stream_path = tmp_path / "old.stream.jsonl"
+    stream_path.write_text(_json.dumps(rec) + "\n", encoding="utf-8")
+
+    result = ComparisonResult(source_a="old.dxf", source_b="new.dxf")
+    result.metadata["change_zone_stream_path"] = str(stream_path)
+    result.metadata["change_zone_stream_complete"] = True
+
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    assert len(zones) == 1
+    assert result.metadata.get("change_zone_block_definition_skipped_count") is None
 
 
 def test_pdf_visual_change_uses_top_left_bbox() -> None:
@@ -851,3 +991,145 @@ def test_corrupt_stream_is_reported_without_silent_memory_fallback(tmp_path: Pat
     assert package.zone_coverage_complete is False
     assert package.artifacts[0].zone_input_source == "stream"
     assert any("invalid change-zone stream JSON" in warning for warning in package.warnings)
+
+
+def test_anchor_translates_block_local_bbox_to_world_location() -> None:
+    # Legacy block-expanded entities keep data in BLOCK-LOCAL coords while
+    # change.location is world (POT BEARING: arc data center (0,0) vs world
+    # (516460,-107284)) — zones built from the local bbox pointed at the
+    # origin area. Far disagreement (> bbox diagonal) must translate.
+    from src.services.comparison.change_zones import _anchor_bbox_to_location
+
+    local = (-23.14, 7.98, -10.12, 21.0)
+    world = (516460.35, -107284.12)
+    anchored, delta = _anchor_bbox_to_location(local, world)
+    acx = (anchored[0] + anchored[2]) / 2.0
+    acy = (anchored[1] + anchored[3]) / 2.0
+    assert abs(acx - world[0]) < 1e-6 and abs(acy - world[1]) < 1e-6
+    assert abs((anchored[2] - anchored[0]) - (local[2] - local[0])) < 1e-9  # size kept
+    assert delta != (0.0, 0.0)
+
+    # A legitimate centre/anchor offset (TEXT inserted at a corner: distance
+    # within the bbox diagonal) must NOT be re-anchored.
+    text_bbox = (100.0, 100.0, 140.0, 110.0)
+    near_anchor = (100.0, 100.0)  # corner insert
+    kept, delta2 = _anchor_bbox_to_location(text_bbox, near_anchor)
+    assert kept == text_bbox and delta2 == (0.0, 0.0)
+
+
+def test_stream_anchors_block_local_data_and_geometry_to_world() -> None:
+    from src.services.comparison.change_zones import change_to_stream_record
+
+    change = ChangeRecord(
+        key="blk",
+        change_type=ChangeType.ADDED,
+        old_value=None,
+        new_value={"start": (0.0, 0.0), "end": (20.0, 0.0)},  # block-LOCAL
+        location="(516460.35, -107284.12)",  # world (legacy str(tuple) form)
+        metadata={"layer": "Zero", "entity_type": "LINE", "change_type": "added"},
+    )
+    rec = change_to_stream_record(change, pair_id="p", index=0)
+    bbox = rec["bbox"]
+    assert bbox is not None and bbox[0] > 500000.0, f"bbox not world-anchored: {bbox}"
+    # geometry must ride the SAME delta so clouds stay congruent with zones
+    geom = rec.get("geometry")
+    assert geom and all(p[0] > 500000.0 for p in geom["points"])
+
+
+def test_memory_path_anchors_block_local_bbox() -> None:
+    change = ChangeRecord(
+        key="blk2",
+        change_type=ChangeType.ADDED,
+        old_value=None,
+        new_value={"start": (0.0, 0.0), "end": (20.0, 0.0)},
+        location="(516460.35, -107284.12)",
+        metadata={"layer": "Zero", "entity_type": "LINE", "change_type": "added"},
+    )
+    bbox = change_record_bbox(change)
+    assert bbox is not None and bbox[0] > 500000.0, f"memory bbox not anchored: {bbox}"
+
+
+def _reloc_zone(zone_id, change_type, bbox, *, count=13):
+    from src.services.comparison.change_zones import DrawingChangeZone
+
+    return DrawingChangeZone(
+        zone_id=zone_id,
+        pair_id="P",
+        change_type=change_type,
+        bbox=tuple(bbox),
+        old_bbox=tuple(bbox) if change_type == "deleted" else None,
+        centroid=((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0),
+        raw_change_count=count,
+        added_count=count if change_type == "added" else 0,
+        deleted_count=count if change_type == "deleted" else 0,
+    )
+
+
+def test_relocation_pairs_link_size_identical_deleted_added_zones() -> None:
+    # Real 240111_P5 case: C-001 (deleted, 13) and C-002 (added, 13) share an
+    # identical bbox size — one notes block moved ~82 m. Link them via
+    # metadata WITHOUT touching counts/types (honest representation).
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    d = _reloc_zone("C-001", "deleted", (444054.0, -93694.0, 459756.0, -76385.0))
+    a = _reloc_zone("C-002", "added", (362269.0, -89681.0, 377971.0, -72373.0))
+    other = _reloc_zone("C-005", "added", (0.0, 0.0, 500.0, 200.0), count=2)
+
+    linked = link_relocation_zone_pairs([d, a, other])
+
+    assert linked == 1
+    assert d.metadata["relocation_counterpart"] == "C-002"
+    assert a.metadata["relocation_counterpart"] == "C-001"
+    assert d.metadata["relocation_role"] == "from"
+    assert a.metadata["relocation_role"] == "to"
+    assert a.metadata["relocation_counterpart_bbox"][0] == 444054.0
+    dx = a.metadata["relocation_offset"][0]
+    assert dx == pytest.approx(-81785.0, abs=1.0)
+    # counts/types untouched (no consolidation cosmetics)
+    assert d.change_type == "deleted" and d.deleted_count == 13
+    assert a.change_type == "added" and a.added_count == 13
+    assert "relocation_pair_id" not in other.metadata
+
+
+def test_relocation_pairs_require_equal_counts_and_size() -> None:
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    d = _reloc_zone("Z1", "deleted", (0.0, 0.0, 1000.0, 500.0), count=5)
+    wrong_count = _reloc_zone("Z2", "added", (5000.0, 0.0, 6000.0, 500.0), count=4)
+    wrong_size = _reloc_zone("Z3", "added", (9000.0, 0.0, 9800.0, 500.0), count=5)
+
+    assert link_relocation_zone_pairs([d, wrong_count, wrong_size]) == 0
+    assert not d.metadata
+
+
+def test_relocation_ambiguity_resolved_by_nearest_centroid() -> None:
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    d = _reloc_zone("D1", "deleted", (0.0, 0.0, 100.0, 100.0), count=1)
+    near = _reloc_zone("A1", "added", (200.0, 0.0, 300.0, 100.0), count=1)
+    far = _reloc_zone("A2", "added", (9000.0, 0.0, 9100.0, 100.0), count=1)
+
+    assert link_relocation_zone_pairs([d, near, far]) == 1
+    assert d.metadata["relocation_counterpart"] == "A1"
+    assert "relocation_pair_id" not in far.metadata
+
+
+def test_build_change_zones_links_relocation_and_counts_it() -> None:
+    # End-to-end through build_change_zones: two far-apart same-size groups
+    # (deleted vs added) get linked and the result metadata records the count.
+    changes = [
+        _line_change("d1", ChangeType.DELETED, (444054.0, -93694.0), (459756.0, -76385.0)),
+        _line_change("a1", ChangeType.ADDED, (362269.0, -89681.0), (377971.0, -72373.0)),
+    ]
+    result = _result(changes)
+
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    by_type = {z.change_type: z for z in zones}
+    assert by_type["deleted"].metadata.get("relocation_counterpart") == by_type["added"].zone_id
+    assert result.metadata.get("relocation_pair_count") == 1
+    # and the link survives into the live overlay dict
+    from src.services.comparison.review_project import _zone_overlay
+
+    overlay = _zone_overlay(by_type["deleted"], before_transform={}, after_transform={}).to_dict()
+    assert overlay["relocation"]["relocation_counterpart"] == by_type["added"].zone_id
