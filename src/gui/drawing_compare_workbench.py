@@ -10672,7 +10672,13 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                     raw = _counterpart_bbox
                 elif match_side == "b_only" and side_label == "before":
                     raw = _counterpart_bbox
-            if raw is None and match_side in {"matched", "mixed"}:
+            # Live overlays (dashboard top_issues) carry the absent side as an
+            # EMPTY list/dict rather than None — an `is None` check here left
+            # the before pane frozen on every PDF zone click (old_bbox=[]),
+            # while the after pane focused fine. Treat any falsy bbox as
+            # missing and borrow the populated side: both panes then frame the
+            # same world window, which is exactly the synced-view contract.
+            if not raw:
                 raw = overlay.get("bbox") or overlay.get("old_bbox")
             if not raw:
                 logger.debug(
