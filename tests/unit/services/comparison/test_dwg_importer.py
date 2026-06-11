@@ -210,7 +210,11 @@ def test_fixture_adapter_preserves_circle_normal(tmp_path: Path) -> None:
     assert circle["geometry"]["normal"] == {"x": 0.0, "y": 0.0, "z": -1.0}
 
 
-def test_default_backend_selection_uses_cleanroom_ac1015_preview() -> None:
+def test_default_backend_selection_uses_cleanroom_ac1015_preview(monkeypatch) -> None:
+    # tests/conftest.py pins DRAWING_COMPARE_DWG_BACKEND=native for suite
+    # determinism; clear it here because this test asserts the TRUE
+    # no-env default (source == "default").
+    monkeypatch.delenv("DRAWING_COMPARE_DWG_BACKEND", raising=False)
     selection = create_dwg_backend_selection()
 
     assert selection.mode == DWG_BACKEND_CLEANROOM_NATIVE
