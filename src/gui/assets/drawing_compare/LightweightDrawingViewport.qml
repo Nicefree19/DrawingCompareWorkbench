@@ -97,6 +97,13 @@ Item {
     // unavailable optional QSG module must never prevent the root item
     // from loading.
     property string skeletonRenderer: "canvas"
+    // T2-B (2026-06-11) — rasterise the skeleton Canvas on the scene
+    // graph's worker instead of the GUI thread: the settle repaint
+    // measured 40-60 ms at real sheet scale (66k segments), felt as a
+    // hitch after every pan/zoom. Python turns this OFF under the
+    // offscreen test platform so grab-based pixel assertions stay
+    // deterministic.
+    property bool canvasThreadedRaster: true
 
     // ---- PAINT DIAGNOSTICS (read by benchmarks / perf tooling) ---------
     // Updated by vectorCanvas.onPaint on every completed paint. These are
@@ -172,11 +179,13 @@ Item {
     // QML fail to load when the optional native module was absent, leaving
     // PDF previews blank even though the rendered page PNG existed. Keep a
     // harmless placeholder so object names remain stable, and let Canvas
-    // below be the guaranteed renderer.
+    // below be the guaranteed renderer. T2 (2026-06-11): Python now
+    // instantiates QSGLineItem INSIDE this container when the optional
+    // module imports; skeletonRenderer drives which layer is visible.
     Item {
         id: qsgContainer
         anchors.fill: parent
-        visible: false
+        visible: root.skeletonRenderer === "qsg"
         z: 10
         objectName: "qsgSkeletonPlaceholder"
     }
@@ -188,6 +197,12 @@ Item {
         antialiasing: true
         visible: root.skeletonRenderer !== "qsg"
         z: 10
+        // T2-B — paint commands are recorded on the GUI thread but
+        // rasterised on the scene graph worker, so the heavy stroke
+        // playback no longer blocks input. Cheap-pan's item transform
+        // keeps the previous frame following the camera until the
+        // threaded raster of the settled frame lands.
+        renderStrategy: root.canvasThreadedRaster ? Canvas.Threaded : Canvas.Immediate
         // CHEAP-PAN (T1, 2026-06-10): repainting the whole skeleton on EVERY
         // camera tick made pan/zoom cost O(all segments) per wheel notch —
         // measured 56 ms/paint × 29 paints for 30 ticks at 100k segments
@@ -284,6 +299,14 @@ Item {
             var vymin = cy - (h / 2.0) * upp - mWorld
             var vymax = cy + (h / 2.0) * upp + mWorld
 
+            // Zoom-band LOD (T2-B): at the settled zoom a segment shorter
+            // than ~3/4 px contributes no legible ink, yet such segments
+            // dominate dense sheets (hatch/text tessellation). Skipping
+            // them cuts the stroke count where culling can't (fit-to-view
+            // shows everything). Zooming in shrinks lodMin, so detail
+            // returns automatically at the zoom where it becomes visible.
+            var lodMin = 0.75 * upp
+
             // Stroke batching (T1): one path per colour run (chunked every
             // 4000 segments) instead of beginPath/stroke per segment. Round
             // caps render disjoint moveTo/lineTo subpaths identically to the
@@ -314,6 +337,10 @@ Item {
                             __culled += 1
                             continue
                         }
+                        if (Math.abs(bx - ax) + Math.abs(by - ay) < lodMin) {
+                            __culled += 1
+                            continue
+                        }
                         if (batchN === 0) ctx.beginPath()
                         ctx.moveTo(ax, ay)
                         ctx.lineTo(bx, by)
@@ -339,6 +366,10 @@ Item {
                         }
                     }
                     if (pxmax < vxmin || pxmin > vxmax || pymax < vymin || pymin > vymax) {
+                        __culled += 1
+                        continue
+                    }
+                    if ((pxmax - pxmin) + (pymax - pymin) < lodMin) {
                         __culled += 1
                         continue
                     }

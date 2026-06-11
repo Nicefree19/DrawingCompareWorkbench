@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -562,11 +563,22 @@ class TestLightweightQmlFallback:
             viewport.deleteLater()
             app.processEvents()
 
-    def test_forced_qsg_env_still_uses_canvas_fallback(self, monkeypatch):
+    def test_forced_qsg_env_with_broken_module_uses_canvas_fallback(
+        self, monkeypatch
+    ):
+        # T2 (2026-06-11): WORKBENCH_QSG=qsg is now an EXPERIMENTAL opt-in
+        # that activates the GPU skeleton when the module imports. The
+        # original safety contract stays: a missing/broken module must
+        # never blank the viewer root — forced qsg degrades to Canvas.
+        import types
+
         pytest.importorskip("PySide6.QtPdf")
 
         monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
         monkeypatch.setenv("WORKBENCH_QSG", "qsg")
+        monkeypatch.setitem(
+            sys.modules, "src.gui.qsg_line_item", types.ModuleType("broken_qsg")
+        )
 
         from PySide6.QtQuickWidgets import QQuickWidget
         from PySide6.QtWidgets import QApplication
@@ -580,6 +592,40 @@ class TestLightweightQmlFallback:
             assert viewport._quick.status() != QQuickWidget.Status.Error
             assert root is not None
             assert root.property("skeletonRenderer") == "canvas"
+            assert "backend_fallback_canvas_skeleton" in viewport.render_failure_codes()
+        finally:
+            viewport.deleteLater()
+            app.processEvents()
+
+    def test_default_renderer_is_canvas_even_with_qsg_module_available(
+        self, monkeypatch
+    ):
+        # T2-B policy: the Python-side QSG path showed nondeterministic
+        # native crashes under PySide6 6.10 + QQuickWidget, so WITHOUT the
+        # explicit experimental env the renderer stays Canvas (made
+        # responsive via threaded raster + zoom-band LOD instead).
+        pytest.importorskip("PySide6.QtPdf")
+
+        monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+        monkeypatch.delenv("WORKBENCH_QSG", raising=False)
+
+        from PySide6.QtWidgets import QApplication
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+        app = QApplication.instance() or QApplication([])
+        viewport = LightweightDrawingViewport(side="after")
+        try:
+            root = viewport._quick.rootObject()
+            assert root is not None
+            assert root.property("skeletonRenderer") == "canvas"
+            # Module imports fine → this is policy, not a fallback event.
+            assert (
+                "backend_fallback_canvas_skeleton"
+                not in viewport.render_failure_codes()
+            )
+            # Offscreen test platform pins the deterministic Immediate
+            # strategy; real platforms keep the threaded raster.
+            assert root.property("canvasThreadedRaster") is False
         finally:
             viewport.deleteLater()
             app.processEvents()

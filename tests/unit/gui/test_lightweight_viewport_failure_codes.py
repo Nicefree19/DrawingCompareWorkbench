@@ -54,15 +54,11 @@ def test_lightweight_viewport_render_failure_codes_returns_tuple() -> None:
         assert severity_of(code) in {"info", "warn", "error"}
 
 
-def test_lightweight_viewport_canvas_skeleton_code_present_in_test_env() -> None:
-    """S1.3.4 Point 4: in the unit-test environment ``src.gui.qsg_line_item``
-    is unavailable, so the viewport must report
-    ``backend_fallback_canvas_skeleton``.
-
-    This locks in the runtime contract: importing the optional QSG
-    extension can fail without blanking the viewer. The viewer keeps
-    rendering through the Canvas path and the badge tells the user.
-    """
+def test_lightweight_viewport_no_fallback_code_when_qsg_module_available() -> None:
+    """T2 (2026-06-11): ``src.gui.qsg_line_item`` now exists, so a default
+    construction is NOT a fallback event — Canvas is the policy default
+    (the experimental QSG path is env-gated) and the badge must stay
+    quiet about it."""
 
     from PySide6.QtWidgets import QApplication
 
@@ -71,17 +67,48 @@ def test_lightweight_viewport_canvas_skeleton_code_present_in_test_env() -> None
     _ = QApplication.instance() or QApplication([])
     viewport = LightweightDrawingViewport()
 
+    assert "backend_fallback_canvas_skeleton" not in viewport.render_failure_codes()
+
+
+def test_lightweight_viewport_canvas_skeleton_code_present_when_import_breaks(
+    monkeypatch,
+) -> None:
+    """S1.3.4 Point 4 contract, preserved under simulated import failure:
+    a broken optional QSG extension must not blank the viewer — the
+    Canvas path keeps rendering and the badge reports the fallback."""
+
+    import sys
+    import types
+
+    from PySide6.QtWidgets import QApplication
+
+    from src.gui.lightweight_viewport import LightweightDrawingViewport
+
+    monkeypatch.setitem(
+        sys.modules, "src.gui.qsg_line_item", types.ModuleType("broken_qsg")
+    )
+    _ = QApplication.instance() or QApplication([])
+    viewport = LightweightDrawingViewport()
+
     assert "backend_fallback_canvas_skeleton" in viewport.render_failure_codes()
 
 
-def test_qsg_unavailable_log_is_throttled_after_first_viewport(caplog) -> None:
+def test_qsg_unavailable_log_is_throttled_after_first_viewport(
+    caplog, monkeypatch
+) -> None:
     """S1.5 residual: QSG fallback logs once at INFO, then DEBUG."""
+
+    import sys
+    import types
 
     from PySide6.QtWidgets import QApplication
 
     from src.gui.lightweight_viewport import LightweightDrawingViewport
     from src.utils.once_per_session_logger import reset_once_per_session_state
 
+    monkeypatch.setitem(
+        sys.modules, "src.gui.qsg_line_item", types.ModuleType("broken_qsg")
+    )
     reset_once_per_session_state()
     caplog.set_level(logging.DEBUG, logger="src.gui.lightweight_viewport")
 
