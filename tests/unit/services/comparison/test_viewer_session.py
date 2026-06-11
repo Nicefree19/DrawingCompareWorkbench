@@ -119,6 +119,11 @@ def test_load_manifest_reflects_existing_scene_pack_ref(tmp_path: Path) -> None:
 
     src = tmp_path / "after.dxf"
     _make_sample_dxf(src)
+    # 2026-06-12: refs are only trusted when the overview actually exists
+    # (sharable redaction / stale manifests carried dead pointers).
+    (tmp_path / "overview_lod0.json").write_text(
+        '{"primitives": [], "world_bbox": [0,0,1,1]}', encoding="utf-8"
+    )
     pack = ScenePackRef(
         json_path=str(tmp_path / "scene_pack.json"),
         index_path=str(tmp_path / "primitive_index.json"),
@@ -426,3 +431,97 @@ def test_save_manifest_persists_scene_pack_back(tmp_path: Path) -> None:
     reloaded = load_manifest_v3(mpath)
     assert reloaded.after_scene_pack is not None
     assert reloaded.current_render_mode == "skeleton_preview"
+
+
+def test_load_manifest_resolves_relative_scene_pack_paths(tmp_path: Path) -> None:
+    """G3 (2026-06-12): pipeline-baked packs carry manifest-relative paths;
+    the session must resolve them so the GUI's seeded state points at real
+    files (relocatable run dirs + sharable path audit)."""
+
+    from src.services.comparison.viewer_manifest_v3 import (
+        ScenePackRef,
+        ViewerManifestV3,
+        write_manifest_v3,
+    )
+    from src.services.comparison.viewer_session import ViewerSession
+
+    pack_dir = tmp_path / "scene_packs" / "after"
+    pack_dir.mkdir(parents=True)
+    overview = pack_dir / "overview_lod0.json"
+    overview.write_text('{"primitives": [], "world_bbox": [0,0,1,1]}',
+                        encoding="utf-8")
+
+    manifest = ViewerManifestV3(
+        pair_uuid="pair_rel77",
+        package_version="g3",
+        source_kind="normalized_dxf",
+        after_scene_pack=ScenePackRef(
+            json_path="scene_packs/after/scene_pack.json",
+            overview_lod0_path="scene_packs/after/overview_lod0.json",
+            primitive_count=0,
+        ),
+    )
+    path = tmp_path / "viewer_manifest_v3.json"
+    write_manifest_v3(path, manifest)
+
+    session = ViewerSession(max_workers=1)
+    try:
+        loaded = session.load_manifest(path)
+        ref = loaded.after_scene_pack
+        assert ref is not None
+        assert Path(ref.overview_lod0_path).is_absolute()
+        assert Path(ref.overview_lod0_path).exists()
+        state = session.get_pair_state("pair_rel77", "after")
+        assert state.scene_pack_ref is not None
+        assert Path(state.scene_pack_ref.overview_lod0_path).exists()
+    finally:
+        session.shutdown() if hasattr(session, "shutdown") else None
+
+
+def test_load_manifest_drops_dead_or_redacted_pack_refs(tmp_path: Path) -> None:
+    """2026-06-12: sharable redaction masks separator-bearing strings, so a
+    manifest can carry "<redacted>/..." (or otherwise stale) pack paths.
+    Trusting them froze the viewer on a dead pointer; they must be dropped
+    so the lazy/cache build path stays reachable."""
+
+    from src.services.comparison.viewer_manifest_v3 import (
+        ScenePackRef,
+        ViewerManifestV3,
+        write_manifest_v3,
+    )
+    from src.services.comparison.viewer_session import ViewerSession
+
+    manifest = ViewerManifestV3(
+        pair_uuid="pair_dead",
+        package_version="g3",
+        source_kind="normalized_dxf",
+        after_scene_pack=ScenePackRef(
+            overview_lod0_path="<redacted>/overview_lod0.json",
+            primitive_count=10,
+        ),
+    )
+    path = tmp_path / "viewer_manifest_v3.json"
+    write_manifest_v3(path, manifest)
+
+    session = ViewerSession(max_workers=1)
+    loaded = session.load_manifest(path)
+    assert loaded.after_scene_pack is None
+    state = session.get_pair_state("pair_dead", "after")
+    assert state.scene_pack_ref is None
+
+
+def test_select_pair_treats_redacted_source_as_absent(tmp_path: Path) -> None:
+    from src.services.comparison.viewer_session import (
+        PairSessionState,
+        ViewerSession,
+    )
+
+    session = ViewerSession(max_workers=1)
+    session._states[("p1", "after")] = PairSessionState(
+        pair_id="p1", side="after",
+        source_path="<redacted>/detail.dxf",
+    )
+    state = session.select_pair("p1", side="after")
+    # No build scheduled against the fake path; stays relative_only.
+    assert state.render_mode == "relative_only"
+    assert ("p1", "after") not in session._futures

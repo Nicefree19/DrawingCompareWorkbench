@@ -1306,6 +1306,19 @@ class FolderComparePipeline:
                 viewer_overlay_count=viewer_overlay_count,
                 auto_structural_cloud_count=auto_structural_cloud_count,
             )
+            # Detached scene-pack prewarm (2026-06-12) — fills the GLOBAL
+            # pack cache in a separate below-normal-priority process so the
+            # GUI's first pair-select is a cache HIT instead of a 4-6 min
+            # in-GUI cold parse of a 115 MB DXF. Fire-and-forget: adds 0 s
+            # to the pipeline; on any failure the lazy GUI build remains.
+            try:
+                from .scene_pack_prewarm import launch_detached_prewarm
+
+                launch_detached_prewarm(
+                    [str(source_a_input), str(source_b_input)]
+                )
+            except Exception:  # noqa: BLE001 - prewarm is best-effort only
+                logger.debug("scene-pack prewarm launch failed", exc_info=True)
 
             fast_state_cleanup: dict[str, Any] = {}
             if fast_first_review:

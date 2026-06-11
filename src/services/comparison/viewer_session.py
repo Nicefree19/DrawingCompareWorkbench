@@ -160,6 +160,28 @@ def _scene_pack_cache_dir(source_path: Path, *, root: Optional[Path] = None) -> 
     return base
 
 
+def _resolve_scene_pack_ref_paths(ref: Optional[ScenePackRef], *, base: Path) -> None:
+    """Resolve relative pack paths against the manifest directory, in place.
+
+    Pipeline-baked refs (G3, 2026-06-12) are stored relative to the
+    manifest dir so the run folder stays relocatable and the sharable
+    export's path audit passes. Absolute/empty values pass through.
+    """
+
+    if ref is None:
+        return
+    for attr in ("json_path", "index_path", "overview_lod0_path"):
+        raw = getattr(ref, attr, "") or ""
+        if not raw:
+            continue
+        try:
+            p = Path(raw)
+            if not p.is_absolute():
+                setattr(ref, attr, str((base / p).resolve()))
+        except (OSError, ValueError):
+            continue
+
+
 def _try_load_cached_pack(source_path: Path, *, root: Optional[Path] = None) -> Optional[ScenePackRef]:
     """Return a :class:`ScenePackRef` if all three artifacts exist + look intact.
 
@@ -263,6 +285,18 @@ class ViewerSession:
 
         path = Path(manifest_path)
         manifest = load_manifest_v3(path)  # may raise
+        # Manifest pack refs may carry relative paths (resolve against the
+        # manifest dir) or redacted/stale ones (sharable export masks any
+        # separator-bearing string). A ref whose overview doesn't exist is
+        # dropped so the lazy/cache path stays reachable instead of the
+        # viewer trusting a dead pointer.
+        for attr in ("before_scene_pack", "after_scene_pack"):
+            ref = getattr(manifest, attr)
+            _resolve_scene_pack_ref_paths(ref, base=path.parent)
+            if ref is not None:
+                overview = str(ref.overview_lod0_path or "")
+                if not overview or not Path(overview).exists():
+                    setattr(manifest, attr, None)
         with self._lock:
             self._manifest = manifest
             self._manifest_path = path
@@ -364,16 +398,38 @@ class ViewerSession:
                 self._transition_locked(pair_id, side, "render_pending")
                 return state
 
-            # Need a source path to build from.
-            if not state.source_path:
+            # Need a USABLE source path to build from. Sharable manifests
+            # carry "<redacted>/..." placeholders — treat those as absent so
+            # the Workbench's ensure_pair_source repair (real local path)
+            # is what unlocks the build, not a doomed parse of a fake path.
+            source_text = str(state.source_path or "")
+            if not source_text or "redacted" in source_text.lower():
                 logger.debug(
-                    "select_pair(%s, %s): no source_path — staying relative_only",
+                    "select_pair(%s, %s): no usable source_path — staying "
+                    "relative_only",
                     pair_id, side,
                 )
                 return state
 
         # Outside the lock — try cache, else schedule a build.
         cached = _try_load_cached_pack(Path(state.source_path), root=self._cache_root)
+        if cached is None and Path(state.source_path).suffix.lower() == ".dwg":
+            # The pipeline's detached prewarmer (2026-06-12) warms the cache
+            # under the EFFECTIVE converted-DXF key; a DWG source injected by
+            # the Workbench would miss it and rebuild from scratch. Resolve
+            # the same effective DXF the builder would use and retry.
+            try:
+                from src.services.comparison.zone_vector_renderer import (
+                    resolve_dxf_path,
+                )
+
+                effective = resolve_dxf_path(Path(state.source_path))
+                if effective and Path(effective) != Path(state.source_path):
+                    cached = _try_load_cached_pack(
+                        Path(effective), root=self._cache_root
+                    )
+            except Exception:  # noqa: BLE001 - cache probe must stay non-fatal
+                logger.debug("effective-DXF cache probe failed", exc_info=True)
         if cached is not None:
             logger.info(
                 "select_pair(%s, %s): cache HIT at %s", pair_id, side, cached.json_path
