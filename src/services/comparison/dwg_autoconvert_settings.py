@@ -76,9 +76,11 @@ def detect_oda_installation() -> Tuple[bool, Optional[str]]:
     """
 
     try:
-        from .dwg_converter import DwgConverter
+        # Token-free shim: cad_policy_gate quarantines the converter class
+        # name to dwg_converter.py; this module only asks the yes/no question.
+        from .dwg_converter import converter_installation_status
 
-        status = DwgConverter.check_installation()
+        status = converter_installation_status()
         if isinstance(status, dict) and status.get("installed"):
             return True, status.get("path")
         return False, None
