@@ -88,6 +88,40 @@ def test_pdf_zone_focus_zooms_to_points_not_pixels():
     assert 0.0 <= cx <= 841.9
 
 
+def test_pdf_zone_focus_moves_before_pane_when_old_bbox_is_empty_list():
+    """Live regression (2026-06-11, "변경전 존 포커싱이 되지 않아"): dashboard
+    top_issues overlays carry ``old_bbox=[]`` (empty list, NOT None) for PDF
+    zones. The before pane reads ``old_bbox`` and the fallback used an
+    ``is None`` check, so the empty list slipped past it straight into
+    ``if not raw: continue`` — the before camera never moved while the after
+    camera focused fine. Both panes must now frame the same window."""
+
+    pair = {"coordinate_source": "image_pixels", "source_a": "a.pdf",
+            "source_b": "b.pdf", "compare_pdf_dpi": 200.0}
+    overlay = {"zone_id": "C-007", "bbox": dict(_PIXEL_BBOX),
+               "old_bbox": [],  # exact live shape from the debug capture
+               "change_type": "modified"}
+    ns, before, after = _make_fake(pair, overlay)
+
+    DrawingCompareWorkbenchV2._focus_lightweight_on_zone_v2(ns, "C-007")
+
+    assert before.camera_calls, "before-side camera must move (was frozen)"
+    assert after.camera_calls, "after-side camera should have been moved"
+    assert before.camera_calls[-1][0] == after.camera_calls[-1][0], (
+        "both panes must frame the SAME world window (synced view contract)"
+    )
+
+
+def test_union_bboxes_tolerates_empty_list_side():
+    """Same empty-``old_bbox=[]`` family: ``union_bboxes`` indexed the
+    empty candidate (``()[2]``) and raised IndexError — it must skip it."""
+
+    from src.gui.zone_crop_alignment import union_bboxes
+
+    assert union_bboxes([], (1.0, 2.0, 3.0, 4.0)) == (1.0, 2.0, 3.0, 4.0)
+    assert union_bboxes([], None) is None
+
+
 def test_dxf_zone_focus_passes_world_coords_through_unchanged():
     """Regression guard: DXF overlays (already world coords) must NOT be
     rescaled by the PDF backfill — they pass through untouched."""

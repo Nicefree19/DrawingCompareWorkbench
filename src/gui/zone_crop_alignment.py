@@ -21,6 +21,10 @@ def union_bboxes(*bboxes: Optional[tuple[float, float, float, float]]) -> Option
             candidate = tuple(float(v) for v in bbox[:4])
         except (TypeError, ValueError):
             continue
+        # Live top_issues overlays carry the absent side as an EMPTY list —
+        # bbox[:4] of [] is () and indexing it crashed the union.
+        if len(candidate) < 4:
+            continue
         if candidate[2] > candidate[0] and candidate[3] > candidate[1]:
             valid.append(candidate)  # type: ignore[arg-type]
     if not valid:
