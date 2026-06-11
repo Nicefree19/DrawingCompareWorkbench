@@ -11366,6 +11366,20 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         session = getattr(self, "_viewer_session", None)
         if session is not None:
             try:
+                # Repair real local sources first (2026-06-12): the v3
+                # manifest may carry "<redacted>/..." paths (sharable
+                # profile) — without this the lazy pack build never runs
+                # and the pair is stuck in relative_only. The Workbench
+                # knows the true inputs it compared.
+                for side, key in (("before", "source_a"), ("after", "source_b")):
+                    candidate = str((viewer_pair or {}).get(key) or "")
+                    if not candidate or "redacted" in candidate.lower():
+                        candidate = str(
+                            getattr(self, "_source_a" if side == "before" else "_source_b", "")
+                            or ""
+                        )
+                    if candidate and "redacted" not in candidate.lower():
+                        session.ensure_pair_source(pair_id, side, candidate)  # type: ignore[arg-type]
                 # Both sides — before/after — get scheduled. The session
                 # de-dupes when two sides share the same source.
                 for side in ("before", "after"):

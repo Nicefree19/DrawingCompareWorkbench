@@ -1359,3 +1359,48 @@ def test_viewer_package_propagates_sheet_frame_bboxes_to_cad_pair_manifest(
     overlay = json.loads((tmp_path / "viewer" / "overlays" / "S21-0001.json").read_text(encoding="utf-8"))
     assert overlay["before_cad_frame_bbox"] == [0.0, 0.0, 420.0, 297.0]
     assert overlay["after_cad_frame_bbox"] == [1000.0, 2000.0, 1420.0, 2297.0]
+
+
+def test_v3_manifest_carries_real_pair_uuid_and_no_inline_packs(tmp_path: Path) -> None:
+    """2026-06-12 contract: pair_uuid must be the REAL pair id (the old
+    "viewer-package" literal made every GUI ViewerSession lookup miss, so
+    lazy pack builds never ran — live 115 MB pair stuck in overlay-only).
+    Pack refs stay None in the manifest: packs live in the GLOBAL cache
+    (lazy build + pipeline detached prewarm), because baking them here runs
+    in the isolated proxy process where each side costs a cold multi-minute
+    parse and the sharable redaction masks ref paths anyway."""
+
+    before = tmp_path / "before.dxf"
+    after = tmp_path / "after.dxf"
+    before.write_text("0\nEOF\n", encoding="utf-8")
+    after.write_text("0\nEOF\n", encoding="utf-8")
+
+    manifest = _build_v3_manifest_from_v1(
+        v1_manifest={
+            "schema_version": 2,
+            "pairs": [
+                {
+                    "pair_id": "pair_realhash77",
+                    "source_a": str(before),
+                    "source_b": str(after),
+                    "coordinate_source": "cad_world",
+                }
+            ],
+        },
+        options=ViewerPackageOptions(),
+        viewer_root=tmp_path / "viewer",
+    )
+
+    assert manifest.pair_uuid == "pair_realhash77"
+    assert manifest.before_scene_pack is None
+    assert manifest.after_scene_pack is None
+    assert manifest.renderer_capabilities["scene_pack_built"] is False
+
+
+def test_v3_manifest_pair_uuid_falls_back_to_literal_only_without_pairs(tmp_path: Path) -> None:
+    manifest = _build_v3_manifest_from_v1(
+        v1_manifest={"schema_version": 2, "pairs": []},
+        options=ViewerPackageOptions(),
+        viewer_root=tmp_path / "viewer",
+    )
+    assert manifest.pair_uuid == "viewer-package"

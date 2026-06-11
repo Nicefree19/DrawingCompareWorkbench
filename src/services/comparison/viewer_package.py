@@ -3633,7 +3633,7 @@ def _build_v2_manifest_from_v1(
     ) else "relative_only"
 
     return ViewerManifestV2(
-        pair_uuid=str(v1_manifest.get("pair_uuid") or "viewer-package"),
+        pair_uuid=_manifest_pair_uuid(v1_manifest),
         package_version=str(v1_manifest.get("schema_version") or "v1"),
         source_kind=source_kind,  # type: ignore[arg-type]
         renderer_capabilities=capabilities,
@@ -3661,6 +3661,28 @@ def _v3_source_kind(pairs_v1: list) -> str:
     if all((p.get("coordinate_source") == "cad_world") for p in pairs_v1):
         return "normalized_dxf"
     return "mixed"
+
+
+def _manifest_pair_uuid(v1_manifest: Dict[str, Any]) -> str:
+    """Real pair id for the v2/v3 manifests.
+
+    The old fallback was the literal ``"viewer-package"`` whenever the v1
+    manifest lacked a top-level ``pair_uuid`` — which is ALWAYS for live
+    Workbench runs. The GUI ViewerSession keys its per-pair state by the
+    Workbench's own pair hash, so the literal made every lookup miss and
+    silently disabled the lazy scene-pack path (live evidence 2026-06-12:
+    115 MB pair stuck in relative_only with packs never built). Fall back
+    to the first pair's id before resorting to the literal.
+    """
+
+    explicit = str(v1_manifest.get("pair_uuid") or "")
+    if explicit:
+        return explicit
+    for pair in v1_manifest.get("pairs") or []:
+        candidate = str(pair.get("pair_id") or pair.get("pair_uuid") or "")
+        if candidate:
+            return candidate
+    return "viewer-package"
 
 
 def _v3_initial_render_mode(pairs_v1: list) -> str:
@@ -3768,7 +3790,7 @@ def _build_v3_manifest_from_v1(
         "viewer_render_policy": v1_manifest.get("viewer_render_policy", "lazy"),
         "tile_size": v1_manifest.get("tile_size", options.tile_size),
         "scene_pack_root": str(viewer_root / SCENE_PACKS_SUBDIR),
-        "scene_pack_built": False,  # G1: lazy build by viewer_session
+        "scene_pack_built": False,  # packs live in the GLOBAL cache (lazy + pipeline prewarm)
         "cad_visual_backend": cad_visual_backend if isinstance(cad_visual_backend, dict) else {},
     }
 
@@ -3784,7 +3806,7 @@ def _build_v3_manifest_from_v1(
             break
 
     return ViewerManifestV3(
-        pair_uuid=str(v1_manifest.get("pair_uuid") or "viewer-package"),
+        pair_uuid=_manifest_pair_uuid(v1_manifest),
         package_version=str(v1_manifest.get("schema_version") or "v1"),
         source_kind=source_kind,  # type: ignore[arg-type]
         before_source_signature=before_sig,
@@ -3794,7 +3816,15 @@ def _build_v3_manifest_from_v1(
         after_world_bbox=shared_bbox,
         shared_world_bbox=shared_bbox,
         overlay_space=overlay_space,  # type: ignore[arg-type]
-        before_scene_pack=None,  # built on demand by viewer_session
+        # In-manifest pack refs stay None: a first attempt (2026-06-12) baked
+        # packs here, but this function runs in the ISOLATED viewer-package
+        # proxy process — no run-scoped doc cache, so each 115 MB side cost
+        # a 4-6 min COLD parse, and the sharable redaction then masked even
+        # manifest-relative ref paths. Packs now live in the GLOBAL scene
+        # pack cache (viewer_session lazy build + pipeline detached prewarm)
+        # where the GUI's cache-hit path picks them up without any manifest
+        # plumbing.
+        before_scene_pack=None,
         after_scene_pack=None,
         zone_requests=[],
         evidence=[],
