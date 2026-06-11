@@ -641,7 +641,10 @@ def change_record_bbox(
         bbox = _bbox_from_metadata(metadata, zone_options)
     if bbox is None:
         bbox = _bbox_from_location(change.location, zone_options)
-    # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+    # Block-LOCAL data → world re-anchoring (CAD-only; PDF records carry
+    # pixel bboxes with prose/points locations — see _metadata_blocks_anchoring).
+    if _metadata_blocks_anchoring(metadata):
+        return bbox
     anchored, _delta = _anchor_bbox_to_location(bbox, _location_point(change.location))
     return anchored
 
@@ -657,7 +660,10 @@ def change_record_old_bbox(
     entity_type = str(metadata.get("entity_type") or "").upper()
     bbox = _bbox_from_entity_data(entity_type, change.old_value, zone_options)
     if bbox is not None:
-        # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
+        # Block-LOCAL data → world re-anchoring (CAD-only; see
+        # _metadata_blocks_anchoring for the PDF exclusion).
+        if _metadata_blocks_anchoring(metadata):
+            return bbox
         anchor = (
             _point_from_metadata(metadata, "old_x", "old_y")
             or _point(metadata.get("old_location"))
@@ -738,8 +744,13 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
     # Block-LOCAL data → world re-anchoring (see _anchor_bbox_to_location).
     # Without this every block-internal change zone/cloud on the legacy path
     # pointed at the origin area instead of the actual drawing location.
-    bbox, new_delta = _anchor_bbox_to_location(bbox, location)
-    old_bbox, old_delta = _anchor_bbox_to_location(old_bbox, old_location or location)
+    # CAD-only: PDF records carry pixel bboxes with prose/points locations —
+    # anchoring them corrupts the zones (2026-06-11 regression).
+    if _metadata_blocks_anchoring(metadata):
+        new_delta = old_delta = (0.0, 0.0)
+    else:
+        bbox, new_delta = _anchor_bbox_to_location(bbox, location)
+        old_bbox, old_delta = _anchor_bbox_to_location(old_bbox, old_location or location)
     old_text = _text_value_from_change_data(old_data)
     new_text = _text_value_from_change_data(new_data)
     # B3 — preserve the entity's real geometry through the stream so large
@@ -833,11 +844,24 @@ def _point_from_metadata(
         return None
 
 
-def _location_point(value: Any) -> Optional[Tuple[float, float]]:
-    """Parse a change location given as a tuple/list OR a string.
+# A location string is only a coordinate when the WHOLE string is one —
+# legacy CAD ChangeRecords store ``str(tuple)`` ("(x, y)") or bare "x,y".
+# PDF records store prose like ``"page 1: ..."``; loosely grabbing the first
+# two numbers from those turned "page 1" into a (1, ...) anchor point and
+# dragged every PDF zone bbox to x≈0 (2026-06-11 PDF-compare regression).
+_COORD_STRING_RE = re.compile(
+    r"^\s*\(?\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*,"
+    r"\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(?:,\s*[-+]?\d+(?:\.\d+)?"
+    r"(?:[eE][-+]?\d+)?\s*)?\)?\s*$"
+)
 
-    Legacy ChangeRecords store ``location=str(tuple)`` (``"(x, y)"``), the
-    stream path passes real tuples — accept both.
+
+def _location_point(value: Any) -> Optional[Tuple[float, float]]:
+    """Parse a change location given as a tuple/list OR a coordinate string.
+
+    Strings must be a PURE coordinate form ("(x, y)", "x,y", optionally with
+    a z component) — prose locations such as ``"page 1: ..."`` return None so
+    they can never become anchoring targets.
     """
 
     point = _point(value)
@@ -845,13 +869,30 @@ def _location_point(value: Any) -> Optional[Tuple[float, float]]:
         return point
     if value is None:
         return None
-    numbers = re.findall(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", str(value))
-    if len(numbers) >= 2:
+    match = _COORD_STRING_RE.match(str(value))
+    if match:
         try:
-            return (float(numbers[0]), float(numbers[1]))
+            return (float(match.group(1)), float(match.group(2)))
         except ValueError:
             return None
     return None
+
+
+def _metadata_blocks_anchoring(metadata: Any) -> bool:
+    """True when a record's coordinate convention forbids location anchoring.
+
+    PDF visual records keep their bbox in ``image_pixels`` while their
+    ``location`` is prose/points — two DIFFERENT spaces, so the world
+    re-anchoring that fixes block-LOCAL CAD data would corrupt them
+    (2026-06-11 regression: every PDF zone bbox got dragged to x≈0 and 9
+    zones collapsed into 4). Anchoring is a CAD-only repair.
+    """
+
+    if not isinstance(metadata, dict):
+        return False
+    if str(metadata.get("bbox_coordinate_space") or "") == "image_pixels":
+        return True
+    return str(metadata.get("source_format") or "").lower() == "pdf"
 
 
 def _anchor_bbox_to_location(
