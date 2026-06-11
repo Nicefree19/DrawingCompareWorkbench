@@ -1047,3 +1047,89 @@ def test_memory_path_anchors_block_local_bbox() -> None:
     )
     bbox = change_record_bbox(change)
     assert bbox is not None and bbox[0] > 500000.0, f"memory bbox not anchored: {bbox}"
+
+
+def _reloc_zone(zone_id, change_type, bbox, *, count=13):
+    from src.services.comparison.change_zones import DrawingChangeZone
+
+    return DrawingChangeZone(
+        zone_id=zone_id,
+        pair_id="P",
+        change_type=change_type,
+        bbox=tuple(bbox),
+        old_bbox=tuple(bbox) if change_type == "deleted" else None,
+        centroid=((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0),
+        raw_change_count=count,
+        added_count=count if change_type == "added" else 0,
+        deleted_count=count if change_type == "deleted" else 0,
+    )
+
+
+def test_relocation_pairs_link_size_identical_deleted_added_zones() -> None:
+    # Real 240111_P5 case: C-001 (deleted, 13) and C-002 (added, 13) share an
+    # identical bbox size — one notes block moved ~82 m. Link them via
+    # metadata WITHOUT touching counts/types (honest representation).
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    d = _reloc_zone("C-001", "deleted", (444054.0, -93694.0, 459756.0, -76385.0))
+    a = _reloc_zone("C-002", "added", (362269.0, -89681.0, 377971.0, -72373.0))
+    other = _reloc_zone("C-005", "added", (0.0, 0.0, 500.0, 200.0), count=2)
+
+    linked = link_relocation_zone_pairs([d, a, other])
+
+    assert linked == 1
+    assert d.metadata["relocation_counterpart"] == "C-002"
+    assert a.metadata["relocation_counterpart"] == "C-001"
+    assert d.metadata["relocation_role"] == "from"
+    assert a.metadata["relocation_role"] == "to"
+    assert a.metadata["relocation_counterpart_bbox"][0] == 444054.0
+    dx = a.metadata["relocation_offset"][0]
+    assert dx == pytest.approx(-81785.0, abs=1.0)
+    # counts/types untouched (no consolidation cosmetics)
+    assert d.change_type == "deleted" and d.deleted_count == 13
+    assert a.change_type == "added" and a.added_count == 13
+    assert "relocation_pair_id" not in other.metadata
+
+
+def test_relocation_pairs_require_equal_counts_and_size() -> None:
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    d = _reloc_zone("Z1", "deleted", (0.0, 0.0, 1000.0, 500.0), count=5)
+    wrong_count = _reloc_zone("Z2", "added", (5000.0, 0.0, 6000.0, 500.0), count=4)
+    wrong_size = _reloc_zone("Z3", "added", (9000.0, 0.0, 9800.0, 500.0), count=5)
+
+    assert link_relocation_zone_pairs([d, wrong_count, wrong_size]) == 0
+    assert not d.metadata
+
+
+def test_relocation_ambiguity_resolved_by_nearest_centroid() -> None:
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    d = _reloc_zone("D1", "deleted", (0.0, 0.0, 100.0, 100.0), count=1)
+    near = _reloc_zone("A1", "added", (200.0, 0.0, 300.0, 100.0), count=1)
+    far = _reloc_zone("A2", "added", (9000.0, 0.0, 9100.0, 100.0), count=1)
+
+    assert link_relocation_zone_pairs([d, near, far]) == 1
+    assert d.metadata["relocation_counterpart"] == "A1"
+    assert "relocation_pair_id" not in far.metadata
+
+
+def test_build_change_zones_links_relocation_and_counts_it() -> None:
+    # End-to-end through build_change_zones: two far-apart same-size groups
+    # (deleted vs added) get linked and the result metadata records the count.
+    changes = [
+        _line_change("d1", ChangeType.DELETED, (444054.0, -93694.0), (459756.0, -76385.0)),
+        _line_change("a1", ChangeType.ADDED, (362269.0, -89681.0), (377971.0, -72373.0)),
+    ]
+    result = _result(changes)
+
+    zones = build_change_zones(result, pair_id="P", drawing_number="P")
+
+    by_type = {z.change_type: z for z in zones}
+    assert by_type["deleted"].metadata.get("relocation_counterpart") == by_type["added"].zone_id
+    assert result.metadata.get("relocation_pair_count") == 1
+    # and the link survives into the live overlay dict
+    from src.services.comparison.review_project import _zone_overlay
+
+    overlay = _zone_overlay(by_type["deleted"], before_transform={}, after_transform={}).to_dict()
+    assert overlay["relocation"]["relocation_counterpart"] == by_type["added"].zone_id

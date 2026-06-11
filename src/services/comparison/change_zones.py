@@ -426,7 +426,101 @@ def build_change_zones(
 
     if suppressed_count:
         result.metadata["change_zone_noise_suppressed_count"] = suppressed_count
+    linked_pairs = link_relocation_zone_pairs(zones)
+    if linked_pairs:
+        result.metadata["relocation_pair_count"] = linked_pairs
     return zones
+
+
+def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
+    """Link size-identical deleted↔added zone pairs as probable relocations.
+
+    Live review on the real 240111_P5 pair: C-001 (deleted, 13 records,
+    15,702×17,309 mm) and C-002 (added, 13 records, SAME bbox size) are one
+    notes block moved ~82 m. The comparator honestly reports delete+add (the
+    move exceeds every matching tolerance), but the reviewer should see the
+    relationship. This links such pairs via METADATA ONLY — zones, counts and
+    change types are untouched (demote-not-drop; no count cosmetics — the
+    341 km fake-consolidation lesson). Criteria are deliberately conservative:
+
+      * one zone deleted-only, the other added-only
+      * record counts equal (and > 0)
+      * bbox width AND height equal within max(2 mm, 1%)
+
+    Greedy best match (smallest size difference, then nearest centroid);
+    each zone links at most once. Returns the number of linked pairs.
+
+    Linked metadata (both zones): ``relocation_pair_id``,
+    ``relocation_role`` ("from"/"to"), ``relocation_counterpart`` (zone id),
+    ``relocation_counterpart_bbox`` (CAD-world list), ``relocation_offset``
+    ([dx, dy], from→to). The GUI uses the counterpart bbox to frame
+    before=old location / after=new location simultaneously.
+    """
+
+    deleted = [
+        z for z in zones
+        if z.change_type == "deleted" and z.deleted_count > 0 and z.added_count == 0
+    ]
+    added = [
+        z for z in zones
+        if z.change_type == "added" and z.added_count > 0 and z.deleted_count == 0
+    ]
+    if not deleted or not added:
+        return 0
+
+    def _dims(zone: "DrawingChangeZone") -> Tuple[float, float]:
+        box = zone.bbox
+        return (float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
+
+    candidates: list[tuple[float, float, "DrawingChangeZone", "DrawingChangeZone"]] = []
+    for d_zone in deleted:
+        dw, dh = _dims(d_zone)
+        for a_zone in added:
+            if d_zone.deleted_count != a_zone.added_count:
+                continue
+            aw, ah = _dims(a_zone)
+            tol_w = max(2.0, 0.01 * max(dw, aw))
+            tol_h = max(2.0, 0.01 * max(dh, ah))
+            if abs(dw - aw) > tol_w or abs(dh - ah) > tol_h:
+                continue
+            size_diff = abs(dw - aw) + abs(dh - ah)
+            dist = math.hypot(
+                float(a_zone.centroid[0]) - float(d_zone.centroid[0]),
+                float(a_zone.centroid[1]) - float(d_zone.centroid[1]),
+            )
+            candidates.append((size_diff, dist, d_zone, a_zone))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    used: set[int] = set()
+    pairs = 0
+    for _size_diff, _dist, d_zone, a_zone in candidates:
+        if id(d_zone) in used or id(a_zone) in used:
+            continue
+        used.add(id(d_zone))
+        used.add(id(a_zone))
+        pairs += 1
+        pair_id = f"R-{pairs:03d}"
+        offset = [
+            float(a_zone.centroid[0]) - float(d_zone.centroid[0]),
+            float(a_zone.centroid[1]) - float(d_zone.centroid[1]),
+        ]
+        d_zone.metadata.update({
+            "relocation_pair_id": pair_id,
+            "relocation_role": "from",
+            "relocation_counterpart": a_zone.zone_id,
+            "relocation_counterpart_bbox": [float(v) for v in a_zone.bbox],
+            "relocation_offset": offset,
+        })
+        a_zone.metadata.update({
+            "relocation_pair_id": pair_id,
+            "relocation_role": "to",
+            "relocation_counterpart": d_zone.zone_id,
+            "relocation_counterpart_bbox": [
+                float(v) for v in (d_zone.old_bbox or d_zone.bbox)
+            ],
+            "relocation_offset": offset,
+        })
+    return pairs
 
 
 def _zone_input_from_result(
@@ -2201,6 +2295,25 @@ def _write_change_zones_json(
     )
 
 
+_RELOCATION_METADATA_KEYS = (
+    "relocation_pair_id",
+    "relocation_role",
+    "relocation_counterpart",
+    "relocation_counterpart_bbox",
+    "relocation_offset",
+)
+
+
+def _relocation_payload(zone: "DrawingChangeZone") -> dict[str, Any]:
+    """Compact relocation-link dict from zone metadata (for CSV/overlay)."""
+
+    return {
+        key: zone.metadata[key]
+        for key in _RELOCATION_METADATA_KEYS
+        if key in zone.metadata
+    }
+
+
 def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
@@ -2254,6 +2367,9 @@ def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> N
         # the cloud along the real shape. Appended last to keep column order
         # stable for existing readers.
         "geometry",
+        # Relocation-pair link (JSON; see link_relocation_zone_pairs) so the
+        # reloaded overlay path keeps the from→to navigation. Appended last.
+        "relocation",
     ]
     with open(path, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
@@ -2311,6 +2427,11 @@ def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> N
                     "geometry": (
                         json.dumps(zone.geometry, separators=(",", ":"))
                         if zone.geometry
+                        else ""
+                    ),
+                    "relocation": (
+                        json.dumps(_relocation_payload(zone), separators=(",", ":"))
+                        if zone.metadata.get("relocation_pair_id")
                         else ""
                     ),
                 }

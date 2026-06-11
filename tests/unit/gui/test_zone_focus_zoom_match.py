@@ -297,3 +297,67 @@ def test_ensure_min_world_span_only_enlarges():
     assert (grown[0] + grown[2]) / 2.0 == pytest.approx(105.0)  # centre kept
     kept = ensure_min_world_span((0.0, 0.0, 500.0, 400.0), 200.0)
     assert kept == (0.0, 0.0, 500.0, 400.0)
+
+
+def test_relocation_pair_focuses_from_and_to_locations():
+    # Relocation pair (C-001 deleted ↔ C-002 added, the 82m-moved notes
+    # block): the before pane frames the OLD location and the after pane the
+    # NEW one — the move reads as a jump between panes.
+    pair = {"coordinate_source": "world", "source_a": "a.dxf", "source_b": "b.dxf"}
+    overlay = {
+        "zone_id": "C-001",
+        "change_type": "deleted",
+        "old_bbox": {"min_x": 444054.0, "min_y": -93694.0,
+                     "max_x": 459756.0, "max_y": -76385.0},
+        "bbox": None,
+        "relocation": {
+            "relocation_pair_id": "R-001",
+            "relocation_role": "from",
+            "relocation_counterpart": "C-002",
+            "relocation_counterpart_bbox": [362269.0, -89681.0, 377971.0, -72373.0],
+            "relocation_offset": [-81785.0, 4012.5],
+        },
+    }
+    ns, before, after = _make_fake(pair, overlay)
+    sheet = (0.0, -250000.0, 460000.0, 160000.0)
+    before.world_bbox = sheet
+    after.world_bbox = sheet
+
+    DrawingCompareWorkbenchV2._focus_lightweight_on_zone_v2(ns, "C-001")
+
+    assert before.camera_calls and after.camera_calls
+    b_bbox = before.camera_calls[-1][0]
+    a_bbox = after.camera_calls[-1][0]
+    b_cx = (b_bbox[0] + b_bbox[2]) / 2.0
+    a_cx = (a_bbox[0] + a_bbox[2]) / 2.0
+    assert b_cx == pytest.approx(451905.0, abs=2.0)  # old location centre
+    assert a_cx == pytest.approx(370120.0, abs=2.0)  # new location centre
+    assert abs(b_cx - a_cx) == pytest.approx(81785.0, abs=5.0)  # the move itself
+
+
+def test_relocation_side_messages_say_moved_not_deleted():
+    captured: dict[str, str] = {}
+
+    class _MsgViewport:
+        def __init__(self, name):
+            self._name = name
+
+        def set_side_message(self, message):
+            captured[self._name] = message
+
+    overlay = {
+        "zone_id": "C-001",
+        "change_type": "deleted",
+        "relocation": {"relocation_counterpart": "C-002", "relocation_role": "from"},
+    }
+    ns = SimpleNamespace(
+        _active_overlays_by_zone={"C-001": overlay},
+        preview_before_lightweight_v2=_MsgViewport("before"),
+        preview_after_lightweight_v2=_MsgViewport("after"),
+    )
+
+    DrawingCompareWorkbenchV2._set_lightweight_zone_side_messages_v2(ns, "C-001")
+
+    assert "묶음 이동" in captured["before"] and "이동 전" in captured["before"]
+    assert "묶음 이동" in captured["after"] and "이동 후" in captured["after"]
+    assert "C-002" in captured["after"]

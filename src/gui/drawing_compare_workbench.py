@@ -10657,6 +10657,21 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             elif match_side == "b_only":
                 key = "bbox"
             raw = overlay.get(key)
+            # Relocation pair (link_relocation_zone_pairs): show from→to —
+            # the before pane frames the OLD location and the after pane the
+            # NEW one, so a moved block reads as a jump between the panes
+            # instead of "deleted here" / "added somewhere unknown".
+            _relocation = overlay.get("relocation")
+            _counterpart_bbox = (
+                _relocation.get("relocation_counterpart_bbox")
+                if isinstance(_relocation, dict)
+                else None
+            )
+            if _counterpart_bbox:
+                if match_side == "a_only" and side_label == "after":
+                    raw = _counterpart_bbox
+                elif match_side == "b_only" and side_label == "before":
+                    raw = _counterpart_bbox
             if raw is None and match_side in {"matched", "mixed"}:
                 raw = overlay.get("bbox") or overlay.get("old_bbox")
             if not raw:
@@ -10736,6 +10751,18 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             elif match_side == "mixed":
                 before_msg = "혼합 변경: 양쪽 위치를 함께 확인"
                 after_msg = "혼합 변경: 양쪽 위치를 함께 확인"
+            # Relocation pair: the panes show from→to (old location | new
+            # location), so say THAT instead of delete/add wording.
+            relocation = (
+                overlay.get("relocation")
+                if isinstance(overlay.get("relocation"), dict)
+                else None
+            )
+            if relocation and match_side in {"a_only", "b_only"}:
+                counterpart = str(relocation.get("relocation_counterpart") or "")
+                pair_suffix = f" · {counterpart} ↔ 쌍" if counterpart else ""
+                before_msg = f"📦 묶음 이동(추정) — 이동 전 위치{pair_suffix}"
+                after_msg = f"📦 묶음 이동(추정) — 이동 후 위치{pair_suffix}"
         for viewport, message in (
             (getattr(self, "preview_before_lightweight_v2", None), before_msg),
             (getattr(self, "preview_after_lightweight_v2", None), after_msg),
