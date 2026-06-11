@@ -1176,11 +1176,23 @@ class DwgDiffer:
                 "dxf_support": bool,
             }
         """
+        # Truthful installation probe (2026-06-11): this used to hardcode
+        # False from the ODA-removal era, so the GUI told users "ODA File
+        # Converter available: no" on machines where it WAS installed.
+        # Status reports installation truth; whether conversion is invoked
+        # is the backend-mode policy's job, not this field's.
+        oda_installed, oda_path = False, None
+        try:
+            from .dwg_autoconvert_settings import detect_oda_installation
+
+            oda_installed, oda_path = detect_oda_installation()
+        except Exception:  # noqa: BLE001 - status must never raise
+            pass
         return {
             "canonical_pipeline": True,
             "ezdxf": EZDXF_AVAILABLE,
-            "oda_converter": False,
-            "oda_path": None,
+            "oda_converter": oda_installed,
+            "oda_path": oda_path,
             "oda_required": False,
             "dwg_support": True,
             "dwg_support_scope": "limited-read-only-adapter",

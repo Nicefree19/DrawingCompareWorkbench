@@ -112,6 +112,12 @@ from src.services.comparison.confirmed_cloud_export import (
     ConfirmedCloudExportResult,
     export_confirmed_cloud_marks,
 )
+from src.services.comparison.dwg_autoconvert_settings import (
+    ODA_DOWNLOAD_URL,
+    detect_oda_installation,
+    load_dwg_autoconvert_enabled,
+    save_dwg_autoconvert_enabled,
+)
 from src.services.comparison.report_settings import (
     REPORT_SETTINGS_FILENAME,
     ReportSettings,
@@ -5040,6 +5046,36 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         settings_menu.addAction(noise_filter_action)
 
+        # DWG 자동 변환 (ODA) 영구 토글 — 2026-06-11 소유자 결정: 설치된
+        # ODA는 env 변수 없이도 기본 사용. 이 토글의 선택은 설정 파일로
+        # 지속되어 .bat을 거치지 않는 실행에서도 유지된다. env 변수가
+        # 명시돼 있으면 env가 우선한다(default_gui_dwg_backend_mode 참조).
+        _oda_installed, _oda_path = detect_oda_installation()
+        self.act_dwg_autoconvert_v2 = QAction(
+            "🔄 DWG 자동 변환 (ODA File Converter)", self
+        )
+        self.act_dwg_autoconvert_v2.setCheckable(True)
+        _saved_autoconvert = load_dwg_autoconvert_enabled()
+        if _oda_installed:
+            self.act_dwg_autoconvert_v2.setChecked(
+                _saved_autoconvert if _saved_autoconvert is not None else True
+            )
+            self.act_dwg_autoconvert_v2.setStatusTip(
+                "AC1018+ DWG를 비교 전에 DXF로 자동 변환합니다 — "
+                f"ODA 경로: {_oda_path}"
+            )
+        else:
+            self.act_dwg_autoconvert_v2.setChecked(False)
+            self.act_dwg_autoconvert_v2.setEnabled(False)
+            self.act_dwg_autoconvert_v2.setStatusTip(
+                "ODA File Converter 미설치 — 설치 후 재시작하면 자동 활성화됩니다: "
+                f"{ODA_DOWNLOAD_URL}"
+            )
+        self.act_dwg_autoconvert_v2.toggled.connect(
+            self._on_toggle_dwg_autoconvert_v2
+        )
+        settings_menu.addAction(self.act_dwg_autoconvert_v2)
+
         visual_ext.attach_visual_extensions(self, menu_bar)
         help_menu = menu_bar.addMenu("&도움말")
         tutorial_action = QAction("📘 시작 가이드 (5단계 튜토리얼)", self)
@@ -5900,6 +5936,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             self.lbl_status_v2.setText(
                 "노이즈 필터 설정 저장 — 다음 비교 실행부터 적용됩니다."
             )
+
+    def _on_toggle_dwg_autoconvert_v2(self, checked: bool) -> None:
+        """Persist the DWG auto-convert (ODA) choice; applies from the next compare."""
+
+        try:
+            save_dwg_autoconvert_enabled(bool(checked))
+        except OSError:
+            logger.warning("Could not persist DWG auto-convert setting", exc_info=True)
+            self.statusBar().showMessage(
+                "DWG 자동 변환 설정 저장 실패 — 로그를 확인하세요", 5000
+            )
+            return
+        self.statusBar().showMessage(
+            "DWG 자동 변환: " + ("켜짐" if checked else "꺼짐") + " — 다음 비교부터 적용",
+            5000,
+        )
 
     def _show_report_settings_dialog_v2(self) -> None:
         """Modal form to edit reviewer info + company branding for the PDF.

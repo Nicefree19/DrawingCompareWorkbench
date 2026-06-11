@@ -41,6 +41,12 @@ if sys.platform == 'win32':
     os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
     os.environ.setdefault('PYTHONUTF8', '1')
 
+# DWG 백엔드를 native로 고정 — 2026-06-11부터 GUI 기본값이 "설치된 ODA
+# 자동 사용"이라, 핀 없이는 ODA가 설치된 개발 PC와 미설치 CI가 서로 다른
+# 경로를 타고(설치 PC에선 픽스처 DWG에 실제 변환 subprocess 시도) 테스트가
+# 기계 의존적이 된다. 자동 감지 로직 자체는 단위테스트가 env 주입으로 검증.
+os.environ.setdefault('DRAWING_COMPARE_DWG_BACKEND', 'native')
+
 # 현재 스크립트 디렉토리 기준으로 src 패키지 경로 추가
 script_dir = Path(__file__).parent
 project_root = script_dir.parent

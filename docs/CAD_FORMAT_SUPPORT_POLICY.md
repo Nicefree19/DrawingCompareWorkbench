@@ -1,6 +1,6 @@
 # CAD Format Support Policy
 
-Last updated: 2026-05-22 KST
+Last updated: 2026-06-11 KST
 
 ## Purpose
 
@@ -22,7 +22,15 @@ This document is an engineering policy, not legal advice. Items marked
 - DXF R13/R14 및 R12 이전 버전은 읽기 중심 제한지원으로 분류한다.
 - DWG는 `AC1015` 단순 2D native reader 범위에서만 제한지원한다.
 - 그 외 DWG 버전/객체는 사용자가 CAD 도구에서 지원 DXF로 사전 변환해야 한다.
-- ODA File Converter 자동 호출, 번들링, 상용 고객 빌드 의존은 금지한다.
+- ODA File Converter의 번들링, 재배포, 상용 고객 빌드 의존은 금지한다.
+- **사내 파일럿 한정 (소유자 결정 2026-06-11)**: 사용자가 자기 PC에 직접
+  설치한 ODA File Converter의 자동 호출은 기본 활성이다. 설정 메뉴
+  "DWG 자동 변환" 또는 `DRAWING_COMPARE_DWG_BACKEND` 환경변수로 명시적으로
+  끄고 켤 수 있다. 미설치 PC에서는 자동으로 비활성(no-op)이며 설치 안내만
+  표시한다. 이 결정의 배경: env 변수 전용 옵트인이 .bat을 거치지 않는
+  실행에서 침묵 다운그레이드를 일으켜 실사용 비교 실패를 재발시켰다.
+- 상용/사외 배포 빌드에서는 위 자동 호출 기본 활성을 적용하기 전에 법무
+  검토가 필요하다 (아래 법무 검토 필요 표 참조).
 - AC1015 preview를 제품 지원으로 광고하거나, DWG 직접 지원 범위를 확대하거나,
   ODA/상용 SDK/GPL/AGPL CAD 라이브러리를 사용하는 것은 법무 검토 필요 항목이다.
 
@@ -96,7 +104,10 @@ Legacy behavior in this repository:
 Post-ODA release rule:
 
 - Customer builds must not bundle ODA binaries.
-- Customer builds must not invoke ODA automatically.
+- Customer (external) builds must not invoke ODA automatically without legal
+  sign-off. Internal-pilot builds invoke a locally installed ODA by default
+  (owner decision 2026-06-11; user-visible toggle + env override exist, and
+  run artifacts record `dwg_oda_autoconvert` provenance).
 - `.dwg` selection in the UI may expose AC1015 native-reader preview only if the
   user-facing status clearly marks partial/unsupported imports.
 - Any future direct DWG support beyond AC1015 must have a documented license
