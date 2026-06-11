@@ -10619,6 +10619,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         from src.gui.lightweight_viewport import (
             _page_height_points_from_world_bbox,
             convert_bbox_to_world_space,
+            ensure_min_world_span,
         )
         bbox_space = str(overlay.get("bbox_coordinate_space") or "")
         try:
@@ -10644,12 +10645,17 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             if vp is None:
                 logger.debug("[ZONE FOCUS DBG]   side=%s viewport=None", side_label)
                 continue
-            if side_label == "before" and match_side == "b_only":
-                logger.debug("[ZONE FOCUS DBG]   side=before skipped for added-only zone")
-                continue
-            if side_label == "after" and match_side == "a_only":
-                logger.debug("[ZONE FOCUS DBG]   side=after skipped for deleted-only zone")
-                continue
+            # Live-review fix (2026-06-11): one-sided zones (deleted/added)
+            # previously SKIPPED the opposite pane, leaving it on an
+            # unrelated frame — the reviewer saw "대응 요소가 없습니다" over
+            # a completely different part of the drawing. Both panes now
+            # focus the SAME world window of the side that HAS the content,
+            # so the empty pane shows that exact location's surroundings
+            # ("여기 있던 요소가 사라짐" is visible at a glance).
+            if match_side == "a_only":
+                key = "old_bbox"
+            elif match_side == "b_only":
+                key = "bbox"
             raw = overlay.get(key)
             if raw is None and match_side in {"matched", "mixed"}:
                 raw = overlay.get("bbox") or overlay.get("old_bbox")
@@ -10672,6 +10678,19 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                     "returned None for raw=%s", side_label, raw,
                 )
                 continue
+            # Context floor: keep at least ~6% of the sheet in view so a tiny
+            # zone is shown WITH its surroundings (the change itself stays
+            # obvious via its never-dimmed revision cloud + focus marker).
+            sheet = getattr(vp, "world_bbox", None) or (0.0, 0.0, 0.0, 0.0)
+            try:
+                sheet_span = max(
+                    float(sheet[2]) - float(sheet[0]),
+                    float(sheet[3]) - float(sheet[1]),
+                )
+            except (TypeError, ValueError, IndexError):
+                sheet_span = 0.0
+            if sheet_span > 0:
+                world_bbox = ensure_min_world_span(world_bbox, sheet_span * 0.06)
             self._lightweight_camera_sync_in_progress = True
             try:
                 vp.set_camera_to_world_bbox(world_bbox, padding_ratio=0.4)
@@ -10701,11 +10720,19 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         after_msg = ""
         overlay = self._active_overlays_by_zone.get(str(zone_id or ""), {})
         if isinstance(overlay, dict):
+            # Live-review fix (2026-06-11): the old banners stated the FACT
+            # ("대응 요소가 없습니다") without the MEANING — reviewers asked
+            # "왜 없는 거야?". Both panes now explain the change type and
+            # point at the cloud colour; the empty pane is framed to the SAME
+            # location (see _focus_lightweight_on_zone_v2), so "same spot,
+            # element gone/new" reads at a glance.
             match_side = resolve_overlay_match_side(str(overlay.get("change_type") or ""))
             if match_side == "b_only":
-                before_msg = "이전 도면에는 대응 요소가 없습니다"
+                before_msg = "➕ 추가된 요소 — 이전 도면의 같은 위치에는 없었습니다"
+                after_msg = "➕ 추가됨 — 초록 구름 표시가 새로 생긴 요소입니다"
             elif match_side == "a_only":
-                after_msg = "변경 도면에는 대응 요소가 없습니다"
+                before_msg = "🗑 삭제됨 — 빨간 구름 표시 요소가 변경 도면에서 제거되었습니다"
+                after_msg = "🗑 삭제된 요소 — 같은 위치에 더 이상 없습니다 (이전 도면의 빨간 구름 참조)"
             elif match_side == "mixed":
                 before_msg = "혼합 변경: 양쪽 위치를 함께 확인"
                 after_msg = "혼합 변경: 양쪽 위치를 함께 확인"

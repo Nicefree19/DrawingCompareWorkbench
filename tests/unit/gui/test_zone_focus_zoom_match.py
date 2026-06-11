@@ -77,11 +77,15 @@ def test_pdf_zone_focus_zooms_to_points_not_pixels():
 
     assert after.camera_calls, "after-side camera should have been moved"
     world_bbox = after.camera_calls[-1][0]
-    # 1859 * 72 / 200 = 669.24 — proves the backfill made the conversion fire.
-    assert world_bbox[0] == pytest.approx(669.24, abs=1.0)
-    assert world_bbox[0] != pytest.approx(1859.0, abs=1.0)
+    # Pixel-bbox centre 1914 px * 72 / 200 = 689.04 pt — proves the backfill
+    # made the image_pixels -> PDF-points conversion fire. Asserted via the
+    # CENTRE because the 2026-06-11 context floor may symmetrically widen the
+    # camera window; the conversion evidence is the centre in points space.
+    cx = (world_bbox[0] + world_bbox[2]) / 2.0
+    assert cx == pytest.approx(689.04, abs=1.5)
+    assert cx != pytest.approx(1914.0, abs=10.0)
     # Landed inside the page bounds (was off-page before the fix).
-    assert 0.0 <= world_bbox[0] <= 841.9
+    assert 0.0 <= cx <= 841.9
 
 
 def test_dxf_zone_focus_passes_world_coords_through_unchanged():
@@ -202,3 +206,94 @@ def test_single_dwg_run_source_repair_prefers_registered_dxf(tmp_path):
     )
 
     assert repaired == str(fallback)
+
+
+def test_deleted_zone_focuses_both_panes_to_the_same_window():
+    # Live-review fix (2026-06-11): a deleted zone used to SKIP the after
+    # pane, leaving it on an unrelated frame ("대응 요소가 없습니다" over a
+    # different part of the drawing). Both panes must now frame the SAME
+    # world window of the side that has the content (old_bbox).
+    pair = {"coordinate_source": "world", "source_a": "a.dxf", "source_b": "b.dxf"}
+    overlay = {
+        "zone_id": "C-001",
+        "change_type": "deleted",
+        "old_bbox": {"min_x": 444054.0, "min_y": -93694.0,
+                     "max_x": 459756.0, "max_y": -76385.0},
+        "bbox": None,
+    }
+    ns, before, after = _make_fake(pair, overlay)
+    sheet = (0.0, -250000.0, 460000.0, 160000.0)
+    before.world_bbox = sheet
+    after.world_bbox = sheet
+
+    DrawingCompareWorkbenchV2._focus_lightweight_on_zone_v2(ns, "C-001")
+
+    assert before.camera_calls and after.camera_calls, (
+        "BOTH panes must be framed for a deleted zone"
+    )
+    assert before.camera_calls[-1][0] == after.camera_calls[-1][0], (
+        "panes must share one world window so the empty side shows the same spot"
+    )
+
+
+def test_tiny_zone_focus_keeps_sheet_context_floor():
+    # Live-review fix (2026-06-11, "지나치게 확대되어 보여"): a 110mm zone on a
+    # ~460m sheet must not fill the pane — the camera window keeps >= ~6% of
+    # the sheet span so the surroundings stay recognisable.
+    pair = {"coordinate_source": "world", "source_a": "a.dxf", "source_b": "b.dxf"}
+    overlay = {
+        "zone_id": "C-003",
+        "change_type": "deleted",
+        "old_bbox": {"min_x": 452082.0, "min_y": -75921.0,
+                     "max_x": 452192.0, "max_y": -75811.0},  # 110 x 110 mm
+        "bbox": None,
+    }
+    ns, before, after = _make_fake(pair, overlay)
+    sheet = (0.0, -250000.0, 460000.0, 160000.0)  # max span 460,000
+    before.world_bbox = sheet
+    after.world_bbox = sheet
+
+    DrawingCompareWorkbenchV2._focus_lightweight_on_zone_v2(ns, "C-003")
+
+    bbox = before.camera_calls[-1][0]
+    span = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    assert span >= 460000.0 * 0.06 - 1.0, f"context floor missing: span={span}"
+    # zone centre preserved (still pointing AT the change)
+    cx = (bbox[0] + bbox[2]) / 2.0
+    assert cx == pytest.approx(452137.0, abs=1.0)
+
+
+def test_side_messages_explain_added_and_deleted_meaning():
+    captured: dict[str, str] = {}
+
+    class _MsgViewport:
+        def __init__(self, name):
+            self._name = name
+
+        def set_side_message(self, message):
+            captured[self._name] = message
+
+    ns = SimpleNamespace(
+        _active_overlays_by_zone={
+            "C-001": {"zone_id": "C-001", "change_type": "deleted"},
+            "C-002": {"zone_id": "C-002", "change_type": "added"},
+        },
+        preview_before_lightweight_v2=_MsgViewport("before"),
+        preview_after_lightweight_v2=_MsgViewport("after"),
+    )
+
+    DrawingCompareWorkbenchV2._set_lightweight_zone_side_messages_v2(ns, "C-001")
+    assert "삭제" in captured["before"] and "삭제" in captured["after"]
+
+    DrawingCompareWorkbenchV2._set_lightweight_zone_side_messages_v2(ns, "C-002")
+    assert "추가" in captured["before"] and "추가" in captured["after"]
+
+
+def test_ensure_min_world_span_only_enlarges():
+    from src.gui.lightweight_viewport import ensure_min_world_span
+
+    grown = ensure_min_world_span((100.0, 100.0, 110.0, 110.0), 200.0)
+    assert grown[2] - grown[0] == pytest.approx(200.0)
+    assert (grown[0] + grown[2]) / 2.0 == pytest.approx(105.0)  # centre kept
+    kept = ensure_min_world_span((0.0, 0.0, 500.0, 400.0), 200.0)
+    assert kept == (0.0, 0.0, 500.0, 400.0)

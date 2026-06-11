@@ -135,3 +135,31 @@ def test_zoomed_in_paint_skips_most_of_the_sheet(viewport):
     culled = int(root.property("lastPaintCulledSegments") or 0)
     assert culled > drawn, f"culling ineffective when zoomed (drawn={drawn}, culled={culled})"
     assert drawn >= 1, "zoomed view must still draw the local content"
+
+
+def test_focused_zone_also_wears_its_revision_cloud(viewport):
+    # Live-review feedback (2026-06-11): the picked change must ALSO show as
+    # a (never-dimmed) revision cloud — the focus pin alone left the selected
+    # change the least-marked thing on screen while all other clouds dimmed.
+    qapp, vp, _quick, root = viewport
+    overlays = [
+        {"zone_id": "C-001", "change_type": "deleted",
+         "old_bbox": {"min_x": 100.0, "min_y": 100.0, "max_x": 200.0, "max_y": 200.0},
+         "bbox": None},
+        {"zone_id": "C-005", "change_type": "moved",
+         "old_bbox": {"min_x": 900.0, "min_y": 100.0, "max_x": 950.0, "max_y": 150.0},
+         "bbox": {"min_x": 900.0, "min_y": 100.0, "max_x": 950.0, "max_y": 150.0}},
+    ]
+    vp.push_change_overlays_from_v1(overlays, side="before", focus_zone_id="C-001")
+    _pump(qapp, 50)
+    cloud = root.property("overlaysCloud") or []
+    focus = root.property("overlaysFocus") or []
+    cloud_ids = {(o.get("zoneId") if isinstance(o, dict) else o.property("zoneId")): o for o in cloud}
+    assert "C-001" in cloud_ids, "focused zone must ALSO be in the cloud layer"
+    c1 = cloud_ids["C-001"]
+    dimmed = c1.get("dimmed") if isinstance(c1, dict) else c1.property("dimmed")
+    assert not dimmed, "the focused zone's cloud must never be dimmed"
+    assert any(
+        (o.get("zoneId") if isinstance(o, dict) else o.property("zoneId")) == "C-001"
+        for o in focus
+    ), "focus marker must still exist"
