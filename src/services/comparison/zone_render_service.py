@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 # v2: zone crops now render frozen/off layers (a detected change on a frozen
 # layer was producing a blank zoom). Bump invalidates stale blank-crop caches.
-SCHEMA_VERSION = 2
+# v3: Korean text-style font remap (2026-06-12) — crops cached before it carry
+# illegible blob text, so they must miss and re-render.
+SCHEMA_VERSION = 3
 DEFAULT_OUTPUT_SIZE = (1600, 900)
 DEFAULT_TARGET_ASPECT = DEFAULT_OUTPUT_SIZE[0] / DEFAULT_OUTPUT_SIZE[1]
 

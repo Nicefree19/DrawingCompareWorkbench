@@ -194,7 +194,12 @@ def test_lightweight_preview_fidelity_is_side_specific() -> None:
     assert '"raster_refined" if loaded else "relative_only"' in pdf_body
     assert "(self.preview_before_lightweight_v2, loaded_before)" in raster_body
     assert "(self.preview_after_lightweight_v2, loaded_after)" in raster_body
-    assert '"raster_refined" if loaded else "relative_only"' in raster_body
+    # PR #16 (2026-06-12): the raster side gained a third state — a raster
+    # may be missing while the vector skeleton is showing, which must NOT be
+    # reported as relative_only (that text reads as "정렬 안 됨" to reviewers).
+    assert '"raster_refined"' in raster_body
+    assert '"skeleton_preview"' in raster_body
+    assert '"relative_only"' in raster_body
 
 
 def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:
@@ -278,8 +283,10 @@ def test_one_sided_zone_selection_explains_blank_counterpart_view() -> None:
     focus_body = SOURCE[focus_start:focus_end]
 
     assert "def _set_lightweight_zone_side_messages_v2" in SOURCE
-    assert "이전 도면에는 대응 요소가 없습니다" in SOURCE
-    assert "변경 도면에는 대응 요소가 없습니다" in SOURCE
+    # Live-review fix (2026-06-11): the banners now explain the MEANING of
+    # the one-sided zone, not just the fact ("대응 요소가 없습니다").
+    assert "추가된 요소 — 이전 도면의 같은 위치에는 없었습니다" in SOURCE
+    assert "삭제된 요소 — 같은 위치에 더 이상 없습니다" in SOURCE
     assert "sideMessage" in qml_source
     assert "def set_side_message" in light_source
     assert "side == \"before\" and match_side == \"b_only\"" in light_source

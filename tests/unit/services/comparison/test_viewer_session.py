@@ -79,6 +79,22 @@ def test_cache_key_handles_missing_file(tmp_path: Path) -> None:
     assert "nostat" in k
 
 
+def test_cache_key_includes_render_version(tmp_path: Path) -> None:
+    """Packs built by an older renderer must miss after a version bump.
+
+    Without this, rendering fixes (e.g. the 2026-06-12 Korean text-style
+    font remap) never reach sources whose mtime+size didn't change.
+    """
+    from src.services.comparison.viewer_session import _PACK_RENDER_VERSION
+
+    p = tmp_path / "a.dxf"
+    p.write_text("x", encoding="utf-8")
+    assert _scene_pack_cache_key(p).endswith(f"__{_PACK_RENDER_VERSION}")
+    assert _scene_pack_cache_key(tmp_path / "absent.dxf").endswith(
+        f"__{_PACK_RENDER_VERSION}"
+    )
+
+
 def test_try_load_cached_pack_returns_none_when_missing(tmp_path: Path) -> None:
     src = tmp_path / "a.dxf"
     src.write_text("x", encoding="utf-8")

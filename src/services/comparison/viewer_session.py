@@ -113,6 +113,12 @@ class PairSessionState:
 # ---------------------------------------------------------------------------
 
 
+# Bump whenever pack RENDERING changes (not just the source file), so packs
+# built by an older renderer stop hitting. r2 = Korean text-style font remap
+# (2026-06-12): packs built before it carry illegible blob-text skeletons.
+_PACK_RENDER_VERSION = "r2"
+
+
 def _scene_pack_cache_key(source_path: Path) -> str:
     """Deterministic per-source cache key (no hash compute — uses mtime + size).
 
@@ -133,9 +139,9 @@ def _scene_pack_cache_key(source_path: Path) -> str:
     src = Path(source_path)
     try:
         st = src.stat()
-        sig = f"{int(st.st_mtime_ns)}__{st.st_size}"
+        sig = f"{int(st.st_mtime_ns)}__{st.st_size}__{_PACK_RENDER_VERSION}"
     except OSError:
-        sig = "nostat"
+        sig = f"nostat__{_PACK_RENDER_VERSION}"
 
     raw_stem = src.stem
     # Drop non-ASCII to keep rtree happy; preserve a stable short hash so
