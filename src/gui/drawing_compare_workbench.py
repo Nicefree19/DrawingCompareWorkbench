@@ -11159,7 +11159,15 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             if is_pdf_row:
                 text += " · 신형 뷰어 PDF"
             else:
-                if row.get("preview_available") is False:
+                # Honesty fix (2026-06-12, live-verified): preview_available
+                # is False for EVERY not-yet-rendered drawing (lazy render
+                # policy), so this row used to read "미리보기 실패 · 렌더
+                # 대기" while zone crops rendered perfectly — the word
+                # "실패" belongs only to an actual failed render.
+                if (
+                    row.get("preview_available") is False
+                    and str(row.get("preview_status") or "") == "failed"
+                ):
                     text += " · 미리보기 실패"
                 text += f" - {_preview_status_label(row.get('preview_status'), row.get('preview_available'))}"
             if row.get("after_marked_dxf"):
