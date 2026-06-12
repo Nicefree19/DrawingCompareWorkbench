@@ -123,3 +123,67 @@ def test_raster_preview_noop_when_lightweight_viewports_absent():
         ns, "pair-3", {"before_image": "C:/x.png", "before_transform": dict(_TX)}
     )
     assert stats["loaded_before"] is False and stats["loaded_after"] is False
+
+
+def test_missing_raster_keeps_visible_skeleton_badge_honest():
+    """2026-06-12 live failure: on timed-out CAD runs the deferred raster
+    path (after_image=None) arrived AFTER the session's cache-hit skeleton
+    and the badge claimed the pane failed. With vector content present the
+    side must report skeleton_preview, not an unavailable-raster failure."""
+
+    ns, before, after = _make_fake()
+    after.has_vector_content = lambda: True  # skeleton already loaded
+    pair = {"pair_id": "p1", "before_image": "before.png", "after_image": None,
+            "before_transform": dict(_TX), "after_transform": dict(_TX)}
+
+    def _resolve(value, _root):
+        # before.png resolves; None stays None
+        return value
+
+    import src.gui.drawing_compare_workbench as wb
+    orig = wb._resolve_viewer_artifact_path
+    wb._resolve_viewer_artifact_path = lambda v, r: _resolve(v, r)
+    try:
+        DrawingCompareWorkbenchV2._load_lightweight_raster_preview_v2(ns, "p1", pair)
+    finally:
+        wb._resolve_viewer_artifact_path = orig
+
+    assert after.fidelity, "after-side fidelity must be set"
+    mode, text = after.fidelity[-1]
+    assert mode == "skeleton_preview"
+    assert "벡터" in text
+
+
+def test_viewport_missing_raster_never_wipes_loaded_skeleton(tmp_path):
+    """Real-widget contract: load a skeleton, then a missing raster — the
+    primitives and notice must survive (the wipe was the '미리보기 실패')."""
+
+    from PySide6.QtWidgets import QApplication
+
+    _ = QApplication.instance() or QApplication([])
+    from src.gui.lightweight_viewport import LightweightDrawingViewport, ScenePackRef
+    import json
+
+    overview = tmp_path / "overview_lod0.json"
+    overview.write_text(json.dumps({
+        "primitives": [{"type": "lines",
+                        "geometry": [[0.0, 0.0, 100.0, 50.0]],
+                        "properties": {}}],
+        "world_bbox": [0.0, 0.0, 100.0, 50.0],
+    }), encoding="utf-8")
+
+    vp = LightweightDrawingViewport(side="after")
+    try:
+        n = vp.load_scene_pack(ScenePackRef(overview_lod0_path=str(overview)))
+        assert n == 1
+        assert vp.has_vector_content() is True
+        root = vp._quick.rootObject()
+        assert len(root.property("primitives") or []) == 1
+
+        loaded = vp.load_raster_image(None, empty_notice="should not appear")
+        assert loaded is False
+        assert vp.has_vector_content() is True, "skeleton must survive"
+        assert len(root.property("primitives") or []) == 1
+        assert root.property("emptyNotice") != "should not appear"
+    finally:
+        vp.deleteLater()

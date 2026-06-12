@@ -1016,6 +1016,20 @@ class LightweightDrawingViewport(QWidget):
             self._pdf_render_state = None
 
         if image_path is None or not Path(image_path).exists():
+            # Live failure (2026-06-12, "여전히 미리보기 뷰어 실패"): on
+            # timed-out CAD runs the DEFERRED raster path arrives AFTER the
+            # session's cache-hit skeleton load and used to WIPE it — the
+            # user saw an empty pane with an English failure notice even
+            # though a perfectly good vector skeleton had just been painted
+            # (run 011902: after_image=None, skeleton 13,583 segments). A
+            # missing raster must never destroy visible vector content.
+            if self._primitive_count > 0:
+                logger.info(
+                    "LightweightViewport(%s): raster image missing — keeping "
+                    "the loaded %d-primitive skeleton visible",
+                    self._side, self._primitive_count,
+                )
+                return False
             _clear_background(empty_notice)
             return False
 
@@ -1049,6 +1063,16 @@ class LightweightDrawingViewport(QWidget):
             bbox[3],
         )
         return True
+
+    def has_vector_content(self) -> bool:
+        """True when a scene-pack skeleton is currently loaded.
+
+        Callers use this to avoid replacing live vector content with
+        failure notices when an OPTIONAL enhancement (raster background)
+        is unavailable.
+        """
+
+        return self._primitive_count > 0
 
     def show_empty_world_bbox(
         self,

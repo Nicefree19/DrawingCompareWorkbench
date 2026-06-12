@@ -445,7 +445,15 @@ def auto_convert_unsupported_dwg(
     cached = cache_dir / f"{source_cache_stem(src)}__{source_signature_hash(src)[:16]}.dxf"
     try:
         if cached.exists() and cached.stat().st_size > 0:
-            return cached, True, "oda_cache_hit"
+            # Retroactive slimming (2026-06-12): caches converted before the
+            # OBJECTS-strip landed can be 60-95% dead weight (measured: a
+            # 1 MB DWG ballooned to a 65.7 MB DXF that was 94% OBJECTS).
+            # One verified in-place slim here upgrades every later run.
+            from .dxf_slim import slim_converted_dxf
+
+            _, slim_note = slim_converted_dxf(cached)
+            note = "oda_cache_hit_slimmed" if slim_note == "slimmed" else "oda_cache_hit"
+            return cached, True, note
     except OSError:
         pass
 
@@ -470,6 +478,14 @@ def auto_convert_unsupported_dwg(
         shutil.copy2(converted, cached)
         result = cached
         note = "oda_converted"
+        # OBJECTS-strip the cached copy (verified, in place): the ODA ASCII
+        # output is mostly proxy-dictionary dead weight on real drawings —
+        # see dxf_slim module docstring for the measured numbers.
+        from .dxf_slim import slim_converted_dxf
+
+        _, slim_note = slim_converted_dxf(cached)
+        if slim_note == "slimmed":
+            note = "oda_converted_slimmed"
     except Exception as exc:  # noqa: BLE001 — fall back to the temp output path
         logger.warning("Failed to cache ODA-converted DXF for %s: %s", src, exc)
         result, note = converted, "oda_converted_uncached"

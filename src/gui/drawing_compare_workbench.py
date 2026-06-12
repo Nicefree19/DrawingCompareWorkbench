@@ -10085,12 +10085,19 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 (self.preview_after_lightweight_v2, loaded_after),
             ):
                 try:
-                    fidelity_mode = "raster_refined" if loaded else "relative_only"
-                    fidelity_text = (
-                        "raster preview"
-                        if loaded
-                        else "raster preview unavailable on this side"
-                    )
+                    if loaded:
+                        fidelity_mode = "raster_refined"
+                        fidelity_text = "raster preview"
+                    elif getattr(viewport, "has_vector_content", lambda: False)():
+                        # 2026-06-12 — the raster on this side is missing
+                        # (e.g. viewer render timed out) but the vector
+                        # skeleton is loaded and visible; the badge must
+                        # not claim the pane failed.
+                        fidelity_mode = "skeleton_preview"
+                        fidelity_text = "벡터 스켈레톤 표시 중"
+                    else:
+                        fidelity_mode = "relative_only"
+                        fidelity_text = "raster preview unavailable on this side"
                     viewport.set_fidelity_state(
                         fidelity_mode,
                         status_text=fidelity_text,
