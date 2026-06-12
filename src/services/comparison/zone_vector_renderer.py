@@ -186,7 +186,16 @@ def resolve_dxf_path(
         logger.info("Cached canonical DWG debug DXF: %s -> %s", src.name, cached)
         return cached
     except Exception as exc:
-        fallback = _cached_dxf_fallback(src, cache_dir)
+        # ODA auto-convert cache first (2026-06-12): the comparison pipeline
+        # already converted this exact DWG via ODA (and OBJECTS-slimmed it).
+        # Reusing that artifact makes zone vector renders share the SAME
+        # effective drawing as the compare. Without this, every AC1018+ DWG
+        # zone render failed native normalisation and the user saw the red
+        # "벡터 렌더링 실패" badge — the 4-day recurring "미리보기 뷰어
+        # 실패" report.
+        fallback = _oda_autoconvert_cache(src, cache_dir)
+        if fallback is None:
+            fallback = _cached_dxf_fallback(src, cache_dir)
         if fallback is None:
             try:
                 from .cache_paths import workbench_data_root
@@ -213,6 +222,41 @@ def resolve_dxf_path(
         raise OSError(
             f"DWG canonical import/export failed for {src.name}: {exc}"
         ) from exc
+
+
+def _oda_autoconvert_cache(source_path: Path, cache_dir: Path) -> Optional[Path]:
+    """Locate the comparison pipeline's ODA-converted DXF for this DWG.
+
+    auto_convert_unsupported_dwg caches conversions under
+    ``<dxf_cache>/oda_auto/{stem}__{signature16}.dxf``. The zone renderer's
+    ``cache_dir`` may or may not be that same root, so both the given dir
+    and the workbench-standard dxf_cache are probed. Returns None quietly —
+    this is an opportunistic reuse, never a requirement.
+    """
+
+    try:
+        from .cache_paths import workbench_data_root
+        from .dwg_dxf_fallback import source_cache_stem, source_signature_hash
+
+        name = f"{source_cache_stem(source_path)}__{source_signature_hash(source_path)[:16]}.dxf"
+        roots = [Path(cache_dir)]
+        try:
+            roots.append(workbench_data_root() / "dxf_cache")
+        except Exception:  # noqa: BLE001
+            pass
+        for root in roots:
+            candidate = root / "oda_auto" / name
+            try:
+                if candidate.exists() and candidate.stat().st_size > 0:
+                    return candidate
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001 - opportunistic probe stays silent
+        logger.debug(
+            "Could not probe ODA auto-convert cache for %s",
+            source_path, exc_info=True,
+        )
+    return None
 
 
 def _cached_dxf_fallback(source_path: Path, cache_dir: Path) -> Optional[Path]:
