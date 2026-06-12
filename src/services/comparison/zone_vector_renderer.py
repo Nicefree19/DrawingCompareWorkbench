@@ -463,6 +463,43 @@ class ZoneVectorRenderResult:
         }
 
 
+KOREAN_SAFE_FONT = "malgun.ttf"
+
+
+def patch_text_styles_for_legibility(doc) -> int:
+    """Remap unrenderable text-style fonts to Malgun Gothic, in place.
+
+    Live failure (2026-06-12, "텍스트가 제대로 렌더링되지 않는다"): real
+    drawings carry STYLE entries with EMPTY font names ('돋움', '굴림',
+    'SAMOO' …), SHX big-font pairs (romans.shx + whtgtxt.shx), or
+    latin-only arial. ezdxf substitutes a latin fallback without Hangul
+    glyph metrics, and the outlined text collapses into overlapping black
+    blobs in the zone SVG (measured: 539 of ~870 text uses on the rebar
+    sheet had an empty font). Malgun Gothic ships with every Windows
+    10/11 and has full Hangul coverage — readability beats face fidelity
+    for review crops. Returns the number of styles remapped.
+
+    Call ONLY on a private/mutable document — never on the shared
+    read-cache instance.
+    """
+
+    patched = 0
+    for style in doc.styles:
+        try:
+            font = str(style.dxf.font or "").strip().lower()
+            bigfont = str(getattr(style.dxf, "bigfont", "") or "").strip()
+            if (not font) or font.endswith(".shx") or font.startswith("arial") or bigfont:
+                style.dxf.font = KOREAN_SAFE_FONT
+                try:
+                    style.dxf.bigfont = ""
+                except Exception:  # noqa: BLE001 - attribute may be absent
+                    pass
+                patched += 1
+        except Exception:  # noqa: BLE001 - one broken style must not stop the rest
+            continue
+    return patched
+
+
 def render_zone_svg(
     dxf_path: Path,
     zone_world_bbox: Tuple[float, float, float, float],
@@ -559,8 +596,18 @@ def render_zone_svg(
     zone_bbox = BoundingBox2d([(padded[0], padded[1]), (padded[2], padded[3])])
 
     try:
-        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        # mutable=True: we remap text-style fonts below, which must never
+        # touch the shared read-cache document other callers reuse.
+        read_result = read_dxf_document_result(
+            dxf_path, ezdxf_module=ezdxf, mutable=True
+        )
         doc = read_result.doc
+        patched_styles = patch_text_styles_for_legibility(doc)
+        if patched_styles:
+            logger.info(
+                "Zone render: remapped %d text styles to %s for legibility",
+                patched_styles, KOREAN_SAFE_FONT,
+            )
     except Exception as exc:
         return ZoneVectorRenderResult(
             svg_path="",

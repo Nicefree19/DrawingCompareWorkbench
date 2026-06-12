@@ -429,8 +429,18 @@ def build_scene_pack(
     # 2. Open + flatten via CustomJSONBackend.
     _emit(progress, "reading_dxf", 0.20, "DXF 읽는 중")
     try:
-        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        # mutable=True + style remap (2026-06-12): skeleton text outlines
+        # collapsed into blobs for empty/SHX/latin-only fonts exactly like
+        # the zone SVG path — see patch_text_styles_for_legibility.
+        read_result = read_dxf_document_result(
+            dxf_path, ezdxf_module=ezdxf, mutable=True
+        )
         doc = read_result.doc
+        from src.services.comparison.zone_vector_renderer import (
+            patch_text_styles_for_legibility,
+        )
+
+        patch_text_styles_for_legibility(doc)
         read_warning = read_result.diagnostics.warning()
         if read_warning:
             warnings.append(read_warning)

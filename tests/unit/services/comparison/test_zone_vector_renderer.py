@@ -646,3 +646,64 @@ def test_resolve_dxf_path_prefers_oda_cache_over_stale_same_stem(
     resolved = resolve_dxf_path(source, cache_dir=cache_dir, failure_codes=[])
 
     assert resolved == oda_cached
+
+
+def test_patch_text_styles_for_legibility_remaps_only_unrenderable_fonts(
+    tmp_path: Path,
+) -> None:
+    """2026-06-12 live failure: empty / SHX-bigfont / latin-only style
+    fonts made Hangul text collapse into overlapping blobs in zone SVGs.
+    Those remap to Malgun Gothic; real TTFs with glyph coverage stay."""
+
+    import ezdxf
+
+    from src.services.comparison.zone_vector_renderer import (
+        KOREAN_SAFE_FONT,
+        patch_text_styles_for_legibility,
+    )
+
+    doc = ezdxf.new()
+    doc.styles.add("EMPTY", font="")
+    shxbig = doc.styles.add("SHXBIG", font="romans.shx")
+    shxbig.dxf.bigfont = "whtgtxt.shx"
+    doc.styles.add("LATIN", font="arial.ttf")
+    doc.styles.add("KOREANTTF", font="malgunbd.ttf")
+
+    patched = patch_text_styles_for_legibility(doc)
+
+    assert patched >= 3
+    assert doc.styles.get("EMPTY").dxf.font == KOREAN_SAFE_FONT
+    assert doc.styles.get("SHXBIG").dxf.font == KOREAN_SAFE_FONT
+    assert doc.styles.get("SHXBIG").dxf.bigfont == ""
+    assert doc.styles.get("LATIN").dxf.font == KOREAN_SAFE_FONT
+    assert doc.styles.get("KOREANTTF").dxf.font == "malgunbd.ttf"  # untouched
+
+
+def test_render_zone_svg_does_not_pollute_the_shared_read_cache(
+    tmp_path: Path,
+) -> None:
+    """The legibility remap must run on a PRIVATE document: a later cached
+    read of the same file must still see the original style fonts."""
+
+    import ezdxf
+
+    from src.services.comparison.dxf_read import (
+        dxf_document_cache_scope,
+        read_dxf_document_result,
+    )
+
+    src = tmp_path / "textstyle.dxf"
+    doc = ezdxf.new()
+    ghs = doc.styles.add("GHS", font="romans.shx")
+    ghs.dxf.bigfont = "whtgtxt.shx"
+    msp = doc.modelspace()
+    msp.add_line((0, 0), (100, 100))
+    msp.add_text("간섭 검토", dxfattribs={"style": "GHS", "height": 5.0}).set_placement((10, 10))
+    doc.saveas(src)
+
+    with dxf_document_cache_scope():
+        render_zone_svg(src, (0.0, 0.0, 120.0, 120.0), tmp_path / "z.svg")
+        cached = read_dxf_document_result(src, ezdxf_module=ezdxf).doc
+        assert cached.styles.get("GHS").dxf.font == "romans.shx", (
+            "shared cache document must keep the ORIGINAL font"
+        )
