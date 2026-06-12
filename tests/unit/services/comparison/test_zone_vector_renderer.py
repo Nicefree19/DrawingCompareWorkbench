@@ -584,3 +584,65 @@ def test_render_zone_svg_success_has_no_failure_codes_for_dxf_input(
     # The rendered SVG should exist and no fallback should have triggered.
     assert result.svg_path != ""
     assert result.failure_codes == ()
+
+
+def test_resolve_dxf_path_reuses_oda_autoconvert_cache_on_native_failure(
+    tmp_path: Path,
+) -> None:
+    """2026-06-12 — THE recurring "미리보기 뷰어 실패" root: AC1018+ DWG zone
+    renders failed native normalisation and never looked at the ODA
+    auto-convert cache the comparison pipeline had already produced (now
+    OBJECTS-slimmed too). The fallback chain must reuse that artifact so
+    zone vectors share the compare's effective drawing."""
+
+    from src.services.comparison.dwg_dxf_fallback import (
+        source_cache_stem,
+        source_signature_hash,
+    )
+
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1032 unsupported native fixture")
+    cache_dir = tmp_path / "cache"
+    oda_dir = cache_dir / "oda_auto"
+    oda_dir.mkdir(parents=True)
+    oda_cached = oda_dir / (
+        f"{source_cache_stem(source)}__{source_signature_hash(source)[:16]}.dxf"
+    )
+    oda_cached.write_text(
+        "0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8"
+    )
+
+    collected: list = []
+    resolved = resolve_dxf_path(source, cache_dir=cache_dir, failure_codes=collected)
+
+    assert resolved == oda_cached
+    assert "dwg_vector_normalise_failed" in collected
+
+
+def test_resolve_dxf_path_prefers_oda_cache_over_stale_same_stem(
+    tmp_path: Path,
+) -> None:
+    """The exact-signature ODA conversion beats the same-stem heuristic."""
+
+    from src.services.comparison.dwg_dxf_fallback import (
+        source_cache_stem,
+        source_signature_hash,
+    )
+
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1032 unsupported native fixture")
+    cache_dir = tmp_path / "cache"
+    oda_dir = cache_dir / "oda_auto"
+    oda_dir.mkdir(parents=True)
+    stale = cache_dir / "detail.previous.dxf"
+    stale.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+    oda_cached = oda_dir / (
+        f"{source_cache_stem(source)}__{source_signature_hash(source)[:16]}.dxf"
+    )
+    oda_cached.write_text(
+        "0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8"
+    )
+
+    resolved = resolve_dxf_path(source, cache_dir=cache_dir, failure_codes=[])
+
+    assert resolved == oda_cached
