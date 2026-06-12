@@ -46,6 +46,11 @@ Bbox = Tuple[float, float, float, float]
 
 ZONE_FOCUS_FILENAME = "zone_focus.json"
 
+#: Part of ``zone_focus_cache_key`` so RENDERER changes (not just source
+#: changes) invalidate cached focus builds. r2 = Korean text-style font
+#: remap (2026-06-12): packs built before it carry illegible blob text.
+_ZONE_RENDER_VERSION = "r2"
+
 #: Max accepted entities per zone — same default as ``zone_vector_renderer``
 #: (Phase B1). Above this we truncate + flag the result.
 DEFAULT_MAX_ENTITIES = 1500
@@ -152,7 +157,10 @@ def render_zone_focus(
         )
 
     from src.services.comparison.dxf_read import read_dxf_document_result
-    from src.services.comparison.zone_vector_renderer import resolve_dxf_path
+    from src.services.comparison.zone_vector_renderer import (
+        patch_text_styles_for_legibility,
+        resolve_dxf_path,
+    )
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,10 +179,14 @@ def render_zone_focus(
             skipped_reason=f"DXF resolution failed: {exc}",
         )
 
-    # 2. Open the doc.
+    # 2. Open the doc. mutable=True: the font remap below must never touch
+    # the shared read-cache document other callers reuse.
     try:
-        read_result = read_dxf_document_result(dxf_path, ezdxf_module=ezdxf)
+        read_result = read_dxf_document_result(
+            dxf_path, ezdxf_module=ezdxf, mutable=True
+        )
         doc = read_result.doc
+        patch_text_styles_for_legibility(doc)
         read_warning = read_result.diagnostics.warning()
         if read_warning:
             warnings.append(read_warning)
@@ -294,9 +306,9 @@ def zone_focus_cache_key(
     src = Path(source_path)
     try:
         st = src.stat()
-        sig_src = f"{int(st.st_mtime_ns)}_{st.st_size}"
+        sig_src = f"{int(st.st_mtime_ns)}_{st.st_size}_{_ZONE_RENDER_VERSION}"
     except OSError:
-        sig_src = "nostat"
+        sig_src = f"nostat_{_ZONE_RENDER_VERSION}"
     bbox_sig = "_".join(f"{round(v):.0f}" for v in zone_world_bbox)
 
     raw_stem = src.stem
