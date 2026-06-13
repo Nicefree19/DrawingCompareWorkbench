@@ -368,6 +368,19 @@ def test_source_render_failure_returns_visible_relative_fallback(tmp_path: Path)
     assert Path(result.before_image).exists()
     assert Path(result.after_image).exists()
     assert result.renderer_backend == "relative-overlay-fallback"
+    meta_path = (
+        tmp_path
+        / "cache"
+        / "zone_crops"
+        / "pair-bad"
+        / result.cache_key
+        / "render_result.json"
+    )
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    provenance = payload["primitive_source_provenance"]
+    assert provenance["producer_id"] == "relative_overlay_fallback"
+    assert provenance["degraded"] is True
+    assert provenance["failure_badge"] == "source_render_failed"
 
 
 def test_pdf_with_rendered_background_crops_from_image_pixels(tmp_path: Path) -> None:

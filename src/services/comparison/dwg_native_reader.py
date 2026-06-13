@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from .dwg_binary_reader import DwgBinaryReadError
 from .dwg_importer import (
     DwgAdapterDrawing,
     DwgFailureCode,
@@ -52,24 +53,54 @@ class DwgNativeAc1015Adapter(DwgImporterAdapter):
                 code=DwgFailureCode.UNSUPPORTED_VERSION,
                 message=f"Native DWG reader currently supports AC1015 only, got {version.code}.",
             )
+        section_reader = DwgSectionReader(data)
         try:
-            section_reader = DwgSectionReader(data)
             header = section_reader.read_header()
+        except DwgBinaryReadError as exc:
+            self._raise_reader_failure(
+                "section read",
+                exc,
+                path=path,
+                version=version,
+                data=data,
+            )
+
+        try:
             object_map = section_reader.read_object_map(header)
-            if not object_map:
-                raise DwgImportError(
-                    DwgFailureCode.NO_READABLE_ENTITIES,
-                    "AC1015 object map is empty.",
-                )
-            return DwgObjectDecoder(data, header, object_map).decode()
-        except DwgImportError:
-            raise
-        except (DwgSectionReadError, DwgObjectDecodeError) as exc:
+        except DwgBinaryReadError as exc:
+            self._raise_reader_failure(
+                "object map",
+                exc,
+                path=path,
+                version=version,
+                data=data,
+                header=header,
+            )
+        if not object_map:
             raise DwgImportError(
-                DwgFailureCode.ADAPTER_FAILED,
-                f"Native AC1015 DWG reader failed: {exc}",
-                details={"adapter": self.name, "path": str(path)},
-            ) from exc
+                DwgFailureCode.NO_READABLE_ENTITIES,
+                "AC1015 object map is empty.",
+                details=self._failure_details(
+                    "object map",
+                    path=path,
+                    version=version,
+                    data=data,
+                    header=header,
+                    object_map_count=0,
+                ),
+            )
+        try:
+            return DwgObjectDecoder(data, header, object_map).decode()
+        except DwgBinaryReadError as exc:
+            self._raise_reader_failure(
+                "object decode",
+                exc,
+                path=path,
+                version=version,
+                data=data,
+                header=header,
+                object_map_count=len(object_map),
+            )
 
     def _fallback(
         self,
@@ -82,3 +113,67 @@ class DwgNativeAc1015Adapter(DwgImporterAdapter):
         if self.fallback_adapter is not None and self.fallback_adapter.is_available():
             return self.fallback_adapter.read_file(path, version)
         raise DwgImportError(code, message, details={"adapter": self.name, "path": str(path)})
+
+    def _raise_reader_failure(
+        self,
+        failure_stage: str,
+        exc: DwgBinaryReadError,
+        *,
+        path: Path,
+        version: DwgVersionInfo,
+        data: bytes,
+        header: object | None = None,
+        object_map_count: int | None = None,
+    ) -> None:
+        raise DwgImportError(
+            DwgFailureCode.ADAPTER_FAILED,
+            f"Native AC1015 DWG reader failed during {failure_stage}: {exc}",
+            details=self._failure_details(
+                failure_stage,
+                path=path,
+                version=version,
+                data=data,
+                header=header,
+                object_map_count=object_map_count,
+                exc=exc,
+            ),
+        ) from exc
+
+    def _failure_details(
+        self,
+        failure_stage: str,
+        *,
+        path: Path,
+        version: DwgVersionInfo,
+        data: bytes,
+        header: object | None = None,
+        object_map_count: int | None = None,
+        exc: Exception | None = None,
+    ) -> dict[str, object]:
+        details: dict[str, object] = {
+            "adapter": self.name,
+            "path": str(path),
+            "dwg_version": version.to_dict(),
+            "failure_stage": failure_stage,
+            "file_size_bytes": len(data),
+            "header_hex": data[:16].hex(),
+        }
+        if exc is not None:
+            details["reader_error_type"] = type(exc).__name__
+            details["reader_error"] = str(exc)
+            diagnostics = getattr(exc, "diagnostics", None)
+            if isinstance(diagnostics, dict):
+                details.update({key: value for key, value in diagnostics.items() if key not in details})
+        if header is not None:
+            details["section_locator_count"] = getattr(header, "locator_count", None)
+            locator = header.locator(DwgSectionReader.OBJECT_MAP_SECTION)
+            if locator is not None:
+                details["object_map_locator"] = {
+                    "record_number": locator.record_number,
+                    "seeker": locator.seeker,
+                    "size": locator.size,
+                    "end": locator.end,
+                }
+        if object_map_count is not None:
+            details["object_map_count"] = object_map_count
+        return details

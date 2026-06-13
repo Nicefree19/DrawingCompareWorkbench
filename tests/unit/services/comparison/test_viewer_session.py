@@ -95,6 +95,20 @@ def test_cache_key_includes_render_version(tmp_path: Path) -> None:
     )
 
 
+def test_render_contract_version_drives_all_viewer_cache_families() -> None:
+    from src.services.comparison.viewer_primitive_source import (
+        RENDER_CONTRACT_VERSION,
+        render_contract_schema_version,
+    )
+    from src.services.comparison.viewer_session import _PACK_RENDER_VERSION
+    from src.services.comparison.zone_render_service import SCHEMA_VERSION
+    from src.services.comparison.zone_render_worker import _ZONE_RENDER_VERSION
+
+    assert _PACK_RENDER_VERSION == RENDER_CONTRACT_VERSION
+    assert _ZONE_RENDER_VERSION == RENDER_CONTRACT_VERSION
+    assert SCHEMA_VERSION == render_contract_schema_version()
+
+
 def test_try_load_cached_pack_returns_none_when_missing(tmp_path: Path) -> None:
     src = tmp_path / "a.dxf"
     src.write_text("x", encoding="utf-8")

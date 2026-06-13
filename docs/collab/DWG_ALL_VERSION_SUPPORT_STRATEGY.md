@@ -6,6 +6,88 @@ This document defines the practical paths for making DrawingCompareWorkbench
 handle all major DWG generations. It is a strategy and gate document, not an
 implementation approval for native AC1018+ parsing.
 
+## 2026-06-13 Product Planning Lock
+
+This is the planning baseline for DWG native all-version work. It clarifies what
+can be planned, what can be claimed, and what must remain blocked until
+version-specific evidence exists.
+
+The executable loop-engineering protocol for this plan lives in
+`docs/collab/DWG_NATIVE_ALL_VERSION_LONG_TERM_PROTOCOL.md`.
+
+### Claim Ladder
+
+| Level | Claim scope | Product posture |
+| --- | --- | --- |
+| L0 | PDF/DXF compare plus converted-DXF DWG fallback | Current customer-safe path when provenance and release gates pass |
+| L1 | AC1015 clean-room native reader | Limited engineering/product preview for simple 2D DWG scope; keep warnings visible |
+| L2 | All target DWG generations through an approved explicit native bridge | Internal or controlled release path only; requires approved license, bridge contract, product-path evidence, and release audit |
+| L3 | Default product native DWG support across target generations | Not current; only after each version row is promoted to `enabled` and legal/product approval is recorded |
+
+Do not collapse L2 into L3. A passing explicit local bridge gate proves that the
+architecture can carry all versions through a licensed/native backend; it does
+not automatically make native DWG a default customer feature.
+
+### Target Set and Priority
+
+The all-version target set is:
+
+`AC1009`, `AC1012`, `AC1014`, `AC1015`, `AC1018`, `AC1021`, `AC1024`, `AC1027`,
+and `AC1032`.
+
+Unknown future `ACxxxx` codes remain fail-closed until a row is added to
+`docs/collab/native_cad_version_matrix.json`.
+
+| Priority | Row(s) | Reason | Planned product outcome |
+| ---: | --- | --- | --- |
+| 0 | `AC1015` | Existing clean-room baseline; current native reader work is already active | Move from `importable` toward `viewable`/`comparable`, then limited `release_candidate` |
+| 1 | Approved bridge for `AC1009` through `AC1032` | Fastest path to a scoped all-version native claim if license/product approval exists | Controlled L2 claim, never default without approval |
+| 2 | `AC1018` | First post-AC1015 format family and nearest clean-room expansion step | Clean-room pilot row |
+| 3 | `AC1021`, `AC1024` | Mid-era customer files, text/block/layout fidelity risk | Mid-era clean-room rows after AC1018 |
+| 4 | `AC1027`, `AC1032` | Modern large real-world drawings; highest customer pain and performance risk | Modern rows with large-model budgets |
+| 5 | `AC1009`, `AC1012`, `AC1014` clean-room compatibility | Needed only for an unrestricted clean-room all-version claim | Legacy rows or explicit bridge/fallback-only posture |
+
+### Milestones
+
+| Milestone | Exit condition | Default/customer claim after exit |
+| --- | --- | --- |
+| M0 Planning lock | This section exists; current support wording remains scoped | No new native claim |
+| M1 AC1015 evidence closure | Real AC1015 sample imports, compare output, LOD0 viewer evidence, failure taxonomy, cache identity, and fallback tests pass | Limited AC1015 native wording only |
+| M2 Licensed/approved bridge decision | Vendor/license/redistribution posture is approved or explicitly rejected | If approved, continue L2; if rejected, L2 is blocked |
+| M3 All-version explicit bridge release candidate | Native bridge contract, product `cad_compare` evidence, all-version native audit, and release readiness audit pass for every target row | Scoped L2 wording only |
+| M4 AC1018 clean-room pilot | AC1018 row reaches at least `comparable` with converted-DXF oracle checks | No broad claim; row-specific preview only |
+| M5 Mid-era and modern clean-room expansion | AC1021/AC1024/AC1027/AC1032 rows reach row-local gates | Row-specific claims only |
+| M6 Default native enablement review | Every target row is `enabled`, policy/legal approvals are recorded, forbidden wording scan passes | Scoped L3 claim may be drafted |
+
+### Immediate Execution Backlog
+
+1. Refresh the AC1015 row evidence after the real `LINE`, `CIRCLE`, `ARC`, and
+   `LWPOLYLINE` viewer-evidence slices, but keep the row blocked until the
+   object-map and standard-object decode blockers are resolved or explicitly
+   classified as visible unsupported-content warnings.
+2. Run the native CAD matrix validator and goal-loop invariants after each row
+   evidence update; do not manually promote a row without the tool output.
+3. Decide whether the near-term business path is L2 licensed bridge or
+   clean-room-only. Without an approved licensed/native backend, an all-version
+   native claim is a long-term clean-room project, not a near-term release item.
+4. Build a row-by-row sample coverage ledger separating public samples,
+   customer-approved real revision pairs, converted-DXF oracle pairs, corrupted
+   samples, encrypted samples, and large drawings.
+5. Keep fallback production behavior intact while native work proceeds:
+   unsupported or unapproved DWGs must either route to documented converted-DXF
+   fallback with provenance or fail closed with a stable diagnostic.
+
+### Planning Constraints
+
+- Do not add target codes to default native support before their row reaches the
+  promotion rule in `docs/collab/NATIVE_CAD_ALL_VERSION_LOOP.md`.
+- Do not add GUI monolith logic for native support; use service modules,
+  adapters, and viewer evidence packets.
+- Do not create new global P5 audit gates for this plan. Use row-local evidence
+  and existing release/native audits unless the structural-freeze exception
+  process is completed.
+- Do not use broad wording such as "all DWG versions supported" until M6.
+
 ## Decision Frame
 
 There are three viable strategies:

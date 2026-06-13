@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from src.services.comparison.viewer_primitive_source import RENDER_CONTRACT_VERSION
+
 logger = logging.getLogger(__name__)
 
 # ezdxf imports are deferred to the build function so module import stays
@@ -47,9 +49,8 @@ Bbox = Tuple[float, float, float, float]
 ZONE_FOCUS_FILENAME = "zone_focus.json"
 
 #: Part of ``zone_focus_cache_key`` so RENDERER changes (not just source
-#: changes) invalidate cached focus builds. r2 = Korean text-style font
-#: remap (2026-06-12): packs built before it carry illegible blob text.
-_ZONE_RENDER_VERSION = "r2"
+#: changes) invalidate cached focus builds.
+_ZONE_RENDER_VERSION = RENDER_CONTRACT_VERSION
 
 #: Max accepted entities per zone — same default as ``zone_vector_renderer``
 #: (Phase B1). Above this we truncate + flag the result.

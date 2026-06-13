@@ -43,6 +43,9 @@ from src.services.comparison.transform import (
     normalise_bbox as _normalise_bbox_contract,
 )
 from src.services.comparison.viewer_manifest_v3 import ScenePackRef
+from src.services.comparison.viewer_primitive_source import (
+    resolve_viewer_primitive_source,
+)
 from src.utils.once_per_session_logger import log_once
 
 logger = logging.getLogger(__name__)
@@ -653,6 +656,7 @@ class LightweightDrawingViewport(QWidget):
         self._world_bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
         self._loaded_pack_path: Optional[str] = None
         self._primitive_count: int = 0
+        self._primitive_source_provenance: dict[str, object] = {}
         # S1.3.4: silent-fallback codes accumulated during __init__.
         # Surfaces QSGLineItem unavailability (Point 4) and QQuickWidget
         # fallback (Point 3) so the FailureBadge (S1.4) can show them.
@@ -922,18 +926,33 @@ class LightweightDrawingViewport(QWidget):
             logger.warning("LightweightViewport: QML root not ready, deferring load")
             return 0
 
-        if pack_ref is None or not pack_ref.overview_lod0_path:
+        source = resolve_viewer_primitive_source(
+            pack_ref,
+            empty_notice=empty_notice,
+        )
+        self._primitive_source_provenance = dict(source.provenance)
+
+        if not source.ok:
             _clear_pdf_background_state(self, root)
             root.setProperty("primitives", [])
-            root.setProperty("emptyNotice", empty_notice)
+            root.setProperty("emptyNotice", source.empty_notice or empty_notice)
             self._loaded_pack_path = None
             self._primitive_count = 0
+            try:
+                self.set_fidelity_state(
+                    source.render_mode, status_text=source.status_text
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Could not push primitive-source failure badge",
+                    exc_info=True,
+                )
             # Phase G2.7-FU2 — leaving PDF mode; clear the auto-rerender
             # state so a stale wheel-zoom event doesn't try to re-render
             # a PDF that's no longer the active source.
             return 0
 
-        overview_path = Path(pack_ref.overview_lod0_path)
+        overview_path = Path(source.overview_lod0_path)
         if not overview_path.exists():
             logger.warning("LightweightViewport: overview LOD0 missing at %s", overview_path)
             _clear_pdf_background_state(self, root)
@@ -944,7 +963,7 @@ class LightweightDrawingViewport(QWidget):
             return 0
 
         try:
-            data = json.loads(overview_path.read_text(encoding="utf-8"))
+            data = source.payload
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("LightweightViewport: failed to read overview: %s", exc)
             _clear_pdf_background_state(self, root)
@@ -956,8 +975,8 @@ class LightweightDrawingViewport(QWidget):
             )
             return 0
 
-        primitives = normalize_skeleton_ink(data.get("primitives") or [])
-        world_bbox = data.get("world_bbox") or [0.0, 0.0, 1.0, 1.0]
+        primitives = normalize_skeleton_ink(source.primitives)
+        world_bbox = source.world_bbox
         try:
             self._world_bbox = (
                 float(world_bbox[0]), float(world_bbox[1]),
@@ -971,9 +990,14 @@ class LightweightDrawingViewport(QWidget):
         _clear_pdf_background_state(self, root)
         root.setProperty("worldBbox", list(self._world_bbox))
         root.setProperty("primitives", primitives)
+        root.setProperty("primitiveSourceProvenance", dict(source.provenance))
         root.setProperty("emptyNotice", "")
-        self._loaded_pack_path = str(overview_path)
+        self._loaded_pack_path = source.overview_lod0_path
         self._primitive_count = len(primitives)
+        try:
+            self.set_fidelity_state(source.render_mode, status_text=source.status_text)
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not push primitive-source badge", exc_info=True)
         # Phase G3 — push to the GPU skeleton item too. The Canvas
         # fallback reads `primitives` directly, but QSGLineItem needs
         # an explicit setLines() call (it's not a QML binding source).
@@ -981,10 +1005,11 @@ class LightweightDrawingViewport(QWidget):
 
         logger.info(
             "LightweightViewport(%s): loaded %d skeleton primitives, "
-            "world_bbox=(%.1f, %.1f, %.1f, %.1f)",
+            "world_bbox=(%.1f, %.1f, %.1f, %.1f), producer=%s",
             self._side, len(primitives),
             self._world_bbox[0], self._world_bbox[1],
             self._world_bbox[2], self._world_bbox[3],
+            source.provenance.get("producer_id", "unknown"),
         )
         return len(primitives)
 

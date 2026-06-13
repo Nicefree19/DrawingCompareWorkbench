@@ -496,6 +496,44 @@ class TestA4PdfPathRaceGuard:
         root.setProperty.assert_any_call("backgroundImageWorldBbox", [])
         root.setProperty.assert_any_call("worldBbox", [10.0, 20.0, 110.0, 220.0])
 
+    def test_load_scene_pack_records_native_source_provenance(self, tmp_path):
+        from src.gui.lightweight_viewport import LightweightDrawingViewport
+        from src.services.comparison.native_scene_pack import (
+            NativeScenePack,
+            write_native_scene_pack_artifacts,
+        )
+
+        pack = NativeScenePack(
+            source={"path": str(tmp_path / "native.dwg"), "acad_version": "AC1015"},
+            adapter={"name": "fixture"},
+            display_primitives=[
+                {"type": "line", "points": [0.0, 0.0, 10.0, 10.0]},
+            ],
+            bbox=(0.0, 0.0, 10.0, 10.0),
+        )
+        ref = write_native_scene_pack_artifacts(pack, tmp_path / "native_pack")
+        root = MagicMock()
+        viewport = MagicMock(spec=LightweightDrawingViewport)
+        viewport._side = "before"
+        viewport._quick = MagicMock()
+        viewport._quick.rootObject.return_value = root
+        viewport._pdf_render_state = None
+        viewport._pdf_rerender_timer = MagicMock()
+        viewport._loaded_pack_path = None
+        viewport._primitive_count = 0
+
+        result = LightweightDrawingViewport.load_scene_pack(viewport, ref)
+
+        assert result == 1
+        assert viewport._primitive_source_provenance["producer_id"] == "native_scene_pack"
+        root.setProperty.assert_any_call("worldBbox", [0.0, 0.0, 10.0, 10.0])
+        provenance_calls = [
+            call.args[1]
+            for call in root.setProperty.call_args_list
+            if call.args and call.args[0] == "primitiveSourceProvenance"
+        ]
+        assert provenance_calls[-1]["producer_id"] == "native_scene_pack"
+
 
 class TestA5ThreadAffinityWarning:
     """``render_page()`` warns when called off the GUI thread."""

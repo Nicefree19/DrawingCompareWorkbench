@@ -1,0 +1,262 @@
+{
+  "schema_version": 1,
+  "description": "Native CAD version coverage matrix. This is an internal evidence tracker, not a customer support claim.",
+  "states": [
+    "blocked",
+    "contracted",
+    "importable",
+    "comparable",
+    "viewable",
+    "release_candidate",
+    "enabled"
+  ],
+  "rows": [
+    {
+      "code": "AC1009",
+      "track": "legacy",
+      "release_family": "AutoCAD R12",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing"
+      ]
+    },
+    {
+      "code": "AC1012",
+      "track": "legacy",
+      "release_family": "AutoCAD R13",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing"
+      ]
+    },
+    {
+      "code": "AC1014",
+      "track": "legacy",
+      "release_family": "AutoCAD R14",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing"
+      ]
+    },
+    {
+      "code": "AC1015",
+      "track": "baseline",
+      "release_family": "AutoCAD 2000/2000i/2002",
+      "state": "importable",
+      "backend_policy": "default_cleanroom",
+      "default_enabled": true,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": true,
+        "fallback_tests": true,
+        "cleanroom_import": true
+      },
+      "blockers": [
+        "public_ac1015_object_map_offset_blocked",
+        "public_ac1015_standard_object_handle_1_payload_decode_blocked",
+        "viewer_lod0_real_evidence_pending"
+      ]
+    },
+    {
+      "code": "AC1018",
+      "track": "mid-era",
+      "release_family": "AutoCAD 2004/2005/2006",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing"
+      ]
+    },
+    {
+      "code": "AC1021",
+      "track": "mid-era",
+      "release_family": "AutoCAD 2007/2008/2009",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing"
+      ]
+    },
+    {
+      "code": "AC1024",
+      "track": "mid-era",
+      "release_family": "AutoCAD 2010/2011/2012",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing"
+      ]
+    },
+    {
+      "code": "AC1027",
+      "track": "modern",
+      "release_family": "AutoCAD 2013/2014/2015/2016/2017",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing",
+        "large_model_budget_pending"
+      ]
+    },
+    {
+      "code": "AC1032",
+      "track": "modern",
+      "release_family": "AutoCAD 2018+",
+      "state": "contracted",
+      "backend_policy": "explicit_bridge_only",
+      "default_enabled": false,
+      "evidence": {
+        "bridge_contract_fixture": true,
+        "canonical_import_fixture": true,
+        "compare_fixture": true,
+        "viewer_lod0_fixture": true,
+        "real_sample_corpus": true,
+        "real_bridge_contract": false,
+        "canonical_import_real": false,
+        "compare_real": false,
+        "viewer_lod0_real": false,
+        "failure_taxonomy": true,
+        "cache_identity": true,
+        "policy_gate": false,
+        "fallback_tests": false,
+        "cleanroom_import": false
+      },
+      "blockers": [
+        "approved_reader_missing",
+        "large_model_budget_pending"
+      ]
+    }
+  ]
+}

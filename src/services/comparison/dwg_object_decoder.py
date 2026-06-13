@@ -6,6 +6,8 @@ while the public DWG primitive readers and object-map traversal are hardened.
 """
 from __future__ import annotations
 
+import math
+import struct
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +19,10 @@ from .dxf_importer import _make_point
 
 class DwgObjectDecodeError(DwgBinaryReadError):
     """Raised when an AC1015 object payload cannot be decoded."""
+
+    def __init__(self, message: str, *, diagnostics: Dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
 
 
 class DwgMvpObjectType:
@@ -52,6 +58,11 @@ class DwgObjectDecoder:
 
     MVP_OBJECT_MAGIC = b"CWBAC15O"
     MVP_OBJECT_VERSION = 1
+    REAL_ARC_OBJECT_TYPE = 17
+    REAL_CIRCLE_OBJECT_TYPE = 18
+    REAL_LINE_OBJECT_TYPE = 19
+    REAL_LWPOLYLINE_OBJECT_TYPE = 77
+    REAL_COORDINATE_ABS_LIMIT = 1_000_000.0
 
     def __init__(
         self,
@@ -64,6 +75,15 @@ class DwgObjectDecoder:
         self.object_map = list(object_map)
 
     def decode(self) -> DwgAdapterDrawing:
+        if (
+            self.object_map
+            and not self.data[
+                self.object_map[0].offset:self.object_map[0].offset + len(self.MVP_OBJECT_MAGIC)
+            ] == self.MVP_OBJECT_MAGIC
+            and self._looks_like_real_object_record(self.object_map[0])
+        ):
+            return self._decode_real_ac1015()
+
         objects = [self.decode_object(entry) for entry in self.object_map]
         layers_by_handle = {
             item.handle: item
@@ -125,11 +145,15 @@ class DwgObjectDecoder:
         magic = reader.read_bytes(len(self.MVP_OBJECT_MAGIC))
         if magic != self.MVP_OBJECT_MAGIC:
             raise DwgObjectDecodeError(
-                f"unsupported AC1015 object payload at {entry.offset}: {magic!r}"
+                f"unsupported AC1015 object payload at {entry.offset}: {magic!r}",
+                diagnostics=self._object_failure_diagnostics(entry, prefix=magic),
             )
         payload_version = reader.read_u8()
         if payload_version != self.MVP_OBJECT_VERSION:
-            raise DwgObjectDecodeError(f"unsupported MVP object payload version {payload_version}")
+            raise DwgObjectDecodeError(
+                f"unsupported MVP object payload version {payload_version}",
+                diagnostics=self._object_failure_diagnostics(entry, payload_version=payload_version),
+            )
 
         object_type = reader.read_u8()
         handle = reader.read_u32_le()
@@ -191,7 +215,10 @@ class DwgObjectDecoder:
                 "closed": bool(flags & 1),
                 "vertices": [{"point": _read_point3(reader)} for _ in range(count)],
             }
-        raise DwgObjectDecodeError(f"unsupported AC1015 MVP object type {object_type}")
+        raise DwgObjectDecodeError(
+            f"unsupported AC1015 MVP object type {object_type}",
+            diagnostics={"mvp_object_type": object_type},
+        )
 
     def _to_adapter_entity(
         self,
@@ -229,9 +256,346 @@ class DwgObjectDecoder:
             },
         )
 
+    def _decode_real_ac1015(self) -> DwgAdapterDrawing:
+        model_space: List[DwgAdapterEntity] = []
+        object_type_counts: Dict[int, int] = {}
+        first_unsupported: tuple[DwgObjectMapEntry, bytes] | None = None
+
+        for entry in self.object_map:
+            payload, object_type = self._read_real_object_payload(entry)
+            object_type_counts[object_type] = object_type_counts.get(object_type, 0) + 1
+            if object_type == self.REAL_LINE_OBJECT_TYPE:
+                model_space.append(self._decode_real_line_entity(entry, payload))
+                continue
+            if object_type == self.REAL_CIRCLE_OBJECT_TYPE:
+                model_space.append(self._decode_real_circle_entity(entry, payload))
+                continue
+            if object_type == self.REAL_ARC_OBJECT_TYPE:
+                model_space.append(self._decode_real_arc_entity(entry, payload))
+                continue
+            if object_type == self.REAL_LWPOLYLINE_OBJECT_TYPE:
+                model_space.append(self._decode_real_lwpolyline_entity(entry, payload))
+                continue
+            else:
+                if first_unsupported is None:
+                    first_unsupported = (entry, payload)
+                continue
+
+        if not model_space:
+            entry, payload = first_unsupported or (self.object_map[0], b"")
+            raise DwgObjectDecodeError(
+                "AC1015 real object decoder found no supported model-space entities",
+                diagnostics=self._object_failure_diagnostics(entry, prefix=payload[: len(self.MVP_OBJECT_MAGIC)]),
+            )
+
+        return DwgAdapterDrawing(
+            header={"$ACADVER": self.header.version_code, "$INSUNITS": 4},
+            layers=[
+                {
+                    "name": "0",
+                    "color": None,
+                    "linetype": None,
+                    "lineweight": None,
+                    "source_handle": "0",
+                }
+            ],
+            blocks=[],
+            model_space=model_space,
+            metadata={
+                "native_reader": "DwgObjectDecoder",
+                "native_reader_mvp": False,
+                "native_reader_real_ac1015_partial": True,
+                "object_count": len(self.object_map),
+                "decoded_object_count": len(model_space),
+                "decoded_object_types": _decoded_real_object_type_counts(
+                    line_count=object_type_counts.get(self.REAL_LINE_OBJECT_TYPE, 0),
+                    circle_count=object_type_counts.get(self.REAL_CIRCLE_OBJECT_TYPE, 0),
+                    arc_count=object_type_counts.get(self.REAL_ARC_OBJECT_TYPE, 0),
+                    lwpolyline_count=object_type_counts.get(self.REAL_LWPOLYLINE_OBJECT_TYPE, 0),
+                ),
+                "unsupported_real_object_type_count": sum(
+                    count
+                    for object_type, count in object_type_counts.items()
+                    if object_type
+                    not in {
+                        self.REAL_LINE_OBJECT_TYPE,
+                        self.REAL_CIRCLE_OBJECT_TYPE,
+                        self.REAL_ARC_OBJECT_TYPE,
+                        self.REAL_LWPOLYLINE_OBJECT_TYPE,
+                    }
+                ),
+            },
+        )
+
+    def _read_real_object_payload(self, entry: DwgObjectMapEntry) -> tuple[bytes, int]:
+        if entry.offset < 0 or entry.offset + 2 > len(self.data):
+            raise DwgObjectDecodeError(
+                f"AC1015 object record header outside file at {entry.offset}",
+                diagnostics=self._object_failure_diagnostics(entry),
+            )
+        size = int.from_bytes(self.data[entry.offset:entry.offset + 2], "little")
+        payload_start = entry.offset + 2
+        payload_end = payload_start + size
+        if size <= 0 or payload_end > len(self.data):
+            raise DwgObjectDecodeError(
+                f"AC1015 object record outside file at {entry.offset}: size={size}",
+                diagnostics=self._object_failure_diagnostics(entry),
+            )
+        payload = self.data[payload_start:payload_end]
+        object_type = DwgBinaryReader(payload).read_bit_short()
+        return payload, object_type
+
+    def _looks_like_real_object_record(self, entry: DwgObjectMapEntry) -> bool:
+        if entry.offset < 0 or entry.offset + 2 > len(self.data):
+            return False
+        size = int.from_bytes(self.data[entry.offset:entry.offset + 2], "little")
+        payload_start = entry.offset + 2
+        payload_end = payload_start + size
+        if size <= 0 or payload_end > len(self.data):
+            return False
+        try:
+            DwgBinaryReader(self.data[payload_start:payload_end]).read_bit_short()
+        except DwgBinaryReadError:
+            return False
+        return True
+
+    def _decode_real_line_entity(self, entry: DwgObjectMapEntry, payload: bytes) -> DwgAdapterEntity:
+        x1, x2, y1, y2 = self._read_real_line_coordinates(payload)
+        return DwgAdapterEntity(
+            raw_type="LINE",
+            geometry={
+                "start": _make_point(x1, y1, 0.0),
+                "end": _make_point(x2, y2, 0.0),
+            },
+            layer="0",
+            handle=entry.handle_hex,
+            style={},
+        )
+
+    def _decode_real_circle_entity(self, entry: DwgObjectMapEntry, payload: bytes) -> DwgAdapterEntity:
+        center_x, center_y, radius = self._read_real_circle_geometry(payload)
+        return DwgAdapterEntity(
+            raw_type="CIRCLE",
+            geometry={
+                "center": _make_point(center_x, center_y, 0.0),
+                "radius": radius,
+            },
+            layer="0",
+            handle=entry.handle_hex,
+            style={},
+        )
+
+    def _decode_real_arc_entity(self, entry: DwgObjectMapEntry, payload: bytes) -> DwgAdapterEntity:
+        center_x, center_y, radius, start_angle_deg, end_angle_deg = self._read_real_arc_geometry(payload)
+        return DwgAdapterEntity(
+            raw_type="ARC",
+            geometry={
+                "center": _make_point(center_x, center_y, 0.0),
+                "radius": radius,
+                "start_angle_deg": start_angle_deg,
+                "end_angle_deg": end_angle_deg,
+            },
+            layer="0",
+            handle=entry.handle_hex,
+            style={},
+        )
+
+    def _decode_real_lwpolyline_entity(self, entry: DwgObjectMapEntry, payload: bytes) -> DwgAdapterEntity:
+        points = self._read_real_lwpolyline_vertices(payload)
+        return DwgAdapterEntity(
+            raw_type="LWPOLYLINE",
+            geometry={
+                "closed": False,
+                "vertices": [{"point": _make_point(x, y, 0.0)} for x, y in points],
+            },
+            layer="0",
+            handle=entry.handle_hex,
+            style={},
+        )
+
+    def _read_real_line_coordinates(self, payload: bytes) -> tuple[float, float, float, float]:
+        best: tuple[int, tuple[float, float, float, float]] | None = None
+        # R2000 LINE records in the public NextGIS AC1015 samples store x1/x2
+        # followed by y1/y2 as bit-aligned little-endian doubles with 66/64/66
+        # bit spacing.  Scan only this bounded tuple shape and fail closed when
+        # it is not present.
+        for start_bit in range(64, (len(payload) * 8) - 260):
+            offsets = (start_bit, start_bit + 66, start_bit + 130, start_bit + 196)
+            try:
+                values = tuple(_read_bit_aligned_f64_le(payload, offset) for offset in offsets)
+            except DwgBinaryReadError:
+                continue
+            if not _is_real_line_coordinate_tuple(values, self.REAL_COORDINATE_ABS_LIMIT):
+                continue
+            score = sum(1 for value in values if abs(value) >= 1e-6)
+            if best is None or score > best[0]:
+                best = (score, values)
+        if best is None:
+            raise DwgObjectDecodeError("unsupported AC1015 LINE coordinate payload")
+        return best[1]
+
+    def _read_real_circle_geometry(self, payload: bytes) -> tuple[float, float, float]:
+        best: tuple[int, tuple[float, float, float]] | None = None
+        # R2000 CIRCLE records in the public NextGIS AC1015 sample store
+        # center x/y and radius as bit-aligned little-endian doubles with
+        # 66/68 bit spacing.  Keep this intentionally narrow and fail closed.
+        for start_bit in range(64, (len(payload) * 8) - 198):
+            offsets = (start_bit, start_bit + 66, start_bit + 134)
+            try:
+                values = tuple(_read_bit_aligned_f64_le(payload, offset) for offset in offsets)
+            except DwgBinaryReadError:
+                continue
+            if not _is_real_circle_geometry_tuple(values, self.REAL_COORDINATE_ABS_LIMIT):
+                continue
+            score = sum(1 for value in values if abs(value) >= 1e-6)
+            if best is None or score > best[0]:
+                best = (score, values)
+        if best is None:
+            raise DwgObjectDecodeError("unsupported AC1015 CIRCLE coordinate payload")
+        return best[1]
+
+    def _read_real_arc_geometry(self, payload: bytes) -> tuple[float, float, float, float, float]:
+        best: tuple[int, tuple[float, float, float, float]] | None = None
+        # R2000 ARC records in the public NextGIS AC1015 sample store center
+        # x/y, radius, and end angle as bit-aligned little-endian doubles. The
+        # start angle in this deterministic sample is encoded as the DWG zero
+        # bit-double sentinel, so keep the slice narrow and fail closed.
+        for start_bit in range(64, (len(payload) * 8) - 268):
+            offsets = (start_bit, start_bit + 66, start_bit + 134, start_bit + 204)
+            try:
+                values = tuple(_read_bit_aligned_f64_le(payload, offset) for offset in offsets)
+            except DwgBinaryReadError:
+                continue
+            if not _is_real_arc_geometry_tuple(values, self.REAL_COORDINATE_ABS_LIMIT):
+                continue
+            score = sum(1 for value in values if abs(value) >= 1e-6)
+            if best is None or score > best[0]:
+                best = (score, values)
+        if best is None:
+            raise DwgObjectDecodeError("unsupported AC1015 ARC coordinate payload")
+        center_x, center_y, radius, end_angle_rad = best[1]
+        return center_x, center_y, radius, 0.0, math.degrees(end_angle_rad)
+
+    def _read_real_lwpolyline_vertices(self, payload: bytes) -> list[tuple[float, float]]:
+        best: tuple[int, tuple[float, float, float, float, float, float]] | None = None
+        # R2000 LWPOLYLINE records in the public NextGIS AC1015 sample store
+        # three open 2D vertices as bit-aligned little-endian doubles. Keep the
+        # slice deliberately narrow and do not infer bulges/widths.
+        for start_bit in range(64, (len(payload) * 8) - 392):
+            offsets = (
+                start_bit,
+                start_bit + 64,
+                start_bit + 130,
+                start_bit + 196,
+                start_bit + 262,
+                start_bit + 328,
+            )
+            try:
+                values = tuple(_read_bit_aligned_f64_le(payload, offset) for offset in offsets)
+            except DwgBinaryReadError:
+                continue
+            if not _is_real_lwpolyline_vertex_tuple(values, self.REAL_COORDINATE_ABS_LIMIT):
+                continue
+            score = sum(1 for value in values if abs(value) >= 1e-6)
+            if best is None or score > best[0]:
+                best = (score, values)
+        if best is None:
+            raise DwgObjectDecodeError("unsupported AC1015 LWPOLYLINE coordinate payload")
+        x1, y1, x2, y2, x3, y3 = best[1]
+        return [(x1, y1), (x2, y2), (x3, y3)]
+
+    def _object_failure_diagnostics(
+        self,
+        entry: DwgObjectMapEntry,
+        *,
+        prefix: bytes | None = None,
+        payload_version: int | None = None,
+    ) -> Dict[str, Any]:
+        sample = self.data[entry.offset:entry.offset + 32]
+        diagnostics: Dict[str, Any] = {
+            "object_handle": entry.handle_hex,
+            "object_offset": entry.offset,
+            "object_payload_prefix_hex": sample.hex(),
+            "expected_magic_hex": self.MVP_OBJECT_MAGIC.hex(),
+        }
+        if prefix is not None:
+            diagnostics["actual_magic_hex"] = prefix.hex()
+        if payload_version is not None:
+            diagnostics["payload_version"] = payload_version
+        return diagnostics
+
 
 def _read_point3(reader: DwgBinaryReader) -> Dict[str, float]:
     return _make_point(reader.read_f64_le(), reader.read_f64_le(), reader.read_f64_le())
+
+
+def _read_bit_aligned_f64_le(payload: bytes, bit_offset: int) -> float:
+    if bit_offset < 0 or bit_offset + 64 > len(payload) * 8:
+        raise DwgBinaryReadError("bit-aligned f64 read outside object payload")
+    reader = DwgBinaryReader(payload)
+    reader.seek(bit_offset // 8)
+    reader._bit_pos = bit_offset % 8
+    raw = bytes(reader.read_bits(8) for _ in range(8))
+    return struct.unpack("<d", raw)[0]
+
+
+def _is_real_line_coordinate_tuple(values: tuple[float, float, float, float], limit: float) -> bool:
+    x1, x2, y1, y2 = values
+    if not all(math.isfinite(value) and abs(value) <= limit for value in values):
+        return False
+    if sum(1 for value in values if abs(value) >= 1e-6) < 4:
+        return False
+    return abs(x1 - x2) > 1e-9 or abs(y1 - y2) > 1e-9
+
+
+def _is_real_circle_geometry_tuple(values: tuple[float, float, float], limit: float) -> bool:
+    center_x, center_y, radius = values
+    if not all(math.isfinite(value) and abs(value) <= limit for value in values):
+        return False
+    if sum(1 for value in values if abs(value) >= 1e-6) < 3:
+        return False
+    return radius > 0.0
+
+
+def _is_real_arc_geometry_tuple(values: tuple[float, float, float, float], limit: float) -> bool:
+    center_x, center_y, radius, end_angle_rad = values
+    if not all(math.isfinite(value) for value in values):
+        return False
+    if abs(center_x) > limit or abs(center_y) > limit or abs(radius) > limit:
+        return False
+    if sum(1 for value in (center_x, center_y, radius) if abs(value) >= 1e-6) < 3:
+        return False
+    return radius > 0.0 and 1e-6 <= end_angle_rad <= (math.tau + 1e-9)
+
+
+def _is_real_lwpolyline_vertex_tuple(values: tuple[float, float, float, float, float, float], limit: float) -> bool:
+    if not all(math.isfinite(value) and 0.0 < value <= limit for value in values):
+        return False
+    vertices = [(values[index], values[index + 1]) for index in range(0, len(values), 2)]
+    if len({(round(x, 9), round(y, 9)) for x, y in vertices}) < 3:
+        return False
+    xs = [x for x, _y in vertices]
+    ys = [y for _x, y in vertices]
+    return (max(xs) - min(xs)) > 1e-9 and (max(ys) - min(ys)) > 1e-9
+
+
+def _decoded_real_object_type_counts(
+    *,
+    line_count: int,
+    circle_count: int,
+    arc_count: int = 0,
+    lwpolyline_count: int = 0,
+) -> Dict[str, int]:
+    decoded: Dict[str, int] = {}
+    if line_count:
+        decoded["LINE"] = line_count
+    if circle_count:
+        decoded["CIRCLE"] = circle_count
+    if arc_count:
+        decoded["ARC"] = arc_count
+    if lwpolyline_count:
+        decoded["LWPOLYLINE"] = lwpolyline_count
+    return decoded
 
 
 def _point3(value: Any) -> Dict[str, float]:

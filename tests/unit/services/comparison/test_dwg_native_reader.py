@@ -202,6 +202,35 @@ def _native_ac1015_fixture() -> bytes:
     return bytes(data)
 
 
+def _native_ac1015_fixture_from_object_records(records: Iterable[tuple[int, bytes]]) -> bytes:
+    locator_count = 3
+    header_size = 0x15 + 4 + locator_count * 9
+    data = bytearray(b"\x00" * header_size)
+    data[:6] = b"AC1015"
+    struct.pack_into("<H", data, 0x13, 30)
+    struct.pack_into("<I", data, 0x15, locator_count)
+
+    object_offsets: list[tuple[int, int]] = []
+    for handle, payload in records:
+        object_offsets.append((handle, len(data)))
+        data += struct.pack("<H", len(payload)) + payload + b"\x00\x00"
+
+    object_map_offset = len(data)
+    object_map = _object_map(object_offsets)
+    data += object_map
+
+    locators = [
+        (0, header_size, 0),
+        (1, header_size, 0),
+        (2, object_map_offset, len(object_map)),
+    ]
+    cursor = 0x15 + 4
+    for record_number, seeker, size in locators:
+        struct.pack_into("<BII", data, cursor, record_number, seeker, size)
+        cursor += 9
+    return bytes(data)
+
+
 def _adapter_payload() -> dict:
     return {
         "header": {"$INSUNITS": 4},
@@ -363,6 +392,186 @@ def test_import_pipeline_uses_native_ac1015_reader_by_default(tmp_path: Path) ->
     assert result.canonical_drawing is not None
     assert result.canonical_drawing["drawing"]["importer"]["backend"] == "native-ac1015"
     assert result.to_dict()["entity_count"] == 6
+
+
+def test_native_ac1015_adapter_decodes_public_real_line_record(tmp_path: Path) -> None:
+    control_payload = bytes.fromhex("4c120000000040690240302174203170316c")
+    line_payload = bytes.fromhex(
+        "44d6c040000060e53421d80000000000024a06000000000000b28000000000000092818000000000002ca06608080a2a9f"
+    )
+    path = tmp_path / "real-line-record-ac1015.dwg"
+    path.write_bytes(
+        _native_ac1015_fixture_from_object_records(
+            [
+                (0x1, control_payload),
+                (0x83, line_payload),
+            ]
+        )
+    )
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    _validate_schema(doc)
+    assert doc["import_report"]["status"] == "ok"
+    assert doc["import_report"]["stats"]["canonical_entity_count"] == 1
+    line = doc["entities"][0]
+    assert line["type"] == "line"
+    assert line["source"]["handle"] == "83"
+    assert line["geometry"]["start"] == {"x": 50.0, "y": 50.0, "z": 0.0}
+    assert line["geometry"]["end"] == {"x": 100.0, "y": 100.0, "z": 0.0}
+    metadata = doc["metadata"]["adapter_metadata"]
+    assert metadata["native_reader_real_ac1015_partial"] is True
+    assert metadata["decoded_object_types"] == {"LINE": 1}
+
+
+def test_native_ac1015_adapter_decodes_public_real_circle_record(tmp_path: Path) -> None:
+    control_payload = bytes.fromhex("4c120000000040690240302174203170316c")
+    circle_payload = bytes.fromhex(
+        "44878040000060e53421d00000000000012500000000000000494080000000000004940cc101014553"
+    )
+    path = tmp_path / "real-circle-record-ac1015.dwg"
+    path.write_bytes(
+        _native_ac1015_fixture_from_object_records(
+            [
+                (0x1, control_payload),
+                (0x83, circle_payload),
+            ]
+        )
+    )
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    _validate_schema(doc)
+    assert doc["import_report"]["status"] == "ok"
+    assert doc["import_report"]["stats"]["canonical_entity_count"] == 1
+    circle = doc["entities"][0]
+    assert circle["type"] == "circle"
+    assert circle["source"]["handle"] == "83"
+    assert circle["geometry"]["center"] == {"x": 50.0, "y": 50.0, "z": 0.0}
+    assert circle["geometry"]["radius"] == 50.0
+    metadata = doc["metadata"]["adapter_metadata"]
+    assert metadata["native_reader_real_ac1015_partial"] is True
+    assert metadata["decoded_object_types"] == {"CIRCLE": 1}
+
+
+def test_native_ac1015_adapter_decodes_public_real_arc_record(tmp_path: Path) -> None:
+    control_payload = bytes.fromhex("4c120000000040690240302174203170316c")
+    arc_payload = bytes.fromhex(
+        "44588040000060e53421d00000000003014900000000000000494080000000000003940e060b51153ec842500c101014553f"
+    )
+    path = tmp_path / "real-arc-record-ac1015.dwg"
+    path.write_bytes(
+        _native_ac1015_fixture_from_object_records(
+            [
+                (0x1, control_payload),
+                (0x83, arc_payload),
+            ]
+        )
+    )
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    _validate_schema(doc)
+    assert doc["import_report"]["status"] == "ok"
+    assert doc["import_report"]["stats"]["canonical_entity_count"] == 1
+    arc = doc["entities"][0]
+    assert arc["type"] == "arc"
+    assert arc["source"]["handle"] == "83"
+    assert arc["geometry"]["center"] == {"x": 75.0, "y": 50.0, "z": 0.0}
+    assert arc["geometry"]["radius"] == 25.0
+    assert arc["geometry"]["start_angle_deg"] == 0.0
+    assert arc["geometry"]["end_angle_deg"] == 180.0
+    metadata = doc["metadata"]["adapter_metadata"]
+    assert metadata["native_reader_real_ac1015_partial"] is True
+    assert metadata["decoded_object_types"] == {"ARC": 1}
+
+
+def test_native_ac1015_adapter_decodes_public_real_lwpolyline_record(tmp_path: Path) -> None:
+    control_payload = bytes.fromhex("4c120000000040690240302174203170316c")
+    polyline_payload = bytes.fromhex(
+        "537a004000005f253421d90300000000000049400000000000004940c00000000000165030000000000005940c000000000301890300000000000049403040405154"
+    )
+    path = tmp_path / "real-lwpolyline-record-ac1015.dwg"
+    path.write_bytes(
+        _native_ac1015_fixture_from_object_records(
+            [
+                (0x1, control_payload),
+                (0x7C, polyline_payload),
+            ]
+        )
+    )
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    _validate_schema(doc)
+    assert doc["import_report"]["status"] == "ok"
+    assert doc["import_report"]["stats"]["canonical_entity_count"] == 1
+    polyline = doc["entities"][0]
+    assert polyline["type"] == "polyline"
+    assert polyline["source"]["handle"] == "7C"
+    assert polyline["geometry"]["closed"] is False
+    assert polyline["geometry"]["polyline_kind"] == "lwpolyline"
+    assert [vertex["point"] for vertex in polyline["geometry"]["vertices"]] == [
+        {"x": 50.0, "y": 50.0, "z": 0.0},
+        {"x": 100.0, "y": 100.0, "z": 0.0},
+        {"x": 150.0, "y": 50.0, "z": 0.0},
+    ]
+    metadata = doc["metadata"]["adapter_metadata"]
+    assert metadata["native_reader_real_ac1015_partial"] is True
+    assert metadata["decoded_object_types"] == {"LWPOLYLINE": 1}
+
+
+def test_native_ac1015_failure_details_classify_section_read(tmp_path: Path) -> None:
+    path = tmp_path / "short-ac1015.dwg"
+    path.write_bytes(b"AC1015\nshort\n")
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    warning = doc["import_report"]["warnings"][0]
+    assert doc["import_report"]["error_code"] == "DWG_ADAPTER_FAILED"
+    assert warning["details"]["failure_stage"] == "section read"
+    assert warning["details"]["reader_error_type"]
+
+
+def test_native_ac1015_failure_details_classify_object_map(tmp_path: Path) -> None:
+    data = bytearray(_native_ac1015_fixture())
+    reader = DwgSectionReader(data)
+    header = reader.read_header()
+    locator = header.locator(DwgSectionReader.OBJECT_MAP_SECTION)
+    assert locator is not None
+    struct.pack_into(">H", data, locator.seeker, locator.size + 100)
+    path = tmp_path / "bad-object-map.dwg"
+    path.write_bytes(data)
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    details = doc["import_report"]["warnings"][0]["details"]
+    assert doc["import_report"]["error_code"] == "DWG_ADAPTER_FAILED"
+    assert details["failure_stage"] == "object map"
+    assert details["section_locator_count"] == 3
+    assert details["object_map_locator"]["seeker"] == locator.seeker
+
+
+def test_native_ac1015_failure_details_classify_object_decode(tmp_path: Path) -> None:
+    data = bytearray(_native_ac1015_fixture())
+    reader = DwgSectionReader(data)
+    header = reader.read_header()
+    first_entry = reader.read_object_map(header)[0]
+    data[first_entry.offset:first_entry.offset + len(DwgObjectDecoder.MVP_OBJECT_MAGIC)] = b"REALDWG!"
+    path = tmp_path / "bad-object-payload.dwg"
+    path.write_bytes(data)
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    details = doc["import_report"]["warnings"][0]["details"]
+    assert doc["import_report"]["error_code"] == "DWG_ADAPTER_FAILED"
+    assert details["failure_stage"] == "object decode"
+    assert details["object_map_count"] == 9
+    assert details["reader_error_type"] == "DwgObjectDecodeError"
+    assert details["object_handle"] == "10"
+    assert details["object_offset"] == first_entry.offset
+    assert details["actual_magic_hex"] == b"REALDWG!".hex()
+    assert details["object_payload_prefix_hex"].startswith(b"REALDWG!".hex())
 
 
 def _entity_signature(doc: dict) -> list[tuple[str, str, str]]:

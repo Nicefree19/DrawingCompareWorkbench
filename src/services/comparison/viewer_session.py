@@ -52,6 +52,7 @@ from src.services.comparison.scene_pack_builder import (
     SceneBuildResult,
     build_scene_pack,
 )
+from src.services.comparison.viewer_primitive_source import RENDER_CONTRACT_VERSION
 from src.services.comparison.viewer_manifest_v3 import (
     EvidenceRef,
     ManifestV3ValidationError,
@@ -113,10 +114,9 @@ class PairSessionState:
 # ---------------------------------------------------------------------------
 
 
-# Bump whenever pack RENDERING changes (not just the source file), so packs
-# built by an older renderer stop hitting. r2 = Korean text-style font remap
-# (2026-06-12): packs built before it carry illegible blob-text skeletons.
-_PACK_RENDER_VERSION = "r2"
+# Bump ``RENDER_CONTRACT_VERSION`` whenever pack RENDERING changes (not just
+# the source file), so packs built by an older renderer stop hitting.
+_PACK_RENDER_VERSION = RENDER_CONTRACT_VERSION
 
 
 def _scene_pack_cache_key(source_path: Path) -> str:

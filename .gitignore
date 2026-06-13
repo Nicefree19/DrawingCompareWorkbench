@@ -98,6 +98,7 @@ smoke_v*_playwright.js
 !.mcp.json
 !docs/canonical-drawing.schema.json
 !docs/drawing-diff.schema.json
+!docs/collab/native_cad_version_matrix.json
 !docs/schemas/
 !docs/schemas/structural-drawing-evidence-v0.1.schema.json
 !docs/structural_evidence_fixture_matrix_v0_1.json
@@ -265,6 +266,7 @@ test_data/*.dxf
 # Agent cache
 .agent/
 .local/
+docs/collab/native_slice_ledger.md
 
 # Zone editor backups
 gui/zone_editor_backup_*/

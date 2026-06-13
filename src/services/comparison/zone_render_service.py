@@ -20,6 +20,10 @@ from typing import Any, Optional, Sequence
 from .cache_budget import process_rss_mb, resolve_cache_byte_limit
 from .perf_events import append_perf_event
 from .source_signature import build_source_signature
+from .viewer_primitive_source import (
+    primitive_source_provenance,
+    render_contract_schema_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,7 @@ logger = logging.getLogger(__name__)
 # layer was producing a blank zoom). Bump invalidates stale blank-crop caches.
 # v3: Korean text-style font remap (2026-06-12) — crops cached before it carry
 # illegible blob text, so they must miss and re-render.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = render_contract_schema_version()
 DEFAULT_OUTPUT_SIZE = (1600, 900)
 DEFAULT_TARGET_ASPECT = DEFAULT_OUTPUT_SIZE[0] / DEFAULT_OUTPUT_SIZE[1]
 
@@ -1758,6 +1762,14 @@ def _visible_fallback_result(
         "render_lifecycle": "fallback_visible",
         "reason_code": reason_code,
         "warnings": warnings,
+        "primitive_source_provenance": primitive_source_provenance(
+            "relative_overlay_fallback",
+            source_path=job.source_before,
+            render_mode="relative_only",
+            degraded=True,
+            fallback_code=reason_code,
+            extra={"after_source_path": str(job.source_after)},
+        ),
         "request_id": job.request_id,
     }
     payload.update(_flatten_dxf_index_cache(dxf_index_cache))
