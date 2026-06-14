@@ -108,7 +108,7 @@
         "real_bridge_contract": false,
         "canonical_import_real": false,
         "compare_real": false,
-        "viewer_lod0_real": false,
+        "viewer_lod0_real": true,
         "failure_taxonomy": true,
         "cache_identity": true,
         "policy_gate": true,
@@ -117,8 +117,7 @@
       },
       "blockers": [
         "public_ac1015_object_map_offset_visible_unsupported",
-        "public_ac1015_real_arc_payload_visible_unsupported",
-        "viewer_lod0_real_evidence_pending"
+        "public_ac1015_real_arc_payload_visible_unsupported"
       ]
     },
     {
