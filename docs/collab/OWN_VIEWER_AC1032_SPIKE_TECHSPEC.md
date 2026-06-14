@@ -1,8 +1,13 @@
 # Own CAD Viewer — AC1032 Spike TechSpec
 
 Date: 2026-06-14
-Status: PLAN (de-risking spike; not a support claim, not default enablement)
+Status: IN PROGRESS (de-risking spike; not a support claim, not default enablement)
 North star: `own-cad-viewer-goal` (deep-interview, 2026-06-14)
+Progress: **S0 (provenance) + S1 (R2018 container navigable) DONE 2026-06-14** —
+the documented R2004 LCG de-obfuscation reproduces the `AcFssFcAJMB` magic and
+locates the section-page-map in bounds on two real AC1032 files
+(`dwg_r2018_reader.py`, 8 tests). The spike's biggest unknown (is the R2018
+container navigable clean-room from the public spec?) is answered YES. Next: S2.
 
 ## 1. Goal
 
