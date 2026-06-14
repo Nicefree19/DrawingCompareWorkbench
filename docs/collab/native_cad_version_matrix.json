@@ -116,8 +116,8 @@
         "cleanroom_import": true
       },
       "blockers": [
-        "public_ac1015_object_map_offset_blocked",
-        "public_ac1015_standard_object_handle_1_payload_decode_blocked",
+        "public_ac1015_object_map_offset_visible_unsupported",
+        "public_ac1015_real_arc_payload_visible_unsupported",
         "viewer_lod0_real_evidence_pending"
       ]
     },

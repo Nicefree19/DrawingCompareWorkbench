@@ -150,6 +150,7 @@ ai_models/*.pkl
 
 # 예외: docs/ 디렉토리의 중요 계획/가이드/분석 문서는 커밋 허용
 !docs/*_PLAN.md
+!docs/collab/DWG_NATIVE_REMAINING_EXECUTION_PLAN.md
 !docs/*_GUIDE.md
 !docs/*_ANALYSIS.md
 !docs/*_REPORT.md

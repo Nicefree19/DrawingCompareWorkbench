@@ -231,6 +231,33 @@ def _native_ac1015_fixture_from_object_records(records: Iterable[tuple[int, byte
     return bytes(data)
 
 
+def _native_ac1015_fixture_with_object_map_offset_overflow(
+    *, handle: int, bad_offset: int
+) -> bytes:
+    """Build an AC1015 fixture whose single object-map entry points past EOF."""
+    locator_count = 3
+    header_size = 0x15 + 4 + locator_count * 9
+    data = bytearray(b"\x00" * header_size)
+    data[:6] = b"AC1015"
+    struct.pack_into("<H", data, 0x13, 30)
+    struct.pack_into("<I", data, 0x15, locator_count)
+
+    object_map_offset = len(data)
+    object_map = _object_map([(handle, bad_offset)])
+    data += object_map
+
+    locators = [
+        (0, header_size, 0),
+        (1, header_size, 0),
+        (2, object_map_offset, len(object_map)),
+    ]
+    cursor = 0x15 + 4
+    for record_number, seeker, size in locators:
+        struct.pack_into("<BII", data, cursor, record_number, seeker, size)
+        cursor += 9
+    return bytes(data)
+
+
 def _adapter_payload() -> dict:
     return {
         "header": {"$INSUNITS": 4},
@@ -484,6 +511,53 @@ def test_native_ac1015_adapter_decodes_public_real_arc_record(tmp_path: Path) ->
     metadata = doc["metadata"]["adapter_metadata"]
     assert metadata["native_reader_real_ac1015_partial"] is True
     assert metadata["decoded_object_types"] == {"ARC": 1}
+
+
+def test_native_ac1015_real_arc_decode_failure_carries_object_diagnostics(tmp_path: Path) -> None:
+    arc_payload = bytes.fromhex(
+        "44688040000064253421d35b4d26b4ca524100f94fa1617ad991408168ff6901"
+    )
+    path = tmp_path / "unsupported-real-arc-record-ac1015.dwg"
+    path.write_bytes(
+        _native_ac1015_fixture_from_object_records(
+            [
+                (0x90, arc_payload),
+            ]
+        )
+    )
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    details = doc["import_report"]["warnings"][0]["details"]
+    assert doc["import_report"]["error_code"] == "DWG_ADAPTER_FAILED"
+    assert details["failure_stage"] == "object decode"
+    assert details["reader_error_type"] == "DwgObjectDecodeError"
+    assert details["reader_error"] == "unsupported AC1015 ARC coordinate payload"
+    assert details["object_handle"] == "90"
+    assert details["real_object_type"] == DwgObjectDecoder.REAL_ARC_OBJECT_TYPE
+    assert details["real_object_type_name"] == "ARC"
+    assert details["real_payload_prefix_hex"].startswith(arc_payload[:8].hex())
+    assert details["object_payload_prefix_hex"][4:].startswith(arc_payload[:8].hex())
+
+
+def test_native_ac1015_object_map_offset_overflow_carries_object_diagnostics(tmp_path: Path) -> None:
+    path = tmp_path / "object-map-offset-overflow-ac1015.dwg"
+    path.write_bytes(
+        _native_ac1015_fixture_with_object_map_offset_overflow(handle=0x18F2, bad_offset=1_000_000)
+    )
+
+    doc = DwgImporter(adapter=DwgNativeAc1015Adapter()).import_file(path)
+
+    report = doc["import_report"]
+    details = report["warnings"][0]["details"]
+    assert report["error_code"] == "DWG_ADAPTER_FAILED"
+    assert details["failure_stage"] == "object map"
+    assert details["reader_error_type"] == "DwgSectionReadError"
+    assert details["reader_error"].startswith("object map entry outside file")
+    assert details["object_handle"] == "18F2"
+    assert details["object_offset"] == 1_000_000
+    assert details["object_map_entry_index"] == 0
+    assert details["object_map_decoded_entries"] == 0
 
 
 def test_native_ac1015_adapter_decodes_public_real_lwpolyline_record(tmp_path: Path) -> None:

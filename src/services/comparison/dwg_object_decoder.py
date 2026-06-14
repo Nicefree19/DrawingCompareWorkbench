@@ -264,18 +264,23 @@ class DwgObjectDecoder:
         for entry in self.object_map:
             payload, object_type = self._read_real_object_payload(entry)
             object_type_counts[object_type] = object_type_counts.get(object_type, 0) + 1
-            if object_type == self.REAL_LINE_OBJECT_TYPE:
-                model_space.append(self._decode_real_line_entity(entry, payload))
-                continue
-            if object_type == self.REAL_CIRCLE_OBJECT_TYPE:
-                model_space.append(self._decode_real_circle_entity(entry, payload))
-                continue
-            if object_type == self.REAL_ARC_OBJECT_TYPE:
-                model_space.append(self._decode_real_arc_entity(entry, payload))
-                continue
-            if object_type == self.REAL_LWPOLYLINE_OBJECT_TYPE:
-                model_space.append(self._decode_real_lwpolyline_entity(entry, payload))
-                continue
+            try:
+                if object_type == self.REAL_LINE_OBJECT_TYPE:
+                    model_space.append(self._decode_real_line_entity(entry, payload))
+                    continue
+                if object_type == self.REAL_CIRCLE_OBJECT_TYPE:
+                    model_space.append(self._decode_real_circle_entity(entry, payload))
+                    continue
+                if object_type == self.REAL_ARC_OBJECT_TYPE:
+                    model_space.append(self._decode_real_arc_entity(entry, payload))
+                    continue
+                if object_type == self.REAL_LWPOLYLINE_OBJECT_TYPE:
+                    model_space.append(self._decode_real_lwpolyline_entity(entry, payload))
+                    continue
+            except DwgObjectDecodeError as exc:
+                diagnostics = self._real_object_failure_diagnostics(entry, payload, object_type)
+                diagnostics.update(getattr(exc, "diagnostics", {}) or {})
+                raise DwgObjectDecodeError(str(exc), diagnostics=diagnostics) from exc
             else:
                 if first_unsupported is None:
                     first_unsupported = (entry, payload)
@@ -524,6 +529,22 @@ class DwgObjectDecoder:
             diagnostics["payload_version"] = payload_version
         return diagnostics
 
+    def _real_object_failure_diagnostics(
+        self,
+        entry: DwgObjectMapEntry,
+        payload: bytes,
+        object_type: int,
+    ) -> Dict[str, Any]:
+        diagnostics = self._object_failure_diagnostics(entry)
+        diagnostics.update(
+            {
+                "real_object_type": object_type,
+                "real_object_type_name": _real_object_type_name(object_type),
+                "real_payload_prefix_hex": payload[:32].hex(),
+            }
+        )
+        return diagnostics
+
 
 def _read_point3(reader: DwgBinaryReader) -> Dict[str, float]:
     return _make_point(reader.read_f64_le(), reader.read_f64_le(), reader.read_f64_le())
@@ -596,6 +617,15 @@ def _decoded_real_object_type_counts(
     if lwpolyline_count:
         decoded["LWPOLYLINE"] = lwpolyline_count
     return decoded
+
+
+def _real_object_type_name(object_type: int) -> str:
+    return {
+        DwgObjectDecoder.REAL_LINE_OBJECT_TYPE: "LINE",
+        DwgObjectDecoder.REAL_CIRCLE_OBJECT_TYPE: "CIRCLE",
+        DwgObjectDecoder.REAL_ARC_OBJECT_TYPE: "ARC",
+        DwgObjectDecoder.REAL_LWPOLYLINE_OBJECT_TYPE: "LWPOLYLINE",
+    }.get(object_type, f"UNKNOWN_{object_type}")
 
 
 def _point3(value: Any) -> Dict[str, float]:
