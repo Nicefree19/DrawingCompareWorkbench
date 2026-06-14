@@ -24,9 +24,10 @@ Scope and honesty boundaries:
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any, List, Mapping, Optional, Tuple
 
-from .native_scene_pack import BBox, NativeScenePack
+from .native_scene_pack import BBox, NativeScenePack, write_native_scene_pack_artifacts
 
 #: Straight segments used to approximate a full circle. Arcs subdivide
 #: proportionally to their swept angle. 64 keeps the LOD0 outline smooth while
@@ -110,6 +111,29 @@ def build_native_scene_pack(
             "unsupported_entity_type_counts": dict(unsupported),
         },
     )
+
+
+def build_native_scene_pack_ref(
+    doc: Mapping[str, Any],
+    output_dir: "str | Path",
+    *,
+    circle_segments: int = DEFAULT_CIRCLE_SEGMENTS,
+):
+    """Build a native scene pack and persist it as a viewer ``ScenePackRef``.
+
+    This is the foundation that lets a clean-room native import drive the SAME
+    lightweight viewport seam (``resolve_viewer_primitive_source``) the ezdxf
+    scene pack uses, with no ezdxf/ODA. The returned ``ScenePackRef`` points at a
+    native ``overview_lod0.json`` whose ``source_kind`` is ``native_cad``.
+
+    Honest scope: the clean-room reader decodes only LINE/CIRCLE/ARC/POLYLINE on
+    AC1015 today, so the resulting preview is a strict subset of an ezdxf render.
+    Callers must treat it as a partial/fallback preview, never as a replacement
+    for the ezdxf scene pack on drawings that carry richer entity types.
+    """
+
+    pack = build_native_scene_pack(doc, circle_segments=circle_segments)
+    return write_native_scene_pack_artifacts(pack, Path(output_dir))
 
 
 def _entity_to_primitive(
@@ -260,4 +284,5 @@ __all__ = [
     "SUPPORTED_ENTITY_TYPES",
     "PRODUCER_ID",
     "build_native_scene_pack",
+    "build_native_scene_pack_ref",
 ]

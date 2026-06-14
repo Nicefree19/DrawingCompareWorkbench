@@ -21,7 +21,9 @@ from src.services.comparison.native_scene_pack_builder import (
     DEFAULT_CIRCLE_SEGMENTS,
     PRODUCER_ID,
     build_native_scene_pack,
+    build_native_scene_pack_ref,
 )
+from src.services.comparison.viewer_primitive_source import resolve_viewer_primitive_source
 
 # Local-only AC1015 real sample (git-ignored corpus). The integration test
 # below runs the full native-import -> producer -> evidence chain when it is
@@ -142,6 +144,32 @@ def test_native_scene_pack_feeds_real_viewer_evidence_packet() -> None:
     assert evidence["primary_change_frame"]["status"] == "framed"
     assert evidence["import_report"]["status"] == "ok"
     assert evidence["native_scene_pack"]["adapter"]["producer"] == PRODUCER_ID
+
+
+def test_native_scene_pack_ref_renders_through_viewport_seam(tmp_path: Path) -> None:
+    # Fork A foundation: a native scene pack must drive the SAME viewport seam
+    # (resolve_viewer_primitive_source) the ezdxf scene pack uses, classified as
+    # the native producer, not a degraded fallback.
+    doc = _canonical_doc(
+        entities=[
+            _entity("line:1", "line", {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 10.0, "y": 5.0}}),
+            _entity("circle:1", "circle", {"type": "circle", "center": {"x": 5.0, "y": 5.0}, "radius": 3.0}),
+        ],
+        extents={"min_x": 0.0, "min_y": 0.0, "max_x": 10.0, "max_y": 10.0},
+    )
+
+    ref = build_native_scene_pack_ref(doc, tmp_path)
+    assert Path(ref.overview_lod0_path).exists()
+    assert ref.primitive_count == 2
+
+    source = resolve_viewer_primitive_source(ref)
+    assert source.ok is True
+    assert source.degraded is False
+    assert source.render_mode == "skeleton_preview"
+    assert source.provenance["producer_id"] == "native_scene_pack"
+    assert source.status_text == "NativeScenePack preview"
+    assert len(source.primitives) == 2
+    assert source.world_bbox == (0.0, 0.0, 10.0, 10.0)
 
 
 @pytest.mark.skipif(
