@@ -108,6 +108,24 @@ SCENE_PACKS_SUBDIR = "scene_packs"
 CAD_EXTENSIONS = {".dwg", ".dxf"}
 PDF_EXTENSIONS = {".pdf"}
 
+# Eager raster-background render feasibility (speed, 2026-06-14).
+# Measured on real pairs (perf_events + viewer_perf.jsonl): a pure-CAD pair
+# >= 25 MB takes ~32 s to raster, so under the fast-first-review ~30 s budget
+# the render is killed mid-after-side and leaves only a useless before-only PNG
+# (the zone-crop path needs BOTH sides, so it falls back to source render
+# anyway). The default lightweight viewer draws the vector scene-pack skeleton,
+# not this raster, so the render is ~30 s of wasted blocking wall-clock and the
+# root of the "미리보기 실패" timeout degradation. Skip it for large pure-CAD
+# pairs under a short budget; PDF (already raster, fast) and small CAD (complete
+# in budget, crop path uses them) and a generous budget (non-fast 180 s) are
+# unaffected. ``_LARGE_CAD_EAGER_BG_SKIP_BYTES`` mirrors
+# ``drawing_batch.LARGE_DXF_LEGACY_FALLBACK_BYTES`` (kept local to avoid a heavy
+# import). RENDER_SKIPPED status is presentation-only: the compare/diff result
+# is computed upstream and is unchanged.
+_LARGE_CAD_EAGER_BG_SKIP_BYTES = 25 * 1024 * 1024
+_EAGER_BG_RENDER_SHORT_BUDGET_SECONDS = 60
+RENDER_SKIPPED_LARGE_CAD = "render_skipped_large_cad_fast_budget"
+
 
 @dataclass
 class ViewerPackageOptions:
@@ -408,6 +426,19 @@ def export_viewer_package(
             render_slots_used=render_slots_used,
             max_viewer_pages=options.max_viewer_pages,
         )
+        # Speed gate (2026-06-14): skip an eager raster render that would just
+        # blow the fast budget and leave a useless before-only PNG. The vector
+        # skeleton (built lazily / by the prewarmer) is the actual view, so this
+        # only removes wasted blocking wall-clock — the diff result is upstream
+        # and unchanged.
+        if render_decision == "render" and _eager_background_render_infeasible(
+            visual_source_a,
+            visual_source_b,
+            is_pdf_pair=is_pdf_pair,
+            is_hybrid_pdf_visual_pair=is_hybrid_pdf_visual_pair,
+            render_timeout_seconds=options.render_timeout_seconds,
+        ):
+            render_decision = RENDER_SKIPPED_LARGE_CAD
 
         background = (
             _empty_background()
@@ -449,6 +480,20 @@ def export_viewer_package(
                         page_a=primary_page_a,
                         page_b=primary_page_b,
                     )
+        elif render_decision == RENDER_SKIPPED_LARGE_CAD:
+            render_status = RENDER_SKIPPED_LARGE_CAD
+            if options.viewer_perf_log:
+                append_viewer_perf_event(
+                    viewer_root,
+                    "package_background_render",
+                    pair_uuid=pair_id,
+                    render_ms=0.0,
+                    render_status=RENDER_SKIPPED_LARGE_CAD,
+                    render_decision=RENDER_SKIPPED_LARGE_CAD,
+                    worker_spawned=False,
+                    page_a=primary_page_a,
+                    page_b=primary_page_b,
+                )
         elif render_decision == "skipped_by_page_cap":
             render_status = "skipped_by_page_cap"
         elif background["after_image"] and background["after_transform"]:
@@ -2641,6 +2686,47 @@ def _safe_name(value: Any) -> str:
     text = str(value or "item").strip()
     text = re.sub(r"[^0-9A-Za-z가-힣_.-]+", "_", text)
     return text[:120] or "item"
+
+
+def _largest_source_bytes(*paths: Optional[Path]) -> int:
+    """Largest on-disk size among the given paths (0 when unreadable)."""
+
+    largest = 0
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            largest = max(largest, int(Path(path).stat().st_size))
+        except OSError:
+            continue
+    return largest
+
+
+def _eager_background_render_infeasible(
+    visual_source_a: Optional[Path],
+    visual_source_b: Optional[Path],
+    *,
+    is_pdf_pair: bool,
+    is_hybrid_pdf_visual_pair: bool,
+    render_timeout_seconds: int,
+) -> bool:
+    """True when the eager raster background render would blow a short budget.
+
+    See ``_LARGE_CAD_EAGER_BG_SKIP_BYTES`` for the measured rationale. Only large
+    pure-CAD pairs under a short (fast-first-review) budget are skipped — PDF and
+    hybrid-PDF pairs (the viewer needs their raster), and any generous budget,
+    proceed normally.
+    """
+
+    if is_pdf_pair or is_hybrid_pdf_visual_pair:
+        return False
+    # A non-positive budget means "render inline, unbounded"; a generous budget
+    # (non-fast, e.g. 180 s) may complete — only short budgets are at risk.
+    if render_timeout_seconds <= 0 or render_timeout_seconds > _EAGER_BG_RENDER_SHORT_BUDGET_SECONDS:
+        return False
+    if not _is_cad_path(visual_source_a) or not _is_cad_path(visual_source_b):
+        return False
+    return _largest_source_bytes(visual_source_a, visual_source_b) >= _LARGE_CAD_EAGER_BG_SKIP_BYTES
 
 
 def _render_decision(
