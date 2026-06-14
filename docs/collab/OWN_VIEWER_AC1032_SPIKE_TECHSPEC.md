@@ -17,10 +17,19 @@ Progress (2026-06-14, `dwg_r2018_reader.py`, 13 tests):
   on both real files. (Fixed a real literal-length-0 decompression bug the
   larger section-map stream exposed.)
 
+- **S3a (reach the object bytes) DONE** — `read_r2004_data_section` +
+  `decrypt_r2004_data_page_header` decrypt (0x4164536B ^ offset) + decompress
+  every page of a named data section; `AcDb:AcDbObjects` assembles to
+  1,192,851 B (41 pages) and `AcDb:Handles` to its exact size on both real
+  files. Reuse for the bit-decode: `DwgBinaryReader` already provides the DWG
+  bit-code toolkit (B/BB/BS/BL/BD/MC/MS/handle/string) and `dwg_object_decoder`
+  has LINE/CIRCLE/ARC/LWPOLYLINE geometry decoders + object-type constants.
+
 **Both spike unknowns (container navigable? R2004 compression decodable
-clean-room?) are answered YES, and the full container navigation (header ->
-section-page-map -> section-map -> object data sections) is proven.** Next: S3
-(decode `AcDb:AcDbObjects` basic geometry -> canonical).
+clean-room?) are answered YES, the full container navigation is proven, and the
+real object bytes are reachable.** Remaining S3: object enumeration (handle map
+-> object offset/type walk) then geometry decode -> canonical. Still
+diagnostic-only — no objects bit-decoded yet, contract still DECODING-gated.
 
 ## 1. Goal
 

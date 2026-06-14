@@ -535,6 +535,78 @@ def read_r2004_section_map(
     )
 
 
+#: A data-section page begins with a 32-byte XOR-encrypted page header.
+DATA_PAGE_HEADER_LENGTH = 0x20
+
+
+def decrypt_r2004_data_page_header(encrypted: bytes, file_offset: int) -> bytes:
+    """Decrypt a 32-byte data-section page header (public spec section 4.6).
+
+    Each of the eight little-endian u32 words is XOR'd with
+    ``0x4164536B ^ file_offset``.
+    """
+
+    out = bytearray(encrypted[:DATA_PAGE_HEADER_LENGTH])
+    sec_mask = 0x4164536B ^ (file_offset & 0xFFFFFFFF)
+    for index in range(8):
+        word = struct.unpack_from("<I", out, index * 4)[0] ^ sec_mask
+        struct.pack_into("<I", out, index * 4, word)
+    return bytes(out)
+
+
+def read_r2004_data_section(
+    data: bytes | bytearray | memoryview,
+    *,
+    section_name: str,
+    version_code: str = R2018_VERSION_CODE,
+) -> bytes:
+    """Assemble one named data section's decompressed bytes (navigation only).
+
+    Reads every page of ``section_name`` (e.g. ``AcDb:AcDbObjects``): decrypts
+    its 32-byte data page header, decompresses the page, and places it at its
+    start offset in the section buffer. Raises ``ValueError`` on any structural
+    mismatch. This reaches the object bytes; it does NOT bit-decode objects.
+    """
+
+    section_map = read_r2004_section_map(data, version_code=version_code)
+    if section_map.status != "decoded":
+        raise ValueError(f"section map not decoded: {section_map.status}")
+    section = next((item for item in section_map.sections if item.name == section_name), None)
+    if section is None:
+        raise ValueError(f"section {section_name!r} not present")
+
+    page_map = read_r2004_section_page_map(data, version_code=version_code)
+    offsets = section_page_file_offsets(page_map)
+    raw = bytes(data)
+    buffer = bytearray(section.size)
+    for page_number, _data_size, start_offset in sorted(section.pages, key=lambda page: page[2]):
+        if page_number not in offsets:
+            raise ValueError(f"{section_name!r} page {page_number} absent from the page directory")
+        file_offset = offsets[page_number]
+        header = decrypt_r2004_data_page_header(
+            raw[file_offset : file_offset + DATA_PAGE_HEADER_LENGTH], file_offset
+        )
+        page_type, _section_number, compressed_size, decompressed_size = struct.unpack_from(
+            "<IIII", header, 0
+        )
+        if page_type != DATA_SECTION_PAGE_TYPE:
+            raise ValueError(
+                f"{section_name!r} page {page_number} type {page_type:#010x} is not a data page"
+            )
+        body_offset = file_offset + DATA_PAGE_HEADER_LENGTH
+        decompressed = decompress_r2004(
+            raw[body_offset : body_offset + compressed_size], decompressed_size
+        )
+        # A page may decompress to its padded page size, which can exceed the
+        # logical section size; clamp so the buffer stays exactly section.size.
+        available = section.size - start_offset
+        if available <= 0:
+            continue
+        chunk = decompressed[:available]
+        buffer[start_offset : start_offset + len(chunk)] = chunk
+    return bytes(buffer)
+
+
 __all__ = [
     "R2018_VERSION_CODE",
     "R2004_HEADER_OFFSET",
@@ -545,6 +617,7 @@ __all__ = [
     "SECTION_MAP_TYPE",
     "DATA_SECTION_PAGE_TYPE",
     "SYSTEM_PAGE_HEADER_LENGTH",
+    "DATA_PAGE_HEADER_LENGTH",
     "DwgR2018ContainerDiagnostic",
     "R2004SectionPageMapDiagnostic",
     "R2004Section",
@@ -555,4 +628,6 @@ __all__ = [
     "read_r2004_section_page_map",
     "section_page_file_offsets",
     "read_r2004_section_map",
+    "decrypt_r2004_data_page_header",
+    "read_r2004_data_section",
 ]

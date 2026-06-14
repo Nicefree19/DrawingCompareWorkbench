@@ -19,6 +19,7 @@ from src.services.comparison.dwg_r2018_reader import (
     decompress_r2004,
     deobfuscate_r2004_header,
     inspect_r2018_container,
+    read_r2004_data_section,
     read_r2004_section_map,
     read_r2004_section_page_map,
 )
@@ -200,3 +201,24 @@ def test_real_ac1032_section_map_enumerates_object_sections(sample: Path) -> Non
     assert objects.page_count >= 1
     assert objects.size > 0
     assert len(objects.pages) == objects.page_count
+
+
+@pytest.mark.parametrize("sample", REAL_AC1032_SAMPLES, ids=lambda p: p.name)
+def test_real_ac1032_reads_acdbobjects_data_section(sample: Path) -> None:
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    raw = sample.read_bytes()
+    section_map = read_r2004_section_map(raw)
+    objects = next(s for s in section_map.sections if s.name == "AcDb:AcDbObjects")
+
+    # S3a: reach the object bytes — decrypt + decompress every AcDb:AcDbObjects
+    # page and assemble them to the exact section size.
+    buffer = read_r2004_data_section(raw, section_name="AcDb:AcDbObjects")
+    assert len(buffer) == objects.size
+    assert objects.size > 1000  # the object database is substantial
+
+    # AcDb:Handles is reachable the same way.
+    handles = read_r2004_data_section(raw, section_name="AcDb:Handles")
+    handle_section = next(s for s in section_map.sections if s.name == "AcDb:Handles")
+    assert len(handles) == handle_section.size
