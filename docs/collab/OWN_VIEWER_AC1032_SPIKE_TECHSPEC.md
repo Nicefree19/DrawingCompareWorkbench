@@ -8,15 +8,19 @@ Progress (2026-06-14, `dwg_r2018_reader.py`, 13 tests):
 - **S1 (R2018 container navigable) DONE** — R2004 LCG de-obfuscation reproduces
   the `AcFssFcAJMB` magic and locates the section-page-map in bounds on two real
   AC1032 files.
-- **S2 (R2004 decompression + section-page-map) DONE** — `decompress_r2004`
-  implements the public-spec LZ77 variant (consulted the published ODA spec
-  sections 4.6-4.7, clean-room, no GPL source); `read_r2004_section_page_map`
-  decompresses + parses the page directory to the exact header size with
-  strictly-increasing bounded page numbers on both real files.
+- **S2 (decompression + section-page-map + section-map) DONE** —
+  `decompress_r2004` implements the public-spec LZ77 variant (consulted the
+  published ODA spec sections 4.4-4.7, clean-room, no GPL source);
+  `read_r2004_section_page_map` decodes the page directory;
+  `read_r2004_section_map` enumerates the named data sections and locates
+  `AcDb:AcDbObjects` (sample: 41 pages, 1.19 MB), `AcDb:Handles`, `AcDb:Header`
+  on both real files. (Fixed a real literal-length-0 decompression bug the
+  larger section-map stream exposed.)
 
 **Both spike unknowns (container navigable? R2004 compression decodable
-clean-room?) are answered YES.** Remaining S2: section-MAP enumeration to locate
-`AcDb:AcDbObjects` / `AcDb:Handles`. Then S3 (object decode).
+clean-room?) are answered YES, and the full container navigation (header ->
+section-page-map -> section-map -> object data sections) is proven.** Next: S3
+(decode `AcDb:AcDbObjects` basic geometry -> canonical).
 
 ## 1. Goal
 

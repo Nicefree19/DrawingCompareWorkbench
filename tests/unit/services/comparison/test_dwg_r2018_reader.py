@@ -19,6 +19,7 @@ from src.services.comparison.dwg_r2018_reader import (
     decompress_r2004,
     deobfuscate_r2004_header,
     inspect_r2018_container,
+    read_r2004_section_map,
     read_r2004_section_page_map,
 )
 
@@ -154,6 +155,15 @@ def test_decompress_r2004_raises_on_underrun() -> None:
         decompress_r2004(bytes([0x05, 0x41, 0x42]), decompressed_size=8)
 
 
+def test_decompress_r2004_literal_length_byte_with_high_nibble_is_next_opcode() -> None:
+    # Regression: a literal-length byte with any high-nibble bit set is NOT a
+    # length (count 0) but IS the next opcode. 0x02 -> 5 literals ("HELLO");
+    # 0x21 copies 3 from offset 0 ("OOO"); then 0x11 (high nibble set) is the
+    # next opcode (terminator), not a 0x14-byte literal run.
+    stream = bytes([0x02]) + b"HELLO" + bytes([0x21, 0x00, 0x00, 0x11])
+    assert decompress_r2004(stream, decompressed_size=8) == b"HELLOOOO"
+
+
 @pytest.mark.parametrize("sample", REAL_AC1032_SAMPLES, ids=lambda p: p.name)
 def test_real_ac1032_section_page_map_decodes(sample: Path) -> None:
     if not sample.exists():
@@ -171,3 +181,22 @@ def test_real_ac1032_section_page_map_decodes(sample: Path) -> None:
     assert page_map.positive_pages_increasing is True
     assert page_map.max_page_number <= page_map.page_count + 8
     assert all(size > 0 for _page, size in page_map.entries if _page > 0)
+
+
+@pytest.mark.parametrize("sample", REAL_AC1032_SAMPLES, ids=lambda p: p.name)
+def test_real_ac1032_section_map_enumerates_object_sections(sample: Path) -> None:
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    section_map = read_r2004_section_map(sample.read_bytes())
+
+    assert section_map.status == "decoded", section_map.message
+    assert section_map.section_count > 0
+    # The whole point of S2: locate the object/handle data sections by name.
+    assert section_map.has_acdbobjects is True
+    assert section_map.has_handles is True
+    assert "AcDb:Header" in section_map.section_names
+    objects = next(s for s in section_map.sections if s.name == "AcDb:AcDbObjects")
+    assert objects.page_count >= 1
+    assert objects.size > 0
+    assert len(objects.pages) == objects.page_count

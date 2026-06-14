@@ -198,10 +198,8 @@ def decompress_r2004(src: bytes, decompressed_size: int) -> bytes:
         pos += 1
         return value
 
-    def literal_length() -> int:
-        byte = take()
-        if byte != 0x00:
-            return byte + 3
+    def extended_literal_length() -> int:
+        # Called only when the literal-length byte was 0x00 (running total).
         total = 0x0F
         while True:
             nxt = take()
@@ -238,11 +236,19 @@ def decompress_r2004(src: bytes, decompressed_size: int) -> bytes:
         for _ in range(count):
             out.append(take())
 
-    opcode = take()
-    if (opcode & 0xF0) == 0:
-        pos -= 1
-        copy_literals(literal_length())
-        opcode = take()
+    def read_literal_run() -> int:
+        # Read one literal-length byte, copy that many literal bytes, and return
+        # the next opcode. Per spec, a literal-length byte with ANY high-nibble
+        # bit set is not a length (count 0) but is itself the next opcode.
+        byte = take()
+        if (byte & 0xF0) != 0:
+            return byte
+        copy_literals(extended_literal_length() if byte == 0x00 else byte + 3)
+        return take()
+
+    # Initial literal run (a leading byte with a high-nibble bit set is already
+    # the first compression opcode).
+    opcode = read_literal_run()
 
     while len(out) < decompressed_size:
         if opcode == 0x11:
@@ -269,12 +275,13 @@ def decompress_r2004(src: bytes, decompressed_size: int) -> bytes:
         else:
             raise ValueError(f"R2004 unexpected opcode {opcode:#04x} at output {len(out)}")
         copy_back(comp_bytes, comp_offset)
-        copy_literals(literal if literal else literal_length())
-        opcode = take()
+        if literal != 0:
+            copy_literals(literal)
+            opcode = take()
+        else:
+            opcode = read_literal_run()
 
-    if len(out) > decompressed_size:
-        del out[decompressed_size:]
-    return bytes(out)
+    return bytes(out[:decompressed_size])
 
 
 @dataclass(frozen=True)
@@ -368,6 +375,166 @@ def read_r2004_section_page_map(
     )
 
 
+def section_page_file_offsets(page_map: "R2004SectionPageMapDiagnostic") -> Dict[int, int]:
+    """Compute each section page's file offset from its size sequence.
+
+    Per the public spec, page 1 starts at 0x100 and each subsequent page starts
+    at the previous page's offset plus the previous page's size (gaps included).
+    """
+
+    offsets: Dict[int, int] = {}
+    address = SECTION_PAGE_ADDRESS_BASE
+    for page_number, page_size in page_map.entries:
+        offsets[page_number] = address
+        address += page_size
+    return offsets
+
+
+@dataclass(frozen=True)
+class R2004Section:
+    """One entry of the data-section map (a named logical section)."""
+
+    name: str
+    section_id: int
+    page_count: int
+    size: int
+    pages: list = field(default_factory=list)  # [(page_number, data_size, start_offset)]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "section_id": self.section_id,
+            "page_count": self.page_count,
+            "size": self.size,
+            "pages": [list(page) for page in self.pages],
+        }
+
+
+@dataclass(frozen=True)
+class R2004SectionMapDiagnostic:
+    """Decoded data-section map (section name -> pages)."""
+
+    version_code: str
+    status: str  # decoded | section_map_type_mismatch | section_map_page_missing | <page-map status>
+    section_count: int
+    section_names: list = field(default_factory=list)
+    has_acdbobjects: bool = False
+    has_handles: bool = False
+    sections: list = field(default_factory=list)  # [R2004Section]
+    message: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version_code": self.version_code,
+            "status": self.status,
+            "section_count": self.section_count,
+            "section_names": list(self.section_names),
+            "has_acdbobjects": self.has_acdbobjects,
+            "has_handles": self.has_handles,
+            "sections": [section.to_dict() for section in self.sections],
+            "message": self.message,
+        }
+
+
+def read_r2004_section_map(
+    data: bytes | bytearray | memoryview,
+    *,
+    version_code: str = R2018_VERSION_CODE,
+) -> R2004SectionMapDiagnostic:
+    """Decompress + parse the data-section map (navigation, not decoding).
+
+    Locates the section-map system page via ``section_map_id`` + the section
+    page directory, decompresses it, and enumerates the named logical sections
+    (``AcDb:AcDbObjects``, ``AcDb:Handles``, ``AcDb:Header`` ...) with their
+    page references. No object/entity bytes are decoded.
+    """
+
+    page_map = read_r2004_section_page_map(data, version_code=version_code)
+    if page_map.status != "decoded":
+        return R2004SectionMapDiagnostic(
+            version_code=version_code,
+            status=page_map.status,
+            section_count=0,
+            message=page_map.message,
+        )
+
+    container = inspect_r2018_container(data, version_code=version_code)
+    section_map_id = int(container.fields["section_map_id"])
+    offsets = section_page_file_offsets(page_map)
+    if section_map_id not in offsets:
+        return R2004SectionMapDiagnostic(
+            version_code=version_code,
+            status="section_map_page_missing",
+            section_count=0,
+            message=f"section-map page {section_map_id} is absent from the page directory",
+        )
+
+    raw = bytes(data)
+    offset = offsets[section_map_id]
+    section_type, decompressed_size, compressed_size, _ctype, _hcrc = struct.unpack_from(
+        "<IIIII", raw, offset
+    )
+    if section_type != SECTION_MAP_TYPE:
+        return R2004SectionMapDiagnostic(
+            version_code=version_code,
+            status="section_map_type_mismatch",
+            section_count=0,
+            message=f"expected section-map type {SECTION_MAP_TYPE:#010x}, got {section_type:#010x}",
+        )
+
+    data_offset = offset + SYSTEM_PAGE_HEADER_LENGTH
+    decompressed = decompress_r2004(
+        raw[data_offset : data_offset + compressed_size], decompressed_size
+    )
+
+    description_count = struct.unpack_from("<I", decompressed, 0)[0]
+    sections: list = []
+    cursor = 0x14  # NumDescriptions header is 5 u32 fields.
+    for _ in range(description_count):
+        if cursor + 0x60 > len(decompressed):
+            break
+        size = struct.unpack_from("<Q", decompressed, cursor)[0]
+        page_count = struct.unpack_from("<I", decompressed, cursor + 0x08)[0]
+        section_id = struct.unpack_from("<I", decompressed, cursor + 0x18)[0]
+        name = (
+            decompressed[cursor + 0x20 : cursor + 0x20 + 64]
+            .split(b"\x00")[0]
+            .decode("ascii", "replace")
+        )
+        pages: list = []
+        page_cursor = cursor + 0x60
+        for _page in range(page_count):
+            if page_cursor + 16 > len(decompressed):
+                break
+            page_number = struct.unpack_from("<i", decompressed, page_cursor)[0]
+            page_size = struct.unpack_from("<I", decompressed, page_cursor + 4)[0]
+            start_offset = struct.unpack_from("<Q", decompressed, page_cursor + 8)[0]
+            pages.append((page_number, page_size, start_offset))
+            page_cursor += 16
+        sections.append(
+            R2004Section(
+                name=name,
+                section_id=section_id,
+                page_count=page_count,
+                size=size,
+                pages=pages,
+            )
+        )
+        cursor += 0x60 + page_count * 16
+
+    names = [section.name for section in sections]
+    return R2004SectionMapDiagnostic(
+        version_code=version_code,
+        status="decoded",
+        section_count=len(sections),
+        section_names=names,
+        has_acdbobjects="AcDb:AcDbObjects" in names,
+        has_handles="AcDb:Handles" in names,
+        sections=sections,
+        message=f"decoded {len(sections)} data-section descriptions",
+    )
+
+
 __all__ = [
     "R2018_VERSION_CODE",
     "R2004_HEADER_OFFSET",
@@ -380,8 +547,12 @@ __all__ = [
     "SYSTEM_PAGE_HEADER_LENGTH",
     "DwgR2018ContainerDiagnostic",
     "R2004SectionPageMapDiagnostic",
+    "R2004Section",
+    "R2004SectionMapDiagnostic",
     "deobfuscate_r2004_header",
     "inspect_r2018_container",
     "decompress_r2004",
     "read_r2004_section_page_map",
+    "section_page_file_offsets",
+    "read_r2004_section_map",
 ]
