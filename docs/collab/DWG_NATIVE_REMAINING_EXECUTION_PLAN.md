@@ -1,6 +1,8 @@
 # DWG Native Remaining Execution Plan
 
 Date: 2026-06-13
+Last advanced: 2026-06-14 (W1 AC1015 evidence closure COMPLETE; see
+"Completed Workstreams" and "Strategic Fork Surfaced by W1").
 
 This document continues the DWG native target-generation planning after the
 lightweight viewer primitive-source seam was completed. It is an execution plan,
@@ -18,13 +20,20 @@ not a support claim and not approval to enable broad default native DWG import.
 - tech_stack: Python, pytest, Qt/PySide viewer, CAD comparison services,
   JSON evidence packets, Markdown planning docs, PowerShell command shell.
 - current_failure:
-  - `AC1015` is `importable` and default clean-room scoped, but real public
-    sample blockers remain.
+  - W1 AC1015 evidence closure is COMPLETE (2026-06-14). Object-map and
+    object-decode failures are now fail-closed visible-unsupported, and a native
+    scene-pack producer yields real `native-cad-viewer-evidence/v1` from a
+    clean-room import; `AC1015.evidence.viewer_lod0_real` is now true. The two
+    remaining AC1015 blockers are visible-unsupported classifications by design,
+    not open work.
   - `AC1009`, `AC1012`, `AC1014`, `AC1018`, `AC1021`, `AC1024`, `AC1027`, and
-    `AC1032` are `contracted` with `explicit_bridge_only`.
-  - `NativeScenePack` can now reach the real lightweight viewport through
-    `ViewerPrimitiveSource`, so the remaining viewer gap is row evidence and
-    promotion, not another render-source seam.
+    `AC1032` are still `contracted` with `explicit_bridge_only` (no default
+    native support).
+  - Open structural gap: the product GUI viewport renders via ezdxf
+    (`scene_pack_builder.build_scene_pack`); the native scene-pack producer is a
+    parallel EVIDENCE path, so clean-room native rendering does not yet fire in
+    the real product pipeline. This fork now drives the next decision (see
+    "Strategic Fork Surfaced by W1").
 - available_tools:
   - `python scripts\native_cad_version_matrix.py validate`
   - `python scripts\native_cad_goal_loop.py invariants --quick`
@@ -62,7 +71,9 @@ not a support claim and not approval to enable broad default native DWG import.
 | --- | --- | --- |
 | Viewer render-source debt | Retired for first paint by `ViewerPrimitiveSource` | Do not plan another viewer-loading seam; plan row evidence through the seam |
 | Cache version debt | `RENDER_CONTRACT_VERSION` drives pack/zone families | Any render contract change is one version bump plus cache tests |
-| `AC1015` clean-room row | `importable`, blockers still listed | Next implementation slice should close or reclassify real-sample blockers |
+| `AC1015` clean-room row | `importable`, `viewer_lod0_real: true`, 2 visible-unsupported blockers | W1 closed; do not re-open as evidence work — next slice is a NEW row or the strategic fork |
+| Native scene-pack producer | `native_scene_pack_builder.build_native_scene_pack` exists (commit 5bfa1d1) | Reusable for AC1018+ rows; it is evidence-only and does NOT render in the product GUI |
+| Native vs product render | GUI uses ezdxf `build_scene_pack`; native producer is parallel evidence | Decide whether to wire native into the viewport or keep product on ODA/ezdxf (HITL) |
 | Non-AC1015 rows | `contracted`, explicit bridge only | No default enablement; choose license/bridge path before product claim work |
 | External bridge options | ODA/RealDWG-style licensed SDKs require approval | Treat as HITL decision, not engineering assumption |
 | LibreDWG-style path | GPL-family license and coverage tradeoffs | Do not bundle or default without legal approval and architecture isolation |
@@ -71,7 +82,7 @@ not a support claim and not approval to enable broad default native DWG import.
 
 | Order | Workstream | Objective | Entry condition | Exit gate | Claim posture |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | W1 AC1015 evidence closure | Resolve or explicitly classify current real-sample blockers and produce row evidence through the viewer seam | Current matrix passes; target samples are available | `AC1015` has real import/compare/viewer evidence or visible unsupported-content blockers | Limited AC1015 wording only |
+| 1 | W1 AC1015 evidence closure | DONE 2026-06-14 (commits 0c73719, 5bfa1d1, 0457314): visible-unsupported object-map/decode blockers + real native viewer evidence; matrix `viewer_lod0_real: true` | n/a (complete) | Closed — see "Completed Workstreams" | Limited AC1015 wording in place |
 | 2 | W2 Corpus and oracle ledger | Build row-by-row sample ledger separating public, customer-approved, converted-DXF oracle, corrupted, encrypted, and large drawings | Read-only inventory access or user-provided paths | Each target row has coverage status and next missing artifact | No new native claim |
 | 3 | W3 License and backend decision | Decide whether near-term target-generation coverage uses approved bridge or clean-room-only path | User/legal decision available | ADR or decision packet records approve/reject/defer | Determines L2 path only |
 | 4A | W4 Explicit bridge release candidate | If W3 approves a backend, run bridge contract, product CLI evidence, native audit, and release readiness gate | Approved backend, license id, sample pack | Product release gate passes for selected scope | Scoped explicit-backend wording only |
@@ -79,9 +90,70 @@ not a support claim and not approval to enable broad default native DWG import.
 | 5 | W6 Large-model and modern-row budget | Add row-local performance evidence for `AC1027`/`AC1032` without new global P5 gates | Modern sample pack available | LOD0, import, compare, and cancel budgets pass or fail visibly | No broad wording |
 | 6 | W7 Default enablement review | Consider default native enablement only after all row gates and approvals | Every target row is release-ready and approved | Matrix rows are `enabled`, policy gate passes, support wording approved | Explicitly approved L3 wording only |
 
-The W1 downstream Goal Command Prompt is now isolated in
-`docs/collab/DWG_NATIVE_W1_AC1015_GOAL_COMMAND.md`. Use that document for the
-next default implementation slice unless the user selects W2-W7.
+W1 is complete. The next default implementation slice is no longer W1; pick the
+next workstream from "Recommended Next Decision" below. The W1 Goal Command
+Prompt in `docs/collab/DWG_NATIVE_W1_AC1015_GOAL_COMMAND.md` is retained as a
+completed-slice template.
+
+## Completed Workstreams
+
+### W1 AC1015 evidence closure — DONE 2026-06-14
+
+Three targets closed on branch `dwg-native-w1-ac1015-visible-unsupported`:
+
+| Target | Outcome | Evidence | Commit |
+| --- | --- | --- | --- |
+| T1 object-map offset | Fail-closed visible diagnostics (`object_handle`/`object_offset`); smoke `object` column populated (was empty) | `sample_AC1015.dwg` -> `18F2@1392451` | `0c73719` |
+| T2 object-decode | Real LINE/CIRCLE/ARC/LWPOLYLINE decode failures re-raise with object diagnostics | `example_2000.dwg` -> `90@36009` | `0c73719` |
+| T3 viewer LOD0 real evidence | NEW `native_scene_pack_builder.build_native_scene_pack` (canonical -> viewer `lines` primitives) + real `native-cad-viewer-evidence/v1`; matrix `viewer_lod0_real: true` | `test_native_scene_pack_builder.py` (5 tests incl. real-sample integration); `.local/native_cad_viewer_evidence/real_native_evidence.json` (4/4 ok) | `5bfa1d1`, `0457314` |
+
+Reusable assets produced: `native_scene_pack_builder` (works for any canonical
+LINE/CIRCLE/ARC/POLYLINE source, so AC1018+ rows can reuse it) and
+`scripts/native_cad_viewer_evidence_real.py`.
+
+Honest scope: matrix state stays `importable` (NOT promoted to `viewable`). The
+producer is an EVIDENCE path; the product GUI still renders via ezdxf.
+
+## Strategic Fork Surfaced by W1
+
+W1 proved the clean-room reader CAN import + flatten + produce real viewer
+evidence for the 4 basic AC1015 entity types. It also exposed the load-bearing
+strategic question that the remaining workstreams must answer BEFORE more
+clean-room row grinding:
+
+- **Fork A — Native becomes the product render path.** Wire
+  `native_scene_pack_builder` output into the lightweight viewport (replace or
+  complement `scene_pack_builder.build_scene_pack`). High value (removes the
+  ODA/ezdxf dependency) but large: the clean-room reader currently decodes only
+  4 entity types, so real drawings (TEXT/INSERT/HATCH/DIMENSION/SPLINE/proxy)
+  would render mostly empty until each type is added. Honest only behind a
+  visible "partial native render" badge.
+- **Fork B — Native stays evidence-only; product stays on ODA/converted-DXF.**
+  Accept that the product viewer uses ezdxf (via `resolve_dxf_path`/ODA) and the
+  clean-room track only produces per-version *evidence* and visible-unsupported
+  classifications. Lower risk, but the clean-room investment never reaches the
+  end user.
+- **Fork C — Stop expanding the clean-room track.** If ODA/converted-DXF fallback
+  already serves users (it does — see `gate_inflation_risk` /
+  `alignment_precision_dead_end` lessons), treat AC1015 as a closed reference
+  slice and redirect effort to product-facing reliability instead of AC1018+
+  rows.
+
+This fork is a HITL decision (it determines whether further clean-room entity
+decoders and rows are worth building). It maps onto W3 (license/backend
+decision) but is broader: even with no licensed backend, Fork A/B/C is an
+architecture-and-priority call, not just a license call.
+
+## Recommended Next Decision
+
+1. **Resolve the Strategic Fork (A/B/C) first** — it gates whether W5 (AC1018
+   clean-room expansion) and W6 (modern-row budget) are worth starting.
+2. If Fork B/C: run **W2 (corpus and oracle ledger)** as the cheap, no-new-claim
+   step that documents per-row coverage, then stop clean-room expansion.
+3. If Fork A: scope an **entity-decoder coverage plan** (TEXT/INSERT/DIMENSION
+   next) behind a visible partial-render badge before any `viewable` promotion.
+4. **W3/W4** (licensed bridge) remain available independently if the user wants
+   AC1018+ product coverage sooner than clean-room decoding can deliver.
 
 ## Execution Prompt
 

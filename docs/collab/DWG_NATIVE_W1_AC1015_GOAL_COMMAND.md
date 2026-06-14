@@ -7,6 +7,26 @@ Goal Command Prompt. It plans W1 only: AC1015 evidence closure. It does not
 approve broader DWG native support, explicit licensed backend usage, release
 wording, or default enablement for other DWG generations.
 
+## Status: COMPLETE (2026-06-14)
+
+All three W1 targets are closed on branch `dwg-native-w1-ac1015-visible-unsupported`:
+
+- Target 1 (object-map offset) and Target 2 (object-decode): fail-closed
+  visible-unsupported diagnostics — commit `0c73719`.
+- Target 3 (real viewer LOD0 evidence): new
+  `native_scene_pack_builder.build_native_scene_pack` producer + real
+  `native-cad-viewer-evidence/v1` (5 committed tests incl. a real-sample
+  integration test; `.local/native_cad_viewer_evidence/real_native_evidence.json`
+  4/4 ok) — commits `5bfa1d1`, `0457314`.
+- Matrix: `AC1015.evidence.viewer_lod0_real` is now `true`; the
+  `viewer_lod0_real_evidence_pending` blocker is removed; state stays
+  `importable` (NOT promoted to `viewable` — the producer is an evidence path,
+  the product GUI still renders via ezdxf).
+
+This document is retained as a completed-slice template. For the next workstream
+selection and the strategic fork W1 surfaced, see
+`docs/collab/DWG_NATIVE_REMAINING_EXECUTION_PLAN.md`.
+
 ## Input Snapshot
 
 - project_goal: advance W1 AC1015 evidence closure by converting the current
