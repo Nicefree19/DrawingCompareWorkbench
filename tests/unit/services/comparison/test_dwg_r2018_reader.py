@@ -16,8 +16,10 @@ from src.services.comparison.dwg_r2018_reader import (
     R2004_HEADER_LENGTH,
     R2004_HEADER_MAGIC,
     R2004_HEADER_OFFSET,
+    decompress_r2004,
     deobfuscate_r2004_header,
     inspect_r2018_container,
+    read_r2004_section_page_map,
 )
 
 # Local-only real AC1032 corpus (git-ignored). The integration test runs the
@@ -120,3 +122,52 @@ def test_real_ac1032_container_is_navigable(sample: Path) -> None:
     assert diag.fields["section_page_map_in_bounds"] is True
     # The located section-page-map must sit inside the real file.
     assert 0 < diag.fields["section_page_map_file_offset"] < diag.file_size_bytes
+
+
+# ---- Spike S2: R2004 decompression + section-page-map ----
+
+
+def test_decompress_r2004_handcrafted_stream() -> None:
+    # 0x05 -> initial literal length 8 ("ABCDEFGH"); 0x4C/0x01 -> back-copy 3
+    # ("ABC") from offset 7; trailing literal length 0x01 -> 4 ("WXYZ"); 0x11 end.
+    stream = bytes(
+        [0x05]
+        + list(b"ABCDEFGH")
+        + [0x4C, 0x01, 0x01]
+        + list(b"WXYZ")
+        + [0x11]
+    )
+
+    out = decompress_r2004(stream, decompressed_size=15)
+
+    assert out == b"ABCDEFGHABCWXYZ"
+
+
+def test_decompress_r2004_pure_literal_run() -> None:
+    # 0x02 -> literal length 5; copy 5 literal bytes; terminator.
+    stream = bytes([0x02] + list(b"HELLO") + [0x11])
+    assert decompress_r2004(stream, decompressed_size=5) == b"HELLO"
+
+
+def test_decompress_r2004_raises_on_underrun() -> None:
+    with pytest.raises(ValueError):
+        decompress_r2004(bytes([0x05, 0x41, 0x42]), decompressed_size=8)
+
+
+@pytest.mark.parametrize("sample", REAL_AC1032_SAMPLES, ids=lambda p: p.name)
+def test_real_ac1032_section_page_map_decodes(sample: Path) -> None:
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    page_map = read_r2004_section_page_map(sample.read_bytes())
+
+    assert page_map.status == "decoded", page_map.message
+    assert page_map.page_count > 0
+    # A correctly decompressed page map starts at page 1 with strictly
+    # increasing, bounded page numbers (gaps from unwritten zero-pages are
+    # allowed). A wrong back-reference offset yields garbage page numbers
+    # (~537M), which both checks below reject.
+    assert page_map.first_page_number == 1
+    assert page_map.positive_pages_increasing is True
+    assert page_map.max_page_number <= page_map.page_count + 8
+    assert all(size > 0 for _page, size in page_map.entries if _page > 0)

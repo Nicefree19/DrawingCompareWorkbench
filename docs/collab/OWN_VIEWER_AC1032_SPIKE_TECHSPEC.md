@@ -3,11 +3,20 @@
 Date: 2026-06-14
 Status: IN PROGRESS (de-risking spike; not a support claim, not default enablement)
 North star: `own-cad-viewer-goal` (deep-interview, 2026-06-14)
-Progress: **S0 (provenance) + S1 (R2018 container navigable) DONE 2026-06-14** —
-the documented R2004 LCG de-obfuscation reproduces the `AcFssFcAJMB` magic and
-locates the section-page-map in bounds on two real AC1032 files
-(`dwg_r2018_reader.py`, 8 tests). The spike's biggest unknown (is the R2018
-container navigable clean-room from the public spec?) is answered YES. Next: S2.
+Progress (2026-06-14, `dwg_r2018_reader.py`, 13 tests):
+- **S0 (provenance) DONE** — `AC1032_CLEANROOM_PROVENANCE.md`.
+- **S1 (R2018 container navigable) DONE** — R2004 LCG de-obfuscation reproduces
+  the `AcFssFcAJMB` magic and locates the section-page-map in bounds on two real
+  AC1032 files.
+- **S2 (R2004 decompression + section-page-map) DONE** — `decompress_r2004`
+  implements the public-spec LZ77 variant (consulted the published ODA spec
+  sections 4.6-4.7, clean-room, no GPL source); `read_r2004_section_page_map`
+  decompresses + parses the page directory to the exact header size with
+  strictly-increasing bounded page numbers on both real files.
+
+**Both spike unknowns (container navigable? R2004 compression decodable
+clean-room?) are answered YES.** Remaining S2: section-MAP enumeration to locate
+`AcDb:AcDbObjects` / `AcDb:Handles`. Then S3 (object decode).
 
 ## 1. Goal
 
