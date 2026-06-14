@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.services.comparison.native_scene_pack import (
     NativeScenePack,
     write_native_scene_pack_artifacts,
@@ -43,6 +45,45 @@ def test_resolves_ezdxf_overview_as_contract_source(tmp_path: Path) -> None:
     assert result.provenance["render_contract_version"] == RENDER_CONTRACT_VERSION
     assert result.payload["render_contract_version"] == RENDER_CONTRACT_VERSION
     assert result.payload["primitive_source_provenance"]["producer_id"] == "ezdxf_scene_pack"
+
+
+def test_real_scene_pack_pipeline_resolves_as_ezdxf_native_branch_stays_dormant(
+    tmp_path: Path,
+) -> None:
+    """Honest wiring contract: the REAL producer emits ezdxf, never native.
+
+    ``test_native_scene_pack_artifacts_resolve_as_first_class_source`` below
+    proves the seam *classifies* a hand-written native artifact. This proves the
+    native branch stays DORMANT in the real pipeline: ``build_scene_pack`` — the
+    only ``overview_lod0`` producer wired into the folder-compare / viewer flow —
+    never writes a native ``source_kind``, so a real drawing always resolves
+    through the ezdxf producer. NativeScenePack rendering is fixture-validated
+    only; it does not fire in production until a real-pipeline native producer
+    is wired in (tracked as ``viewer_lod0_real_evidence_pending``).
+    """
+
+    ezdxf = pytest.importorskip("ezdxf")
+    from src.services.comparison.scene_pack_builder import build_scene_pack
+
+    src = tmp_path / "sample.dxf"
+    doc = ezdxf.new("R2018", setup=True)
+    msp = doc.modelspace()
+    msp.add_line((0, 0), (10, 10))
+    msp.add_line((10, 10), (20, 0))
+    doc.saveas(str(src))
+
+    ref = build_scene_pack(src, tmp_path / "pack").scene_pack_ref
+    overview = json.loads(Path(ref.overview_lod0_path).read_text(encoding="utf-8"))
+
+    # The real producer must not masquerade as native.
+    assert str(overview.get("source_kind") or "") != "native_cad"
+    assert "native_scene_pack" not in overview
+
+    # The seam the viewport actually calls classifies the real artifact as the
+    # ezdxf producer — the native branch never fires for a real drawing.
+    resolved = resolve_viewer_primitive_source(ref)
+    assert resolved.ok is True
+    assert resolved.provenance["producer_id"] == "ezdxf_scene_pack"
 
 
 def test_native_scene_pack_artifacts_resolve_as_first_class_source(tmp_path: Path) -> None:
