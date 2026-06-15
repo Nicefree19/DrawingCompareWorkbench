@@ -195,7 +195,20 @@ def create_dwg_backend_selection(mode: Optional[str] = None) -> DwgBackendSelect
     if normalized == DWG_BACKEND_CLEANROOM_NATIVE:
         from .dwg_native_reader import DwgNativeAc1015Adapter
 
-        adapter = DwgNativeAc1015Adapter(fallback_adapter=DwgJsonFixtureAdapter())
+        adapter: DwgImporterAdapter = DwgNativeAc1015Adapter(
+            fallback_adapter=DwgJsonFixtureAdapter()
+        )
+        # Experimental, opt-in only: layer the clean-room AC1032 reader on top of
+        # the default AC1015 adapter ONLY when explicitly opted in.  With the
+        # opt-in off (the default) the selection is byte-for-byte the AC1015
+        # adapter, so AC1032 keeps falling through to the existing default path.
+        from .dwg_native_ac1032_adapter import (
+            DwgNativeAc1032Adapter,
+            ac1032_native_opt_in,
+        )
+
+        if ac1032_native_opt_in():
+            adapter = DwgNativeAc1032Adapter(fallback_adapter=adapter)
         return DwgBackendSelection(
             mode=normalized,
             adapter=adapter,

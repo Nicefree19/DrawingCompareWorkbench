@@ -70,6 +70,11 @@ from .dwg_backend import (
 )
 from .dwg_binary_reader import DwgBinaryReadError, DwgBinaryReader, DwgHandleRef
 from .dwg_native_reader import DwgNativeAc1015Adapter
+from .dwg_native_ac1032_adapter import (
+    AC1032_NATIVE_OPT_IN_ENV,
+    DwgNativeAc1032Adapter,
+    ac1032_native_opt_in,
+)
 from .dwg_object_decoder import DwgMvpObjectType, DwgObjectDecodeError, DwgObjectDecoder
 from .dwg_section_reader import (
     DwgFileHeader,
@@ -321,6 +326,9 @@ __all__ = [
     "DwgObjectDecodeError",
     "DwgObjectDecoder",
     "DwgNativeAc1015Adapter",
+    "DwgNativeAc1032Adapter",
+    "AC1032_NATIVE_OPT_IN_ENV",
+    "ac1032_native_opt_in",
     "DwgVersionDetector",
     "DwgVersionInfo",
     "DrawingNormalizer",
