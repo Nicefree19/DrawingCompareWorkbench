@@ -25,11 +25,21 @@ Progress (2026-06-14, `dwg_r2018_reader.py`, 13 tests):
   bit-code toolkit (B/BB/BS/BL/BD/MC/MS/handle/string) and `dwg_object_decoder`
   has LINE/CIRCLE/ARC/LWPOLYLINE geometry decoders + object-type constants.
 
-**Both spike unknowns (container navigable? R2004 compression decodable
-clean-room?) are answered YES, the full container navigation is proven, and the
-real object bytes are reachable.** Remaining S3: object enumeration (handle map
--> object offset/type walk) then geometry decode -> canonical. Still
-diagnostic-only — no objects bit-decoded yet, contract still DECODING-gated.
+- **S3b (object framing + object-type decode) DONE** — cracked the R2018
+  object stride against real data: each object is `[MS object-size][MC
+  handle-stream-bits][bit stream: MS bytes][RS CRC]`, so the next object is at
+  `offset + (MS+MC field bytes) + MS + 2`. `read_r2018_object_type` (spec 2.12:
+  bit pair + 1-2 bytes) + `read_r2018_object_run` decode a contiguous run on
+  both real files into real DWG object types (sample: 111 objects ->
+  LINE 32 / POINT 21 / DICTIONARY 19 / LAYER 13 / CIRCLE 1 / INSERT 4 / ...).
+
+**Both spike unknowns are answered YES, the container is fully navigated, and
+real object TYPES decode from the bit stream.** Remaining S3: (1) full
+enumeration across free-space gaps needs the R2018 `AcDb:Handles` index (its
+offset encoding differs from AC1015 and is not yet decoded; the sequential walk
+covers one contiguous run); (2) geometry decode (LINE/CIRCLE/ARC/LWPOLYLINE/TEXT
+coordinates) -> canonical. Still diagnostic-only — no geometry decoded yet,
+contract still DECODING-gated.
 
 ## 1. Goal
 

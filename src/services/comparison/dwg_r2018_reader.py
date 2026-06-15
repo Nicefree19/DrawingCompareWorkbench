@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
+
+from .dwg_binary_reader import DwgBinaryReader, DwgBinaryReadError
 
 R2018_VERSION_CODE = "AC1032"
 
@@ -607,6 +609,105 @@ def read_r2004_data_section(
     return bytes(buffer)
 
 
+# ---------------------------------------------------------------------------
+# Spike S3b: object-stream framing + object-type decode (diagnostic-only).
+# ---------------------------------------------------------------------------
+
+#: For R18+, the AcDb:AcDbObjects buffer starts with this RL value.
+OBJECT_SECTION_LEADING_RL = 0x0DCA
+#: First object begins right after the 4-byte leading RL.
+OBJECT_RUN_START_OFFSET = 4
+#: An object never exceeds one decompressed page; used as a sanity bound when
+#: walking (a too-large MS means we have walked into free space / a gap).
+MAX_R2004_OBJECT_BYTES = 0x7400
+
+
+def read_r2018_object_type(reader: DwgBinaryReader) -> int:
+    """Decode an R2010+ object type (public spec 2.12): a bit pair + 1-2 bytes."""
+
+    pair = reader.read_bit_pair()
+    if pair == 0:
+        return reader.read_bits(8)
+    if pair == 1:
+        return reader.read_bits(8) + 0x1F0
+    return reader.read_bits(16)
+
+
+@dataclass(frozen=True)
+class R2018ObjectRun:
+    """One contiguous run of decoded object (offset, size, type) tuples.
+
+    Full traversal of every object requires the AcDb:Handles index (the R2018
+    handle-map encoding is not yet decoded); this walks a contiguous run from a
+    known object start and stops at the first free-space gap or the buffer end.
+    """
+
+    start_offset: int
+    object_count: int
+    end_offset: int
+    stopped_at_gap: bool
+    type_counts: Dict[int, int] = field(default_factory=dict)
+    objects: List[Tuple[int, int, int]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "start_offset": self.start_offset,
+            "object_count": self.object_count,
+            "end_offset": self.end_offset,
+            "stopped_at_gap": self.stopped_at_gap,
+            "type_counts": {str(k): v for k, v in self.type_counts.items()},
+            "objects": [list(item) for item in self.objects],
+        }
+
+
+def read_r2018_object_run(
+    objects_buffer: bytes | bytearray | memoryview,
+    *,
+    start_offset: int = OBJECT_RUN_START_OFFSET,
+    max_objects: int = 1_000_000,
+) -> R2018ObjectRun:
+    """Walk a contiguous run of objects from ``start_offset``.
+
+    Each object is ``[MS object-size][MC handle-stream-bits][bit stream: MS
+    bytes][RS CRC]``; the next object is ``offset + (MS+MC field bytes) + MS +
+    2``. Reads only the object TYPE (no geometry yet). Stops at a free-space gap
+    (``MS <= 0`` or ``MS`` beyond a page) or the buffer end.
+    """
+
+    buffer = bytes(objects_buffer)
+    size = len(buffer)
+    objects: List[Tuple[int, int, int]] = []
+    type_counts: Dict[int, int] = {}
+    offset = start_offset
+    stopped_at_gap = False
+
+    while offset < size - 2 and len(objects) < max_objects:
+        reader = DwgBinaryReader(buffer, offset=offset)
+        try:
+            object_size = reader.read_modular_short()
+            if object_size <= 0 or object_size > MAX_R2004_OBJECT_BYTES:
+                stopped_at_gap = True
+                break
+            reader.read_modular_char()  # MC handle-stream size; advances byte_pos
+            header_bytes = reader.byte_pos
+            object_type = read_r2018_object_type(reader)
+        except DwgBinaryReadError:
+            stopped_at_gap = True
+            break
+        objects.append((offset, object_size, object_type))
+        type_counts[object_type] = type_counts.get(object_type, 0) + 1
+        offset = offset + header_bytes + object_size + 2
+
+    return R2018ObjectRun(
+        start_offset=start_offset,
+        object_count=len(objects),
+        end_offset=offset,
+        stopped_at_gap=stopped_at_gap,
+        type_counts=type_counts,
+        objects=objects,
+    )
+
+
 __all__ = [
     "R2018_VERSION_CODE",
     "R2004_HEADER_OFFSET",
@@ -618,10 +719,14 @@ __all__ = [
     "DATA_SECTION_PAGE_TYPE",
     "SYSTEM_PAGE_HEADER_LENGTH",
     "DATA_PAGE_HEADER_LENGTH",
+    "OBJECT_SECTION_LEADING_RL",
+    "OBJECT_RUN_START_OFFSET",
+    "MAX_R2004_OBJECT_BYTES",
     "DwgR2018ContainerDiagnostic",
     "R2004SectionPageMapDiagnostic",
     "R2004Section",
     "R2004SectionMapDiagnostic",
+    "R2018ObjectRun",
     "deobfuscate_r2004_header",
     "inspect_r2018_container",
     "decompress_r2004",
@@ -630,4 +735,6 @@ __all__ = [
     "read_r2004_section_map",
     "decrypt_r2004_data_page_header",
     "read_r2004_data_section",
+    "read_r2018_object_type",
+    "read_r2018_object_run",
 ]

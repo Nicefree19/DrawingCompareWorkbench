@@ -22,6 +22,7 @@ from src.services.comparison.dwg_r2018_reader import (
     read_r2004_data_section,
     read_r2004_section_map,
     read_r2004_section_page_map,
+    read_r2018_object_run,
 )
 
 # Local-only real AC1032 corpus (git-ignored). The integration test runs the
@@ -222,3 +223,28 @@ def test_real_ac1032_reads_acdbobjects_data_section(sample: Path) -> None:
     handles = read_r2004_data_section(raw, section_name="AcDb:Handles")
     handle_section = next(s for s in section_map.sections if s.name == "AcDb:Handles")
     assert len(handles) == handle_section.size
+
+
+@pytest.mark.parametrize("sample", REAL_AC1032_SAMPLES, ids=lambda p: p.name)
+def test_real_ac1032_object_run_decodes_object_types(sample: Path) -> None:
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    objects = read_r2004_data_section(sample.read_bytes(), section_name="AcDb:AcDbObjects")
+    # The R18+ object buffer starts with the RL 0x0dca, then objects.
+    assert int.from_bytes(objects[0:4], "little") == 0x0DCA
+
+    run = read_r2018_object_run(objects)
+
+    # S3b: the object framing (MS/MC stride) + object-type decode (BB + 1-2
+    # bytes) must yield a clean run of real DWG object types, not garbage.
+    assert run.object_count >= 30, run.to_dict()
+    assert run.stopped_at_gap is True  # a contiguous run, not the whole section
+    # Every decoded type is a plausible fixed DWG object type (garbage framing
+    # produces large/random type ids).
+    assert all(0 <= t < 1024 for t in run.type_counts), run.type_counts
+    # The run contains real geometry/structure (LINE=19, CIRCLE=18, ARC=17,
+    # LWPOLYLINE=77, POINT=27).
+    assert any(t in run.type_counts for t in (17, 18, 19, 27, 77)), run.type_counts
+    # First object decodes at the section start.
+    assert run.objects[0][0] == 4
