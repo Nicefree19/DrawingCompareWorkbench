@@ -459,6 +459,15 @@ _GT_MTEXT = {
     0x513: {"insert": (741.023750025, 14.696812402), "height": 1.424925206,
             "text": "Sample annotation"},
 }
+_GT_INSERT = {
+    # block references whose name resolves through the handle stream -> the BLOCK
+    # HEADER's string-stream name. (Anonymous '*U' blocks are excluded — their
+    # raw stored name is '*U', which ODA's DXF renders with an index suffix.)
+    0x704: {"insert": (920.679626663, 16.352853774), "xscale": 0.363373695,
+            "rotation": 0.0, "block_name": "MyBlock"},
+    0x783: {"insert": (-208.14953277, 8.990124366), "xscale": 1.217889265,
+            "rotation": 0.0, "block_name": "my_block_v2"},
+}
 
 
 def _approx(actual, expected, tol=1e-6):
@@ -474,7 +483,7 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     assert table.status == "decoded", table.message
     # A substantial number of entities decode across all four supported types.
     assert table.decoded_count >= 50, table.type_counts
-    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT"):
+    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT", "INSERT"):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by_handle = {e.handle: e for e in table.entities}
@@ -538,6 +547,16 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
         assert _approx(entity.geometry["height"], expected["height"])
         # Multi-line value from the string stream (raw newlines preserved).
         assert entity.geometry["text"] == expected["text"]
+
+    for handle, expected in _GT_INSERT.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "INSERT"
+        assert _approx(entity.geometry["insert"][0], expected["insert"][0])
+        assert _approx(entity.geometry["insert"][1], expected["insert"][1])
+        assert _approx(entity.geometry["scale"][0], expected["xscale"])
+        assert _approx(entity.geometry["rotation_deg"], expected["rotation"], tol=1e-4)
+        # Block name resolved via the handle stream -> BLOCK HEADER name.
+        assert entity.geometry["block_name"] == expected["block_name"]
 
 
 def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
@@ -630,6 +649,17 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert mtext["geometry"]["height"] == 1.5
     assert mtext["geometry"]["text"] == "line1\nline2"
     assert mtext["geometry"]["canonical_text"] == "line1\nline2"
+
+    insert = r2018_entity_to_canonical(
+        R2018Entity(0x704, 0x07, "INSERT",
+                    {"insert": (10.0, 20.0, 0.0), "scale": (2.0, 2.0, 1.0),
+                     "rotation_deg": 90.0, "block_name": "DETAIL-A"})
+    )
+    assert insert["type"] == "insert"
+    assert insert["geometry"]["insert"] == {"x": 10.0, "y": 20.0, "z": 0.0}
+    assert insert["geometry"]["scale"] == {"x": 2.0, "y": 2.0, "z": 1.0}
+    assert insert["geometry"]["rotation_deg"] == 90.0
+    assert insert["geometry"]["block_name"] == "DETAIL-A"
 
 
 def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: Path) -> None:
