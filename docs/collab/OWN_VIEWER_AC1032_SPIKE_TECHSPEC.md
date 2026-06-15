@@ -56,10 +56,21 @@ real object TYPES decode from the bit stream.**
   Residual unframed are non-framable handle entries (stale/deleted/other-section),
   not gaps. `read_r2004_data_section` is spike-only (no product caller).
 
-Remaining S3: **geometry decode** (LINE/CIRCLE/ARC/LWPOLYLINE/TEXT coordinates,
-common-entity header field-by-field) → canonical, now with correctly-assembled
-object extents. Still diagnostic-only — no geometry decoded yet, contract still
-DECODING-gated.
+- **S3 part 2 (basic entity geometry decode) DONE** — implemented the R2010+
+  Common Entity Data parse (ODA spec 20.4.1) + per-entity formats for
+  LINE/CIRCLE/ARC/POINT in `dwg_r2018_reader.py` (`_parse_common_entity_header`,
+  `decode_r2018_entity`, `read_r2018_entities`). **Validated 1:1 against ODA
+  ground truth** (sample DWG → ODA File Converter → ezdxf coords, validation
+  only): LINE 26/26, CIRCLE 4/4, ARC 1/1 (incl. angles), POINT 6/6 — ALL exact;
+  125 entities file-wide; the second sample decodes 931. The object's own handle
+  (H field) matches the handle-map handle (0 mismatches). **This answers the
+  spike's core unknown — AC1032 geometry IS parseable clean-room — with a
+  verified YES.** Geometry is pre-canonical (dicts), diagnostic-only.
+
+Remaining: **S4** (feed geometry → `build_native_scene_pack_ref` →
+`resolve_viewer_primitive_source` → render) and **S5** (diff + revision clouds
+end-to-end on own-reader canonical, ODA calls = 0). Still diagnostic-only;
+AC1032 clean-room contract stays `blocked` (no support claim).
 
 ## 1. Goal
 

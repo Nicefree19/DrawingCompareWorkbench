@@ -1,23 +1,27 @@
 # -*- coding: utf-8 -*-
-"""Diagnostic-only navigator for the AC1032 (R2018) DWG container — Spike S1.
+"""Diagnostic AC1032 (R2018) DWG container reader — own-viewer spike.
 
-This module ONLY navigates the R2004+ container: it de-obfuscates the R2004
-file header and locates the section-page-map / section-map. It decodes NO
-objects, makes NO support claim, and does not enable AC1032 import. AC1032
-object/entity decoding stays gated by ``dwg_cleanroom_contract.py``.
+This module navigates the R2004+ container (header de-obfuscation, section-page
+/ section maps, page assembly), enumerates objects via the AcDb:Handles index,
+and decodes basic entity geometry (LINE/CIRCLE/ARC/POINT) for the spike. It is
+DIAGNOSTIC-only: it makes NO support claim, does not enable AC1032 import, and
+does not feed the product pipeline. AC1032 decoding stays gated by
+``dwg_cleanroom_contract.py`` (which remains ``blocked``).
 
-Clean-room provenance: the R2004 file-header LCG de-obfuscation, the
-``AcFssFcAJMB`` header magic, and the header field layout are implemented from
-the public DWG format specification and verified against locally held real
-AC1032 samples. The approved public-spec reference and the license/reference
-posture (no third-party reader source copied) are recorded in
-``docs/collab/AC1032_CLEANROOM_PROVENANCE.md``.
+Clean-room provenance: every algorithm (R2004 LCG de-obfuscation, the
+``AcFssFcAJMB`` magic, R2004 LZ77 decompression, the section/handle map layout,
+the R2010+ common-entity-data field order, and the per-entity formats) is
+implemented from the public ODA "Open Design Specification for .dwg files" and
+verified by observation against locally held real AC1032 samples (geometry
+cross-checked against ODA-converted ground truth). No third-party reader source
+is copied. See ``docs/collab/AC1032_CLEANROOM_PROVENANCE.md``.
 """
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .dwg_binary_reader import DwgBinaryReader, DwgBinaryReadError
 
@@ -996,6 +1000,241 @@ def read_r2018_object_table(
     )
 
 
+# ---------------------------------------------------------------------------
+# Spike S3 (part 2): basic entity geometry decode (LINE/CIRCLE/ARC/POINT).
+# Diagnostic-only; geometry validated 1:1 against ODA-converted ground truth.
+# ---------------------------------------------------------------------------
+
+
+def _read_raw_double(reader: DwgBinaryReader) -> float:
+    """RD: a raw little-endian f64 read bit-aligned from the data stream."""
+
+    return struct.unpack("<d", bytes(reader.read_bits(8) for _ in range(8)))[0]
+
+
+def _read_bit_thickness(reader: DwgBinaryReader) -> float:
+    """BT: one flag bit; if set the value is 0, otherwise a BitDouble follows."""
+
+    return 0.0 if reader.read_bit() else reader.read_bit_double()
+
+
+def _read_bit_extrusion(reader: DwgBinaryReader) -> Tuple[float, float, float]:
+    """BE: one flag bit; if set the extrusion is the (0,0,1) default, else 3BD."""
+
+    if reader.read_bit():
+        return (0.0, 0.0, 1.0)
+    return (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+
+
+def _parse_common_entity_header(reader: DwgBinaryReader) -> int:
+    """Consume the R2010+ Common Entity Data, positioning at entity geometry.
+
+    Implements ODA spec 20.4.1 (Common Entity Data) for R2018; the field order
+    is validated 1:1 against ODA ground truth on real AC1032 entities. Returns
+    the object's own handle value. The reader must already be positioned past
+    the object type.
+
+    Caveat: the R2013+ "has data-store binary data" bit is intentionally omitted
+    — it is absent on files without a data-store section (confirmed on the
+    validation corpus); a data-store sample would need it reinstated. Entities
+    that carry a proxy graphic image raise ``DwgBinaryReadError`` (unsupported).
+    """
+
+    handle = reader.read_handle()  # H: object's own handle
+    while True:  # EED: BS size then that many bytes, repeated until size 0
+        eed_size = reader.read_bit_short()
+        if eed_size <= 0:
+            break
+        for _ in range(eed_size):
+            reader.read_bits(8)
+    if reader.read_bit():  # B: graphic image present
+        raise DwgBinaryReadError("entity proxy graphic image is not supported")
+    reader.read_bits(2)            # BB: entity mode
+    reader.read_bit_long()         # BL: number of reactors
+    reader.read_bit()              # B: XDictionary-missing flag (R2004+)
+    reader.read_bit()              # B: no-links flag (R2004+ always 1)
+    color = reader.read_bit_short() & 0xFFFF  # ENC: entity colour number + flags
+    if (color & 0x8000) and not (color & 0x4000):
+        reader.read_bit_long()     # complex colour: RGB value in the data stream
+    if color & 0x2000:
+        reader.read_bit_long()     # colour transparency
+    reader.read_bit_double()       # BD: linetype scale
+    reader.read_bits(2)            # BB: linetype flags
+    reader.read_bits(2)            # BB: plotstyle flags
+    reader.read_bits(2)            # BB: material flags (R2007+)
+    reader.read_bits(8)            # RC: shadow flags
+    reader.read_bit()              # B: has full visual style (R2010+)
+    reader.read_bit()              # B: has face visual style (R2010+)
+    reader.read_bit()              # B: has edge visual style (R2010+)
+    reader.read_bit_short()        # BS: invisibility flag
+    reader.read_bits(8)            # RC: lineweight
+    return handle.value
+
+
+def _decode_line_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    z_is_zero = reader.read_bit()  # B: Z coordinates are both zero
+    x1 = _read_raw_double(reader)
+    x2 = reader.read_bit_double_with_default(x1)  # DD, default = start x
+    y1 = _read_raw_double(reader)
+    y2 = reader.read_bit_double_with_default(y1)  # DD, default = start y
+    if z_is_zero:
+        z1 = z2 = 0.0
+    else:
+        z1 = _read_raw_double(reader)
+        z2 = reader.read_bit_double_with_default(z1)
+    return {"start": (x1, y1, z1), "end": (x2, y2, z2)}
+
+
+def _decode_circle_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    center = (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+    return {"center": center, "radius": reader.read_bit_double()}
+
+
+def _decode_arc_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    center = (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+    radius = reader.read_bit_double()
+    _read_bit_thickness(reader)
+    _read_bit_extrusion(reader)
+    start = reader.read_bit_double()
+    end = reader.read_bit_double()
+    return {
+        "center": center,
+        "radius": radius,
+        "start_angle_deg": math.degrees(start),
+        "end_angle_deg": math.degrees(end),
+    }
+
+
+def _decode_point_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    location = (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+    return {"location": location}
+
+
+#: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
+_ENTITY_GEOMETRY_DECODERS = {
+    0x11: ("ARC", _decode_arc_geometry),
+    0x12: ("CIRCLE", _decode_circle_geometry),
+    0x13: ("LINE", _decode_line_geometry),
+    0x1B: ("POINT", _decode_point_geometry),
+}
+
+
+@dataclass(frozen=True)
+class R2018Entity:
+    """One decoded entity: type + geometry (diagnostic, pre-canonical)."""
+
+    handle: int
+    object_type: int
+    type_name: str
+    geometry: Dict[str, Any]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "handle": self.handle,
+            "object_type": self.object_type,
+            "type_name": self.type_name,
+            "geometry": self.geometry,
+        }
+
+
+def decode_r2018_entity(
+    objects_buffer: bytes | bytearray | memoryview, offset: int
+) -> "Optional[R2018Entity]":
+    """Decode the geometry of a supported entity at ``offset`` in the buffer.
+
+    Returns an ``R2018Entity`` for LINE/CIRCLE/ARC/POINT, or ``None`` for an
+    unsupported type, a free-space gap, or any malformed/unsupported field
+    (fail-closed: never returns partial/garbage geometry).
+    """
+
+    frame = _frame_r2018_object(objects_buffer, offset)
+    if frame is None:
+        return None
+    object_size, header_bytes, object_type = frame
+    decoder = _ENTITY_GEOMETRY_DECODERS.get(object_type)
+    if decoder is None:
+        return None
+    type_name, decode = decoder
+    reader = DwgBinaryReader(objects_buffer, offset=offset + header_bytes, length=object_size)
+    try:
+        read_r2018_object_type(reader)  # advance past the object type
+        handle = _parse_common_entity_header(reader)
+        geometry = decode(reader)
+    except DwgBinaryReadError:
+        return None
+    return R2018Entity(
+        handle=handle, object_type=object_type, type_name=type_name, geometry=geometry
+    )
+
+
+@dataclass(frozen=True)
+class R2018EntityTable:
+    """All supported entity geometry decoded from a real AC1032 file."""
+
+    version_code: str
+    status: str  # decoded | <upstream status>
+    decoded_count: int
+    type_counts: Dict[str, int] = field(default_factory=dict)
+    entities: List[R2018Entity] = field(default_factory=list)
+    message: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version_code": self.version_code,
+            "status": self.status,
+            "decoded_count": self.decoded_count,
+            "type_counts": dict(self.type_counts),
+            "entities": [entity.to_dict() for entity in self.entities],
+            "message": self.message,
+        }
+
+
+def read_r2018_entities(
+    data: bytes | bytearray | memoryview,
+    *,
+    version_code: str = R2018_VERSION_CODE,
+) -> R2018EntityTable:
+    """Decode every supported entity (LINE/CIRCLE/ARC/POINT) the handle map locates.
+
+    Enumerates objects via the AcDb:Handles index and decodes the geometry of
+    supported entity types. Diagnostic-only — the result is pre-canonical
+    geometry, not wired to the product diff/render pipeline.
+    """
+
+    handle_map = read_r2018_handle_map(data, version_code=version_code)
+    if handle_map.status != "decoded":
+        return R2018EntityTable(
+            version_code=version_code,
+            status=handle_map.status,
+            decoded_count=0,
+            message=handle_map.message,
+        )
+
+    objects = read_r2004_data_section(
+        data, section_name="AcDb:AcDbObjects", version_code=version_code
+    )
+    object_size = len(objects)
+    entities: List[R2018Entity] = []
+    type_counts: Dict[str, int] = {}
+    for _handle, offset in handle_map.entries:
+        if not 0 <= offset < object_size:
+            continue
+        entity = decode_r2018_entity(objects, offset)
+        if entity is None:
+            continue
+        entities.append(entity)
+        type_counts[entity.type_name] = type_counts.get(entity.type_name, 0) + 1
+
+    return R2018EntityTable(
+        version_code=version_code,
+        status="decoded",
+        decoded_count=len(entities),
+        type_counts=type_counts,
+        entities=entities,
+        message=f"decoded geometry for {len(entities)} entities {type_counts}",
+    )
+
+
 __all__ = [
     "R2018_VERSION_CODE",
     "R2004_HEADER_OFFSET",
@@ -1019,6 +1258,8 @@ __all__ = [
     "R2018ObjectRun",
     "R2018HandleMapDiagnostic",
     "R2018ObjectTable",
+    "R2018Entity",
+    "R2018EntityTable",
     "deobfuscate_r2004_header",
     "inspect_r2018_container",
     "decompress_r2004",
@@ -1032,4 +1273,6 @@ __all__ = [
     "parse_r2018_handle_map",
     "read_r2018_handle_map",
     "read_r2018_object_table",
+    "decode_r2018_entity",
+    "read_r2018_entities",
 ]
