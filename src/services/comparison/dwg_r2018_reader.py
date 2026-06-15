@@ -1350,6 +1350,56 @@ def _resolve_insert_block_name(
     return name
 
 
+#: DIMENSION subtypes (spec 20.3 fixed type ids 0x14-0x1A) all share the Common
+#: Dimension Data block (ODA 20.4.22); the type id maps to the DXF dimension-type
+#: code (group 70 low bits, as ezdxf reports it).
+_DIMENSION_OBJECT_TYPES = {
+    0x14: 6,  # ORDINATE
+    0x15: 0,  # LINEAR
+    0x16: 1,  # ALIGNED
+    0x17: 5,  # ANG3Pt (angular, 3-point)
+    0x18: 2,  # ANG2Ln (angular, 2-line)
+    0x19: 4,  # RADIUS
+    0x1A: 3,  # DIAMETER
+}
+
+
+def _decode_dimension_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str, Any]:
+    """Decode the shared Common Dimension Data (ODA 20.4.22, R2010/R2018).
+
+    Reads through the Actual Measurement field, which is common to all seven
+    dimension subtypes; the subtype-specific definition points that follow it are
+    not needed for the diff (which keys on the measurement-text position and the
+    measured value). The user-text override is a TV in the R2007+ string stream,
+    read separately and passed in. Validated 1:1 against ODA ground truth — text
+    midpoint, dimtype, and the raw stored measurement (DXF group 42) — across all
+    seven subtypes. ``measurement`` is the raw stored value (radians for the
+    angular subtypes), matching what the DWG file holds rather than ezdxf's
+    recomputed ``get_measurement()``.
+    """
+
+    reader.read_bits(8)                # RC: version (0 = R2010)
+    reader.read_bit_double()           # BD: extrusion x ...
+    reader.read_bit_double()           # BD: extrusion y
+    reader.read_bit_double()           # BD: extrusion z
+    tmx = _read_raw_double(reader)     # 2RD: text midpoint
+    tmy = _read_raw_double(reader)
+    reader.read_bit_double()           # BD: elevation
+    reader.read_bits(8)                # RC: flags 1
+    # User text TV lives in the string stream (R2007+); absent from the data stream.
+    for _ in range(6):                 # BD x6: text rot, horiz dir, ins X/Y/Z-scale,
+        reader.read_bit_double()       #        ins rotation
+    reader.read_bit_short()            # BS: attachment point (R2000+)
+    reader.read_bit_short()            # BS: linespacing style
+    reader.read_bit_double()           # BD: linespacing factor
+    measurement = reader.read_bit_double()  # BD: actual measurement
+    return {
+        "text_midpoint": (tmx, tmy, 0.0),
+        "measurement": measurement,
+        "text": text_value,
+    }
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
@@ -1394,10 +1444,10 @@ def decode_r2018_entity(
     """Decode the geometry of a supported entity at ``offset`` in the buffer.
 
     Returns an ``R2018Entity`` for LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/
-    INSERT, or ``None`` for an unsupported type, a free-space gap, or any
-    malformed/unsupported field (fail-closed). ``handle_map`` (handle -> object
-    offset) is only needed to resolve an INSERT's block name; without it an
-    INSERT decodes with an empty ``block_name``.
+    INSERT/DIMENSION, or ``None`` for an unsupported type, a free-space gap, or
+    any malformed/unsupported field (fail-closed). ``handle_map`` (handle ->
+    object offset) is only needed to resolve an INSERT's block name; without it
+    an INSERT decodes with an empty ``block_name``.
     """
 
     frame = _frame_r2018_object(objects_buffer, offset)
@@ -1407,7 +1457,14 @@ def decode_r2018_entity(
     string_decoder = _STRING_STREAM_DECODERS.get(object_type)
     geometry_decoder = _ENTITY_GEOMETRY_DECODERS.get(object_type)
     is_insert = object_type == INSERT_OBJECT_TYPE
-    if string_decoder is None and geometry_decoder is None and not is_insert:
+    dimtype = _DIMENSION_OBJECT_TYPES.get(object_type)
+    is_dimension = dimtype is not None
+    if (
+        string_decoder is None
+        and geometry_decoder is None
+        and not is_insert
+        and not is_dimension
+    ):
         return None
     data_start_byte = offset + header_bytes
     reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
@@ -1425,6 +1482,18 @@ def decode_r2018_entity(
             )
             type_name, decode = string_decoder
             geometry = decode(reader, text_value)
+        elif is_dimension:
+            # DIMENSION: the user-text override is a TV in the R2007+ string
+            # stream (read like TEXT); the measured value is in the data stream.
+            framing = DwgBinaryReader(objects_buffer, offset=offset)
+            framing.read_modular_short()
+            handle_stream_bits = framing.read_modular_char()
+            text_value = _read_text_string_value(
+                objects_buffer, data_start_byte, object_size, handle_stream_bits
+            )
+            geometry = _decode_dimension_geometry(reader, text_value)
+            geometry["dimtype"] = dimtype
+            type_name = "DIMENSION"
         elif is_insert:
             geometry = _decode_insert_geometry(reader)
             framing = DwgBinaryReader(objects_buffer, offset=offset)
@@ -1472,10 +1541,10 @@ def read_r2018_entities(
     *,
     version_code: str = R2018_VERSION_CODE,
 ) -> R2018EntityTable:
-    """Decode every supported entity (LINE/CIRCLE/ARC/POINT) the handle map locates.
+    """Decode every supported entity the AcDb:Handles index locates.
 
-    Enumerates objects via the AcDb:Handles index and decodes the geometry of
-    supported entity types. Diagnostic-only — the result is pre-canonical
+    Supported types: LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/INSERT and the
+    seven DIMENSION subtypes. Diagnostic-only — the result is pre-canonical
     geometry, not wired to the product diff/render pipeline.
     """
 
@@ -1527,13 +1596,14 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "CIRCLE": "circle",
     "ARC": "arc",
     "LWPOLYLINE": "polyline",
-    # POINT/TEXT/MTEXT are not rendered by the scene-pack producer (counted
-    # unsupported, visible) but TEXT/MTEXT carry the value the structural diff
-    # cares about.
+    # POINT/TEXT/MTEXT/DIMENSION are not rendered by the scene-pack producer
+    # (counted unsupported, visible) but TEXT/MTEXT/DIMENSION carry the value the
+    # structural diff cares about.
     "POINT": "point",
     "TEXT": "text",
     "MTEXT": "mtext",
     "INSERT": "insert",  # block reference; carries the block name for the diff
+    "DIMENSION": "dimension",  # carries the measured value the structural diff cares about
 }
 
 
@@ -1570,6 +1640,11 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
         sx, sy = abs(geometry["scale"][0]) or 1.0, abs(geometry["scale"][1]) or 1.0
         xs = [ix - sx, ix + sx]
         ys = [iy - sy, iy + sy]
+    elif entity.type_name == "DIMENSION":
+        # No reliable extent without the subtype definition points; anchor on the
+        # measurement-text midpoint (a point box, like POINT).
+        xs = [geometry["text_midpoint"][0]]
+        ys = [geometry["text_midpoint"][1]]
     else:  # POINT
         xs = [geometry["location"][0]]
         ys = [geometry["location"][1]]
@@ -1651,6 +1726,15 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "scale": _canonical_point(geometry["scale"]),
             "rotation_deg": geometry["rotation_deg"],
             "block_name": geometry["block_name"],
+        }
+    elif entity.type_name == "DIMENSION":
+        out["geometry"] = {
+            "type": "dimension",
+            "text_midpoint": _canonical_point(geometry["text_midpoint"]),
+            "measurement": geometry["measurement"],
+            "dimtype": geometry["dimtype"],
+            "text": geometry["text"],
+            "canonical_text": geometry["text"],
         }
     else:  # POINT
         out["geometry"] = {"type": "point", "location": _canonical_point(geometry["location"])}
