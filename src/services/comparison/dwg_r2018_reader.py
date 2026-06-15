@@ -1041,10 +1041,11 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> int:
     """
 
     handle = reader.read_handle()  # H: object's own handle
-    while True:  # EED: BS size then that many bytes, repeated until size 0
+    while True:  # EED: BS size, the owning APPID handle, then that many bytes
         eed_size = reader.read_bit_short()
         if eed_size <= 0:
             break
+        reader.read_handle()  # EED block's owning APPID handle (inline)
         for _ in range(eed_size):
             reader.read_bits(8)
     if reader.read_bit():  # B: graphic image present
@@ -1151,6 +1152,92 @@ def _decode_lwpolyline_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
     return {"vertices": vertices, "bulges": bulges, "closed": bool(flag & _LWPOLY_CLOSED)}
 
 
+#: TEXT (spec type 0x01) needs the R2007+ string stream for its value, so it is
+#: decoded on a separate path (not in the geometry-only decoder map).
+TEXT_OBJECT_TYPE = 0x01
+
+
+def _read_text_string_value(
+    objects_buffer: bytes,
+    data_start_byte: int,
+    object_size: int,
+    handle_stream_bits: int,
+) -> str:
+    """Read the first text value (TV) from the R2007+ string stream.
+
+    Layout (ODA spec p.103): the object body is data-stream + string-stream +
+    handle-stream. The handle stream is the last ``handle_stream_bits`` bits, so
+    ``end_bit = object_size*8 - handle_stream_bits`` ends the pre-handles section.
+    Its last bit is the string-stream-present flag; if set, a 16-bit
+    ``strDataSize`` (optionally extended via the 0x8000 bit) precedes it and the
+    string stream is ``[end_bit-17-strDataSize, end_bit-17)``. Each string there
+    is a BS char-count followed by that many UTF-16LE characters. Returns ``''``
+    when no string stream is present or on any malformed read (fail-closed).
+    """
+
+    end_bit = object_size * 8 - handle_stream_bits
+    if end_bit < 1:
+        return ""
+
+    def reader_at(bit: int) -> DwgBinaryReader:
+        reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
+        reader.seek_bits(bit)
+        return reader
+
+    def u16_at(bit: int) -> int:
+        reader = reader_at(bit)
+        return reader.read_bits(8) | (reader.read_bits(8) << 8)
+
+    try:
+        if not reader_at(end_bit - 1).read_bit():
+            return ""
+        str_data_size = u16_at(end_bit - 17)
+        size_fields_end = end_bit - 17
+        if str_data_size & 0x8000:
+            str_data_size = (str_data_size & 0x7FFF) | (u16_at(end_bit - 33) << 15)
+            size_fields_end = end_bit - 33
+        string_stream_start = size_fields_end - str_data_size
+        if string_stream_start < 0:
+            return ""
+        reader = reader_at(string_stream_start)
+        char_count = reader.read_bit_short()
+        if char_count <= 0 or char_count > object_size * 4:
+            return ""
+        return "".join(
+            chr(reader.read_bits(8) | (reader.read_bits(8) << 8)) for _ in range(char_count)
+        )
+    except DwgBinaryReadError:
+        return ""
+
+
+def _decode_text_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str, Any]:
+    """Decode TEXT (spec 20.4.3, R2000+) geometry; the value comes from the
+    string stream (read separately and passed in)."""
+
+    flags = reader.read_bits(8)  # RC DataFlags (presence bits for optional fields)
+    if not (flags & 0x01):
+        _read_raw_double(reader)  # elevation
+    ix = _read_raw_double(reader)
+    iy = _read_raw_double(reader)  # insertion point 2RD
+    if not (flags & 0x02):
+        reader.read_bit_double_with_default(ix)
+        reader.read_bit_double_with_default(iy)  # alignment point 2DD
+    _read_bit_extrusion(reader)
+    _read_bit_thickness(reader)
+    if not (flags & 0x04):
+        _read_raw_double(reader)  # oblique angle
+    rotation = 0.0
+    if not (flags & 0x08):
+        rotation = _read_raw_double(reader)  # rotation angle
+    height = _read_raw_double(reader)
+    return {
+        "insert": (ix, iy, 0.0),
+        "height": height,
+        "rotation_deg": math.degrees(rotation),
+        "text": text_value,
+    }
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
@@ -1193,15 +1280,29 @@ def decode_r2018_entity(
     if frame is None:
         return None
     object_size, header_bytes, object_type = frame
+    is_text = object_type == TEXT_OBJECT_TYPE
     decoder = _ENTITY_GEOMETRY_DECODERS.get(object_type)
-    if decoder is None:
+    if decoder is None and not is_text:
         return None
-    type_name, decode = decoder
-    reader = DwgBinaryReader(objects_buffer, offset=offset + header_bytes, length=object_size)
+    data_start_byte = offset + header_bytes
+    reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
     try:
         read_r2018_object_type(reader)  # advance past the object type
         handle = _parse_common_entity_header(reader)
-        geometry = decode(reader)
+        if is_text:
+            # the value lives in the string stream; the handle-stream size (the
+            # MC consumed at framing) locates it, so re-read it from the framing.
+            framing = DwgBinaryReader(objects_buffer, offset=offset)
+            framing.read_modular_short()
+            handle_stream_bits = framing.read_modular_char()
+            text_value = _read_text_string_value(
+                objects_buffer, data_start_byte, object_size, handle_stream_bits
+            )
+            type_name = "TEXT"
+            geometry = _decode_text_geometry(reader, text_value)
+        else:
+            type_name, decode = decoder
+            geometry = decode(reader)
     except DwgBinaryReadError:
         return None
     return R2018Entity(
@@ -1289,7 +1390,10 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "CIRCLE": "circle",
     "ARC": "arc",
     "LWPOLYLINE": "polyline",
-    "POINT": "point",  # the scene-pack producer counts POINT as unsupported (visible)
+    # POINT/TEXT are not rendered by the scene-pack producer (counted unsupported,
+    # visible) but TEXT carries the value the structural diff cares about.
+    "POINT": "point",
+    "TEXT": "text",
 }
 
 
@@ -1311,6 +1415,12 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
     elif entity.type_name == "LWPOLYLINE":
         xs = [vertex[0] for vertex in geometry["vertices"]]
         ys = [vertex[1] for vertex in geometry["vertices"]]
+    elif entity.type_name == "TEXT":
+        ix, iy = geometry["insert"][0], geometry["insert"][1]
+        height = geometry["height"]
+        width = height * max(1, len(geometry["text"])) * 0.6  # rough advance width
+        xs = [ix, ix + width]
+        ys = [iy, iy + height]
     else:  # POINT
         xs = [geometry["location"][0]]
         ys = [geometry["location"][1]]
@@ -1367,6 +1477,15 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
                 )
             ],
             "closed": geometry["closed"],
+        }
+    elif entity.type_name == "TEXT":
+        out["geometry"] = {
+            "type": "text",
+            "insert": _canonical_point(geometry["insert"]),
+            "height": geometry["height"],
+            "rotation_deg": geometry["rotation_deg"],
+            "text": geometry["text"],
+            "canonical_text": geometry["text"],
         }
     else:  # POINT
         out["geometry"] = {"type": "point", "location": _canonical_point(geometry["location"])}
