@@ -20,11 +20,14 @@ from src.services.comparison.dwg_r2018_reader import (
     R2004_HEADER_LENGTH,
     R2004_HEADER_MAGIC,
     R2004_HEADER_OFFSET,
+    R2018Entity,
+    build_r2018_canonical_document,
     decode_r2018_entity,
     decompress_r2004,
     deobfuscate_r2004_header,
     inspect_r2018_container,
     parse_r2018_handle_map,
+    r2018_entity_to_canonical,
     read_r2004_data_section,
     read_r2004_section_map,
     read_r2004_section_page_map,
@@ -33,6 +36,11 @@ from src.services.comparison.dwg_r2018_reader import (
     read_r2018_object_run,
     read_r2018_object_table,
 )
+from src.services.comparison.native_scene_pack_builder import (
+    build_native_scene_pack,
+    build_native_scene_pack_ref,
+)
+from src.services.comparison.viewer_primitive_source import resolve_viewer_primitive_source
 
 # Local-only real AC1032 corpus (git-ignored). The integration test runs the
 # real container navigation when present and skips visibly otherwise.
@@ -493,3 +501,75 @@ def test_decode_r2018_entity_returns_none_on_unframable_offset() -> None:
     # Fail-closed: a buffer of zeros frames no object, so geometry decode returns
     # None rather than raising or inventing geometry.
     assert decode_r2018_entity(b"\x00" * 256, 4) is None
+
+
+# ---- Spike S4: decoded geometry -> canonical -> native scene pack -> viewport ----
+
+
+def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
+    line = r2018_entity_to_canonical(
+        R2018Entity(0x2C7, 0x13, "LINE", {"start": (1.0, 2.0, 0.0), "end": (3.0, 4.0, 0.0)})
+    )
+    assert line["type"] == "line" and line["handle"] == "2C7"
+    assert line["geometry"]["start"] == {"x": 1.0, "y": 2.0, "z": 0.0}
+    assert line["geometry"]["end"] == {"x": 3.0, "y": 4.0, "z": 0.0}
+
+    circle = r2018_entity_to_canonical(
+        R2018Entity(0x10, 0x12, "CIRCLE", {"center": (5.0, 6.0, 0.0), "radius": 2.5})
+    )
+    assert circle["type"] == "circle"
+    assert circle["geometry"]["center"] == {"x": 5.0, "y": 6.0, "z": 0.0}
+    assert circle["geometry"]["radius"] == 2.5
+
+    arc = r2018_entity_to_canonical(
+        R2018Entity(0x11, 0x11, "ARC",
+                    {"center": (0.0, 0.0, 0.0), "radius": 5.0,
+                     "start_angle_deg": 0.0, "end_angle_deg": 90.0})
+    )
+    assert arc["type"] == "arc"
+    assert arc["geometry"]["start_angle_deg"] == 0.0 and arc["geometry"]["end_angle_deg"] == 90.0
+
+    point = r2018_entity_to_canonical(
+        R2018Entity(0x12, 0x1B, "POINT", {"location": (7.0, 8.0, 0.0)})
+    )
+    assert point["type"] == "point"  # producer counts this as unsupported (visible)
+    assert point["geometry"]["location"] == {"x": 7.0, "y": 8.0, "z": 0.0}
+
+
+def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: Path) -> None:
+    # S4: the own clean-room reader drives the SAME viewport seam the ezdxf path
+    # uses — decoded geometry -> canonical doc -> native scene pack -> primitives
+    # + bbox — with ZERO ODA/ezdxf calls.
+    sample = REAL_AC1032_SAMPLES[0]
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    raw = sample.read_bytes()
+    table = read_r2018_entities(raw)
+    expected_primitives = sum(table.type_counts.get(k, 0) for k in ("LINE", "CIRCLE", "ARC"))
+
+    document = build_r2018_canonical_document(raw, source_path=sample.name)
+    assert document["schema_version"] == "canonical-drawing/v1"
+    assert len(document["entities"]) == table.decoded_count
+    assert "extents" in document
+
+    pack = build_native_scene_pack(document)
+    # LINE/CIRCLE/ARC flatten to viewport line primitives; POINT is counted
+    # unsupported, never silently dropped.
+    assert pack.metadata["primitive_count"] == expected_primitives
+    assert pack.metadata["unsupported_entity_type_counts"].get("point") == table.type_counts.get("POINT")
+    # The scene bbox spans the decoded geometry.
+    min_x, min_y, max_x, max_y = pack.bbox
+    assert max_x > min_x and max_y > min_y
+
+    ref = build_native_scene_pack_ref(document, tmp_path)
+    assert Path(ref.overview_lod0_path).exists()
+    assert ref.primitive_count == expected_primitives
+
+    source = resolve_viewer_primitive_source(ref)
+    assert source.ok is True
+    assert source.degraded is False
+    assert source.render_mode == "skeleton_preview"
+    assert source.provenance["producer_id"] == "native_scene_pack"
+    assert len(source.primitives) == expected_primitives
+    assert source.world_bbox == pack.bbox

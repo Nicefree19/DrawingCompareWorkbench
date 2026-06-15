@@ -1235,6 +1235,126 @@ def read_r2018_entities(
     )
 
 
+# ---------------------------------------------------------------------------
+# Spike S4 (render bridge): decoded entities -> canonical-drawing/v1 document.
+# The document feeds the existing native scene-pack producer
+# (native_scene_pack_builder.build_native_scene_pack) and the viewport seam,
+# with ZERO ODA/ezdxf calls. Diagnostic-only; not wired to product import.
+# ---------------------------------------------------------------------------
+
+_CANONICAL_ENTITY_TYPE_NAMES = {
+    "LINE": "line",
+    "CIRCLE": "circle",
+    "ARC": "arc",
+    "POINT": "point",  # the scene-pack producer counts POINT as unsupported (visible)
+}
+
+
+def _canonical_point(xyz: Tuple[float, float, float]) -> Dict[str, float]:
+    return {"x": xyz[0], "y": xyz[1], "z": xyz[2]}
+
+
+def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
+    """Convert a decoded ``R2018Entity`` to a ``canonical-drawing/v1`` entity dict.
+
+    The shape matches what ``native_scene_pack_builder.build_native_scene_pack``
+    consumes (lowercased ``type`` + a ``geometry`` mapping of ``{x, y, z}``
+    points). LINE/CIRCLE/ARC flatten to viewer line primitives; POINT is emitted
+    as ``type: "point"`` which the producer records as unsupported, not dropped.
+    """
+
+    geometry = entity.geometry
+    canonical_type = _CANONICAL_ENTITY_TYPE_NAMES.get(entity.type_name, entity.type_name.lower())
+    out: Dict[str, Any] = {
+        "id": f"{canonical_type}:{entity.handle:X}",
+        "type": canonical_type,
+        "layer_id": "",
+        "handle": f"{entity.handle:X}",
+    }
+    if entity.type_name == "LINE":
+        out["geometry"] = {
+            "type": "line",
+            "start": _canonical_point(geometry["start"]),
+            "end": _canonical_point(geometry["end"]),
+        }
+    elif entity.type_name == "CIRCLE":
+        out["geometry"] = {
+            "type": "circle",
+            "center": _canonical_point(geometry["center"]),
+            "radius": geometry["radius"],
+        }
+    elif entity.type_name == "ARC":
+        out["geometry"] = {
+            "type": "arc",
+            "center": _canonical_point(geometry["center"]),
+            "radius": geometry["radius"],
+            "start_angle_deg": geometry["start_angle_deg"],
+            "end_angle_deg": geometry["end_angle_deg"],
+        }
+    else:  # POINT
+        out["geometry"] = {"type": "point", "location": _canonical_point(geometry["location"])}
+    return out
+
+
+def _r2018_entities_extents(entities: List[R2018Entity]) -> "Optional[Dict[str, float]]":
+    xs: List[float] = []
+    ys: List[float] = []
+    for entity in entities:
+        geometry = entity.geometry
+        if entity.type_name == "LINE":
+            xs.extend((geometry["start"][0], geometry["end"][0]))
+            ys.extend((geometry["start"][1], geometry["end"][1]))
+        elif entity.type_name in ("CIRCLE", "ARC"):
+            cx, cy = geometry["center"][0], geometry["center"][1]
+            radius = geometry["radius"]
+            xs.extend((cx - radius, cx + radius))
+            ys.extend((cy - radius, cy + radius))
+        elif entity.type_name == "POINT":
+            xs.append(geometry["location"][0])
+            ys.append(geometry["location"][1])
+    if not xs:
+        return None
+    return {"min_x": min(xs), "min_y": min(ys), "max_x": max(xs), "max_y": max(ys)}
+
+
+def build_r2018_canonical_document(
+    data: bytes | bytearray | memoryview,
+    *,
+    version_code: str = R2018_VERSION_CODE,
+    source_path: str = "",
+) -> Dict[str, Any]:
+    """Decode AC1032 entities into a ``canonical-drawing/v1`` document.
+
+    The returned document (``entities`` + ``extents``) is exactly what the
+    existing ``build_native_scene_pack`` producer flattens into viewport line
+    primitives — so the own clean-room reader can drive the same render seam the
+    ezdxf path uses, with ZERO ODA/ezdxf calls. Diagnostic-only: it is NOT wired
+    to the product import pipeline and carries no support claim.
+    """
+
+    table = read_r2018_entities(data, version_code=version_code)
+    entities = [r2018_entity_to_canonical(entity) for entity in table.entities]
+    extents = _r2018_entities_extents(table.entities)
+    document: Dict[str, Any] = {
+        "schema_version": "canonical-drawing/v1",
+        "drawing": {
+            "source": {"path": source_path, "acad_version": version_code, "format": "dwg"},
+            "importer": {"name": "native-ac1032-spike", "backend": "native"},
+        },
+        "layers": [],
+        "blocks": [],
+        "entities": entities,
+        "import_report": {
+            "status": table.status,
+            "error_code": None,
+            "adapter": {"name": "native-ac1032-spike"},
+        },
+    }
+    if extents is not None:
+        document["extents"] = extents
+    return document
+
+
 __all__ = [
     "R2018_VERSION_CODE",
     "R2004_HEADER_OFFSET",
@@ -1275,4 +1395,6 @@ __all__ = [
     "read_r2018_object_table",
     "decode_r2018_entity",
     "read_r2018_entities",
+    "r2018_entity_to_canonical",
+    "build_r2018_canonical_document",
 ]
