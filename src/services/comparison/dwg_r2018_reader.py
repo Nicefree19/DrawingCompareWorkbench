@@ -1257,6 +1257,9 @@ def _decode_mtext_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str
 #: stream; the referenced BLOCK HEADER (0x31) holds the block name.
 INSERT_OBJECT_TYPE = 0x07
 _BLOCK_HEADER_OBJECT_TYPE = 0x31
+#: LAYER table record (spec 20.4.53). Every entity's handle stream carries a
+#: reference to its layer record; the record's first string value is the name.
+LAYER_OBJECT_TYPE = 0x33
 
 
 def _decode_insert_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
@@ -1315,6 +1318,24 @@ def _read_handle_stream_refs(
     return refs
 
 
+def _record_name_if_type(
+    objects_buffer: bytes, offset: int, expected_type: int
+) -> "Optional[str]":
+    """Return the record's first string-stream value (its name) when the object
+    at ``offset`` frames as ``expected_type``, else ``None`` (fail-closed)."""
+
+    frame = _frame_r2018_object(objects_buffer, offset)
+    if frame is None or frame[2] != expected_type:
+        return None
+    object_size, header_bytes, _object_type = frame
+    framing = DwgBinaryReader(objects_buffer, offset=offset)
+    framing.read_modular_short()
+    handle_stream_bits = framing.read_modular_char()
+    return _read_text_string_value(
+        objects_buffer, offset + header_bytes, object_size, handle_stream_bits
+    )
+
+
 def _resolve_insert_block_name(
     objects_buffer: bytes, handle_map: "Optional[Dict[int, int]]", refs: List[int]
 ) -> str:
@@ -1333,21 +1354,36 @@ def _resolve_insert_block_name(
         offset = handle_map.get(value)
         if offset is None:
             continue
-        frame = _frame_r2018_object(objects_buffer, offset)
-        if frame is None:
-            continue
-        object_size, header_bytes, object_type = frame
-        if object_type != _BLOCK_HEADER_OBJECT_TYPE:
-            continue
-        framing = DwgBinaryReader(objects_buffer, offset=offset)
-        framing.read_modular_short()
-        handle_stream_bits = framing.read_modular_char()
-        candidate = _read_text_string_value(
-            objects_buffer, offset + header_bytes, object_size, handle_stream_bits
+        candidate = _record_name_if_type(
+            objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE
         )
         if candidate:
             name = candidate  # keep the last (the inserted block, not the owner)
     return name
+
+
+def _resolve_entity_layer_name(
+    objects_buffer: bytes, handle_map: "Optional[Dict[int, int]]", refs: List[int]
+) -> str:
+    """Resolve an entity's layer name from its handle-stream references.
+
+    An entity references exactly one LAYER record (0x33); it is the single
+    handle-stream reference that frames as one, so the FIRST such reference is
+    the layer (validated 1:1 against ODA ground truth on every decoded entity).
+    Returns '' when none resolves (fail-closed) — e.g. a relative-encoded handle
+    or a handle outside the decoded map.
+    """
+
+    if not handle_map:
+        return ""
+    for value in refs:
+        offset = handle_map.get(value)
+        if offset is None:
+            continue
+        candidate = _record_name_if_type(objects_buffer, offset, LAYER_OBJECT_TYPE)
+        if candidate is not None:
+            return candidate
+    return ""
 
 
 #: DIMENSION subtypes (spec 20.3 fixed type ids 0x14-0x1A) all share the Common
@@ -1419,12 +1455,13 @@ _STRING_STREAM_DECODERS = {
 
 @dataclass(frozen=True)
 class R2018Entity:
-    """One decoded entity: type + geometry (diagnostic, pre-canonical)."""
+    """One decoded entity: type + geometry + layer (diagnostic, pre-canonical)."""
 
     handle: int
     object_type: int
     type_name: str
     geometry: Dict[str, Any]
+    layer: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1432,6 +1469,7 @@ class R2018Entity:
             "object_type": self.object_type,
             "type_name": self.type_name,
             "geometry": self.geometry,
+            "layer": self.layer,
         }
 
 
@@ -1446,8 +1484,8 @@ def decode_r2018_entity(
     Returns an ``R2018Entity`` for LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/
     INSERT/DIMENSION, or ``None`` for an unsupported type, a free-space gap, or
     any malformed/unsupported field (fail-closed). ``handle_map`` (handle ->
-    object offset) is only needed to resolve an INSERT's block name; without it
-    an INSERT decodes with an empty ``block_name``.
+    object offset) resolves the entity's layer name (and an INSERT's block name);
+    without it the entity decodes with an empty ``layer`` (and ``block_name``).
     """
 
     frame = _frame_r2018_object(objects_buffer, offset)
@@ -1471,23 +1509,21 @@ def decode_r2018_entity(
     try:
         read_r2018_object_type(reader)  # advance past the object type
         handle = _parse_common_entity_header(reader)
+        # The handle-stream size (the MC consumed at framing) locates both the
+        # R2007+ string stream and the trailing handle references; read it once.
+        framing = DwgBinaryReader(objects_buffer, offset=offset)
+        framing.read_modular_short()
+        handle_stream_bits = framing.read_modular_char()
         if string_decoder is not None:
-            # TEXT/MTEXT: the value lives in the string stream; the handle-stream
-            # size (the MC consumed at framing) locates it, so re-read the framing.
-            framing = DwgBinaryReader(objects_buffer, offset=offset)
-            framing.read_modular_short()
-            handle_stream_bits = framing.read_modular_char()
+            # TEXT/MTEXT: the value lives in the R2007+ string stream.
             text_value = _read_text_string_value(
                 objects_buffer, data_start_byte, object_size, handle_stream_bits
             )
             type_name, decode = string_decoder
             geometry = decode(reader, text_value)
         elif is_dimension:
-            # DIMENSION: the user-text override is a TV in the R2007+ string
-            # stream (read like TEXT); the measured value is in the data stream.
-            framing = DwgBinaryReader(objects_buffer, offset=offset)
-            framing.read_modular_short()
-            handle_stream_bits = framing.read_modular_char()
+            # DIMENSION: the user-text override is a TV in the string stream (read
+            # like TEXT); the measured value is in the data stream.
             text_value = _read_text_string_value(
                 objects_buffer, data_start_byte, object_size, handle_stream_bits
             )
@@ -1496,21 +1532,30 @@ def decode_r2018_entity(
             type_name = "DIMENSION"
         elif is_insert:
             geometry = _decode_insert_geometry(reader)
-            framing = DwgBinaryReader(objects_buffer, offset=offset)
-            framing.read_modular_short()
-            handle_stream_bits = framing.read_modular_char()
-            refs = _read_handle_stream_refs(
-                objects_buffer, data_start_byte, object_size, handle_stream_bits
-            )
-            geometry["block_name"] = _resolve_insert_block_name(objects_buffer, handle_map, refs)
             type_name = "INSERT"
         else:
             type_name, decode = geometry_decoder
             geometry = decode(reader)
+        # The layer (and the INSERT block name) live in the trailing handle
+        # stream; resolve both from a single pass when the handle map is given.
+        layer = ""
+        if handle_map is not None:
+            refs = _read_handle_stream_refs(
+                objects_buffer, data_start_byte, object_size, handle_stream_bits
+            )
+            layer = _resolve_entity_layer_name(objects_buffer, handle_map, refs)
+            if is_insert:
+                geometry["block_name"] = _resolve_insert_block_name(
+                    objects_buffer, handle_map, refs
+                )
     except DwgBinaryReadError:
         return None
     return R2018Entity(
-        handle=handle, object_type=object_type, type_name=type_name, geometry=geometry
+        handle=handle,
+        object_type=object_type,
+        type_name=type_name,
+        geometry=geometry,
+        layer=layer,
     )
 
 
@@ -1665,7 +1710,7 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "id": f"{canonical_type}:{entity.handle:X}",
         "type": canonical_type,
-        "layer_id": "",
+        "layer_id": entity.layer,
         "space": "model",
         "handle": f"{entity.handle:X}",
         "bbox": _r2018_entity_bbox(entity),
