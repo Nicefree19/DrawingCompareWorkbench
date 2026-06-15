@@ -442,6 +442,14 @@ _GT_LWPOLY = {
     0x2E4: {"closed": True, "nverts": 7,
             "v0": (28.005636844, 0.361304863), "bulge1": -0.799559497},
 }
+_GT_TEXT = {
+    # simple single-line TEXT (no EED) — exercises the string-stream value decode.
+    0x3B9: {"insert": (147.819447119, 2.8549753), "height": 1.0,
+            "text": "Hello this is a single line text"},
+    # TEXT carrying XData (EED) — exercises the EED appid-handle parse in the
+    # common header (without it this object's header fails to parse).
+    0x915: {"insert": (21.232079808, -70.793260346), "height": 1.0, "text": "XData 3Real"},
+}
 
 
 def _approx(actual, expected, tol=1e-6):
@@ -457,7 +465,7 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     assert table.status == "decoded", table.message
     # A substantial number of entities decode across all four supported types.
     assert table.decoded_count >= 50, table.type_counts
-    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE"):
+    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT"):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by_handle = {e.handle: e for e in table.entities}
@@ -503,6 +511,15 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
             assert _approx(vertices[-1][1], expected["vlast"][1])
         if "bulge1" in expected:
             assert _approx(entity.geometry["bulges"][1], expected["bulge1"], tol=1e-6)
+
+    for handle, expected in _GT_TEXT.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "TEXT"
+        assert _approx(entity.geometry["insert"][0], expected["insert"][0])
+        assert _approx(entity.geometry["insert"][1], expected["insert"][1])
+        assert _approx(entity.geometry["height"], expected["height"])
+        # The value is read from the R2007+ string stream (UTF-16).
+        assert entity.geometry["text"] == expected["text"]
 
 
 def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
@@ -575,6 +592,16 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert len(poly["geometry"]["vertices"]) == 3
     assert poly["geometry"]["vertices"][0]["point"] == {"x": 0.0, "y": 0.0, "z": 0.0}
     assert poly["geometry"]["vertices"][1]["point"] == {"x": 1.0, "y": 2.0, "z": 0.0}
+
+    text = r2018_entity_to_canonical(
+        R2018Entity(0x3B9, 0x01, "TEXT",
+                    {"insert": (5.0, 6.0, 0.0), "height": 2.5, "rotation_deg": 0.0, "text": "H-400"})
+    )
+    assert text["type"] == "text"
+    assert text["geometry"]["insert"] == {"x": 5.0, "y": 6.0, "z": 0.0}
+    assert text["geometry"]["height"] == 2.5
+    assert text["geometry"]["text"] == "H-400"
+    assert text["geometry"]["canonical_text"] == "H-400"
 
 
 def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: Path) -> None:
