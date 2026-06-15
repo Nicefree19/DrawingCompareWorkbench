@@ -34,12 +34,30 @@ Progress (2026-06-14, `dwg_r2018_reader.py`, 13 tests):
   LINE 32 / POINT 21 / DICTIONARY 19 / LAYER 13 / CIRCLE 1 / INSERT 4 / ...).
 
 **Both spike unknowns are answered YES, the container is fully navigated, and
-real object TYPES decode from the bit stream.** Remaining S3: (1) full
-enumeration across free-space gaps needs the R2018 `AcDb:Handles` index (its
-offset encoding differs from AC1015 and is not yet decoded; the sequential walk
-covers one contiguous run); (2) geometry decode (LINE/CIRCLE/ARC/LWPOLYLINE/TEXT
-coordinates) -> canonical. Still diagnostic-only — no geometry decoded yet,
-contract still DECODING-gated.
+real object TYPES decode from the bit stream.**
+
+- **S3 part 1 (AcDb:Handles index -> full enumeration) DONE** —
+  `parse_r2018_handle_map` / `read_r2018_handle_map` / `read_r2018_object_table`
+  decode the handle map (public-spec R2004+ structure, identical to the AC1015
+  object map: big-endian u16 section size; `(handle-delta MC, location-delta
+  signed MC)` pairs; 2-byte CRC; `size<=2` terminator). PROVEN on the primary
+  sample: 842 entries, handles strictly increasing, clean terminator, and ALL
+  111 contiguous-run object offsets located by the map (exact 1:1). This
+  resolves the earlier "the handle encoding drifts" note — the prior "drift to
+  132876" was a real object location; the decode is correct. **Honest limitation
+  found:** object framing covers only ~55% of in-bounds handle entries because
+  the multi-page `AcDb:AcDbObjects` logical assembly in `read_r2004_data_section`
+  leaves zero gaps (pages placed at 0x7400-aligned `start_offset` slots, but
+  decompressed page sizes differ from the spacing — small pages leave gaps, big
+  pages overlap). `read_r2018_object_table.unframed_count` surfaces this rather
+  than overclaiming.
+
+Remaining S3: (1) **correct the multi-page logical-offset assembly** so every
+handle-mapped object frames (the precise next blocker — the S3a test only
+checked `len(buffer)==size`, not interior placement); (2) **geometry decode**
+(LINE/CIRCLE/ARC/LWPOLYLINE/TEXT coordinates, common-entity header field-by-field)
+-> canonical, which needs exact object extents from (1). Still diagnostic-only —
+no geometry decoded yet, contract still DECODING-gated.
 
 ## 1. Goal
 

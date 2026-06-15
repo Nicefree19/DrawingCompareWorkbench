@@ -645,13 +645,41 @@ def read_r2018_object_type(reader: DwgBinaryReader) -> int:
     return reader.read_bits(16)
 
 
+def _frame_r2018_object(
+    objects_buffer: bytes, offset: int
+) -> "Tuple[int, int, int] | None":
+    """Frame one object at ``offset`` without decoding its geometry.
+
+    Returns ``(object_size, header_bytes, object_type)`` when a sane object
+    frames at ``offset`` (``[MS object-size][MC handle-stream-bits][type ...]``),
+    or ``None`` at a free-space gap / malformed framing. ``header_bytes`` is the
+    MS+MC field width, so the next object begins at ``offset + header_bytes +
+    object_size + 2`` (the trailing RS CRC).
+    """
+
+    if offset < 0 or offset >= len(objects_buffer) - 2:
+        return None
+    try:
+        reader = DwgBinaryReader(objects_buffer, offset=offset)
+        object_size = reader.read_modular_short()
+        if object_size <= 0 or object_size > MAX_R2004_OBJECT_BYTES:
+            return None
+        reader.read_modular_char()  # MC handle-stream size; advances byte_pos
+        header_bytes = reader.byte_pos
+        object_type = read_r2018_object_type(reader)
+    except DwgBinaryReadError:
+        return None
+    return object_size, header_bytes, object_type
+
+
 @dataclass(frozen=True)
 class R2018ObjectRun:
     """One contiguous run of decoded object (offset, size, type) tuples.
 
-    Full traversal of every object requires the AcDb:Handles index (the R2018
-    handle-map encoding is not yet decoded); this walks a contiguous run from a
-    known object start and stops at the first free-space gap or the buffer end.
+    A contiguous walk stops at the first free-space gap; full traversal of every
+    object across gaps is provided by ``read_r2018_object_table`` (which uses the
+    decoded AcDb:Handles index). This walks a contiguous run from a known object
+    start and stops at the first free-space gap or the buffer end.
     """
 
     start_offset: int
@@ -694,18 +722,11 @@ def read_r2018_object_run(
     stopped_at_gap = False
 
     while offset < size - 2 and len(objects) < max_objects:
-        reader = DwgBinaryReader(buffer, offset=offset)
-        try:
-            object_size = reader.read_modular_short()
-            if object_size <= 0 or object_size > MAX_R2004_OBJECT_BYTES:
-                stopped_at_gap = True
-                break
-            reader.read_modular_char()  # MC handle-stream size; advances byte_pos
-            header_bytes = reader.byte_pos
-            object_type = read_r2018_object_type(reader)
-        except DwgBinaryReadError:
+        frame = _frame_r2018_object(buffer, offset)
+        if frame is None:
             stopped_at_gap = True
             break
+        object_size, header_bytes, object_type = frame
         objects.append((offset, object_size, object_type))
         type_counts[object_type] = type_counts.get(object_type, 0) + 1
         offset = offset + header_bytes + object_size + 2
@@ -717,6 +738,247 @@ def read_r2018_object_run(
         stopped_at_gap=stopped_at_gap,
         type_counts=type_counts,
         objects=objects,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Spike S3 (part 1): AcDb:Handles index -> full object enumeration across gaps.
+# ---------------------------------------------------------------------------
+
+#: The handle map groups (handle, location) delta pairs into sections, each
+#: prefixed by a big-endian u16 byte size (counting the 2 size bytes) and
+#: followed by a 2-byte CRC. A section whose size is <= 2 terminates the map.
+HANDLE_MAP_SECTION_SIZE_BYTES = 2
+HANDLE_MAP_SECTION_CRC_BYTES = 2
+
+
+def parse_r2018_handle_map(
+    handles_buffer: bytes | bytearray | memoryview,
+) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
+    """Decode an ``AcDb:Handles`` buffer into ``(handle, object_offset)`` pairs.
+
+    The R2004+ handle map (public DWG spec) is a sequence of sections; each is a
+    big-endian u16 size, then ``(handle-delta MC, location-delta signed MC)``
+    pairs filling ``size - 2`` bytes, then a 2-byte CRC. A section with size
+    ``<= 2`` ends the map. Handles accumulate as unsigned deltas (always
+    increasing); locations accumulate as signed deltas into the decompressed
+    ``AcDb:AcDbObjects`` buffer. Returns the pairs plus an info dict
+    (``section_count``, ``clean_terminator``, ``consumed``). Pure decode: takes
+    the already-extracted handle buffer so it is unit-testable in isolation.
+    """
+
+    buffer = bytes(handles_buffer)
+    size = len(buffer)
+    pairs: List[Tuple[int, int]] = []
+    pos = 0
+    last_handle = 0
+    last_offset = 0
+    section_count = 0
+    clean_terminator = False
+    while pos + HANDLE_MAP_SECTION_SIZE_BYTES <= size:
+        section_size = struct.unpack_from(">H", buffer, pos)[0]
+        pos += HANDLE_MAP_SECTION_SIZE_BYTES
+        if section_size <= HANDLE_MAP_SECTION_SIZE_BYTES:
+            clean_terminator = True
+            break
+        data_size = section_size - HANDLE_MAP_SECTION_SIZE_BYTES
+        if pos + data_size + HANDLE_MAP_SECTION_CRC_BYTES > size:
+            break
+        sub = DwgBinaryReader(buffer, offset=pos, length=data_size)
+        pos += data_size + HANDLE_MAP_SECTION_CRC_BYTES
+        section_count += 1
+        try:
+            # A minimal (handle, location) pair needs at least two bytes; fewer
+            # trailing bytes are section padding.
+            while sub.remaining() >= 2:
+                last_handle += sub.read_modular_char(signed=False)
+                last_offset += sub.read_modular_char(signed=True)
+                pairs.append((last_handle, last_offset))
+        except DwgBinaryReadError:
+            break
+    return pairs, {
+        "section_count": section_count,
+        "clean_terminator": clean_terminator,
+        "consumed": pos,
+    }
+
+
+@dataclass(frozen=True)
+class R2018HandleMapDiagnostic:
+    """Decoded AcDb:Handles index (handle -> object-buffer offset)."""
+
+    version_code: str
+    status: str  # decoded | <upstream section-map status>
+    entry_count: int
+    in_bounds_count: int  # entries whose offset lands in the object buffer
+    handles_increasing: bool
+    clean_terminator: bool
+    section_count: int
+    object_buffer_size: int
+    entries: List[Tuple[int, int]] = field(default_factory=list)
+    message: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version_code": self.version_code,
+            "status": self.status,
+            "entry_count": self.entry_count,
+            "in_bounds_count": self.in_bounds_count,
+            "handles_increasing": self.handles_increasing,
+            "clean_terminator": self.clean_terminator,
+            "section_count": self.section_count,
+            "object_buffer_size": self.object_buffer_size,
+            "entries": [list(item) for item in self.entries],
+            "message": self.message,
+        }
+
+
+def read_r2018_handle_map(
+    data: bytes | bytearray | memoryview,
+    *,
+    version_code: str = R2018_VERSION_CODE,
+) -> R2018HandleMapDiagnostic:
+    """Decode the AcDb:Handles index into (handle, object-offset) entries.
+
+    Extracts the ``AcDb:Handles`` and ``AcDb:AcDbObjects`` sections, decodes the
+    handle-map delta pairs, and reports honest coverage: ``in_bounds_count``
+    (offsets that land inside the object buffer) vs ``entry_count``. This is
+    navigation only — it locates objects, it does not decode their geometry.
+    """
+
+    section_map = read_r2004_section_map(data, version_code=version_code)
+    if section_map.status != "decoded":
+        return R2018HandleMapDiagnostic(
+            version_code=version_code,
+            status=section_map.status,
+            entry_count=0,
+            in_bounds_count=0,
+            handles_increasing=False,
+            clean_terminator=False,
+            section_count=0,
+            object_buffer_size=0,
+            message=section_map.message,
+        )
+
+    objects = read_r2004_data_section(
+        data, section_name="AcDb:AcDbObjects", version_code=version_code
+    )
+    handles = read_r2004_data_section(
+        data, section_name="AcDb:Handles", version_code=version_code
+    )
+    pairs, info = parse_r2018_handle_map(handles)
+    object_size = len(objects)
+    in_bounds = sum(1 for _handle, offset in pairs if 0 <= offset < object_size)
+    increasing = all(pairs[i][0] <= pairs[i + 1][0] for i in range(len(pairs) - 1))
+    return R2018HandleMapDiagnostic(
+        version_code=version_code,
+        status="decoded",
+        entry_count=len(pairs),
+        in_bounds_count=in_bounds,
+        handles_increasing=increasing,
+        clean_terminator=bool(info["clean_terminator"]),
+        section_count=int(info["section_count"]),
+        object_buffer_size=object_size,
+        entries=pairs,
+        message=(
+            f"decoded {len(pairs)} handle-map entries "
+            f"({in_bounds} within the {object_size}-byte object buffer)"
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class R2018ObjectTable:
+    """Object enumeration framed from the AcDb:Handles index, across gaps.
+
+    Unlike ``read_r2018_object_run`` (one contiguous run), this frames objects
+    the handle map points at anywhere in the buffer, not just the first run.
+    ``framed_count`` objects framed sanely; ``unframed_count`` in-bounds handle
+    entries did NOT frame (surfaced, never silently dropped). NOTE: a handle
+    entry can fail to frame because the multi-page ``AcDb:AcDbObjects`` logical
+    assembly leaves zero gaps at its offset (the page ``start_offset`` slots are
+    0x7400-aligned but decompressed page sizes differ) — so ``unframed_count``
+    currently also measures that assembly gap, not only genuine free space.
+    """
+
+    version_code: str
+    status: str  # decoded | <upstream status>
+    handle_entry_count: int
+    framed_count: int
+    unframed_count: int
+    type_counts: Dict[int, int] = field(default_factory=dict)
+    objects: List[Tuple[int, int, int, int]] = field(default_factory=list)  # (handle, offset, size, type)
+    message: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version_code": self.version_code,
+            "status": self.status,
+            "handle_entry_count": self.handle_entry_count,
+            "framed_count": self.framed_count,
+            "unframed_count": self.unframed_count,
+            "type_counts": {str(k): v for k, v in self.type_counts.items()},
+            "objects": [list(item) for item in self.objects],
+            "message": self.message,
+        }
+
+
+def read_r2018_object_table(
+    data: bytes | bytearray | memoryview,
+    *,
+    version_code: str = R2018_VERSION_CODE,
+) -> R2018ObjectTable:
+    """Enumerate the objects the AcDb:Handles index locates (beyond one run).
+
+    For each in-bounds handle entry, frame the object (size + type) at its
+    offset. Out-of-buffer handle entries (stale handles / other sections) are
+    skipped; in-bounds entries that fail to frame are counted as
+    ``unframed_count`` rather than dropped (see ``R2018ObjectTable``: this also
+    catches the multi-page assembly gap, not only free space). Diagnostic-only:
+    no geometry is decoded.
+    """
+
+    handle_map = read_r2018_handle_map(data, version_code=version_code)
+    if handle_map.status != "decoded":
+        return R2018ObjectTable(
+            version_code=version_code,
+            status=handle_map.status,
+            handle_entry_count=0,
+            framed_count=0,
+            unframed_count=0,
+            message=handle_map.message,
+        )
+
+    objects = read_r2004_data_section(
+        data, section_name="AcDb:AcDbObjects", version_code=version_code
+    )
+    object_size = len(objects)
+    framed: List[Tuple[int, int, int, int]] = []
+    type_counts: Dict[int, int] = {}
+    unframed = 0
+    for handle, offset in handle_map.entries:
+        if not 0 <= offset < object_size:
+            continue
+        frame = _frame_r2018_object(objects, offset)
+        if frame is None:
+            unframed += 1
+            continue
+        object_bytes, _header_bytes, object_type = frame
+        framed.append((handle, offset, object_bytes, object_type))
+        type_counts[object_type] = type_counts.get(object_type, 0) + 1
+
+    return R2018ObjectTable(
+        version_code=version_code,
+        status="decoded",
+        handle_entry_count=handle_map.entry_count,
+        framed_count=len(framed),
+        unframed_count=unframed,
+        type_counts=type_counts,
+        objects=framed,
+        message=(
+            f"framed {len(framed)} objects from {handle_map.entry_count} "
+            f"handle-map entries ({unframed} in-bounds entries did not frame)"
+        ),
     )
 
 
@@ -734,11 +996,15 @@ __all__ = [
     "OBJECT_SECTION_LEADING_RL",
     "OBJECT_RUN_START_OFFSET",
     "MAX_R2004_OBJECT_BYTES",
+    "HANDLE_MAP_SECTION_SIZE_BYTES",
+    "HANDLE_MAP_SECTION_CRC_BYTES",
     "DwgR2018ContainerDiagnostic",
     "R2004SectionPageMapDiagnostic",
     "R2004Section",
     "R2004SectionMapDiagnostic",
     "R2018ObjectRun",
+    "R2018HandleMapDiagnostic",
+    "R2018ObjectTable",
     "deobfuscate_r2004_header",
     "inspect_r2018_container",
     "decompress_r2004",
@@ -749,4 +1015,7 @@ __all__ = [
     "read_r2004_data_section",
     "read_r2018_object_type",
     "read_r2018_object_run",
+    "parse_r2018_handle_map",
+    "read_r2018_handle_map",
+    "read_r2018_object_table",
 ]

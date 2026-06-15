@@ -23,10 +23,13 @@ from src.services.comparison.dwg_r2018_reader import (
     decompress_r2004,
     deobfuscate_r2004_header,
     inspect_r2018_container,
+    parse_r2018_handle_map,
     read_r2004_data_section,
     read_r2004_section_map,
     read_r2004_section_page_map,
+    read_r2018_handle_map,
     read_r2018_object_run,
+    read_r2018_object_table,
 )
 
 # Local-only real AC1032 corpus (git-ignored). The integration test runs the
@@ -259,3 +262,140 @@ def test_real_ac1032_object_run_decodes_object_types(sample: Path) -> None:
     assert any(t in run.type_counts for t in (17, 18, 19, 27, 77)), run.type_counts
     # First object decodes at the section start.
     assert run.objects[0][0] == 4
+
+
+# ---- Spike S3 (part 1): AcDb:Handles index -> full object enumeration ----
+
+
+def _mc_unsigned(value: int) -> bytes:
+    """Encode an unsigned modular char (matches DwgBinaryReader.read_modular_char)."""
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _mc_signed_small(value: int) -> bytes:
+    """Encode a single-byte signed modular char (test values in [-63, 63])."""
+    assert -63 <= value <= 63
+    return bytes([(abs(value) | 0x40) if value < 0 else value])
+
+
+def _handle_map_section(pair_deltas: list[tuple[int, int]]) -> bytes:
+    data = bytearray()
+    for handle_delta, offset_delta in pair_deltas:
+        data += _mc_unsigned(handle_delta) + _mc_signed_small(offset_delta)
+    size = 2 + len(data)
+    return struct.pack(">H", size) + bytes(data) + b"\x00\x00"  # + 2 CRC bytes
+
+
+def _handle_map_buffer(sections: list[list[tuple[int, int]]]) -> bytes:
+    out = bytearray()
+    for section in sections:
+        out += _handle_map_section(section)
+    out += struct.pack(">H", 2)  # empty terminator section
+    return bytes(out)
+
+
+def test_parse_handle_map_accumulates_handle_and_signed_offset_deltas() -> None:
+    # Handles accumulate as unsigned deltas; locations as signed deltas (note
+    # the negative third delta moves the offset backwards).
+    buf = _handle_map_buffer([[(1, 4), (5, 50), (2, -10)]])
+
+    pairs, info = parse_r2018_handle_map(buf)
+
+    assert pairs == [(1, 4), (6, 54), (8, 44)]
+    assert info["section_count"] == 1
+    assert info["clean_terminator"] is True
+
+
+def test_parse_handle_map_spans_multiple_sections() -> None:
+    buf = _handle_map_buffer([[(1, 4), (3, 20)], [(2, 30)]])
+
+    pairs, info = parse_r2018_handle_map(buf)
+
+    assert pairs == [(1, 4), (4, 24), (6, 54)]
+    assert info["section_count"] == 2
+    assert info["clean_terminator"] is True
+
+
+def test_parse_handle_map_tolerates_missing_terminator() -> None:
+    # A complete section with no trailing terminator decodes its pairs and
+    # reports an unclean terminator instead of raising.
+    buf = _handle_map_section([(1, 4), (2, 8)])  # no terminator section appended
+
+    pairs, info = parse_r2018_handle_map(buf)
+
+    assert pairs == [(1, 4), (3, 12)]
+    assert info["clean_terminator"] is False
+
+
+@pytest.mark.parametrize("sample", REAL_AC1032_SAMPLES, ids=lambda p: p.name)
+def test_real_ac1032_handle_map_decodes_and_locates_run(sample: Path) -> None:
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    raw = sample.read_bytes()
+    objects = read_r2004_data_section(raw, section_name="AcDb:AcDbObjects")
+    run = read_r2018_object_run(objects)
+    handle_map = read_r2018_handle_map(raw)
+
+    assert handle_map.status == "decoded", handle_map.message
+    # Handles are stored as strictly accumulating deltas; a structural decode
+    # error would scramble them.
+    assert handle_map.handles_increasing is True
+    # The map lists far more objects than a single contiguous run.
+    assert handle_map.entry_count >= run.object_count
+    # The map's offsets index the decompressed object buffer.
+    assert 0 < handle_map.in_bounds_count <= handle_map.entry_count
+    # Most objects the independent contiguous run found are located by the map
+    # (proves the handle->offset decode is real, not coincidental framing).
+    run_offsets = {offset for offset, _s, _t in run.objects}
+    map_offsets = {offset for _h, offset in handle_map.entries}
+    covered = run_offsets & map_offsets
+    assert len(covered) >= 0.85 * len(run_offsets), (
+        f"{len(covered)}/{len(run_offsets)} run objects located by the handle map"
+    )
+
+
+def test_real_ac1032_handle_map_fully_covers_run_on_primary_sample() -> None:
+    # The primary acadsharp sample is small enough that EVERY contiguous-run
+    # object is located by the handle map (exact 1:1 offset coverage).
+    sample = REAL_AC1032_SAMPLES[0]
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    raw = sample.read_bytes()
+    objects = read_r2004_data_section(raw, section_name="AcDb:AcDbObjects")
+    run = read_r2018_object_run(objects)
+    handle_map = read_r2018_handle_map(raw)
+
+    run_offsets = {offset for offset, _s, _t in run.objects}
+    map_offsets = {offset for _h, offset in handle_map.entries}
+    missing = sorted(run_offsets - map_offsets)
+    assert not missing, f"run objects missing from the handle map: {missing[:8]}"
+    assert handle_map.clean_terminator is True
+
+
+def test_real_ac1032_object_table_frames_beyond_one_run() -> None:
+    sample = REAL_AC1032_SAMPLES[0]
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    raw = sample.read_bytes()
+    run = read_r2018_object_run(
+        read_r2004_data_section(raw, section_name="AcDb:AcDbObjects")
+    )
+    table = read_r2018_object_table(raw)
+
+    assert table.status == "decoded", table.message
+    # Crossing free-space gaps via the handle map frames more objects than the
+    # single contiguous run can reach.
+    assert table.framed_count > run.object_count
+    # Real geometry is among them (LINE == 19).
+    assert 19 in table.type_counts, table.type_counts
+    # Framed + unframed accounting stays within the in-bounds handle entries.
+    assert table.framed_count + table.unframed_count <= table.handle_entry_count
