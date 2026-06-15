@@ -491,6 +491,21 @@ _GT_LAYER = {
     0x299: "Layer_Lock",      # POINT
     0x757: "Layer_color_80",  # TEXT
 }
+_GT_HATCH = {
+    # handle -> hatch summary. pattern/gradient names are TVs in the string stream;
+    # the boundary bbox is decoded from the loops (LINE edges here). Non-gradient
+    # hatches validate the pattern name; gradient hatches validate the gradient
+    # name (ezdxf normalises their group-2 pattern to 'SOLID', but the DWG stores
+    # a raw extended name, so the pattern is not asserted for those).
+    0x35A: {"pattern": "ANSI31", "solid": False, "is_gradient": False,
+            "bbox": (102.7458, 0.0853, 123.1991, 13.7101)},
+    0x36E: {"pattern": "AR-PARQ1", "solid": False, "is_gradient": False,
+            "bbox": (102.7458, 17.3141, 123.1991, 30.9389)},
+    0x371: {"gradient_name": "LINEAR", "solid": True, "is_gradient": True,
+            "bbox": (102.7458, 33.4672, 123.1991, 47.092)},
+    0x376: {"gradient_name": "SPHERICAL", "solid": True, "is_gradient": True,
+            "bbox": (102.7458, 49.5097, 123.1991, 63.1344)},
+}
 
 
 def _approx(actual, expected, tol=1e-6):
@@ -507,7 +522,7 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     # A substantial number of entities decode across all four supported types.
     assert table.decoded_count >= 50, table.type_counts
     for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT",
-                 "INSERT", "DIMENSION"):
+                 "INSERT", "DIMENSION", "HATCH"):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by_handle = {e.handle: e for e in table.entities}
@@ -598,6 +613,20 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     # Every decoded entity resolves a (non-empty) layer name — '0' at minimum.
     assert all(e.layer for e in table.entities), \
         [f"{e.handle:#x}" for e in table.entities if not e.layer]
+
+    for handle, expected in _GT_HATCH.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "HATCH"
+        assert entity.geometry["solid"] is expected["solid"], entity.geometry
+        assert entity.geometry["is_gradient"] is expected["is_gradient"], entity.geometry
+        if "pattern" in expected:        # non-gradient: pattern name is exact
+            assert entity.geometry["pattern"] == expected["pattern"], entity.geometry
+        if "gradient_name" in expected:  # gradient: gradient name is exact
+            assert entity.geometry["gradient_name"] == expected["gradient_name"], entity.geometry
+        # Boundary bbox decoded from the loops (matches ODA within rounding).
+        box = entity.geometry["bbox"]
+        for key, val in zip(("min_x", "min_y", "max_x", "max_y"), expected["bbox"]):
+            assert _approx(box[key], val, tol=1e-3), (f"{handle:#x}", key, box)
 
 
 def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
@@ -715,6 +744,20 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert dimension["geometry"]["dimtype"] == 0
     # bbox anchors on the text midpoint (no invented extent).
     assert dimension["bbox"] == {"min_x": 339.0, "min_y": 34.0, "max_x": 339.0, "max_y": 34.0}
+
+    hatch = r2018_entity_to_canonical(
+        R2018Entity(0x35A, 0x4E, "HATCH",
+                    {"pattern": "ANSI31", "gradient_name": "LINEAR", "is_gradient": False,
+                     "solid": False, "associative": True, "num_paths": 1,
+                     "bbox": {"min_x": 1.0, "min_y": 2.0, "max_x": 5.0, "max_y": 6.0}},
+                    layer="S-HATCH")
+    )
+    assert hatch["type"] == "hatch"  # producer counts this as unsupported (visible)
+    assert hatch["geometry"]["pattern"] == "ANSI31"
+    assert hatch["geometry"]["solid"] is False
+    assert hatch["geometry"]["num_paths"] == 1
+    assert hatch["bbox"] == {"min_x": 1.0, "min_y": 2.0, "max_x": 5.0, "max_y": 6.0}  # boundary extent
+    assert hatch["layer_id"] == "S-HATCH"
 
 
 def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: Path) -> None:

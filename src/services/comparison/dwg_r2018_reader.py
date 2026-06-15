@@ -1157,6 +1157,54 @@ def _decode_lwpolyline_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
 TEXT_OBJECT_TYPE = 0x01
 
 
+#: A sane upper bound on strings in one object's string stream (HATCH uses 2).
+_MAX_STRING_STREAM_VALUES = 16
+
+
+def _string_stream_window(
+    objects_buffer: bytes,
+    data_start_byte: int,
+    object_size: int,
+    handle_stream_bits: int,
+) -> "Optional[Tuple[int, int]]":
+    """Return the ``[start, end)`` bit bounds of the R2007+ string stream, or None.
+
+    Layout (ODA spec p.103): the object body is data-stream + string-stream +
+    handle-stream. The handle stream is the last ``handle_stream_bits`` bits, so
+    ``end_bit = object_size*8 - handle_stream_bits`` ends the pre-handles section.
+    Its last bit is the string-stream-present flag; if set, a 16-bit
+    ``strDataSize`` (optionally extended via the 0x8000 bit) precedes it and the
+    string stream is ``[end_bit-17-strDataSize, end_bit-17)``. Returns None when
+    no string stream is present or the bounds are malformed (fail-closed).
+    """
+
+    end_bit = object_size * 8 - handle_stream_bits
+    if end_bit < 1:
+        return None
+
+    def u16_at(bit: int) -> int:
+        reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
+        reader.seek_bits(bit)
+        return reader.read_bits(8) | (reader.read_bits(8) << 8)
+
+    try:
+        flag_reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
+        flag_reader.seek_bits(end_bit - 1)
+        if not flag_reader.read_bit():
+            return None
+        str_data_size = u16_at(end_bit - 17)
+        size_fields_end = end_bit - 17
+        if str_data_size & 0x8000:
+            str_data_size = (str_data_size & 0x7FFF) | (u16_at(end_bit - 33) << 15)
+            size_fields_end = end_bit - 33
+        start = size_fields_end - str_data_size
+        if start < 0:
+            return None
+        return start, size_fields_end
+    except DwgBinaryReadError:
+        return None
+
+
 def _read_text_string_value(
     objects_buffer: bytes,
     data_start_byte: int,
@@ -1165,41 +1213,19 @@ def _read_text_string_value(
 ) -> str:
     """Read the first text value (TV) from the R2007+ string stream.
 
-    Layout (ODA spec p.103): the object body is data-stream + string-stream +
-    handle-stream. The handle stream is the last ``handle_stream_bits`` bits, so
-    ``end_bit = object_size*8 - handle_stream_bits`` ends the pre-handles section.
-    Its last bit is the string-stream-present flag; if set, a 16-bit
-    ``strDataSize`` (optionally extended via the 0x8000 bit) precedes it and the
-    string stream is ``[end_bit-17-strDataSize, end_bit-17)``. Each string there
-    is a BS char-count followed by that many UTF-16LE characters. Returns ``''``
-    when no string stream is present or on any malformed read (fail-closed).
+    Each string is a BS char-count followed by that many UTF-16LE characters.
+    Returns ``''`` when no string stream is present or on a malformed read.
     """
 
-    end_bit = object_size * 8 - handle_stream_bits
-    if end_bit < 1:
+    window = _string_stream_window(
+        objects_buffer, data_start_byte, object_size, handle_stream_bits
+    )
+    if window is None:
         return ""
-
-    def reader_at(bit: int) -> DwgBinaryReader:
-        reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
-        reader.seek_bits(bit)
-        return reader
-
-    def u16_at(bit: int) -> int:
-        reader = reader_at(bit)
-        return reader.read_bits(8) | (reader.read_bits(8) << 8)
-
+    start, _end = window
     try:
-        if not reader_at(end_bit - 1).read_bit():
-            return ""
-        str_data_size = u16_at(end_bit - 17)
-        size_fields_end = end_bit - 17
-        if str_data_size & 0x8000:
-            str_data_size = (str_data_size & 0x7FFF) | (u16_at(end_bit - 33) << 15)
-            size_fields_end = end_bit - 33
-        string_stream_start = size_fields_end - str_data_size
-        if string_stream_start < 0:
-            return ""
-        reader = reader_at(string_stream_start)
+        reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
+        reader.seek_bits(start)
         char_count = reader.read_bit_short()
         if char_count <= 0 or char_count > object_size * 4:
             return ""
@@ -1208,6 +1234,45 @@ def _read_text_string_value(
         )
     except DwgBinaryReadError:
         return ""
+
+
+def _read_string_stream_values(
+    objects_buffer: bytes,
+    data_start_byte: int,
+    object_size: int,
+    handle_stream_bits: int,
+) -> List[str]:
+    """Read ALL string values (TVs) from the R2007+ string stream, in order.
+
+    HATCH carries two TVs there (gradient name then pattern name); a single
+    ``_read_text_string_value`` only sees the first. Each string is a BS
+    char-count + that many UTF-16LE chars. Fail-closed: returns the values read
+    so far on any malformed count (an empty list when there is no string stream).
+    """
+
+    window = _string_stream_window(
+        objects_buffer, data_start_byte, object_size, handle_stream_bits
+    )
+    if window is None:
+        return []
+    start, end = window
+    values: List[str] = []
+    try:
+        reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
+        reader.seek_bits(start)
+        while reader.tell_bits() + 16 <= end and len(values) < _MAX_STRING_STREAM_VALUES:
+            char_count = reader.read_bit_short()
+            if char_count < 0 or char_count * 16 > end - reader.tell_bits():
+                break
+            values.append(
+                "".join(
+                    chr(reader.read_bits(8) | (reader.read_bits(8) << 8))
+                    for _ in range(char_count)
+                )
+            )
+    except DwgBinaryReadError:
+        pass
+    return values
 
 
 def _decode_text_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str, Any]:
@@ -1436,6 +1501,146 @@ def _decode_dimension_geometry(reader: DwgBinaryReader, text_value: str) -> Dict
     }
 
 
+#: HATCH (spec 20.4.75, fixed type id 0x4E). Pattern + boundary loops; the
+#: pattern and gradient names are TVs in the R2007+ string stream, so the data
+#: stream's two TV fields occupy no bits there.
+HATCH_OBJECT_TYPE = 0x4E
+#: Runaway guard for HATCH boundary path/segment/spline counts (fail-closed).
+_HATCH_MAX_COUNT = 1_000_000
+
+
+def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[str, Any]:
+    """Decode HATCH (ODA spec 20.4.75): the gradient prefix, solid/associative
+    flags, and the boundary loops, from which a world bbox is computed.
+
+    The two TV fields (gradient name, then the pattern Name) live in the R2007+
+    string stream and are passed in as ``strings`` (the pattern Name is the last
+    TV). Only the diff-relevant summary is kept — pattern + gradient name/flag,
+    solid/associative flags, path count, and the boundary bbox; the hatch pattern
+    line definitions after the loops are not read. All four boundary edge types
+    (LINE / CIRCULAR ARC / ELLIPTICAL ARC / SPLINE) and the polyline path are
+    decoded per spec; LINE boundaries are validated 1:1 against ODA ground truth
+    (the bbox matches), and arcs contribute their full-circle extent (a
+    conservative bound).
+    """
+
+    is_gradient = reader.read_bit_long()      # BL: is gradient fill
+    reader.read_bit_long()                    # BL: reserved
+    reader.read_bit_double()                  # BD: gradient angle
+    reader.read_bit_double()                  # BD: gradient shift
+    reader.read_bit_long()                    # BL: single-colour gradient
+    reader.read_bit_double()                  # BD: gradient tint
+    num_grad_colors = reader.read_bit_long()  # BL: number of gradient colours
+    if not 0 <= num_grad_colors <= 256:
+        raise DwgBinaryReadError(f"HATCH gradient colour count {num_grad_colors} insane")
+    for _ in range(num_grad_colors):
+        reader.read_bit_double()              # BD: unknown double
+        reader.read_bit_short()               # BS: unknown short
+        reader.read_bit_long()                # BL: RGB colour
+        reader.read_bits(8)                   # RC: ignored colour byte
+    # Gradient name TV -> string stream (no bits here).
+    reader.read_bit_double()                  # BD: Z coord (X, Y always 0)
+    reader.read_bit_double()                  # BD: extrusion x ...
+    reader.read_bit_double()
+    reader.read_bit_double()
+    # Pattern name TV -> string stream (no bits here).
+    solid = reader.read_bit()                 # B: solid fill
+    associative = reader.read_bit()           # B: associative
+    num_paths = reader.read_bit_long()        # BL: number of boundary paths
+    if not 0 <= num_paths <= _HATCH_MAX_COUNT:
+        raise DwgBinaryReadError(f"HATCH path count {num_paths} insane")
+
+    xs: List[float] = []
+    ys: List[float] = []
+    for _ in range(num_paths):
+        path_flag = reader.read_bit_long()    # BL: path flag (bit 1 = polyline)
+        if not (path_flag & 2):               # edge-based path
+            num_segs = reader.read_bit_long()
+            if not 0 <= num_segs <= _HATCH_MAX_COUNT:
+                raise DwgBinaryReadError(f"HATCH segment count {num_segs} insane")
+            for _ in range(num_segs):
+                edge_type = reader.read_bits(8)  # RC: edge type
+                if edge_type == 1:               # LINE: two endpoints (2RD each)
+                    x0, y0 = _read_raw_double(reader), _read_raw_double(reader)
+                    x1, y1 = _read_raw_double(reader), _read_raw_double(reader)
+                    xs += [x0, x1]
+                    ys += [y0, y1]
+                elif edge_type == 2:             # CIRCULAR ARC
+                    cx, cy = _read_raw_double(reader), _read_raw_double(reader)
+                    radius = reader.read_bit_double()
+                    reader.read_bit_double()     # start angle
+                    reader.read_bit_double()     # end angle
+                    reader.read_bit()            # is counter-clockwise
+                    xs += [cx - radius, cx + radius]
+                    ys += [cy - radius, cy + radius]
+                elif edge_type == 3:             # ELLIPTICAL ARC
+                    cx, cy = _read_raw_double(reader), _read_raw_double(reader)
+                    ex, ey = _read_raw_double(reader), _read_raw_double(reader)  # major axis end
+                    reader.read_bit_double()     # minor/major ratio
+                    reader.read_bit_double()     # start angle
+                    reader.read_bit_double()     # end angle
+                    reader.read_bit()            # is counter-clockwise
+                    major = math.hypot(ex, ey)
+                    xs += [cx - major, cx + major]
+                    ys += [cy - major, cy + major]
+                elif edge_type == 4:             # SPLINE
+                    reader.read_bit_long()       # degree
+                    is_rational = reader.read_bit()
+                    reader.read_bit()            # is periodic
+                    num_knots = reader.read_bit_long()
+                    num_ctrl = reader.read_bit_long()
+                    if not (0 <= num_knots <= _HATCH_MAX_COUNT
+                            and 0 <= num_ctrl <= _HATCH_MAX_COUNT):
+                        raise DwgBinaryReadError("HATCH spline knot/control counts insane")
+                    for _ in range(num_knots):
+                        reader.read_bit_double()  # knot value
+                    for _ in range(num_ctrl):
+                        cx, cy = _read_raw_double(reader), _read_raw_double(reader)
+                        xs.append(cx)
+                        ys.append(cy)
+                        if is_rational:
+                            reader.read_bit_double()  # weight
+                    num_fit = reader.read_bit_long()  # R24+: fit points
+                    if not 0 <= num_fit <= _HATCH_MAX_COUNT:
+                        raise DwgBinaryReadError("HATCH spline fit-point count insane")
+                    for _ in range(num_fit):
+                        _read_raw_double(reader)
+                        _read_raw_double(reader)
+                    _read_raw_double(reader)     # start tangent (2RD)
+                    _read_raw_double(reader)
+                    _read_raw_double(reader)     # end tangent (2RD)
+                    _read_raw_double(reader)
+                else:
+                    raise DwgBinaryReadError(f"HATCH unknown edge type {edge_type}")
+        else:                                  # polyline path
+            has_bulges = reader.read_bit()
+            reader.read_bit()                  # closed
+            num_segs = reader.read_bit_long()
+            if not 0 <= num_segs <= _HATCH_MAX_COUNT:
+                raise DwgBinaryReadError(f"HATCH polyline vertex count {num_segs} insane")
+            for _ in range(num_segs):
+                x0, y0 = _read_raw_double(reader), _read_raw_double(reader)
+                xs.append(x0)
+                ys.append(y0)
+                if has_bulges:
+                    reader.read_bit_double()   # bulge
+        reader.read_bit_long()                 # BL: number of boundary object handles
+
+    bbox = None
+    if xs:
+        bbox = {"min_x": min(xs), "min_y": min(ys), "max_x": max(xs), "max_y": max(ys)}
+    return {
+        # The pattern Name is the LAST TV; the gradient name is the first of two.
+        "pattern": strings[-1] if strings else "",
+        "gradient_name": strings[0] if len(strings) >= 2 else "",
+        "is_gradient": bool(is_gradient),
+        "solid": bool(solid),
+        "associative": bool(associative),
+        "num_paths": num_paths,
+        "bbox": bbox,
+    }
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
@@ -1482,8 +1687,8 @@ def decode_r2018_entity(
     """Decode the geometry of a supported entity at ``offset`` in the buffer.
 
     Returns an ``R2018Entity`` for LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/
-    INSERT/DIMENSION, or ``None`` for an unsupported type, a free-space gap, or
-    any malformed/unsupported field (fail-closed). ``handle_map`` (handle ->
+    INSERT/DIMENSION/HATCH, or ``None`` for an unsupported type, a free-space gap,
+    or any malformed/unsupported field (fail-closed). ``handle_map`` (handle ->
     object offset) resolves the entity's layer name (and an INSERT's block name);
     without it the entity decodes with an empty ``layer`` (and ``block_name``).
     """
@@ -1497,11 +1702,13 @@ def decode_r2018_entity(
     is_insert = object_type == INSERT_OBJECT_TYPE
     dimtype = _DIMENSION_OBJECT_TYPES.get(object_type)
     is_dimension = dimtype is not None
+    is_hatch = object_type == HATCH_OBJECT_TYPE
     if (
         string_decoder is None
         and geometry_decoder is None
         and not is_insert
         and not is_dimension
+        and not is_hatch
     ):
         return None
     data_start_byte = offset + header_bytes
@@ -1533,6 +1740,14 @@ def decode_r2018_entity(
         elif is_insert:
             geometry = _decode_insert_geometry(reader)
             type_name = "INSERT"
+        elif is_hatch:
+            # HATCH carries two TVs (gradient name, pattern name) in the string
+            # stream; the boundary loops + flags are in the data stream.
+            strings = _read_string_stream_values(
+                objects_buffer, data_start_byte, object_size, handle_stream_bits
+            )
+            geometry = _decode_hatch_geometry(reader, strings)
+            type_name = "HATCH"
         else:
             type_name, decode = geometry_decoder
             geometry = decode(reader)
@@ -1588,8 +1803,8 @@ def read_r2018_entities(
 ) -> R2018EntityTable:
     """Decode every supported entity the AcDb:Handles index locates.
 
-    Supported types: LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/INSERT and the
-    seven DIMENSION subtypes. Diagnostic-only — the result is pre-canonical
+    Supported types: LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/INSERT/HATCH and
+    the seven DIMENSION subtypes. Diagnostic-only — the result is pre-canonical
     geometry, not wired to the product diff/render pipeline.
     """
 
@@ -1641,14 +1856,15 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "CIRCLE": "circle",
     "ARC": "arc",
     "LWPOLYLINE": "polyline",
-    # POINT/TEXT/MTEXT/DIMENSION are not rendered by the scene-pack producer
-    # (counted unsupported, visible) but TEXT/MTEXT/DIMENSION carry the value the
-    # structural diff cares about.
+    # POINT/TEXT/MTEXT/DIMENSION/HATCH are not rendered by the scene-pack producer
+    # (counted unsupported, visible) but TEXT/MTEXT/DIMENSION/HATCH carry the value
+    # (text / measurement / pattern) the structural diff cares about.
     "POINT": "point",
     "TEXT": "text",
     "MTEXT": "mtext",
     "INSERT": "insert",  # block reference; carries the block name for the diff
     "DIMENSION": "dimension",  # carries the measured value the structural diff cares about
+    "HATCH": "hatch",  # carries the pattern + boundary bbox (fills/section poche)
 }
 
 
@@ -1660,6 +1876,10 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
     """A 2D world bbox (min_x/min_y/max_x/max_y) for one decoded entity."""
 
     geometry = entity.geometry
+    if entity.type_name == "HATCH":
+        # The boundary extent is computed during the decode; a degenerate box at
+        # the origin is the fail-safe when no boundary point decoded.
+        return geometry["bbox"] or {"min_x": 0.0, "min_y": 0.0, "max_x": 0.0, "max_y": 0.0}
     if entity.type_name == "LINE":
         xs = [geometry["start"][0], geometry["end"][0]]
         ys = [geometry["start"][1], geometry["end"][1]]
@@ -1780,6 +2000,16 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "dimtype": geometry["dimtype"],
             "text": geometry["text"],
             "canonical_text": geometry["text"],
+        }
+    elif entity.type_name == "HATCH":
+        out["geometry"] = {
+            "type": "hatch",
+            "pattern": geometry["pattern"],
+            "gradient_name": geometry["gradient_name"],
+            "is_gradient": geometry["is_gradient"],
+            "solid": geometry["solid"],
+            "associative": geometry["associative"],
+            "num_paths": geometry["num_paths"],
         }
     else:  # POINT
         out["geometry"] = {"type": "point", "location": _canonical_point(geometry["location"])}
