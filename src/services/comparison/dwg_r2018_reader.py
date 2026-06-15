@@ -406,6 +406,7 @@ class R2004Section:
     section_id: int
     page_count: int
     size: int
+    max_decompressed_size: int = 0  # per-page logical slot size (spec: section "page size")
     pages: list = field(default_factory=list)  # [(page_number, data_size, start_offset)]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -414,6 +415,7 @@ class R2004Section:
             "section_id": self.section_id,
             "page_count": self.page_count,
             "size": self.size,
+            "max_decompressed_size": self.max_decompressed_size,
             "pages": [list(page) for page in self.pages],
         }
 
@@ -506,6 +508,7 @@ def read_r2004_section_map(
             break
         size = struct.unpack_from("<Q", decompressed, cursor)[0]
         page_count = struct.unpack_from("<I", decompressed, cursor + 0x08)[0]
+        max_decompressed = struct.unpack_from("<I", decompressed, cursor + 0x0C)[0]
         section_id = struct.unpack_from("<I", decompressed, cursor + 0x18)[0]
         name = (
             decompressed[cursor + 0x20 : cursor + 0x20 + 64]
@@ -528,6 +531,7 @@ def read_r2004_section_map(
                 section_id=section_id,
                 page_count=page_count,
                 size=size,
+                max_decompressed_size=max_decompressed,
                 pages=pages,
             )
         )
@@ -574,9 +578,14 @@ def read_r2004_data_section(
     """Assemble one named data section's decompressed bytes (navigation only).
 
     Reads every page of ``section_name`` (e.g. ``AcDb:AcDbObjects``): decrypts
-    its 32-byte data page header, decompresses the page, and places it at its
-    start offset in the section buffer. Raises ``ValueError`` on any structural
-    mismatch. This reaches the object bytes; it does NOT bit-decode objects.
+    its 32-byte data page header, decompresses the page to its logical slot size,
+    and places it at its ``start_offset`` in the section buffer. Each page fills a
+    ``max_decompressed_size`` slot (from the section descriptor); the page
+    header's own size word UNDER-reports the page's logical content, so decoding
+    to that word leaves zero gaps between pages (and mis-locates every later
+    object). Decoding to the slot size (capped by the section end) tiles the
+    pages gap-free. Raises ``ValueError`` on any structural mismatch. This reaches
+    the object bytes; it does NOT bit-decode objects.
     """
 
     page_map = read_r2004_section_page_map(data, version_code=version_code)
@@ -597,7 +606,7 @@ def read_r2004_data_section(
         header = decrypt_r2004_data_page_header(
             raw[file_offset : file_offset + DATA_PAGE_HEADER_LENGTH], file_offset
         )
-        page_type, _section_number, compressed_size, decompressed_size = struct.unpack_from(
+        page_type, _section_number, compressed_size, decompressed_field = struct.unpack_from(
             "<IIII", header, 0
         )
         if page_type != DATA_SECTION_PAGE_TYPE:
@@ -605,16 +614,17 @@ def read_r2004_data_section(
                 f"{section_name!r} page {page_number} type {page_type:#010x} is not a data page"
             )
         body_offset = file_offset + DATA_PAGE_HEADER_LENGTH
-        decompressed = decompress_r2004(
-            raw[body_offset : body_offset + compressed_size], decompressed_size
-        )
-        # A page may decompress to its padded page size, which can exceed the
-        # logical section size; clamp so the buffer stays exactly section.size.
-        available = section.size - start_offset
-        if available <= 0:
+        # Decode the page to its logical slot size (capped by the section end),
+        # NOT the page header's under-reporting size word. Fall back to the page
+        # word only if the section slot size is unavailable.
+        slot = section.max_decompressed_size or decompressed_field
+        target = min(slot, section.size - start_offset)
+        if target <= 0:
             continue
-        chunk = decompressed[:available]
-        buffer[start_offset : start_offset + len(chunk)] = chunk
+        decompressed = decompress_r2004(
+            raw[body_offset : body_offset + compressed_size], target
+        )
+        buffer[start_offset : start_offset + len(decompressed)] = decompressed
     return bytes(buffer)
 
 
@@ -711,7 +721,11 @@ def read_r2018_object_run(
     Each object is ``[MS object-size][MC handle-stream-bits][bit stream: MS
     bytes][RS CRC]``; the next object is ``offset + (MS+MC field bytes) + MS +
     2``. Reads only the object TYPE (no geometry yet). Stops at a free-space gap
-    (``MS <= 0`` or ``MS`` beyond a page) or the buffer end.
+    (``MS <= 0`` or ``MS`` beyond a page) or the buffer end. This is a heuristic
+    contiguous walk: on a gap-free assembled buffer it can over-walk slightly
+    into free-space leftovers before stopping, so a few trailing entries may be
+    spurious. ``read_r2018_object_table`` (handle-map driven) is the
+    authoritative enumeration.
     """
 
     buffer = bytes(objects_buffer)
