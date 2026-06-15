@@ -434,6 +434,14 @@ _GT_ARC = {
 _GT_POINT = {
     0x28E: (1.494404150136852, 1.491325898678436, 0.0),
 }
+_GT_LWPOLY = {
+    # open 5-vertex polyline, no bulges.
+    0x2E2: {"closed": False, "nverts": 5,
+            "v0": (12.140516195, 1.379831194), "vlast": (12.914494994, 2.771889577)},
+    # closed 7-vertex polyline whose second vertex carries an arc bulge.
+    0x2E4: {"closed": True, "nverts": 7,
+            "v0": (28.005636844, 0.361304863), "bulge1": -0.799559497},
+}
 
 
 def _approx(actual, expected, tol=1e-6):
@@ -449,7 +457,7 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     assert table.status == "decoded", table.message
     # A substantial number of entities decode across all four supported types.
     assert table.decoded_count >= 50, table.type_counts
-    for kind in ("LINE", "CIRCLE", "ARC", "POINT"):
+    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE"):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by_handle = {e.handle: e for e in table.entities}
@@ -481,6 +489,20 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
         assert entity.type_name == "POINT"
         assert _approx(entity.geometry["location"][0], location[0])
         assert _approx(entity.geometry["location"][1], location[1])
+
+    for handle, expected in _GT_LWPOLY.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "LWPOLYLINE"
+        vertices = entity.geometry["vertices"]
+        assert len(vertices) == expected["nverts"]
+        assert entity.geometry["closed"] is expected["closed"]
+        assert _approx(vertices[0][0], expected["v0"][0])
+        assert _approx(vertices[0][1], expected["v0"][1])
+        if "vlast" in expected:
+            assert _approx(vertices[-1][0], expected["vlast"][0])
+            assert _approx(vertices[-1][1], expected["vlast"][1])
+        if "bulge1" in expected:
+            assert _approx(entity.geometry["bulges"][1], expected["bulge1"], tol=1e-6)
 
 
 def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
@@ -543,6 +565,17 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert point["type"] == "point"  # producer counts this as unsupported (visible)
     assert point["geometry"]["location"] == {"x": 7.0, "y": 8.0, "z": 0.0}
 
+    poly = r2018_entity_to_canonical(
+        R2018Entity(0x4D, 0x4D, "LWPOLYLINE",
+                    {"vertices": [(0.0, 0.0), (1.0, 2.0), (3.0, 0.0)],
+                     "bulges": [], "closed": True})
+    )
+    assert poly["type"] == "polyline"
+    assert poly["geometry"]["closed"] is True
+    assert len(poly["geometry"]["vertices"]) == 3
+    assert poly["geometry"]["vertices"][0]["point"] == {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert poly["geometry"]["vertices"][1]["point"] == {"x": 1.0, "y": 2.0, "z": 0.0}
+
 
 def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: Path) -> None:
     # S4: the own clean-room reader drives the SAME viewport seam the ezdxf path
@@ -554,7 +587,9 @@ def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: 
 
     raw = sample.read_bytes()
     table = read_r2018_entities(raw)
-    expected_primitives = sum(table.type_counts.get(k, 0) for k in ("LINE", "CIRCLE", "ARC"))
+    expected_primitives = sum(
+        table.type_counts.get(k, 0) for k in ("LINE", "CIRCLE", "ARC", "LWPOLYLINE")
+    )
 
     document = build_r2018_canonical_document(raw, source_path=sample.name)
     assert document["schema_version"] == "canonical-drawing/v1"

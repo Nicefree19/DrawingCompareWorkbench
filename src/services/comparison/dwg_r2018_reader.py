@@ -1110,12 +1110,54 @@ def _decode_point_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
     return {"location": location}
 
 
+#: LWPOLYLINE flag bits (ODA spec 20.4.85) for optional fields + the closed bit.
+_LWPOLY_HAS_CONST_WIDTH = 0x04
+_LWPOLY_HAS_ELEVATION = 0x08
+_LWPOLY_HAS_THICKNESS = 0x02
+_LWPOLY_HAS_EXTRUSION = 0x01
+_LWPOLY_HAS_BULGES = 0x10
+_LWPOLY_HAS_VERTEX_IDS = 0x400  # R2010+
+_LWPOLY_HAS_WIDTHS = 0x20
+_LWPOLY_CLOSED = 0x200  # verified against ODA ground truth (closed flags 0x200/0x210)
+
+
+def _decode_lwpolyline_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    flag = reader.read_bit_short()
+    if flag & _LWPOLY_HAS_CONST_WIDTH:
+        reader.read_bit_double()           # constant width
+    if flag & _LWPOLY_HAS_ELEVATION:
+        reader.read_bit_double()           # elevation
+    if flag & _LWPOLY_HAS_THICKNESS:
+        reader.read_bit_double()           # thickness
+    if flag & _LWPOLY_HAS_EXTRUSION:       # extrusion 3BD
+        reader.read_bit_double(); reader.read_bit_double(); reader.read_bit_double()
+    numpoints = reader.read_bit_long()
+    if numpoints <= 0:
+        raise DwgBinaryReadError(f"LWPOLYLINE vertex count {numpoints} is not positive")
+    numbulges = reader.read_bit_long() if (flag & _LWPOLY_HAS_BULGES) else 0
+    vertex_id_count = reader.read_bit_long() if (flag & _LWPOLY_HAS_VERTEX_IDS) else 0
+    numwidths = reader.read_bit_long() if (flag & _LWPOLY_HAS_WIDTHS) else 0
+    # First vertex is a raw 2RD; the rest are 2DD with the previous coordinate
+    # as the default (why a naive scan misses repeated coordinates).
+    x = _read_raw_double(reader)
+    y = _read_raw_double(reader)
+    vertices: List[Tuple[float, float]] = [(x, y)]
+    for _ in range(numpoints - 1):
+        x = reader.read_bit_double_with_default(x)
+        y = reader.read_bit_double_with_default(y)
+        vertices.append((x, y))
+    bulges = [reader.read_bit_double() for _ in range(max(0, numbulges))]
+    # (vertex ids + widths follow but are not needed for outline geometry.)
+    return {"vertices": vertices, "bulges": bulges, "closed": bool(flag & _LWPOLY_CLOSED)}
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
     0x12: ("CIRCLE", _decode_circle_geometry),
     0x13: ("LINE", _decode_line_geometry),
     0x1B: ("POINT", _decode_point_geometry),
+    0x4D: ("LWPOLYLINE", _decode_lwpolyline_geometry),
 }
 
 
@@ -1246,6 +1288,7 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "LINE": "line",
     "CIRCLE": "circle",
     "ARC": "arc",
+    "LWPOLYLINE": "polyline",
     "POINT": "point",  # the scene-pack producer counts POINT as unsupported (visible)
 }
 
@@ -1265,6 +1308,9 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
         cx, cy, radius = geometry["center"][0], geometry["center"][1], geometry["radius"]
         xs = [cx - radius, cx + radius]
         ys = [cy - radius, cy + radius]
+    elif entity.type_name == "LWPOLYLINE":
+        xs = [vertex[0] for vertex in geometry["vertices"]]
+        ys = [vertex[1] for vertex in geometry["vertices"]]
     else:  # POINT
         xs = [geometry["location"][0]]
         ys = [geometry["location"][1]]
@@ -1310,30 +1356,33 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "start_angle_deg": geometry["start_angle_deg"],
             "end_angle_deg": geometry["end_angle_deg"],
         }
+    elif entity.type_name == "LWPOLYLINE":
+        out["geometry"] = {
+            "type": "polyline",
+            "vertices": [
+                {"point": {"x": vx, "y": vy, "z": 0.0}, "bulge": bulge}
+                for (vx, vy), bulge in zip(
+                    geometry["vertices"],
+                    list(geometry["bulges"]) + [0.0] * len(geometry["vertices"]),
+                )
+            ],
+            "closed": geometry["closed"],
+        }
     else:  # POINT
         out["geometry"] = {"type": "point", "location": _canonical_point(geometry["location"])}
     return out
 
 
 def _r2018_entities_extents(entities: List[R2018Entity]) -> "Optional[Dict[str, float]]":
-    xs: List[float] = []
-    ys: List[float] = []
-    for entity in entities:
-        geometry = entity.geometry
-        if entity.type_name == "LINE":
-            xs.extend((geometry["start"][0], geometry["end"][0]))
-            ys.extend((geometry["start"][1], geometry["end"][1]))
-        elif entity.type_name in ("CIRCLE", "ARC"):
-            cx, cy = geometry["center"][0], geometry["center"][1]
-            radius = geometry["radius"]
-            xs.extend((cx - radius, cx + radius))
-            ys.extend((cy - radius, cy + radius))
-        elif entity.type_name == "POINT":
-            xs.append(geometry["location"][0])
-            ys.append(geometry["location"][1])
-    if not xs:
+    boxes = [_r2018_entity_bbox(entity) for entity in entities]
+    if not boxes:
         return None
-    return {"min_x": min(xs), "min_y": min(ys), "max_x": max(xs), "max_y": max(ys)}
+    return {
+        "min_x": min(box["min_x"] for box in boxes),
+        "min_y": min(box["min_y"] for box in boxes),
+        "max_x": max(box["max_x"] for box in boxes),
+        "max_y": max(box["max_y"] for box in boxes),
+    }
 
 
 def build_r2018_canonical_document(
