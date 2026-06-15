@@ -482,6 +482,15 @@ _GT_DIM = {
     0x515: {"dimtype": 5, "tm": (470.64204095, 31.939054011), "meas": 1.647568218},    # ANG3Pt (rad)
     0x525: {"dimtype": 6, "tm": (706.46879441, 16.46796855), "meas": 102.594614812},   # ORDINATE
 }
+_GT_LAYER = {
+    # handle -> layer name; entities on distinct layers across types. The layer is
+    # resolved from the entity's handle stream (the reference to a LAYER record).
+    0x28E: "0",               # POINT on the default layer
+    0x517: "Layer2",          # LINE
+    0x513: "Layer1",          # MTEXT
+    0x299: "Layer_Lock",      # POINT
+    0x757: "Layer_color_80",  # TEXT
+}
 
 
 def _approx(actual, expected, tol=1e-6):
@@ -583,6 +592,13 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
         assert _approx(entity.geometry["text_midpoint"][1], expected["tm"][1])
         assert _approx(entity.geometry["measurement"], expected["meas"], tol=1e-5)
 
+    # Layer resolved from the handle stream (the reference to a LAYER record).
+    for handle, expected_layer in _GT_LAYER.items():
+        assert by_handle[handle].layer == expected_layer, by_handle[handle]
+    # Every decoded entity resolves a (non-empty) layer name — '0' at minimum.
+    assert all(e.layer for e in table.entities), \
+        [f"{e.handle:#x}" for e in table.entities if not e.layer]
+
 
 def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
     # Each decoded object's own handle (from the common-entity-data H field) must
@@ -617,11 +633,13 @@ def test_decode_r2018_entity_returns_none_on_unframable_offset() -> None:
 
 def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     line = r2018_entity_to_canonical(
-        R2018Entity(0x2C7, 0x13, "LINE", {"start": (1.0, 2.0, 0.0), "end": (3.0, 4.0, 0.0)})
+        R2018Entity(0x2C7, 0x13, "LINE", {"start": (1.0, 2.0, 0.0), "end": (3.0, 4.0, 0.0)},
+                    layer="S-BEAM")
     )
     assert line["type"] == "line" and line["handle"] == "2C7"
     assert line["geometry"]["start"] == {"x": 1.0, "y": 2.0, "z": 0.0}
     assert line["geometry"]["end"] == {"x": 3.0, "y": 4.0, "z": 0.0}
+    assert line["layer_id"] == "S-BEAM"  # layer flows from the handle stream
 
     circle = r2018_entity_to_canonical(
         R2018Entity(0x10, 0x12, "CIRCLE", {"center": (5.0, 6.0, 0.0), "radius": 2.5})
