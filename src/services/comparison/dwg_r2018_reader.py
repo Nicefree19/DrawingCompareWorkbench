@@ -246,6 +246,8 @@ def decompress_r2004(src: bytes, decompressed_size: int) -> bytes:
         if (byte & 0xF0) != 0:
             return byte
         copy_literals(extended_literal_length() if byte == 0x00 else byte + 3)
+        if len(out) >= decompressed_size:
+            return 0x11  # output complete; do not consume another opcode byte
         return take()
 
     # Initial literal run (a leading byte with a high-nibble bit set is already
@@ -277,8 +279,12 @@ def decompress_r2004(src: bytes, decompressed_size: int) -> bytes:
         else:
             raise ValueError(f"R2004 unexpected opcode {opcode:#04x} at output {len(out)}")
         copy_back(comp_bytes, comp_offset)
+        if len(out) >= decompressed_size:
+            break  # complete; do not read the trailing literals / next opcode
         if literal != 0:
             copy_literals(literal)
+            if len(out) >= decompressed_size:
+                break
             opcode = take()
         else:
             opcode = read_literal_run()
@@ -442,16 +448,19 @@ def read_r2004_section_map(
     data: bytes | bytearray | memoryview,
     *,
     version_code: str = R2018_VERSION_CODE,
+    page_map: "R2004SectionPageMapDiagnostic | None" = None,
 ) -> R2004SectionMapDiagnostic:
     """Decompress + parse the data-section map (navigation, not decoding).
 
     Locates the section-map system page via ``section_map_id`` + the section
     page directory, decompresses it, and enumerates the named logical sections
     (``AcDb:AcDbObjects``, ``AcDb:Handles``, ``AcDb:Header`` ...) with their
-    page references. No object/entity bytes are decoded.
+    page references. No object/entity bytes are decoded. Pass a pre-decoded
+    ``page_map`` to avoid re-decoding the page directory.
     """
 
-    page_map = read_r2004_section_page_map(data, version_code=version_code)
+    if page_map is None:
+        page_map = read_r2004_section_page_map(data, version_code=version_code)
     if page_map.status != "decoded":
         return R2004SectionMapDiagnostic(
             version_code=version_code,
@@ -570,14 +579,14 @@ def read_r2004_data_section(
     mismatch. This reaches the object bytes; it does NOT bit-decode objects.
     """
 
-    section_map = read_r2004_section_map(data, version_code=version_code)
+    page_map = read_r2004_section_page_map(data, version_code=version_code)
+    section_map = read_r2004_section_map(data, version_code=version_code, page_map=page_map)
     if section_map.status != "decoded":
         raise ValueError(f"section map not decoded: {section_map.status}")
     section = next((item for item in section_map.sections if item.name == section_name), None)
     if section is None:
         raise ValueError(f"section {section_name!r} not present")
 
-    page_map = read_r2004_section_page_map(data, version_code=version_code)
     offsets = section_page_file_offsets(page_map)
     raw = bytes(data)
     buffer = bytearray(section.size)
@@ -630,6 +639,9 @@ def read_r2018_object_type(reader: DwgBinaryReader) -> int:
         return reader.read_bits(8)
     if pair == 1:
         return reader.read_bits(8) + 0x1F0
+    # pair 2/3: a 2-byte raw short. Fixed entities (LINE/CIRCLE/... < 0x1F0) use
+    # pair 0/1; the raw-short byte order for high custom-object type ids is not
+    # yet verified against a custom-object sample.
     return reader.read_bits(16)
 
 

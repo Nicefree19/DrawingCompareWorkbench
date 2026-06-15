@@ -4,6 +4,10 @@
 Diagnostic-only — these tests prove the R2004+ container is navigable from the
 public ODA spec (header de-obfuscation + section-page-map location). They make
 no object-decoding or support claim.
+
+CI coverage note: the algorithm tests (LCG, decompression, synthetic fixtures)
+run everywhere. The ``test_real_ac1032_*`` integration tests require the local
+git-ignored AC1032 corpus and SKIP in CI — real-file verification is local-only.
 """
 from __future__ import annotations
 
@@ -150,6 +154,13 @@ def test_decompress_r2004_pure_literal_run() -> None:
     # 0x02 -> literal length 5; copy 5 literal bytes; terminator.
     stream = bytes([0x02] + list(b"HELLO") + [0x11])
     assert decompress_r2004(stream, decompressed_size=5) == b"HELLO"
+
+
+def test_decompress_r2004_stream_ending_exactly_at_boundary() -> None:
+    # Regression: a stream that completes the output with no trailing opcode/
+    # terminator must not over-read past the end (the boundary guard stops
+    # instead of consuming another byte).
+    assert decompress_r2004(bytes([0x02]) + b"HELLO", decompressed_size=5) == b"HELLO"
 
 
 def test_decompress_r2004_raises_on_underrun() -> None:
