@@ -1238,6 +1238,21 @@ def _decode_text_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str,
     }
 
 
+def _decode_mtext_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str, Any]:
+    """Decode MTEXT (spec 20.4.46) position + height; the multi-line value comes
+    from the string stream (read separately and passed in)."""
+
+    ix = reader.read_bit_double()
+    iy = reader.read_bit_double()
+    reader.read_bit_double()  # insertion point 3BD
+    reader.read_bit_double(); reader.read_bit_double(); reader.read_bit_double()  # extrusion 3BD
+    reader.read_bit_double(); reader.read_bit_double(); reader.read_bit_double()  # x-axis dir 3BD
+    reader.read_bit_double()  # reference rectangle width
+    reader.read_bit_double()  # reference rectangle height (R2007+)
+    height = reader.read_bit_double()  # text height
+    return {"insert": (ix, iy, 0.0), "height": height, "text": text_value}
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
@@ -1245,6 +1260,13 @@ _ENTITY_GEOMETRY_DECODERS = {
     0x13: ("LINE", _decode_line_geometry),
     0x1B: ("POINT", _decode_point_geometry),
     0x4D: ("LWPOLYLINE", _decode_lwpolyline_geometry),
+}
+
+#: object type -> (canonical name, decoder(reader, text_value)). These entities
+#: carry a TV value that lives in the R2007+ string stream (read separately).
+_STRING_STREAM_DECODERS = {
+    TEXT_OBJECT_TYPE: ("TEXT", _decode_text_geometry),
+    0x2C: ("MTEXT", _decode_mtext_geometry),
 }
 
 
@@ -1280,28 +1302,28 @@ def decode_r2018_entity(
     if frame is None:
         return None
     object_size, header_bytes, object_type = frame
-    is_text = object_type == TEXT_OBJECT_TYPE
-    decoder = _ENTITY_GEOMETRY_DECODERS.get(object_type)
-    if decoder is None and not is_text:
+    string_decoder = _STRING_STREAM_DECODERS.get(object_type)
+    geometry_decoder = _ENTITY_GEOMETRY_DECODERS.get(object_type)
+    if string_decoder is None and geometry_decoder is None:
         return None
     data_start_byte = offset + header_bytes
     reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
     try:
         read_r2018_object_type(reader)  # advance past the object type
         handle = _parse_common_entity_header(reader)
-        if is_text:
-            # the value lives in the string stream; the handle-stream size (the
-            # MC consumed at framing) locates it, so re-read it from the framing.
+        if string_decoder is not None:
+            # TEXT/MTEXT: the value lives in the string stream; the handle-stream
+            # size (the MC consumed at framing) locates it, so re-read the framing.
             framing = DwgBinaryReader(objects_buffer, offset=offset)
             framing.read_modular_short()
             handle_stream_bits = framing.read_modular_char()
             text_value = _read_text_string_value(
                 objects_buffer, data_start_byte, object_size, handle_stream_bits
             )
-            type_name = "TEXT"
-            geometry = _decode_text_geometry(reader, text_value)
+            type_name, decode = string_decoder
+            geometry = decode(reader, text_value)
         else:
-            type_name, decode = decoder
+            type_name, decode = geometry_decoder
             geometry = decode(reader)
     except DwgBinaryReadError:
         return None
@@ -1390,10 +1412,12 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "CIRCLE": "circle",
     "ARC": "arc",
     "LWPOLYLINE": "polyline",
-    # POINT/TEXT are not rendered by the scene-pack producer (counted unsupported,
-    # visible) but TEXT carries the value the structural diff cares about.
+    # POINT/TEXT/MTEXT are not rendered by the scene-pack producer (counted
+    # unsupported, visible) but TEXT/MTEXT carry the value the structural diff
+    # cares about.
     "POINT": "point",
     "TEXT": "text",
+    "MTEXT": "mtext",
 }
 
 
@@ -1415,12 +1439,14 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
     elif entity.type_name == "LWPOLYLINE":
         xs = [vertex[0] for vertex in geometry["vertices"]]
         ys = [vertex[1] for vertex in geometry["vertices"]]
-    elif entity.type_name == "TEXT":
+    elif entity.type_name in ("TEXT", "MTEXT"):
         ix, iy = geometry["insert"][0], geometry["insert"][1]
         height = geometry["height"]
-        width = height * max(1, len(geometry["text"])) * 0.6  # rough advance width
+        lines = geometry["text"].replace("^J", "\n").splitlines() or [""]
+        longest = max((len(line) for line in lines), default=1)
+        width = height * max(1, longest) * 0.6  # rough advance width
         xs = [ix, ix + width]
-        ys = [iy, iy + height]
+        ys = [iy - height * len(lines), iy + height]
     else:  # POINT
         xs = [geometry["location"][0]]
         ys = [geometry["location"][1]]
@@ -1484,6 +1510,14 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "insert": _canonical_point(geometry["insert"]),
             "height": geometry["height"],
             "rotation_deg": geometry["rotation_deg"],
+            "text": geometry["text"],
+            "canonical_text": geometry["text"],
+        }
+    elif entity.type_name == "MTEXT":
+        out["geometry"] = {
+            "type": "mtext",
+            "insert": _canonical_point(geometry["insert"]),
+            "height": geometry["height"],
             "text": geometry["text"],
             "canonical_text": geometry["text"],
         }
