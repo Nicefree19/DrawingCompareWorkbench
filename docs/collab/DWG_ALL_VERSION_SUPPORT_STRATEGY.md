@@ -14,6 +14,9 @@ version-specific evidence exists.
 
 The executable loop-engineering protocol for this plan lives in
 `docs/collab/DWG_NATIVE_ALL_VERSION_LONG_TERM_PROTOCOL.md`.
+The remaining execution plan lives in
+`docs/collab/DWG_NATIVE_REMAINING_EXECUTION_PLAN.md`; unless the user selects
+another slice, the next default workstream is W1 AC1015 evidence closure.
 
 ### Claim Ladder
 

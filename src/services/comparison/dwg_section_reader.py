@@ -11,6 +11,10 @@ from .dwg_cleanroom_contract import contract_for_version
 class DwgSectionReadError(DwgBinaryReadError):
     """Raised when DWG section metadata is malformed."""
 
+    def __init__(self, message: str, *, diagnostics: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+
 
 @dataclass(frozen=True)
 class DwgSectionLocator:
@@ -227,7 +231,13 @@ class DwgSectionReader:
                 last_offset += offset_delta
                 if last_handle < 0 or last_offset < 0 or last_offset >= len(self.data):
                     raise DwgSectionReadError(
-                        f"object map entry outside file: handle={last_handle:X}, offset={last_offset}"
+                        f"object map entry outside file: handle={last_handle:X}, offset={last_offset}",
+                        diagnostics={
+                            "object_handle": f"{last_handle:X}",
+                            "object_offset": last_offset,
+                            "object_map_entry_index": len(entries),
+                            "object_map_decoded_entries": len(entries),
+                        },
                     )
                 entries.append(DwgObjectMapEntry(handle=last_handle, offset=last_offset))
                 if len(entries) > self.MAX_OBJECT_MAP_ENTRIES:
