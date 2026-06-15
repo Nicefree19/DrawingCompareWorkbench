@@ -1254,6 +1254,23 @@ def _canonical_point(xyz: Tuple[float, float, float]) -> Dict[str, float]:
     return {"x": xyz[0], "y": xyz[1], "z": xyz[2]}
 
 
+def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
+    """A 2D world bbox (min_x/min_y/max_x/max_y) for one decoded entity."""
+
+    geometry = entity.geometry
+    if entity.type_name == "LINE":
+        xs = [geometry["start"][0], geometry["end"][0]]
+        ys = [geometry["start"][1], geometry["end"][1]]
+    elif entity.type_name in ("CIRCLE", "ARC"):
+        cx, cy, radius = geometry["center"][0], geometry["center"][1], geometry["radius"]
+        xs = [cx - radius, cx + radius]
+        ys = [cy - radius, cy + radius]
+    else:  # POINT
+        xs = [geometry["location"][0]]
+        ys = [geometry["location"][1]]
+    return {"min_x": min(xs), "min_y": min(ys), "max_x": max(xs), "max_y": max(ys)}
+
+
 def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
     """Convert a decoded ``R2018Entity`` to a ``canonical-drawing/v1`` entity dict.
 
@@ -1269,7 +1286,9 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
         "id": f"{canonical_type}:{entity.handle:X}",
         "type": canonical_type,
         "layer_id": "",
+        "space": "model",
         "handle": f"{entity.handle:X}",
+        "bbox": _r2018_entity_bbox(entity),
     }
     if entity.type_name == "LINE":
         out["geometry"] = {

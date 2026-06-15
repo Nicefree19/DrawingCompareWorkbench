@@ -77,10 +77,24 @@ real object TYPES decode from the bit stream.**
   geometry-spanning bbox — **ODA/ezdxf calls = 0.** The own reader drives the
   same viewport seam the ezdxf path uses.
 
-Remaining: **S5** (run a real AC1032 before/after pair through the existing diff
-+ revision-cloud engine on own-reader canonical; clouds land on the changes,
-ODA calls = 0). Still diagnostic-only; AC1032 clean-room contract stays
-`blocked` (no support claim).
+- **S5 (diff + revision clouds) DONE — SPIKE GO MET.** The canonical doc from
+  `build_r2018_canonical_document` feeds the EXISTING diff engine directly
+  (`DrawingCompareEngine.compare` reads the same `{x,y,z}` geometry; only a
+  per-entity `bbox` was added — no new diff/cloud code). End-to-end: own-reader
+  before/after (one synthetic edit) → `DrawingCompareEngine.compare` matches
+  124/125 entities unchanged and isolates the edit → `build_change_zones` → a
+  zone covers it → `revcloud_geometry_from_bbox` → a 24-vertex revision cloud
+  whose bounds contain the change. **ODA/ezdxf calls = 0** through read → decode
+  → render → diff → clouds. The only ODA use in the whole program was offline
+  ground-truth validation of the geometry decode.
+
+**SPIKE COMPLETE (S0–S5).** The own clean-room AC1032 reader reads the container,
+decodes basic entity geometry (golden-validated vs ODA), renders through the
+viewport seam, diffs, and auto-draws revision clouds — all ODA-free, diagnostic-
+only, contract still `blocked` (no support claim). Post-spike (HITL): scale
+entity coverage (MTEXT/INSERT/HATCH/DIMENSION/LWPOLYLINE), wire the native path
+behind a product flag, and weigh promotion against the gate-inflation / north-
+star caveats before any support claim.
 
 ## 1. Goal
 
