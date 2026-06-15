@@ -1253,6 +1253,103 @@ def _decode_mtext_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str
     return {"insert": (ix, iy, 0.0), "height": height, "text": text_value}
 
 
+#: INSERT (spec type 0x07) carries its block-header reference in the handle
+#: stream; the referenced BLOCK HEADER (0x31) holds the block name.
+INSERT_OBJECT_TYPE = 0x07
+_BLOCK_HEADER_OBJECT_TYPE = 0x31
+
+
+def _decode_insert_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    """Decode INSERT (spec 20.4.10) position / scale / rotation from the data
+    stream. The block name is resolved separately from the handle stream."""
+
+    ix = reader.read_bit_double()
+    iy = reader.read_bit_double()
+    reader.read_bit_double()  # insertion point 3BD
+    scale_flags = reader.read_bits(2)  # BB scale data flags
+    if scale_flags == 0b11:
+        sx = sy = sz = 1.0
+    elif scale_flags == 0b01:
+        sx = 1.0
+        sy = reader.read_bit_double_with_default(1.0)
+        sz = reader.read_bit_double_with_default(1.0)
+    elif scale_flags == 0b10:
+        sx = _read_raw_double(reader)
+        sy = sz = sx
+    else:  # 0b00
+        sx = _read_raw_double(reader)
+        sy = reader.read_bit_double_with_default(sx)
+        sz = reader.read_bit_double_with_default(sx)
+    rotation = reader.read_bit_double()
+    return {
+        "insert": (ix, iy, 0.0),
+        "scale": (sx, sy, sz),
+        "rotation_deg": math.degrees(rotation),
+        "block_name": "",
+    }
+
+
+def _read_handle_stream_refs(
+    objects_buffer: bytes, data_start_byte: int, object_size: int, handle_stream_bits: int
+) -> List[int]:
+    """Read every handle reference in the object's trailing handle stream.
+
+    The handle stream is the last ``handle_stream_bits`` bits of the object body;
+    each reference is a code + counter + value. Relative-encoded references give a
+    delta rather than an absolute handle, but those are filtered out by the block
+    lookup, so the raw values are sufficient. Fail-closed on a malformed stream.
+    """
+
+    refs: List[int] = []
+    total_bits = object_size * 8
+    start = total_bits - handle_stream_bits
+    if start < 0:
+        return refs
+    reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
+    try:
+        reader.seek_bits(start)
+        while total_bits - reader.tell_bits() >= 8:
+            refs.append(reader.read_handle().value)
+    except DwgBinaryReadError:
+        pass
+    return refs
+
+
+def _resolve_insert_block_name(
+    objects_buffer: bytes, handle_map: "Optional[Dict[int, int]]", refs: List[int]
+) -> str:
+    """Resolve the inserted block name from the INSERT's handle references.
+
+    Among the references, the inserted block is the LAST that points to a BLOCK
+    HEADER (0x31) object — the owner/space block header (if present) comes first,
+    and any ATTRIB/SEQEND handles after the block header are other types. The
+    block name is the block header's first string-stream value.
+    """
+
+    if not handle_map:
+        return ""
+    name = ""
+    for value in refs:
+        offset = handle_map.get(value)
+        if offset is None:
+            continue
+        frame = _frame_r2018_object(objects_buffer, offset)
+        if frame is None:
+            continue
+        object_size, header_bytes, object_type = frame
+        if object_type != _BLOCK_HEADER_OBJECT_TYPE:
+            continue
+        framing = DwgBinaryReader(objects_buffer, offset=offset)
+        framing.read_modular_short()
+        handle_stream_bits = framing.read_modular_char()
+        candidate = _read_text_string_value(
+            objects_buffer, offset + header_bytes, object_size, handle_stream_bits
+        )
+        if candidate:
+            name = candidate  # keep the last (the inserted block, not the owner)
+    return name
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
@@ -1289,13 +1386,18 @@ class R2018Entity:
 
 
 def decode_r2018_entity(
-    objects_buffer: bytes | bytearray | memoryview, offset: int
+    objects_buffer: bytes | bytearray | memoryview,
+    offset: int,
+    *,
+    handle_map: "Optional[Dict[int, int]]" = None,
 ) -> "Optional[R2018Entity]":
     """Decode the geometry of a supported entity at ``offset`` in the buffer.
 
-    Returns an ``R2018Entity`` for LINE/CIRCLE/ARC/POINT, or ``None`` for an
-    unsupported type, a free-space gap, or any malformed/unsupported field
-    (fail-closed: never returns partial/garbage geometry).
+    Returns an ``R2018Entity`` for LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/
+    INSERT, or ``None`` for an unsupported type, a free-space gap, or any
+    malformed/unsupported field (fail-closed). ``handle_map`` (handle -> object
+    offset) is only needed to resolve an INSERT's block name; without it an
+    INSERT decodes with an empty ``block_name``.
     """
 
     frame = _frame_r2018_object(objects_buffer, offset)
@@ -1304,7 +1406,8 @@ def decode_r2018_entity(
     object_size, header_bytes, object_type = frame
     string_decoder = _STRING_STREAM_DECODERS.get(object_type)
     geometry_decoder = _ENTITY_GEOMETRY_DECODERS.get(object_type)
-    if string_decoder is None and geometry_decoder is None:
+    is_insert = object_type == INSERT_OBJECT_TYPE
+    if string_decoder is None and geometry_decoder is None and not is_insert:
         return None
     data_start_byte = offset + header_bytes
     reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
@@ -1322,6 +1425,16 @@ def decode_r2018_entity(
             )
             type_name, decode = string_decoder
             geometry = decode(reader, text_value)
+        elif is_insert:
+            geometry = _decode_insert_geometry(reader)
+            framing = DwgBinaryReader(objects_buffer, offset=offset)
+            framing.read_modular_short()
+            handle_stream_bits = framing.read_modular_char()
+            refs = _read_handle_stream_refs(
+                objects_buffer, data_start_byte, object_size, handle_stream_bits
+            )
+            geometry["block_name"] = _resolve_insert_block_name(objects_buffer, handle_map, refs)
+            type_name = "INSERT"
         else:
             type_name, decode = geometry_decoder
             geometry = decode(reader)
@@ -1379,12 +1492,14 @@ def read_r2018_entities(
         data, section_name="AcDb:AcDbObjects", version_code=version_code
     )
     object_size = len(objects)
+    # handle -> object offset, so an INSERT can resolve its block-header name.
+    offset_by_handle = {handle: offset for handle, offset in handle_map.entries}
     entities: List[R2018Entity] = []
     type_counts: Dict[str, int] = {}
     for _handle, offset in handle_map.entries:
         if not 0 <= offset < object_size:
             continue
-        entity = decode_r2018_entity(objects, offset)
+        entity = decode_r2018_entity(objects, offset, handle_map=offset_by_handle)
         if entity is None:
             continue
         entities.append(entity)
@@ -1418,6 +1533,7 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "POINT": "point",
     "TEXT": "text",
     "MTEXT": "mtext",
+    "INSERT": "insert",  # block reference; carries the block name for the diff
 }
 
 
@@ -1447,6 +1563,13 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
         width = height * max(1, longest) * 0.6  # rough advance width
         xs = [ix, ix + width]
         ys = [iy - height * len(lines), iy + height]
+    elif entity.type_name == "INSERT":
+        # the block extent is unknown without expanding the block; use a small
+        # marker box scaled by the insert scale around the insertion point.
+        ix, iy = geometry["insert"][0], geometry["insert"][1]
+        sx, sy = abs(geometry["scale"][0]) or 1.0, abs(geometry["scale"][1]) or 1.0
+        xs = [ix - sx, ix + sx]
+        ys = [iy - sy, iy + sy]
     else:  # POINT
         xs = [geometry["location"][0]]
         ys = [geometry["location"][1]]
@@ -1520,6 +1643,14 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "height": geometry["height"],
             "text": geometry["text"],
             "canonical_text": geometry["text"],
+        }
+    elif entity.type_name == "INSERT":
+        out["geometry"] = {
+            "type": "insert",
+            "insert": _canonical_point(geometry["insert"]),
+            "scale": _canonical_point(geometry["scale"]),
+            "rotation_deg": geometry["rotation_deg"],
+            "block_name": geometry["block_name"],
         }
     else:  # POINT
         out["geometry"] = {"type": "point", "location": _canonical_point(geometry["location"])}
