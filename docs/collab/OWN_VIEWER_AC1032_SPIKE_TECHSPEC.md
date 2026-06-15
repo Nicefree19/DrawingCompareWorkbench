@@ -67,10 +67,20 @@ real object TYPES decode from the bit stream.**
   spike's core unknown — AC1032 geometry IS parseable clean-room — with a
   verified YES.** Geometry is pre-canonical (dicts), diagnostic-only.
 
-Remaining: **S4** (feed geometry → `build_native_scene_pack_ref` →
-`resolve_viewer_primitive_source` → render) and **S5** (diff + revision clouds
-end-to-end on own-reader canonical, ODA calls = 0). Still diagnostic-only;
-AC1032 clean-room contract stays `blocked` (no support claim).
+- **S4 (render) DONE** — `r2018_entity_to_canonical` + `build_r2018_canonical_document`
+  turn decoded entities into a `canonical-drawing/v1` doc that the existing
+  `build_native_scene_pack` → `build_native_scene_pack_ref` →
+  `resolve_viewer_primitive_source` seam flattens and renders. Primary sample:
+  125 entities → 91 viewport line primitives (LINE/CIRCLE/ARC; POINT counted
+  unsupported) → `resolve_viewer_primitive_source` returns `ok`, non-degraded,
+  `render_mode=skeleton_preview`, producer `native_scene_pack`, with the
+  geometry-spanning bbox — **ODA/ezdxf calls = 0.** The own reader drives the
+  same viewport seam the ezdxf path uses.
+
+Remaining: **S5** (run a real AC1032 before/after pair through the existing diff
++ revision-cloud engine on own-reader canonical; clouds land on the changes,
+ODA calls = 0). Still diagnostic-only; AC1032 clean-room contract stays
+`blocked` (no support claim).
 
 ## 1. Goal
 
