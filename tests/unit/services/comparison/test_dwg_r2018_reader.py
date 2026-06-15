@@ -20,6 +20,7 @@ from src.services.comparison.dwg_r2018_reader import (
     R2004_HEADER_LENGTH,
     R2004_HEADER_MAGIC,
     R2004_HEADER_OFFSET,
+    decode_r2018_entity,
     decompress_r2004,
     deobfuscate_r2004_header,
     inspect_r2018_container,
@@ -27,6 +28,7 @@ from src.services.comparison.dwg_r2018_reader import (
     read_r2004_data_section,
     read_r2004_section_map,
     read_r2004_section_page_map,
+    read_r2018_entities,
     read_r2018_handle_map,
     read_r2018_object_run,
     read_r2018_object_table,
@@ -385,3 +387,109 @@ def test_real_ac1032_object_table_high_coverage_on_primary_sample() -> None:
     in_bounds = table.framed_count + table.unframed_count
     coverage = table.framed_count / in_bounds
     assert coverage >= 0.85, f"only {coverage:.1%} framed (assembly regression?)"
+
+
+# ---- Spike S3 (part 2): basic entity geometry decode ----
+
+# Ground truth for the primary acadsharp sample: the exact geometry an
+# ODA-converted DXF reports for these handles (recorded once, as constants — no
+# ODA dependency at test time). The native clean-room decoder must reproduce it.
+_PRIMARY_SAMPLE = REAL_AC1032_SAMPLES[0]
+_GT_LINES = {
+    0x2C7: ((3.592533998909389, 1.477241896180196, 0.0),
+            (6.863547033979557, 1.477241896180196, 0.0)),
+    0x517: ((330.2890594765796, 2.941179455067987, 0.0),
+            (364.4872644138525, 37.13938439234094, 0.0)),
+    # true colour (0x8000) + non-zero Z flag — exercises the complex-colour and
+    # Z-coordinate branches.
+    0x99E: ((18.96130506894906, -124.7749383365533, 0.0),
+            (23.96130506894906, -119.7749383365533, 0.0)),
+}
+_GT_CIRCLES = {
+    0x51D: ((569.6764940374901, 25.73998274658328), 11.39940164575765),
+    # AcDbColor reference colour (0x4000) — handle in the handle stream, no RGB
+    # bytes in the data stream.
+    0x99F: ((30.20357222512345, -119.9668664522385), 2.382841759818497),
+}
+_GT_ARC = {
+    0x320: ((56.35179242595231, 4.697601732518876), 3.044494390598889,
+            341.0435453511963, 161.0435453511958),
+}
+_GT_POINT = {
+    0x28E: (1.494404150136852, 1.491325898678436, 0.0),
+}
+
+
+def _approx(actual, expected, tol=1e-6):
+    return abs(actual - expected) <= tol
+
+
+def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
+    if not _PRIMARY_SAMPLE.exists():
+        pytest.skip(f"local AC1032 sample not present: {_PRIMARY_SAMPLE}")
+
+    table = read_r2018_entities(_PRIMARY_SAMPLE.read_bytes())
+
+    assert table.status == "decoded", table.message
+    # A substantial number of entities decode across all four supported types.
+    assert table.decoded_count >= 50, table.type_counts
+    for kind in ("LINE", "CIRCLE", "ARC", "POINT"):
+        assert table.type_counts.get(kind, 0) > 0, table.type_counts
+
+    by_handle = {e.handle: e for e in table.entities}
+
+    for handle, (start, end) in _GT_LINES.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "LINE"
+        assert all(_approx(a, b) for a, b in zip(entity.geometry["start"], start)), entity.geometry
+        assert all(_approx(a, b) for a, b in zip(entity.geometry["end"], end)), entity.geometry
+
+    for handle, (center, radius) in _GT_CIRCLES.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "CIRCLE"
+        assert _approx(entity.geometry["center"][0], center[0])
+        assert _approx(entity.geometry["center"][1], center[1])
+        assert _approx(entity.geometry["radius"], radius)
+
+    for handle, (center, radius, start_deg, end_deg) in _GT_ARC.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "ARC"
+        assert _approx(entity.geometry["center"][0], center[0])
+        assert _approx(entity.geometry["center"][1], center[1])
+        assert _approx(entity.geometry["radius"], radius)
+        assert _approx(entity.geometry["start_angle_deg"], start_deg, tol=1e-4)
+        assert _approx(entity.geometry["end_angle_deg"], end_deg, tol=1e-4)
+
+    for handle, location in _GT_POINT.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "POINT"
+        assert _approx(entity.geometry["location"][0], location[0])
+        assert _approx(entity.geometry["location"][1], location[1])
+
+
+def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
+    # Each decoded object's own handle (from the common-entity-data H field) must
+    # equal the handle the AcDb:Handles index recorded for that offset.
+    if not _PRIMARY_SAMPLE.exists():
+        pytest.skip(f"local AC1032 sample not present: {_PRIMARY_SAMPLE}")
+
+    raw = _PRIMARY_SAMPLE.read_bytes()
+    handle_map = read_r2018_handle_map(raw)
+    objects = read_r2004_data_section(raw, section_name="AcDb:AcDbObjects")
+
+    checked = 0
+    for handle, offset in handle_map.entries:
+        if not 0 <= offset < len(objects):
+            continue
+        entity = decode_r2018_entity(objects, offset)
+        if entity is None:
+            continue
+        assert entity.handle == handle, f"{entity.handle:#x} != {handle:#x} at {offset}"
+        checked += 1
+    assert checked >= 50
+
+
+def test_decode_r2018_entity_returns_none_on_unframable_offset() -> None:
+    # Fail-closed: a buffer of zeros frames no object, so geometry decode returns
+    # None rather than raising or inventing geometry.
+    assert decode_r2018_entity(b"\x00" * 256, 4) is None
