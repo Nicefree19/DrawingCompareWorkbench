@@ -44,20 +44,22 @@ real object TYPES decode from the bit stream.**
   sample: 842 entries, handles strictly increasing, clean terminator, and ALL
   111 contiguous-run object offsets located by the map (exact 1:1). This
   resolves the earlier "the handle encoding drifts" note — the prior "drift to
-  132876" was a real object location; the decode is correct. **Honest limitation
-  found:** object framing covers only ~55% of in-bounds handle entries because
-  the multi-page `AcDb:AcDbObjects` logical assembly in `read_r2004_data_section`
-  leaves zero gaps (pages placed at 0x7400-aligned `start_offset` slots, but
-  decompressed page sizes differ from the spacing — small pages leave gaps, big
-  pages overlap). `read_r2018_object_table.unframed_count` surfaces this rather
-  than overclaiming.
+  132876" was a real object location; the decode is correct.
 
-Remaining S3: (1) **correct the multi-page logical-offset assembly** so every
-handle-mapped object frames (the precise next blocker — the S3a test only
-checked `len(buffer)==size`, not interior placement); (2) **geometry decode**
-(LINE/CIRCLE/ARC/LWPOLYLINE/TEXT coordinates, common-entity header field-by-field)
--> canonical, which needs exact object extents from (1). Still diagnostic-only —
-no geometry decoded yet, contract still DECODING-gated.
+- **S3 part 1b (multi-page assembly fix) DONE** — root cause: each page fills a
+  `max_decompressed_size` slot (section descriptor word @0x0C = 0x7400), but
+  `read_r2004_data_section` decompressed to the page header's size word, which
+  UNDER-reports the page content, leaving zero gaps. Fix: decompress each page to
+  `min(max_decompressed_size, section.size - start_offset)`. Object framing
+  55%→**88.2%** (acadsharp) / 42%→**75.9%** (calpoly); the fix also cleaned up
+  calpoly's handle-map garbage tail (AcDb:Handles was under-decompressed too).
+  Residual unframed are non-framable handle entries (stale/deleted/other-section),
+  not gaps. `read_r2004_data_section` is spike-only (no product caller).
+
+Remaining S3: **geometry decode** (LINE/CIRCLE/ARC/LWPOLYLINE/TEXT coordinates,
+common-entity header field-by-field) → canonical, now with correctly-assembled
+object extents. Still diagnostic-only — no geometry decoded yet, contract still
+DECODING-gated.
 
 ## 1. Goal
 
