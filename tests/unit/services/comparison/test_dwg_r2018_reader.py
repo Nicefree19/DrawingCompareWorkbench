@@ -11,6 +11,7 @@ git-ignored AC1032 corpus and SKIP in CI — real-file verification is local-onl
 """
 from __future__ import annotations
 
+import copy
 import struct
 from pathlib import Path
 
@@ -36,10 +37,17 @@ from src.services.comparison.dwg_r2018_reader import (
     read_r2018_object_run,
     read_r2018_object_table,
 )
+from src.services.comparison.base import ComparisonResult
+from src.services.comparison.change_zones import ChangeZoneOptions, build_change_zones
+from src.services.comparison.drawing_compare_engine import (
+    DrawingCompareEngine,
+    DrawingCompareOptions,
+)
 from src.services.comparison.native_scene_pack_builder import (
     build_native_scene_pack,
     build_native_scene_pack_ref,
 )
+from src.services.comparison.revision_marker import revcloud_geometry_from_bbox
 from src.services.comparison.viewer_primitive_source import resolve_viewer_primitive_source
 
 # Local-only real AC1032 corpus (git-ignored). The integration test runs the
@@ -573,3 +581,61 @@ def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: 
     assert source.provenance["producer_id"] == "native_scene_pack"
     assert len(source.primitives) == expected_primitives
     assert source.world_bbox == pack.bbox
+
+
+# ---- Spike S5: own-reader canonical -> existing diff + revision clouds ----
+
+
+def test_real_ac1032_canonical_pair_diffs_and_clouds_the_change() -> None:
+    # S5 / GO criterion: a before/after pair built from the own clean-room reader
+    # flows through the EXISTING canonical diff + revision-cloud engine, with ZERO
+    # ODA/ezdxf calls, and a revision cloud lands on the change.
+    sample = REAL_AC1032_SAMPLES[0]
+    if not sample.exists():
+        pytest.skip(f"local AC1032 sample not present: {sample}")
+
+    before = build_r2018_canonical_document(sample.read_bytes(), source_path="before.dwg")
+    after = copy.deepcopy(before)
+    after["drawing"]["source"]["path"] = "after.dwg"
+
+    # Synthetic edit: move the first LINE's end point and update its bbox.
+    moved = next(e for e in after["entities"] if e["type"] == "line")
+    moved["geometry"]["end"]["x"] += 40.0
+    moved["geometry"]["end"]["y"] += 30.0
+    sx, ex = moved["geometry"]["start"]["x"], moved["geometry"]["end"]["x"]
+    sy, ey = moved["geometry"]["start"]["y"], moved["geometry"]["end"]["y"]
+    moved["bbox"] = {"min_x": min(sx, ex), "min_y": min(sy, ey),
+                     "max_x": max(sx, ex), "max_y": max(sy, ey)}
+    moved_centroid = ((min(sx, ex) + max(sx, ex)) / 2.0, (min(sy, ey) + max(sy, ey)) / 2.0)
+
+    # Existing canonical diff engine on own-reader canonical.
+    diff = DrawingCompareEngine(DrawingCompareOptions(include_unchanged=False)).compare(before, after)
+    # The matcher pairs the unchanged majority (proves own canonical diffs cleanly)
+    # and isolates the single edit.
+    assert diff.summary_counts["unchanged"] >= len(before["entities"]) - 5
+    edited = diff.summary_counts["added"] + diff.summary_counts["removed"] + diff.summary_counts["modified"]
+    assert 1 <= edited <= 4, diff.summary_counts
+
+    # Diff -> change records -> change zones (existing engine).
+    result = ComparisonResult(source_a="before.dwg", source_b="after.dwg")
+    for record in diff.to_change_records():
+        result.add_change(record)
+    zones = build_change_zones(result, pair_id="P1", drawing_number="P1",
+                               options=ChangeZoneOptions(cluster_distance=120.0))
+    assert zones, "the edit must produce at least one change zone"
+
+    # The zone that covers the edit anchors a revision cloud.
+    covering = [
+        z for z in zones
+        if z.bbox[0] <= moved_centroid[0] <= z.bbox[2]
+        and z.bbox[1] <= moved_centroid[1] <= z.bbox[3]
+    ]
+    assert covering, f"no change zone covers the moved line at {moved_centroid}"
+
+    cloud = revcloud_geometry_from_bbox(covering[0].bbox)
+    assert len(cloud.vertices) >= 4
+    assert len(cloud.vertices) == len(cloud.bulges)
+    xs = [v[0] for v in cloud.vertices]
+    ys = [v[1] for v in cloud.vertices]
+    assert min(xs) <= moved_centroid[0] <= max(xs)
+    assert min(ys) <= moved_centroid[1] <= max(ys)
