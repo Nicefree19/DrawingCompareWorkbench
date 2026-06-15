@@ -65,6 +65,13 @@ class DwgBinaryReader:
         self._byte_pos = byte_pos
         self._bit_pos = 0
 
+    def seek_bits(self, bit_pos: int) -> None:
+        """Position the cursor at an absolute bit offset from the buffer start."""
+        if bit_pos < 0 or bit_pos > self.size * 8:
+            raise DwgBinaryReadError(f"bit seek {bit_pos} is outside buffer ({self.size} bytes)")
+        self._byte_pos = bit_pos // 8
+        self._bit_pos = bit_pos % 8
+
     def align_byte(self) -> None:
         if self._bit_pos:
             self._byte_pos += 1
