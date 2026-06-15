@@ -468,6 +468,20 @@ _GT_INSERT = {
     0x783: {"insert": (-208.14953277, 8.990124366), "xscale": 1.217889265,
             "rotation": 0.0, "block_name": "my_block_v2"},
 }
+_GT_DIM = {
+    # One per dimension subtype (object types 0x14-0x1A), covering the shared
+    # Common Dimension Data decode. ``meas`` is the RAW stored measurement (DXF
+    # group 42) — the field the DWG holds, not ezdxf's recomputed get_measurement
+    # (which converts angular to degrees and re-derives the aligned/2-line cases).
+    # ``dimtype`` is the DXF dimension-type code ezdxf reports for the subtype.
+    0x514: {"dimtype": 0, "tm": (339.065951088, 34.45477396), "meas": 46.715616708},   # LINEAR
+    0x527: {"dimtype": 1, "tm": (390.757369259, 33.668082839), "meas": 48.363565231},  # ALIGNED
+    0x516: {"dimtype": 2, "tm": (527.000217858, 31.588370182), "meas": 1.647568218},   # ANG2Ln (rad)
+    0x522: {"dimtype": 3, "tm": (626.673502266, 25.739982747), "meas": 45.597606583},  # DIAMETER
+    0x51F: {"dimtype": 4, "tm": (583.348482182, 42.420551074), "meas": 11.399401646},  # RADIUS
+    0x515: {"dimtype": 5, "tm": (470.64204095, 31.939054011), "meas": 1.647568218},    # ANG3Pt (rad)
+    0x525: {"dimtype": 6, "tm": (706.46879441, 16.46796855), "meas": 102.594614812},   # ORDINATE
+}
 
 
 def _approx(actual, expected, tol=1e-6):
@@ -483,7 +497,8 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     assert table.status == "decoded", table.message
     # A substantial number of entities decode across all four supported types.
     assert table.decoded_count >= 50, table.type_counts
-    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT", "INSERT"):
+    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT",
+                 "INSERT", "DIMENSION"):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by_handle = {e.handle: e for e in table.entities}
@@ -557,6 +572,16 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
         assert _approx(entity.geometry["rotation_deg"], expected["rotation"], tol=1e-4)
         # Block name resolved via the handle stream -> BLOCK HEADER name.
         assert entity.geometry["block_name"] == expected["block_name"]
+
+    for handle, expected in _GT_DIM.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "DIMENSION"
+        # Object-type -> dimension subtype mapping (all seven exercised).
+        assert entity.geometry["dimtype"] == expected["dimtype"], entity.geometry
+        # Text midpoint (2RD) and raw measurement (BD) from Common Dimension Data.
+        assert _approx(entity.geometry["text_midpoint"][0], expected["tm"][0])
+        assert _approx(entity.geometry["text_midpoint"][1], expected["tm"][1])
+        assert _approx(entity.geometry["measurement"], expected["meas"], tol=1e-5)
 
 
 def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
@@ -660,6 +685,18 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert insert["geometry"]["scale"] == {"x": 2.0, "y": 2.0, "z": 1.0}
     assert insert["geometry"]["rotation_deg"] == 90.0
     assert insert["geometry"]["block_name"] == "DETAIL-A"
+
+    dimension = r2018_entity_to_canonical(
+        R2018Entity(0x514, 0x15, "DIMENSION",
+                    {"text_midpoint": (339.0, 34.0, 0.0), "measurement": 46.71,
+                     "dimtype": 0, "text": ""})
+    )
+    assert dimension["type"] == "dimension"  # producer counts this as unsupported (visible)
+    assert dimension["geometry"]["text_midpoint"] == {"x": 339.0, "y": 34.0, "z": 0.0}
+    assert dimension["geometry"]["measurement"] == 46.71
+    assert dimension["geometry"]["dimtype"] == 0
+    # bbox anchors on the text midpoint (no invented extent).
+    assert dimension["bbox"] == {"min_x": 339.0, "min_y": 34.0, "max_x": 339.0, "max_y": 34.0}
 
 
 def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: Path) -> None:
