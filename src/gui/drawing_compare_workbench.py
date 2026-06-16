@@ -115,7 +115,9 @@ from src.services.comparison.confirmed_cloud_export import (
 from src.services.comparison.dwg_autoconvert_settings import (
     ODA_DOWNLOAD_URL,
     detect_oda_installation,
+    load_ac1032_native_enabled,
     load_dwg_autoconvert_enabled,
+    save_ac1032_native_enabled,
     save_dwg_autoconvert_enabled,
 )
 from src.services.comparison.report_settings import (
@@ -5076,6 +5078,25 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         )
         settings_menu.addAction(self.act_dwg_autoconvert_v2)
 
+        # 자체 AC1032 네이티브 리더 (실험) 영구 토글 — 켜면 AC1032 DWG를 ODA
+        # 변환 없이 자체 클린룸 리더로 직접 읽는다(진단/실험, 기본 꺼짐). 선택은
+        # 설정 파일로 지속되며 DRAWING_COMPARE_DWG_AC1032_NATIVE env가 우선한다
+        # (ac1032_native_opt_in 해석 순서 참조). ODA 자동 변환을 끈 상태에서 적용.
+        self.act_ac1032_native_v2 = QAction(
+            "🧪 AC1032 자체 리더 (실험, ODA 불필요)", self
+        )
+        self.act_ac1032_native_v2.setCheckable(True)
+        _saved_ac1032 = load_ac1032_native_enabled()
+        self.act_ac1032_native_v2.setChecked(bool(_saved_ac1032))
+        self.act_ac1032_native_v2.setStatusTip(
+            "실험: AC1032 DWG를 ODA 변환 없이 자체 클린룸 리더로 직접 읽습니다 "
+            "(기본 꺼짐 — ODA 자동 변환을 끈 상태에서 적용)"
+        )
+        self.act_ac1032_native_v2.toggled.connect(
+            self._on_toggle_ac1032_native_v2
+        )
+        settings_menu.addAction(self.act_ac1032_native_v2)
+
         visual_ext.attach_visual_extensions(self, menu_bar)
         help_menu = menu_bar.addMenu("&도움말")
         tutorial_action = QAction("📘 시작 가이드 (5단계 튜토리얼)", self)
@@ -5950,6 +5971,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             return
         self.statusBar().showMessage(
             "DWG 자동 변환: " + ("켜짐" if checked else "꺼짐") + " — 다음 비교부터 적용",
+            5000,
+        )
+
+    def _on_toggle_ac1032_native_v2(self, checked: bool) -> None:
+        """Persist the experimental AC1032 native-reader opt-in; applies next compare."""
+
+        try:
+            save_ac1032_native_enabled(bool(checked))
+        except OSError:
+            logger.warning("Could not persist AC1032 native opt-in setting", exc_info=True)
+            self.statusBar().showMessage(
+                "AC1032 자체 리더 설정 저장 실패 — 로그를 확인하세요", 5000
+            )
+            return
+        self.statusBar().showMessage(
+            "AC1032 자체 리더(실험): " + ("켜짐" if checked else "꺼짐") + " — 다음 비교부터 적용",
             5000,
         )
 
