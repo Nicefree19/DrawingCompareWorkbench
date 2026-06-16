@@ -30,6 +30,7 @@ from .dxf_importer import (
     _circle_bbox,
     _default_tolerances,
     _dimension_type,
+    _ellipse_points,
     _drawing_id,
     _geometry_hash_payload,
     _hash_payload,
@@ -490,6 +491,23 @@ class DwgImporter:
                     "sweep_direction": "ccw",
                 }
                 return self._common(adapter_entity, "arc", mapped_geometry, _arc_bbox(center, radius, start_angle, end_angle), space, block_id, block_name, source_path)
+            if raw_type == "ELLIPSE":
+                # Tessellate to a canonical polyline, exactly like the DXF importer,
+                # so the ellipse renders + diffs as a curve (source raw_type kept).
+                center = _point(geometry.get("center"))
+                major = _point(geometry.get("major_axis"))
+                ratio = float(geometry.get("ratio") or 1.0)
+                start = float(geometry.get("start_param") or 0.0)
+                end = geometry.get("end_param")
+                end = float(end) if end is not None else math.tau
+                points = _ellipse_points(center, major, ratio, start, end)
+                mapped_geometry = {
+                    "type": "polyline",
+                    "vertices": [{"point": pt, "bulge": 0.0} for pt in points],
+                    "closed": abs((end - start) - math.tau) < 1e-6,
+                    "polyline_kind": "2d_polyline",
+                }
+                return self._common(adapter_entity, "polyline", mapped_geometry, _bbox_from_points(points, "control_points"), space, block_id, block_name, source_path)
             if raw_type in {"LWPOLYLINE", "POLYLINE"}:
                 vertices = [_vertex(item) for item in geometry.get("vertices") or []]
                 mapped_geometry = {

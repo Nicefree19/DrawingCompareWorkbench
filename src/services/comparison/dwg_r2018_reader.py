@@ -1138,6 +1138,28 @@ def _decode_point_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
     return {"location": location}
 
 
+def _decode_ellipse_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    """Decode ELLIPSE (ODA spec 20.4.37): centre + major-axis vector + axis ratio
+    and the start/end parameters (radians). Validated 1:1 against ODA ground
+    truth (centre, major axis, ratio, params)."""
+
+    center = (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+    major_axis = (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+    reader.read_bit_double()  # extrusion x ...
+    reader.read_bit_double()
+    reader.read_bit_double()
+    ratio = reader.read_bit_double()        # minor / major axis ratio
+    start_param = reader.read_bit_double()  # start parameter (radians)
+    end_param = reader.read_bit_double()    # end parameter (radians)
+    return {
+        "center": center,
+        "major_axis": major_axis,
+        "ratio": ratio,
+        "start_param": start_param,
+        "end_param": end_param,
+    }
+
+
 #: LWPOLYLINE flag bits (ODA spec 20.4.85) for optional fields + the closed bit.
 _LWPOLY_HAS_CONST_WIDTH = 0x04
 _LWPOLY_HAS_ELEVATION = 0x08
@@ -1711,6 +1733,7 @@ _ENTITY_GEOMETRY_DECODERS = {
     0x12: ("CIRCLE", _decode_circle_geometry),
     0x13: ("LINE", _decode_line_geometry),
     0x1B: ("POINT", _decode_point_geometry),
+    0x23: ("ELLIPSE", _decode_ellipse_geometry),
     0x4D: ("LWPOLYLINE", _decode_lwpolyline_geometry),
 }
 
@@ -1880,9 +1903,9 @@ def read_r2018_entities(
 ) -> R2018EntityTable:
     """Decode every supported entity the AcDb:Handles index locates.
 
-    Supported types: LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/INSERT/HATCH and
-    the seven DIMENSION subtypes. Diagnostic-only — the result is pre-canonical
-    geometry, not wired to the product diff/render pipeline.
+    Supported types: LINE/CIRCLE/ARC/ELLIPSE/POINT/LWPOLYLINE/TEXT/MTEXT/INSERT/
+    HATCH and the seven DIMENSION subtypes. Diagnostic-only — the result is
+    pre-canonical geometry, not wired to the product diff/render pipeline.
     """
 
     handle_map = read_r2018_handle_map(data, version_code=version_code)
@@ -1933,6 +1956,7 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "CIRCLE": "circle",
     "ARC": "arc",
     "LWPOLYLINE": "polyline",
+    "ELLIPSE": "ellipse",  # product path tessellates to a polyline; diagnostic keeps params
     # POINT/TEXT/MTEXT/DIMENSION/HATCH are not rendered by the scene-pack producer
     # (counted unsupported, visible) but TEXT/MTEXT/DIMENSION/HATCH carry the value
     # (text / measurement / pattern) the structural diff cares about.
@@ -1964,6 +1988,11 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
         cx, cy, radius = geometry["center"][0], geometry["center"][1], geometry["radius"]
         xs = [cx - radius, cx + radius]
         ys = [cy - radius, cy + radius]
+    elif entity.type_name == "ELLIPSE":
+        cx, cy = geometry["center"][0], geometry["center"][1]
+        reach = math.hypot(geometry["major_axis"][0], geometry["major_axis"][1])
+        xs = [cx - reach, cx + reach]  # major-axis reach bounds both axes (ratio<=1)
+        ys = [cy - reach, cy + reach]
     elif entity.type_name == "LWPOLYLINE":
         xs = [vertex[0] for vertex in geometry["vertices"]]
         ys = [vertex[1] for vertex in geometry["vertices"]]
@@ -2032,6 +2061,15 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "radius": geometry["radius"],
             "start_angle_deg": geometry["start_angle_deg"],
             "end_angle_deg": geometry["end_angle_deg"],
+        }
+    elif entity.type_name == "ELLIPSE":
+        out["geometry"] = {
+            "type": "ellipse",
+            "center": _canonical_point(geometry["center"]),
+            "major_axis": _canonical_point(geometry["major_axis"]),
+            "ratio": geometry["ratio"],
+            "start_param": geometry["start_param"],
+            "end_param": geometry["end_param"],
         }
     elif entity.type_name == "LWPOLYLINE":
         out["geometry"] = {

@@ -70,6 +70,14 @@ def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
             "start_angle_deg": geometry["start_angle_deg"],
             "end_angle_deg": geometry["end_angle_deg"],
         }
+    elif name == "ELLIPSE":
+        mapped = {
+            "center": geometry["center"],
+            "major_axis": geometry["major_axis"],
+            "ratio": geometry["ratio"],
+            "start_param": geometry["start_param"],
+            "end_param": geometry["end_param"],
+        }
     elif name == "LWPOLYLINE":
         bulges = list(geometry["bulges"]) + [0.0] * len(geometry["vertices"])
         mapped = {
