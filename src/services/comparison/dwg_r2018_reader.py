@@ -1048,6 +1048,9 @@ class R2018CommonHeader:
     #: ENC entity colour ACI index (the flag bits masked off): 256=BYLAYER,
     #: 0=BYBLOCK, 1-255=an ACI colour. Matches the DXF group-62 the importer uses.
     color_index: int = 256
+    #: BB entity mode: 0 = the owner handle is in the handle stream (a
+    #: block-definition / sub entity), 1 = paper space, 2 = model space.
+    entmode: int = 2
 
 
 def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
@@ -1074,7 +1077,7 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
             reader.read_bits(8)
     if reader.read_bit():  # B: graphic image present
         raise DwgBinaryReadError("entity proxy graphic image is not supported")
-    reader.read_bits(2)            # BB: entity mode
+    entmode = reader.read_bits(2)  # BB: entity mode (0=block-owned, 1=paper, 2=model)
     reader.read_bit_long()         # BL: number of reactors
     reader.read_bit()              # B: XDictionary-missing flag (R2004+)
     reader.read_bit()              # B: no-links flag (R2004+ always 1)
@@ -1095,7 +1098,8 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     reader.read_bit_short()        # BS: invisibility flag
     reader.read_bits(8)            # RC: lineweight
     return R2018CommonHeader(
-        handle=handle.value, ltype_flags=ltype_flags, color_index=color_index
+        handle=handle.value, ltype_flags=ltype_flags, color_index=color_index,
+        entmode=entmode,
     )
 
 
@@ -1480,6 +1484,28 @@ def _resolve_insert_block_name(
     return name
 
 
+def _resolve_insert_block_handle(
+    objects_buffer: bytes, handle_map: "Optional[Dict[int, int]]", refs: List[int]
+) -> int:
+    """The inserted block's HANDLE = the LAST handle-stream ref that frames as a
+    BLOCK_HEADER (0x31). Mirrors ``_resolve_insert_block_name`` but returns the
+    handle, so the importer can match an INSERT to a UNIQUE block definition even
+    when several anonymous blocks share the raw name ``*U``/``*D``. 0 if none."""
+
+    if not handle_map:
+        return 0
+    handle = 0
+    for value in refs:
+        offset = handle_map.get(value)
+        if offset is None:
+            continue
+        if _record_name_if_type(
+            objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE
+        ) is not None:
+            handle = value  # keep the last (the inserted block, not the owner)
+    return handle
+
+
 def _resolve_first_record_name(
     objects_buffer: bytes,
     handle_map: "Optional[Dict[int, int]]",
@@ -1499,6 +1525,32 @@ def _resolve_first_record_name(
         if candidate is not None:
             return candidate
     return ""
+
+
+def _resolve_owner_block_handle(
+    objects_buffer: bytes, handle_map: "Optional[Dict[int, int]]", refs: List[int]
+) -> int:
+    """Return the handle of the FIRST handle-stream ref that frames as a
+    BLOCK_HEADER (0x31).
+
+    For a block-owned entity (``entmode == 0``) this is the block DEFINITION that
+    contains it — the owner appears first in the handle stream (before the
+    inserted-block ref an INSERT carries last, cf ``_resolve_insert_block_name``).
+    Grouping by this handle (not the name) keeps the 112 anonymous ``*U`` blocks
+    distinct. Returns 0 when none resolves (fail-closed).
+    """
+
+    if not handle_map:
+        return 0
+    for value in refs:
+        offset = handle_map.get(value)
+        if offset is None:
+            continue
+        if _record_name_if_type(
+            objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE
+        ) is not None:
+            return value
+    return 0
 
 
 def _resolve_entity_layer_name(
@@ -1756,6 +1808,11 @@ class R2018Entity:
     layer: str = ""
     linetype: str = "BYLAYER"
     color: int = 256  # ACI index: 256=BYLAYER, 0=BYBLOCK, 1-255=ACI colour
+    #: BB entity mode (0=block-owned, 1=paper space, 2=model space).
+    entmode: int = 2
+    #: For block-owned entities (entmode==0) the resolved owner BLOCK_HEADER
+    #: handle, else 0. Lets the importer group block-definition geometry.
+    owner_handle: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1766,6 +1823,8 @@ class R2018Entity:
             "layer": self.layer,
             "linetype": self.linetype,
             "color": self.color,
+            "entmode": self.entmode,
+            "owner_handle": self.owner_handle,
         }
 
 
@@ -1848,6 +1907,7 @@ def decode_r2018_entity(
         # when the handle map is given. The linetype's well-known cases (flags
         # 0/1/2) need no refs, so it resolves even without a handle map.
         layer = ""
+        owner_handle = 0
         refs: List[int] = []
         if handle_map is not None:
             refs = _read_handle_stream_refs(
@@ -1856,6 +1916,14 @@ def decode_r2018_entity(
             layer = _resolve_entity_layer_name(objects_buffer, handle_map, refs)
             if is_insert:
                 geometry["block_name"] = _resolve_insert_block_name(
+                    objects_buffer, handle_map, refs
+                )
+                geometry["block_handle"] = _resolve_insert_block_handle(
+                    objects_buffer, handle_map, refs
+                )
+            if header.entmode == 0:
+                # Block-owned entity: its owner is the first BLOCK_HEADER ref.
+                owner_handle = _resolve_owner_block_handle(
                     objects_buffer, handle_map, refs
                 )
         linetype = _resolve_entity_linetype(
@@ -1871,6 +1939,8 @@ def decode_r2018_entity(
         layer=layer,
         linetype=linetype,
         color=header.color_index,
+        entmode=header.entmode,
+        owner_handle=owner_handle,
     )
 
 
@@ -1883,6 +1953,9 @@ class R2018EntityTable:
     decoded_count: int
     type_counts: Dict[str, int] = field(default_factory=dict)
     entities: List[R2018Entity] = field(default_factory=list)
+    #: BLOCK_HEADER handle -> block name. Lets the importer group block-owned
+    #: entities (entmode==0) under their owning block definition.
+    block_names: Dict[int, str] = field(default_factory=dict)
     message: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1892,6 +1965,7 @@ class R2018EntityTable:
             "decoded_count": self.decoded_count,
             "type_counts": dict(self.type_counts),
             "entities": [entity.to_dict() for entity in self.entities],
+            "block_names": dict(self.block_names),
             "message": self.message,
         }
 
@@ -1925,11 +1999,17 @@ def read_r2018_entities(
     offset_by_handle = {handle: offset for handle, offset in handle_map.entries}
     entities: List[R2018Entity] = []
     type_counts: Dict[str, int] = {}
+    block_names: Dict[int, str] = {}
     for _handle, offset in handle_map.entries:
         if not 0 <= offset < object_size:
             continue
         entity = decode_r2018_entity(objects, offset, handle_map=offset_by_handle)
         if entity is None:
+            # Non-graphical object: capture BLOCK_HEADER names so the importer
+            # can group block-owned entities under their block definition.
+            name = _record_name_if_type(objects, offset, _BLOCK_HEADER_OBJECT_TYPE)
+            if name is not None:
+                block_names[_handle] = name
             continue
         entities.append(entity)
         type_counts[entity.type_name] = type_counts.get(entity.type_name, 0) + 1
@@ -1940,6 +2020,7 @@ def read_r2018_entities(
         decoded_count=len(entities),
         type_counts=type_counts,
         entities=entities,
+        block_names=block_names,
         message=f"decoded geometry for {len(entities)} entities {type_counts}",
     )
 
