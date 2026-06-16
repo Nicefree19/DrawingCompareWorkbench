@@ -326,32 +326,3 @@ def test_audit_gate_passes_when_peak_comparator_changes_under_threshold(
         f"runtime_budget_measurement failed with generous threshold; "
         f"detail={detail!r}"
     )
-
-
-@pytest.mark.audit_chain_integration
-@pytest.mark.integration
-@pytest.mark.skipif(
-    True,
-    reason=(
-        "Streaming (time_to_first_stream_record_ms) requires "
-        "change_zone_stream_path configuration which is NOT exposed by "
-        "run_validation's Namespace surface. The stream path is derived "
-        "from options.compare_state_dir inside drawing_batch.py:1797-1803, "
-        "and is implicit-only. End-to-end coverage of the streaming gate "
-        "is provided by unit tests at "
-        "tests/unit/services/comparison/test_audit_runtime_budget.py:471-482 "
-        "and tests/unit/services/comparison/test_dxf_comparator_large_mode.py."
-    ),
-)
-def test_audit_gate_fails_on_time_to_first_stream_record_ms_breach(
-    tmp_path: Path,
-) -> None:  # pragma: no cover — see skipif reason
-    """Phase C-4.1 Test 4 — audit gate FAILS when time_to_first_stream_record_ms exceeds threshold.
-
-    Skipped because ``run_validation`` does not expose stream path
-    configuration. The unit-level equivalent is covered in
-    ``test_audit_runtime_budget.py`` where the validation_summary is
-    constructed as a literal dict with a populated
-    ``time_to_first_stream_record_ms`` value.
-    """
-    raise AssertionError("unreachable — test is unconditionally skipped")

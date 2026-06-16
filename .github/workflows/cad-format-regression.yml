@@ -44,6 +44,9 @@ jobs:
             tests\unit\services\comparison\test_import_compare_pipeline.py `
             tests\unit\services\comparison\test_cad_stability_limits.py `
             tests\unit\services\comparison\test_dwg_native_reader.py `
+            tests\unit\services\comparison\test_dwg_r2018_reader.py `
+            tests\unit\services\comparison\test_dwg_native_ac1032_adapter.py `
+            tests\unit\services\comparison\test_native_scene_pack_builder.py `
             tests\unit\services\comparison\test_cad_format_regression.py `
             tests\unit\services\comparison\test_drawing_batch.py `
             tests\unit\services\comparison\test_preflight.py `
