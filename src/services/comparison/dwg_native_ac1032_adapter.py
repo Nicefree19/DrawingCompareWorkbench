@@ -48,11 +48,12 @@ def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
     """Map one decoded ``R2018Entity`` to a ``DwgAdapterEntity`` for the importer.
 
     The R2018 geometry points are ``(x, y, z)`` tuples that ``DwgImporter._point``
-    reads directly.  POINT/DIMENSION/HATCH have no importer geometry mapping yet,
-    so they pass through with their raw type and are counted unsupported-visible
-    (recorded, not dropped) — the same posture the importer already uses for
-    unmapped types.  Preserving their decoded payload (dimension measurement,
-    hatch pattern) is a follow-up that would extend ``DwgImporter._map_entity``.
+    reads directly.  POINT/DIMENSION/HATCH carry their decoded payload (location /
+    measurement+dimtype / pattern+bbox) through to ``DwgImporter._map_entity``,
+    which maps them to the same canonical shape the DXF importer emits, so the
+    structural diff reads the measurement and pattern regardless of source.  Any
+    other type passes through with an empty geometry and is counted
+    unsupported-visible (recorded, not dropped).
     """
 
     geometry = entity.geometry
@@ -99,7 +100,25 @@ def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
             "rotation_deg": geometry["rotation_deg"],
             "block_name": geometry["block_name"],
         }
-    else:  # POINT / DIMENSION / HATCH -> unsupported-visible (counted, not dropped)
+    elif name == "POINT":
+        mapped = {"location": geometry["location"]}
+    elif name == "DIMENSION":
+        mapped = {
+            "text_midpoint": geometry["text_midpoint"],
+            "measurement": geometry["measurement"],
+            "dimtype": geometry["dimtype"],
+            "text": geometry["text"],
+        }
+    elif name == "HATCH":
+        mapped = {
+            "pattern": geometry["pattern"],
+            "gradient_name": geometry["gradient_name"],
+            "is_gradient": geometry["is_gradient"],
+            "solid": geometry["solid"],
+            "num_paths": geometry["num_paths"],
+            "bbox": geometry["bbox"],
+        }
+    else:  # any other type -> unsupported-visible (counted, not dropped)
         mapped = {}
     return DwgAdapterEntity(
         raw_type=name,

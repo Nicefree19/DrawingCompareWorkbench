@@ -29,6 +29,7 @@ from .dxf_importer import (
     _block_id,
     _circle_bbox,
     _default_tolerances,
+    _dimension_type,
     _drawing_id,
     _geometry_hash_payload,
     _hash_payload,
@@ -547,6 +548,46 @@ class DwgImporter:
                     "expanded_entity_ids": [],
                 }
                 return self._common(adapter_entity, "block_reference", mapped_geometry, _bbox_from_points([insert], "estimated"), space, block_id, block_name, source_path, semantic_payload={"attributes": mapped_geometry["attributes"]})
+            if raw_type == "POINT":
+                location = _point(geometry.get("location"))
+                mapped_geometry = {"type": "point", "location": location}
+                return self._common(adapter_entity, "point", mapped_geometry, _bbox_from_points([location], "exact"), space, block_id, block_name, source_path)
+            if raw_type == "DIMENSION":
+                # Mirror the DXF importer's canonical dimension shape so the diff /
+                # structural analysers read the same fields regardless of source.
+                text_midpoint = _point(geometry.get("text_midpoint"))
+                dim_type = _dimension_type(int(geometry.get("dimtype") or 0))
+                text_override = str(geometry.get("text") or "") or None
+                canonical_text = _canonical_text(text_override) if text_override else None
+                measurement = geometry.get("measurement")
+                mapped_geometry = {
+                    "type": "dimension",
+                    "dimension_type": dim_type,
+                    "measurement": float(measurement) if measurement is not None else None,
+                    "text_override": text_override,
+                    "canonical_text": canonical_text,
+                    "defpoints": [],  # subtype def points are not decoded by the native reader
+                    "text_midpoint": text_midpoint,
+                }
+                return self._common(adapter_entity, "dimension", mapped_geometry, _bbox_from_points([text_midpoint], "estimated"), space, block_id, block_name, source_path, semantic_payload={"dimension_type": dim_type, "measurement": mapped_geometry["measurement"], "canonical_text": canonical_text})
+            if raw_type == "HATCH":
+                pattern_name = str(geometry.get("pattern") or "SOLID").upper()
+                box = geometry.get("bbox") or {}
+                corners = [
+                    _make_point(float(box.get("min_x") or 0.0), float(box.get("min_y") or 0.0), 0.0),
+                    _make_point(float(box.get("max_x") or 0.0), float(box.get("max_y") or 0.0), 0.0),
+                ]
+                mapped_geometry = {
+                    "type": "hatch",
+                    "pattern_name": pattern_name,
+                    "solid_fill": bool(geometry.get("solid")),
+                    "pattern_scale": None,
+                    "pattern_angle_deg": None,
+                    "boundaries": [],  # boundary vertices are summarised to a bbox by the native reader
+                    "is_gradient": bool(geometry.get("is_gradient")),
+                    "gradient_name": str(geometry.get("gradient_name") or ""),
+                }
+                return self._common(adapter_entity, "hatch", mapped_geometry, _bbox_from_points(corners, "control_points"), space, block_id, block_name, source_path, semantic_payload={"pattern_name": pattern_name, "pattern_scale": None, "pattern_angle_deg": None})
         except Exception as exc:
             self._warning(
                 "DWG_ENTITY_MAP_FAILED",
