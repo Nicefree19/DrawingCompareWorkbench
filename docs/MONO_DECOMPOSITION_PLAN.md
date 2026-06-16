@@ -30,7 +30,7 @@
 |---|----------|------|---------------|------|------|
 | 1 | overlay 헬퍼 6종 + 상수 | 순수 | `workbench_overlay_model.py` | 낮음 | **완료 2026-06-16** (-142) |
 | 2 | 순수 요약/포맷 free 함수군 (`natural_change_summary`, `format_top_issue_label`, `format_pattern_group_label`, `_ko_change_type`, `_change_grade`, `_format_count`, `_int_value`) | 순수 | `workbench_summary_format.py` | 낮음 | **완료 2026-06-16** (-137) |
-| 3 | bbox↔pixel 변환 free 함수군 (`_cad_bbox_to_pixel_rect`, `_world_bbox_to_pixel_rect`, `scale_pdf_bbox_to_render_pixels`, `compute_pdf_page_pin_overlay`) | 순수(수학) | `workbench_bbox_transform.py` | 낮음 | 좌표계 회귀 주의 |
+| 3 | bbox↔pixel 변환 free 함수군 (`compute_pdf_page_pin_overlay`, `_cad_bbox_to_pixel_rect`, `_world_bbox_to_pixel_rect`, `_lightweight_tile_zoom_from_transform`) | 순수(수학) | `workbench_bbox_transform.py` | 낮음 | **완료 2026-06-16** (-150). `scale_pdf_bbox_to_render_pixels`는 30-use `_viewer_pair_is_pdf` 의존이라 잔류 |
 | 4 | viewer 소스/경로 resolve free 함수군 (`_resolve_viewer_artifact_path`, `_resolve_pdf_viewer_source_path`, `_existing_pdf_file`, `_is_redacted_artifact_path`) | 순수 | `workbench_viewer_source.py` | 낮음 | redaction 경로 테스트 |
 | 5 | `_viewer_overlay_cache*` 트리오 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | V2가 위임; bounded-cache 테스트 존재 |
 | 6 | review-state 메서드군 | 상태 | `ReviewStateController` 협력 객체 | 중간 | 가장 큰 응집 state 클러스터 |
@@ -49,5 +49,5 @@
 
 ## 현황 / Status
 
-- 세션 시작 14,857줄 → V1 삭제 -1,021 → overlay 추출 -142 → 요약/포맷 추출 -137 = **13,557줄** (누적 -1,300).
-- 다음 권장: 후보 #3(bbox↔pixel 변환 순수 함수군) — 동일 순수-추출 패턴, 좌표계 회귀만 주의.
+- 세션 시작 14,857줄 → V1 삭제 -1,021 → overlay -142 → 요약/포맷 -137 → bbox/pixel -150 = **13,407줄** (누적 -1,450).
+- 다음 권장: 후보 #4(viewer 소스/경로 resolve 함수군) — 단, `_resolve_viewer_artifact_path` 등은 `_viewer_pair_is_pdf`/redaction 헬퍼 의존성 먼저 확인. 또는 잔류한 `scale_pdf_bbox_to_render_pixels`+`_viewer_pair_is_pdf`를 묶어 별도 viewer-pair 모듈로.
