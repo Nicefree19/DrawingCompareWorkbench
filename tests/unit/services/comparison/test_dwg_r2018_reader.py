@@ -491,6 +491,18 @@ _GT_LAYER = {
     0x299: "Layer_Lock",      # POINT
     0x757: "Layer_color_80",  # TEXT
 }
+_GT_LINETYPE = {
+    # handle -> linetype, covering all four common-header ltype-flag cases. The
+    # well-known names (flags 0/1/2) are the ACAD upper-case tokens (ezdxf reports
+    # them as ByLayer/ByBlock/Continuous — same value, different case); flag-3
+    # names come from the LTYPE record and match ODA exactly.
+    0x28E: "BYLAYER",          # flags 0
+    0x298: "BYBLOCK",          # flags 1
+    0x299: "CONTINUOUS",       # flags 2
+    0x29B: "ACAD_ISO02W100",   # flags 3 (named record)
+    0x694: "GAS_LINE",         # flags 3
+    0x695: "TRACKS",           # flags 3
+}
 _GT_HATCH = {
     # handle -> hatch summary. pattern/gradient names are TVs in the string stream;
     # the boundary bbox is decoded from the loops (LINE edges here). Non-gradient
@@ -614,6 +626,13 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     assert all(e.layer for e in table.entities), \
         [f"{e.handle:#x}" for e in table.entities if not e.layer]
 
+    # Linetype from the common-header flags (+ the LTYPE record for flag 3).
+    for handle, expected_linetype in _GT_LINETYPE.items():
+        assert by_handle[handle].linetype == expected_linetype, by_handle[handle]
+    # Every decoded entity resolves a (non-empty) linetype — BYLAYER at minimum.
+    assert all(e.linetype for e in table.entities), \
+        [f"{e.handle:#x}" for e in table.entities if not e.linetype]
+
     for handle, expected in _GT_HATCH.items():
         entity = by_handle[handle]
         assert entity.type_name == "HATCH"
@@ -663,12 +682,13 @@ def test_decode_r2018_entity_returns_none_on_unframable_offset() -> None:
 def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     line = r2018_entity_to_canonical(
         R2018Entity(0x2C7, 0x13, "LINE", {"start": (1.0, 2.0, 0.0), "end": (3.0, 4.0, 0.0)},
-                    layer="S-BEAM")
+                    layer="S-BEAM", linetype="DASHED")
     )
     assert line["type"] == "line" and line["handle"] == "2C7"
     assert line["geometry"]["start"] == {"x": 1.0, "y": 2.0, "z": 0.0}
     assert line["geometry"]["end"] == {"x": 3.0, "y": 4.0, "z": 0.0}
     assert line["layer_id"] == "S-BEAM"  # layer flows from the handle stream
+    assert line["style"]["linetype"] == "DASHED"  # linetype flows to canonical style
 
     circle = r2018_entity_to_canonical(
         R2018Entity(0x10, 0x12, "CIRCLE", {"center": (5.0, 6.0, 0.0), "radius": 2.5})
