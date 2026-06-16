@@ -778,9 +778,16 @@ def parse_r2018_handle_map(
     The R2004+ handle map (public DWG spec) is a sequence of sections; each is a
     big-endian u16 size, then ``(handle-delta MC, location-delta signed MC)``
     pairs filling ``size - 2`` bytes, then a 2-byte CRC. A section with size
-    ``<= 2`` ends the map. Handles accumulate as unsigned deltas (always
-    increasing); locations accumulate as signed deltas into the decompressed
-    ``AcDb:AcDbObjects`` buffer. Returns the pairs plus an info dict
+    ``<= 2`` ends the map. **Each section is self-contained: both the handle and
+    the location base reset to 0 at the section start**, so the first pair in a
+    section is absolute; within a section the handle accumulates unsigned deltas
+    and the location signed deltas (offsets into the decompressed
+    ``AcDb:AcDbObjects`` buffer). Resetting per section is essential on real
+    multi-section maps — a small map (1-2 sections) mostly works without it
+    because its first section is already correct, but a large drawing's later
+    sections then decode to out-of-range offsets / mismatched handles (verified:
+    framing 14%/32% -> 98%/99.96%, handle-match -> 100% on real files). Returns
+    the pairs plus an info dict
     (``section_count``, ``clean_terminator``, ``consumed``). Pure decode: takes
     the already-extracted handle buffer so it is unit-testable in isolation.
     """
@@ -805,6 +812,10 @@ def parse_r2018_handle_map(
         sub = DwgBinaryReader(buffer, offset=pos, length=data_size)
         pos += data_size + HANDLE_MAP_SECTION_CRC_BYTES
         section_count += 1
+        # Each section is self-contained: both the handle and location bases reset
+        # to 0 at the section start (so the first pair in a section is absolute).
+        last_handle = 0
+        last_offset = 0
         try:
             # A minimal (handle, location) pair needs at least two bytes; fewer
             # trailing bytes are section padding.

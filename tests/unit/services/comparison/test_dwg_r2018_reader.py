@@ -334,11 +334,14 @@ def test_parse_handle_map_accumulates_handle_and_signed_offset_deltas() -> None:
 
 
 def test_parse_handle_map_spans_multiple_sections() -> None:
+    # Each section is self-contained: both the handle and location bases reset to
+    # 0 at the section start, so section 2's first pair (2, 30) is absolute, NOT
+    # carried over from section 1's running totals.
     buf = _handle_map_buffer([[(1, 4), (3, 20)], [(2, 30)]])
 
     pairs, info = parse_r2018_handle_map(buf)
 
-    assert pairs == [(1, 4), (4, 24), (6, 54)]
+    assert pairs == [(1, 4), (4, 24), (2, 30)]
     assert info["section_count"] == 2
     assert info["clean_terminator"] is True
 
