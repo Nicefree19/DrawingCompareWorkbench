@@ -189,6 +189,72 @@ def test_real_ac1032_imports_through_pipeline_zero_oda(monkeypatch: pytest.Monke
     assert any(isinstance(c, int) and 0 < c < 256 for c in style_colors)  # an explicit ACI
 
 
+def test_real_ac1032_separates_model_space_from_block_definitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Block-definition geometry (entmode==0) is grouped under its owning block
+    # instead of being emitted at block-local coords in model space (the
+    # pollution fix), so INSERTs expand at the correct transform.
+    if not _SAMPLE.exists():
+        pytest.skip(f"local AC1032 sample not present: {_SAMPLE}")
+    monkeypatch.setenv(AC1032_NATIVE_OPT_IN_ENV, "1")
+    from src.services.comparison.dwg_r2018_reader import read_r2018_entities
+
+    version = DwgVersionDetector.detect_file(_SAMPLE)
+    adapter = DwgNativeAc1032Adapter(fallback_adapter=DwgNativeAc1015Adapter())
+    drawing = adapter.read_file(_SAMPLE, version)
+
+    assert drawing.blocks, "expected block definitions to be emitted"
+    block_entity_count = sum(len(b.entities) for b in drawing.blocks)
+    assert block_entity_count > 0
+    # Separation is lossless and a strict split (model is a subset of the whole).
+    table = read_r2018_entities(_SAMPLE.read_bytes())
+    assert len(drawing.model_space) + block_entity_count == table.decoded_count
+    assert len(drawing.model_space) < table.decoded_count
+    # Unique block names (anonymous *U/*D disambiguated by handle) — else ezdxf
+    # cannot tell two same-named anonymous blocks apart on expansion.
+    names = [b.name for b in drawing.blocks]
+    assert len(names) == len(set(names))
+    # The block-owned geometry reaches canonical with space="block".
+    canonical = DwgImporter(adapter=adapter).import_file(_SAMPLE)
+    assert canonical["blocks"]
+    assert any(e.get("space") == "block" for e in canonical["entities"])
+
+
+def test_build_unique_block_names_disambiguates_anonymous_and_duplicates() -> None:
+    from src.services.comparison.dwg_native_ac1032_adapter import _build_unique_block_names
+
+    unique = _build_unique_block_names(
+        {0x10: "M20-2", 0x20: "*U", 0x30: "*U", 0x40: "DUP", 0x50: "DUP"}
+    )
+    assert unique[0x10] == "M20-2"  # named + unique keeps its name
+    assert unique[0x20] != unique[0x30] and unique[0x20].startswith("*U_")  # anonymous distinct
+    assert unique[0x40] != unique[0x50]  # duplicate names disambiguated by handle
+    assert len(set(unique.values())) == len(unique)  # all unique
+
+
+def test_adapter_entity_remaps_insert_block_name_to_unique() -> None:
+    from src.services.comparison.dwg_native_ac1032_adapter import _adapter_entity
+    from src.services.comparison.dwg_r2018_reader import R2018Entity
+
+    insert = R2018Entity(
+        handle=0x5,
+        object_type=0x07,
+        type_name="INSERT",
+        geometry={
+            "insert": (0.0, 0.0, 0.0),
+            "scale": (1.0, 1.0, 1.0),
+            "rotation_deg": 0.0,
+            "block_name": "*U",
+            "block_handle": 0x30,
+        },
+    )
+    # With the unique-name map, the INSERT references the disambiguated block name.
+    assert _adapter_entity(insert, {0x30: "*U_30"}).geometry["block_name"] == "*U_30"
+    # Without a map, the raw name is preserved (backward compatible).
+    assert _adapter_entity(insert).geometry["block_name"] == "*U"
+
+
 def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
     # _map_entity maps the native DIMENSION/HATCH/POINT geometry to the same
     # canonical shape the DXF importer emits (no real file needed).

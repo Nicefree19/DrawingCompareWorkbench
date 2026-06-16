@@ -18,10 +18,12 @@ diagnostic/experimental and makes no DWG support claim.
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .dwg_importer import (
+    DwgAdapterBlock,
     DwgAdapterDrawing,
     DwgAdapterEntity,
     DwgFailureCode,
@@ -76,7 +78,9 @@ def set_ac1032_native_opt_in(enabled: bool, *, settings_path: Optional["Path"] =
     save_ac1032_native_enabled(enabled, settings_path)
 
 
-def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
+def _adapter_entity(
+    entity: R2018Entity, unique_block_names: "Optional[Dict[int, str]]" = None
+) -> DwgAdapterEntity:
     """Map one decoded ``R2018Entity`` to a ``DwgAdapterEntity`` for the importer.
 
     The R2018 geometry points are ``(x, y, z)`` tuples that ``DwgImporter._point``
@@ -134,11 +138,19 @@ def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
             "raw_content": geometry["text"],
         }
     elif name == "INSERT":
+        # Remap to the UNIQUE block name (keyed by the inserted block's handle) so
+        # the INSERT references the exact block definition the importer emits —
+        # essential for anonymous *U/*D blocks that share a raw name.
+        block_name = geometry["block_name"]
+        if unique_block_names:
+            block_name = unique_block_names.get(
+                geometry.get("block_handle") or 0, block_name
+            )
         mapped = {
             "insert": geometry["insert"],
             "scale": geometry["scale"],
             "rotation_deg": geometry["rotation_deg"],
-            "block_name": geometry["block_name"],
+            "block_name": block_name,
         }
     elif name == "POINT":
         mapped = {"location": geometry["location"]}
@@ -167,6 +179,29 @@ def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
         handle=f"{entity.handle:X}",
         style={"linetype": entity.linetype, "color": entity.color},
     )
+
+
+def _build_unique_block_names(block_names: Dict[int, str]) -> Dict[int, str]:
+    """Map each BLOCK_HEADER handle to a UNIQUE canonical block name.
+
+    Named blocks keep their name (block names are unique by the DWG invariant).
+    Anonymous (``*U``/``*D`` ...) or empty names — which the reader returns
+    without the per-instance index, so many distinct blocks share one raw string
+    — get a handle suffix so the (here 71) distinct anonymous blocks stay
+    distinct for ezdxf expansion. A duplicate name is likewise disambiguated.
+    """
+
+    counts: Dict[str, int] = {}
+    for name in block_names.values():
+        counts[name] = counts.get(name, 0) + 1
+    unique: Dict[int, str] = {}
+    for handle, name in block_names.items():
+        nm = (name or "").strip()
+        if not nm or nm.startswith("*") or counts.get(nm, 0) > 1:
+            unique[handle] = f"{nm or 'BLK'}_{handle:X}"
+        else:
+            unique[handle] = nm
+    return unique
 
 
 class DwgNativeAc1032Adapter(DwgImporterAdapter):
@@ -231,15 +266,39 @@ class DwgNativeAc1032Adapter(DwgImporterAdapter):
                 f"Native AC1032 reader decoded no entities from {path.name}.",
                 details={"adapter": self.name, "path": str(path)},
             )
-        entities = [_adapter_entity(entity) for entity in table.entities]
+        # Separate real model-space content (entmode==2) from block-definition
+        # geometry (entmode==0), grouping the latter under its owning block. This
+        # both removes the block-local pollution (block geometry was emitted at
+        # local coords in model space) and lets each model-space INSERT expand its
+        # block at the correct transform. Anonymous *U/*D blocks stay distinct via
+        # the unique-name map keyed by handle.
+        unique_block_names = _build_unique_block_names(table.block_names)
+        model_space: List[DwgAdapterEntity] = []
+        block_entities: Dict[int, List[DwgAdapterEntity]] = defaultdict(list)
+        for entity in table.entities:
+            mapped = _adapter_entity(entity, unique_block_names)
+            if entity.entmode == 0 and entity.owner_handle:
+                block_entities[entity.owner_handle].append(mapped)
+            else:
+                model_space.append(mapped)
+        blocks = [
+            DwgAdapterBlock(
+                name=unique_block_names.get(owner_handle) or f"BLK_{owner_handle:X}",
+                entities=ents,
+            )
+            for owner_handle, ents in block_entities.items()
+        ]
         return DwgAdapterDrawing(
             header={"$ACADVER": version.code},
-            model_space=entities,
+            model_space=model_space,
+            blocks=blocks,
             metadata={
                 "adapter": self.name,
                 "decoder": "native-ac1032-cleanroom",
                 "decoded_entity_count": table.decoded_count,
                 "type_counts": dict(table.type_counts),
+                "model_space_entity_count": len(model_space),
+                "block_definition_count": len(blocks),
             },
         )
 
