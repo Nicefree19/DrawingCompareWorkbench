@@ -381,51 +381,10 @@ from src.gui.workbench_bbox_transform import (  # MONO-4 satellite extraction
 )
 
 
-def scale_pdf_bbox_to_render_pixels(
-    bbox: object,
-    overlay: dict,
-    viewer_pair: dict,
-) -> Optional[tuple[float, float, float, float]]:
-    """Return a PDF crop bbox in the rendered background image pixel space."""
-
-    box = union_bboxes(bbox)
-    if not box:
-        return None
-    if not isinstance(overlay, dict) or not isinstance(viewer_pair, dict):
-        return box
-    if not _viewer_pair_is_pdf(viewer_pair):
-        return box
-    if str(overlay.get("bbox_coordinate_space") or "").lower() != "image_pixels":
-        return box
-    transform = viewer_pair.get("after_transform") or viewer_pair.get("before_transform") or {}
-    if not isinstance(transform, dict):
-        return box
-    try:
-        bbox_dpi = float(
-            overlay.get("pdf_dpi")
-            or viewer_pair.get("compare_pdf_dpi")
-            or 0.0
-        )
-    except (TypeError, ValueError):
-        bbox_dpi = 0.0
-    try:
-        image_dpi = float(
-            transform.get("effective_dpi")
-            or transform.get("dpi")
-            or transform.get("pdf_dpi")
-            or 0.0
-        )
-    except (TypeError, ValueError):
-        image_dpi = 0.0
-    if bbox_dpi <= 0 or image_dpi <= 0 or bbox_dpi == image_dpi:
-        return box
-    scale = image_dpi / bbox_dpi
-    return (
-        box[0] * scale,
-        box[1] * scale,
-        box[2] * scale,
-        box[3] * scale,
-    )
+from src.gui.workbench_viewer_pair import (  # MONO-4 satellite extraction
+    _viewer_pair_is_pdf,
+    scale_pdf_bbox_to_render_pixels,
+)
 
 
 def _workbench_data_dir() -> Path:
@@ -470,14 +429,6 @@ def _write_json_file(path: Path, payload: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
-
-
-def _viewer_pair_is_pdf(viewer_pair: dict) -> bool:
-    if str(viewer_pair.get("coordinate_source") or "").lower() == "image_pixels":
-        return True
-    source_a = str(viewer_pair.get("source_a") or "").lower()
-    source_b = str(viewer_pair.get("source_b") or "").lower()
-    return source_a.endswith(".pdf") and source_b.endswith(".pdf")
 
 
 from src.gui.workbench_viewer_source import (  # MONO-4 satellite extraction
