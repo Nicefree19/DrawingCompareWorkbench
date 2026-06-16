@@ -34,7 +34,7 @@
 | 4 | viewer 소스/경로 resolve free 함수군 (`_resolve_viewer_artifact_path`, `_resolve_pdf_viewer_source_path`, `_existing_pdf_file`, `_is_redacted_artifact_path`) | 순수 | `workbench_viewer_source.py` | 낮음 | **완료 2026-06-16** (-91). `_viewer_pair_is_pdf` 의존 없음 확인; redaction 테스트 통과 |
 | 4b | viewer-pair 술어 + PDF bbox 스케일 (`_viewer_pair_is_pdf`, `scale_pdf_bbox_to_render_pixels`) | 순수 | `workbench_viewer_pair.py` | 낮음 | **완료 2026-06-17** (-49). #3에서 잔류했던 쌍을 묶음; `_viewer_pair_is_pdf` 31-use re-import |
 | 5 | `_viewer_overlay_cache*` 5필드+메서드 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | **완료 2026-06-17** (net -99). `workbench_overlay_cache.py`로 이동, V2엔 5 @property+5 delegator(facade)만 잔류. 안전망 `test_overlay_cache_characterization.py`(8종)이 행동 보존 입증(14+73+184 통과+라이브 부팅) |
-| 6 | review-state 메서드군 | 상태 | `ReviewStateController` 협력 객체 | 중간 | 가장 큰 응집 state 클러스터 |
+| 6 | review-state 메서드군 | 상태 | `ReviewStateController` 협력 객체 | 중간→높음 | **안전망 완료 2026-06-17**: `test_review_state_characterization.py`(5종)이 순수 record 로직(key·ko·counts·status_for_zone) 고정. **주의**: #5보다 훨씬 UI-얽힘 — `_review_status_for_zone_v2`는 `_active_issue_by_zone`/`_active_overlays_by_zone`도 읽고, `_set_zone_review_status_v2`는 ~7 위젯 오케스트레이션. 깨끗한 코어는 counts/key/ko뿐. 추출 레버리지 낮음 — 신중한 별도 세션 필요 |
 | 7 | 최장 `*_finished_v2` 렌더 콜백 (예: `_load_lightweight_pdf_v2` 265줄) | 콜백 | 명시 입력 받는 free 함수 + V2는 thin orchestrator | 높음 | **dead-island 버그가 역사적으로 숨는 곳 — 우선 테스트 보강 후** |
 
 ## 가드레일 / Guardrails
@@ -50,6 +50,6 @@
 
 ## 현황 / Status
 
-- 14,857 → V1 -1,021 → overlay -142 → 요약/포맷 -137 → bbox/pixel -150 → viewer-source -91 → viewer-pair -49 → OverlayCache -99 = **13,168줄** (누적 -1,689).
+- 14,857 → V1 -1,021 → overlay -142 → 요약/포맷 -137 → bbox/pixel -150 → viewer-source -91 → viewer-pair -49 → OverlayCache -53 = **13,214줄** (누적 -1,643, **wc -l 기준**; OverlayCache의 직전 -99 기록은 측정 아티팩트, 실제 -53).
 - 순수-함수 추출(#1~4b) + 첫 **상태 협력객체** 추출(#5 OverlayCache, 안전망 선행→추출→행동보존 검증의 모범 사이클) 완료. 남은 #6(review-state)·#7(렌더 콜백)은 동일 패턴(특성화 테스트 선행 → 협력객체 추출)으로, 각각 별도 PR 권장.
 - 검증 주의: `tests/unit/gui/`는 PySide6 6.10 비결정 AV로 **간헐 1-fail flaky** 가능 — 회귀 판정 전 반드시 결정적 재실행으로 확인(본 세션서 184-pass 재현).
