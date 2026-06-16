@@ -28,8 +28,8 @@
 
 | # | 클러스터 | 성격 | 신규 모듈(안) | 위험 | 비고 |
 |---|----------|------|---------------|------|------|
-| 1 | overlay 헬퍼 6종 + 상수 | 순수 | `workbench_overlay_model.py` | 낮음 | **완료 2026-06-16** |
-| 2 | 순수 포맷/요약 free 함수군 (`natural_change_summary`, `format_top_issue_label`, `format_pattern_group_label`, `_ko_change_type`, `_change_grade`, `_format_count`) | 순수 | `workbench_summary_format.py` | 낮음 | test 커버리지 먼저 확인 |
+| 1 | overlay 헬퍼 6종 + 상수 | 순수 | `workbench_overlay_model.py` | 낮음 | **완료 2026-06-16** (-142) |
+| 2 | 순수 요약/포맷 free 함수군 (`natural_change_summary`, `format_top_issue_label`, `format_pattern_group_label`, `_ko_change_type`, `_change_grade`, `_format_count`, `_int_value`) | 순수 | `workbench_summary_format.py` | 낮음 | **완료 2026-06-16** (-137) |
 | 3 | bbox↔pixel 변환 free 함수군 (`_cad_bbox_to_pixel_rect`, `_world_bbox_to_pixel_rect`, `scale_pdf_bbox_to_render_pixels`, `compute_pdf_page_pin_overlay`) | 순수(수학) | `workbench_bbox_transform.py` | 낮음 | 좌표계 회귀 주의 |
 | 4 | viewer 소스/경로 resolve free 함수군 (`_resolve_viewer_artifact_path`, `_resolve_pdf_viewer_source_path`, `_existing_pdf_file`, `_is_redacted_artifact_path`) | 순수 | `workbench_viewer_source.py` | 낮음 | redaction 경로 테스트 |
 | 5 | `_viewer_overlay_cache*` 트리오 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | V2가 위임; bounded-cache 테스트 존재 |
@@ -49,5 +49,5 @@
 
 ## 현황 / Status
 
-- 세션 시작 14,857줄 → V1 삭제 -1,021 → overlay 추출 -142 = **13,694줄** (누적 -1,163).
-- 다음 권장: 후보 #2(순수 포맷 함수군) — 가장 낮은 위험으로 패턴을 한 번 더 굳힌다.
+- 세션 시작 14,857줄 → V1 삭제 -1,021 → overlay 추출 -142 → 요약/포맷 추출 -137 = **13,557줄** (누적 -1,300).
+- 다음 권장: 후보 #3(bbox↔pixel 변환 순수 함수군) — 동일 순수-추출 패턴, 좌표계 회귀만 주의.
