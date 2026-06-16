@@ -140,6 +140,16 @@ def test_real_ac1032_imports_through_pipeline_zero_oda(monkeypatch: pytest.Monke
     hatch = next(e for e in canonical["entities"] if e["type"] == "hatch")
     assert hatch["geometry"]["pattern_name"]  # non-empty, upper-cased
 
+    # Linetype (handle-stream resolved) reaches the canonical style; named
+    # linetypes from the LTYPE records appear alongside the well-known tokens.
+    style_linetypes = {
+        e.get("style", {}).get("linetype")
+        for e in canonical["entities"]
+        if e.get("style")
+    }
+    assert "BYLAYER" in style_linetypes
+    assert "ACAD_ISO02W100" in style_linetypes  # a named LTYPE resolved via the handle stream
+
 
 def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
     # _map_entity maps the native DIMENSION/HATCH/POINT geometry to the same
