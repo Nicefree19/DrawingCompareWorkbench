@@ -44,9 +44,10 @@ If no issues are found, say so clearly and list any residual test gaps.
 다음 규칙은 명시적 ADR/사용자 합의로 해제되기 전까지 모든 에이전트(Claude, Codex 포함)에 적용된다.
 
 ### 1. `src/gui/drawing_compare_workbench.py` 줄 추가 동결
-- 이 파일은 현재 **13,267줄**짜리 monolith이며 V2(`DrawingCompareWorkbenchV2` 클래스)가 **유일한** 메인 윈도우다.
+- 이 파일은 현재 **13,168줄**짜리 monolith이며 V2(`DrawingCompareWorkbenchV2` 클래스)가 **유일한** 메인 윈도우다.
 - 2026-06-16: 죽은 V1(`DrawingCompareWorkbench`) 클래스와 V1 전용 `ScanWorker`를 제거(-1,021줄). 저장소 전역 검증에서 V1은 인스턴스화·import 0건이고 `ScanWorker`는 V1 span 내부에서만 참조됨이 확인됨. 근거: `docs/TECH_DEBT_AUDIT_REPORT.md` (MONO-1/2).
-- 2026-06-16: god-object 분해 위성 추출 — **1차** 순수 overlay 헬퍼 6종+상수→`workbench_overlay_model.py`(-142), **2차** 순수 요약/포맷 헬퍼 7종→`workbench_summary_format.py`(-137), **3차** 순수 bbox/pixel 변환 4종→`workbench_bbox_transform.py`(-150), **4차** 순수 viewer 소스/경로 resolve 4종→`workbench_viewer_source.py`(-91), **5차** viewer-pair 술어+PDF bbox 스케일(`_viewer_pair_is_pdf`·`scale_pdf_bbox_to_render_pixels`)→`workbench_viewer_pair.py`(-49). monolith는 re-import로 공개 API 보존. 후속 시퀀스: `docs/MONO_DECOMPOSITION_PLAN.md`. 동일 re-export 패턴으로 각 추출은 net-negative 유지.
+- 2026-06-16: god-object 분해 위성 추출 — **1차** 순수 overlay 헬퍼 6종+상수→`workbench_overlay_model.py`(-142), **2차** 순수 요약/포맷 헬퍼 7종→`workbench_summary_format.py`(-137), **3차** 순수 bbox/pixel 변환 4종→`workbench_bbox_transform.py`(-150), **4차** 순수 viewer 소스/경로 resolve 4종→`workbench_viewer_source.py`(-91), **5차** viewer-pair 술어+PDF bbox 스케일(`_viewer_pair_is_pdf`·`scale_pdf_bbox_to_render_pixels`)→`workbench_viewer_pair.py`(-49). monolith는 re-import로 공개 API 보존.
+- 2026-06-17: **#5 상태 협력객체 추출** — V2의 `_viewer_overlay_cache*` 5필드+5메서드(LRU+byte 캐시)를 `workbench_overlay_cache.py`의 `OverlayCache`로 이동(net -99). 순수-함수와 달리 V2에 **5 read-only @property + 5 얇은 delegator**를 남겨 call site·14개 테스트 무변경(facade). add 라인 ≤5 초과(facade)이나 net-negative 분해이므로 예외. 안전망: `test_overlay_cache_characterization.py`(8종). 후속 시퀀스: `docs/MONO_DECOMPOSITION_PLAN.md`.
 - **모든 신규 위젯/워커는 별도 모듈에 만든다** (예: `src/gui/failure_badge.py`, `src/gui/sheet_match_panel.py`).
 - 이 파일에 대한 단일 PR의 add 라인 수 ≤ 5를 권장 한계로 한다(삭제는 권장·예외). 초과 시 PR 본문에 사유 명시.
 - 위치 참조는 **라인 번호 대신 클래스/심볼 앵커**를 사용한다(파일 드리프트로 L-번호가 자주 어긋남).
