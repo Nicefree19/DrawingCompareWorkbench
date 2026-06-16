@@ -33,7 +33,7 @@
 | 3 | bbox↔pixel 변환 free 함수군 (`compute_pdf_page_pin_overlay`, `_cad_bbox_to_pixel_rect`, `_world_bbox_to_pixel_rect`, `_lightweight_tile_zoom_from_transform`) | 순수(수학) | `workbench_bbox_transform.py` | 낮음 | **완료 2026-06-16** (-150). `scale_pdf_bbox_to_render_pixels`는 30-use `_viewer_pair_is_pdf` 의존이라 잔류 |
 | 4 | viewer 소스/경로 resolve free 함수군 (`_resolve_viewer_artifact_path`, `_resolve_pdf_viewer_source_path`, `_existing_pdf_file`, `_is_redacted_artifact_path`) | 순수 | `workbench_viewer_source.py` | 낮음 | **완료 2026-06-16** (-91). `_viewer_pair_is_pdf` 의존 없음 확인; redaction 테스트 통과 |
 | 4b | viewer-pair 술어 + PDF bbox 스케일 (`_viewer_pair_is_pdf`, `scale_pdf_bbox_to_render_pixels`) | 순수 | `workbench_viewer_pair.py` | 낮음 | **완료 2026-06-17** (-49). #3에서 잔류했던 쌍을 묶음; `_viewer_pair_is_pdf` 31-use re-import |
-| 5 | `_viewer_overlay_cache*` 트리오 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | V2가 위임; bounded-cache 테스트 존재 |
+| 5 | `_viewer_overlay_cache*` 5필드+메서드 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | **안전망 완료 2026-06-17**: `test_overlay_cache_characterization.py`(8종)이 put/회계/LRU-touch/active-pair 보호/byte estimator/no-op 고정. 추출 시 5필드가 외부(telemetry·perf·reset·test)서 직접 읽히므로 **V2에 property 위임 + reset=`clear()` + 호출처 갱신** 필요(monolith 줄 추가 동반) — verbatim 이동 아님 |
 | 6 | review-state 메서드군 | 상태 | `ReviewStateController` 협력 객체 | 중간 | 가장 큰 응집 state 클러스터 |
 | 7 | 최장 `*_finished_v2` 렌더 콜백 (예: `_load_lightweight_pdf_v2` 265줄) | 콜백 | 명시 입력 받는 free 함수 + V2는 thin orchestrator | 높음 | **dead-island 버그가 역사적으로 숨는 곳 — 우선 테스트 보강 후** |
 
