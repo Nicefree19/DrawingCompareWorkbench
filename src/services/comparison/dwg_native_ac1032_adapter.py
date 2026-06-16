@@ -125,6 +125,7 @@ def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
         geometry=mapped,
         layer=entity.layer or "0",
         handle=f"{entity.handle:X}",
+        style={"linetype": entity.linetype},
     )
 
 

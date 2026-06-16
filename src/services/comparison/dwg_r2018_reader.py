@@ -1026,13 +1026,23 @@ def _read_bit_extrusion(reader: DwgBinaryReader) -> Tuple[float, float, float]:
     return (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
 
 
-def _parse_common_entity_header(reader: DwgBinaryReader) -> int:
+@dataclass(frozen=True)
+class R2018CommonHeader:
+    """The fields the entity decoder needs from the Common Entity Data block."""
+
+    handle: int
+    #: BB linetype flags: 0=BYLAYER, 1=BYBLOCK, 2=CONTINUOUS, 3=handle in the
+    #: handle stream (an LTYPE record reference).
+    ltype_flags: int
+
+
+def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     """Consume the R2010+ Common Entity Data, positioning at entity geometry.
 
     Implements ODA spec 20.4.1 (Common Entity Data) for R2018; the field order
     is validated 1:1 against ODA ground truth on real AC1032 entities. Returns
-    the object's own handle value. The reader must already be positioned past
-    the object type.
+    the object's own handle value and its linetype flags. The reader must already
+    be positioned past the object type.
 
     Caveat: the R2013+ "has data-store binary data" bit is intentionally omitted
     — it is absent on files without a data-store section (confirmed on the
@@ -1060,7 +1070,7 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> int:
     if color & 0x2000:
         reader.read_bit_long()     # colour transparency
     reader.read_bit_double()       # BD: linetype scale
-    reader.read_bits(2)            # BB: linetype flags
+    ltype_flags = reader.read_bits(2)  # BB: linetype flags (see R2018CommonHeader)
     reader.read_bits(2)            # BB: plotstyle flags
     reader.read_bits(2)            # BB: material flags (R2007+)
     reader.read_bits(8)            # RC: shadow flags
@@ -1069,7 +1079,7 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> int:
     reader.read_bit()              # B: has edge visual style (R2010+)
     reader.read_bit_short()        # BS: invisibility flag
     reader.read_bits(8)            # RC: lineweight
-    return handle.value
+    return R2018CommonHeader(handle=handle.value, ltype_flags=ltype_flags)
 
 
 def _decode_line_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
@@ -1325,6 +1335,10 @@ _BLOCK_HEADER_OBJECT_TYPE = 0x31
 #: LAYER table record (spec 20.4.53). Every entity's handle stream carries a
 #: reference to its layer record; the record's first string value is the name.
 LAYER_OBJECT_TYPE = 0x33
+#: LTYPE (linetype) table record. Referenced from the handle stream only when the
+#: common-header linetype flags are 3; flags 0/1/2 are the well-known names below.
+LTYPE_OBJECT_TYPE = 0x39
+_LTYPE_WELL_KNOWN = {0: "BYLAYER", 1: "BYBLOCK", 2: "CONTINUOUS"}
 
 
 def _decode_insert_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
@@ -1427,6 +1441,27 @@ def _resolve_insert_block_name(
     return name
 
 
+def _resolve_first_record_name(
+    objects_buffer: bytes,
+    handle_map: "Optional[Dict[int, int]]",
+    refs: List[int],
+    object_type: int,
+) -> str:
+    """Return the name of the FIRST handle-stream reference that frames as
+    ``object_type`` (a table record), or '' if none resolves (fail-closed)."""
+
+    if not handle_map:
+        return ""
+    for value in refs:
+        offset = handle_map.get(value)
+        if offset is None:
+            continue
+        candidate = _record_name_if_type(objects_buffer, offset, object_type)
+        if candidate is not None:
+            return candidate
+    return ""
+
+
 def _resolve_entity_layer_name(
     objects_buffer: bytes, handle_map: "Optional[Dict[int, int]]", refs: List[int]
 ) -> str:
@@ -1439,16 +1474,28 @@ def _resolve_entity_layer_name(
     or a handle outside the decoded map.
     """
 
-    if not handle_map:
-        return ""
-    for value in refs:
-        offset = handle_map.get(value)
-        if offset is None:
-            continue
-        candidate = _record_name_if_type(objects_buffer, offset, LAYER_OBJECT_TYPE)
-        if candidate is not None:
-            return candidate
-    return ""
+    return _resolve_first_record_name(objects_buffer, handle_map, refs, LAYER_OBJECT_TYPE)
+
+
+def _resolve_entity_linetype(
+    objects_buffer: bytes,
+    handle_map: "Optional[Dict[int, int]]",
+    refs: List[int],
+    ltype_flags: int,
+) -> str:
+    """Resolve an entity's linetype name from the common-header flags + refs.
+
+    Flags 0/1/2 are the well-known names (BYLAYER/BYBLOCK/CONTINUOUS, no handle);
+    flag 3 means the linetype is an LTYPE record referenced from the handle
+    stream, so the FIRST ref framing as an LTYPE (0x39) gives the name. Validated
+    1:1 against ODA ground truth across all four flag cases. Falls back to
+    BYLAYER when a flag-3 reference does not resolve (fail-closed).
+    """
+
+    if ltype_flags != 3:
+        return _LTYPE_WELL_KNOWN.get(ltype_flags, "BYLAYER")
+    name = _resolve_first_record_name(objects_buffer, handle_map, refs, LTYPE_OBJECT_TYPE)
+    return name or "BYLAYER"
 
 
 #: DIMENSION subtypes (spec 20.3 fixed type ids 0x14-0x1A) all share the Common
@@ -1660,13 +1707,14 @@ _STRING_STREAM_DECODERS = {
 
 @dataclass(frozen=True)
 class R2018Entity:
-    """One decoded entity: type + geometry + layer (diagnostic, pre-canonical)."""
+    """One decoded entity: type + geometry + layer + linetype (pre-canonical)."""
 
     handle: int
     object_type: int
     type_name: str
     geometry: Dict[str, Any]
     layer: str = ""
+    linetype: str = "BYLAYER"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1675,6 +1723,7 @@ class R2018Entity:
             "type_name": self.type_name,
             "geometry": self.geometry,
             "layer": self.layer,
+            "linetype": self.linetype,
         }
 
 
@@ -1715,7 +1764,8 @@ def decode_r2018_entity(
     reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
     try:
         read_r2018_object_type(reader)  # advance past the object type
-        handle = _parse_common_entity_header(reader)
+        header = _parse_common_entity_header(reader)
+        handle = header.handle
         # The handle-stream size (the MC consumed at framing) locates both the
         # R2007+ string stream and the trailing handle references; read it once.
         framing = DwgBinaryReader(objects_buffer, offset=offset)
@@ -1751,9 +1801,12 @@ def decode_r2018_entity(
         else:
             type_name, decode = geometry_decoder
             geometry = decode(reader)
-        # The layer (and the INSERT block name) live in the trailing handle
-        # stream; resolve both from a single pass when the handle map is given.
+        # The layer, the linetype (when its flags say so), and the INSERT block
+        # name live in the trailing handle stream; resolve them from one ref pass
+        # when the handle map is given. The linetype's well-known cases (flags
+        # 0/1/2) need no refs, so it resolves even without a handle map.
         layer = ""
+        refs: List[int] = []
         if handle_map is not None:
             refs = _read_handle_stream_refs(
                 objects_buffer, data_start_byte, object_size, handle_stream_bits
@@ -1763,6 +1816,9 @@ def decode_r2018_entity(
                 geometry["block_name"] = _resolve_insert_block_name(
                     objects_buffer, handle_map, refs
                 )
+        linetype = _resolve_entity_linetype(
+            objects_buffer, handle_map, refs, header.ltype_flags
+        )
     except DwgBinaryReadError:
         return None
     return R2018Entity(
@@ -1771,6 +1827,7 @@ def decode_r2018_entity(
         type_name=type_name,
         geometry=geometry,
         layer=layer,
+        linetype=linetype,
     )
 
 
@@ -1934,6 +1991,7 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
         "space": "model",
         "handle": f"{entity.handle:X}",
         "bbox": _r2018_entity_bbox(entity),
+        "style": {"linetype": entity.linetype},
     }
     if entity.type_name == "LINE":
         out["geometry"] = {
