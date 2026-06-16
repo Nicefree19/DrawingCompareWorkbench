@@ -31,7 +31,7 @@
 | 1 | overlay 헬퍼 6종 + 상수 | 순수 | `workbench_overlay_model.py` | 낮음 | **완료 2026-06-16** (-142) |
 | 2 | 순수 요약/포맷 free 함수군 (`natural_change_summary`, `format_top_issue_label`, `format_pattern_group_label`, `_ko_change_type`, `_change_grade`, `_format_count`, `_int_value`) | 순수 | `workbench_summary_format.py` | 낮음 | **완료 2026-06-16** (-137) |
 | 3 | bbox↔pixel 변환 free 함수군 (`compute_pdf_page_pin_overlay`, `_cad_bbox_to_pixel_rect`, `_world_bbox_to_pixel_rect`, `_lightweight_tile_zoom_from_transform`) | 순수(수학) | `workbench_bbox_transform.py` | 낮음 | **완료 2026-06-16** (-150). `scale_pdf_bbox_to_render_pixels`는 30-use `_viewer_pair_is_pdf` 의존이라 잔류 |
-| 4 | viewer 소스/경로 resolve free 함수군 (`_resolve_viewer_artifact_path`, `_resolve_pdf_viewer_source_path`, `_existing_pdf_file`, `_is_redacted_artifact_path`) | 순수 | `workbench_viewer_source.py` | 낮음 | redaction 경로 테스트 |
+| 4 | viewer 소스/경로 resolve free 함수군 (`_resolve_viewer_artifact_path`, `_resolve_pdf_viewer_source_path`, `_existing_pdf_file`, `_is_redacted_artifact_path`) | 순수 | `workbench_viewer_source.py` | 낮음 | **완료 2026-06-16** (-91). `_viewer_pair_is_pdf` 의존 없음 확인; redaction 테스트 통과 |
 | 5 | `_viewer_overlay_cache*` 트리오 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | V2가 위임; bounded-cache 테스트 존재 |
 | 6 | review-state 메서드군 | 상태 | `ReviewStateController` 협력 객체 | 중간 | 가장 큰 응집 state 클러스터 |
 | 7 | 최장 `*_finished_v2` 렌더 콜백 (예: `_load_lightweight_pdf_v2` 265줄) | 콜백 | 명시 입력 받는 free 함수 + V2는 thin orchestrator | 높음 | **dead-island 버그가 역사적으로 숨는 곳 — 우선 테스트 보강 후** |
@@ -49,5 +49,5 @@
 
 ## 현황 / Status
 
-- 세션 시작 14,857줄 → V1 삭제 -1,021 → overlay -142 → 요약/포맷 -137 → bbox/pixel -150 = **13,407줄** (누적 -1,450).
-- 다음 권장: 후보 #4(viewer 소스/경로 resolve 함수군) — 단, `_resolve_viewer_artifact_path` 등은 `_viewer_pair_is_pdf`/redaction 헬퍼 의존성 먼저 확인. 또는 잔류한 `scale_pdf_bbox_to_render_pixels`+`_viewer_pair_is_pdf`를 묶어 별도 viewer-pair 모듈로.
+- 세션 시작 14,857줄 → V1 삭제 -1,021 → overlay -142 → 요약/포맷 -137 → bbox/pixel -150 → viewer-source -91 = **13,316줄** (누적 -1,541).
+- 순수-함수 위성 추출 #1~4 완료. 라이브 앱 기동 검증까지 통과. 남은 순수 함수군은 소진 단계 — 다음은 #5~7(상태/콜백)로 **추출 전 테스트 보강 선행** 필요, 또는 잔류 `scale_pdf_bbox_to_render_pixels`+`_viewer_pair_is_pdf`를 묶어 viewer-pair 모듈로.

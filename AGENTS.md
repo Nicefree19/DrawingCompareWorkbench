@@ -44,9 +44,9 @@ If no issues are found, say so clearly and list any residual test gaps.
 다음 규칙은 명시적 ADR/사용자 합의로 해제되기 전까지 모든 에이전트(Claude, Codex 포함)에 적용된다.
 
 ### 1. `src/gui/drawing_compare_workbench.py` 줄 추가 동결
-- 이 파일은 현재 **13,407줄**짜리 monolith이며 V2(`DrawingCompareWorkbenchV2` 클래스)가 **유일한** 메인 윈도우다.
+- 이 파일은 현재 **13,316줄**짜리 monolith이며 V2(`DrawingCompareWorkbenchV2` 클래스)가 **유일한** 메인 윈도우다.
 - 2026-06-16: 죽은 V1(`DrawingCompareWorkbench`) 클래스와 V1 전용 `ScanWorker`를 제거(-1,021줄). 저장소 전역 검증에서 V1은 인스턴스화·import 0건이고 `ScanWorker`는 V1 span 내부에서만 참조됨이 확인됨. 근거: `docs/TECH_DEBT_AUDIT_REPORT.md` (MONO-1/2).
-- 2026-06-16: god-object 분해 위성 추출 — **1차** 순수 overlay 헬퍼 6종+상수→`workbench_overlay_model.py`(-142), **2차** 순수 요약/포맷 헬퍼 7종→`workbench_summary_format.py`(-137), **3차** 순수 bbox/pixel 변환 4종(`compute_pdf_page_pin_overlay`·`_cad_bbox_to_pixel_rect`·`_world_bbox_to_pixel_rect`·`_lightweight_tile_zoom_from_transform`)→`workbench_bbox_transform.py`(-150). monolith는 re-import로 공개 API 보존. 후속 시퀀스: `docs/MONO_DECOMPOSITION_PLAN.md`. 동일 re-export 패턴으로 각 추출은 net-negative 유지.
+- 2026-06-16: god-object 분해 위성 추출 — **1차** 순수 overlay 헬퍼 6종+상수→`workbench_overlay_model.py`(-142), **2차** 순수 요약/포맷 헬퍼 7종→`workbench_summary_format.py`(-137), **3차** 순수 bbox/pixel 변환 4종→`workbench_bbox_transform.py`(-150), **4차** 순수 viewer 소스/경로 resolve 4종(`_is_redacted_artifact_path`·`_resolve_viewer_artifact_path`·`_existing_pdf_file`·`_resolve_pdf_viewer_source_path`)→`workbench_viewer_source.py`(-91). monolith는 re-import로 공개 API 보존. 후속 시퀀스: `docs/MONO_DECOMPOSITION_PLAN.md`. 동일 re-export 패턴으로 각 추출은 net-negative 유지.
 - **모든 신규 위젯/워커는 별도 모듈에 만든다** (예: `src/gui/failure_badge.py`, `src/gui/sheet_match_panel.py`).
 - 이 파일에 대한 단일 PR의 add 라인 수 ≤ 5를 권장 한계로 한다(삭제는 권장·예외). 초과 시 PR 본문에 사유 명시.
 - 위치 참조는 **라인 번호 대신 클래스/심볼 앵커**를 사용한다(파일 드리프트로 L-번호가 자주 어긋남).
