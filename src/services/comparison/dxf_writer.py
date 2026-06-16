@@ -202,7 +202,7 @@ class DxfWriter:
             return
         z_values = {round(point.get("z", 0.0), self.options.precision) for point in points}
         if len(z_values) <= 1:
-            self._entity_start("LWPOLYLINE", entity, layer_name_by_id)
+            self._entity_start("LWPOLYLINE", entity, layer_name_by_id, subclass="AcDbPolyline")
             self._out.add(90, len(vertices))
             self._out.add(70, 1 if geometry.get("closed") else 0)
             elevation = points[0].get("z", 0.0)
@@ -272,7 +272,7 @@ class DxfWriter:
 
     def _write_mtext(self, entity: Dict[str, Any], layer_name_by_id: Dict[str, str]) -> None:
         geometry = entity.get("geometry") or {}
-        self._entity_start("MTEXT", entity, layer_name_by_id)
+        self._entity_start("MTEXT", entity, layer_name_by_id, subclass="AcDbMText")
         self._point_codes(_point(geometry.get("insert")), x_code=10, y_code=20, z_code=30)
         self._out.add(40, geometry.get("height") or 2.5)
         if geometry.get("box_width") is not None:
@@ -314,11 +314,27 @@ class DxfWriter:
             self._maybe_handle()
             self._out.add(8, self._layer_name(entity, layer_name_by_id))
 
-    def _entity_start(self, raw_type: str, entity: Dict[str, Any], layer_name_by_id: Dict[str, str]) -> None:
+    def _entity_start(
+        self,
+        raw_type: str,
+        entity: Dict[str, Any],
+        layer_name_by_id: Dict[str, str],
+        *,
+        subclass: Optional[str] = None,
+    ) -> None:
+        # When *subclass* is given, emit a valid R2000 subclass chain
+        # (AcDbEntity -> <subclass>) so strict readers like ezdxf accept the
+        # R2000-only entities (LWPOLYLINE/MTEXT). When None (default), the
+        # output is byte-identical to the legacy R12-style form that the
+        # in-repo DxfImporter and the R12-compatible entities rely on.
         self._out.add(0, raw_type)
         self._maybe_handle(entity)
+        if subclass is not None:
+            self._out.add(100, "AcDbEntity")
         self._out.add(8, self._layer_name(entity, layer_name_by_id))
         self._write_style(entity)
+        if subclass is not None:
+            self._out.add(100, subclass)
 
     def _write_style(self, entity: Dict[str, Any]) -> None:
         style = entity.get("style") or {}

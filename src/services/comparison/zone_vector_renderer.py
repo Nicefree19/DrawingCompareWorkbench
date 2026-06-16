@@ -154,7 +154,11 @@ def resolve_dxf_path(
         src,
         namespace="preview_dxf",
         extension=".dxf",
-        importer_version="canonical_debug_dxf:AC1015",
+        # Bumped 2026-06-16: the DxfWriter now emits R2000 subclass markers
+        # (AcDbPolyline/AcDbMText) so ezdxf can read the export. Invalidate any
+        # stale pre-fix cached DXF that lacks them (else the viewer keeps
+        # reusing an export ezdxf rejects -> empty render).
+        importer_version="canonical_debug_dxf:AC1015-r2000subclass",
         config_fingerprint="zone_vector_renderer:v1",
         digest_length=16,
     )
