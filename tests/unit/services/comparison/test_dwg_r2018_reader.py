@@ -434,6 +434,11 @@ _GT_ARC = {
     0x320: ((56.35179242595231, 4.697601732518876), 3.044494390598889,
             341.0435453511963, 161.0435453511958),
 }
+_GT_ELLIPSE = {
+    # centre, major-axis vector, axis ratio, start/end params (radians).
+    0x321: {"center": (68.000517, 4.18521), "major": (-5.101255, 0.0),
+            "ratio": 0.640373, "start": 0.0, "end": 6.283185},
+}
 _GT_POINT = {
     0x28E: (1.494404150136852, 1.491325898678436, 0.0),
 }
@@ -546,7 +551,7 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     # A substantial number of entities decode across all four supported types.
     assert table.decoded_count >= 50, table.type_counts
     for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT",
-                 "INSERT", "DIMENSION", "HATCH"):
+                 "INSERT", "DIMENSION", "HATCH", "ELLIPSE"):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by_handle = {e.handle: e for e in table.entities}
@@ -572,6 +577,17 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
         assert _approx(entity.geometry["radius"], radius)
         assert _approx(entity.geometry["start_angle_deg"], start_deg, tol=1e-4)
         assert _approx(entity.geometry["end_angle_deg"], end_deg, tol=1e-4)
+
+    for handle, expected in _GT_ELLIPSE.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "ELLIPSE"
+        assert _approx(entity.geometry["center"][0], expected["center"][0])
+        assert _approx(entity.geometry["center"][1], expected["center"][1])
+        assert _approx(entity.geometry["major_axis"][0], expected["major"][0])
+        assert _approx(entity.geometry["major_axis"][1], expected["major"][1])
+        assert _approx(entity.geometry["ratio"], expected["ratio"])
+        assert _approx(entity.geometry["start_param"], expected["start"])
+        assert _approx(entity.geometry["end_param"], expected["end"], tol=1e-4)
 
     for handle, location in _GT_POINT.items():
         entity = by_handle[handle]
@@ -723,6 +739,17 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     )
     assert arc["type"] == "arc"
     assert arc["geometry"]["start_angle_deg"] == 0.0 and arc["geometry"]["end_angle_deg"] == 90.0
+
+    ellipse = r2018_entity_to_canonical(
+        R2018Entity(0x23, 0x23, "ELLIPSE",
+                    {"center": (1.0, 2.0, 0.0), "major_axis": (3.0, 0.0, 0.0),
+                     "ratio": 0.5, "start_param": 0.0, "end_param": 6.283185})
+    )
+    assert ellipse["type"] == "ellipse"  # diagnostic keeps the params (producer counts visible)
+    assert ellipse["geometry"]["center"] == {"x": 1.0, "y": 2.0, "z": 0.0}
+    assert ellipse["geometry"]["ratio"] == 0.5
+    # bbox reaches the major-axis length in both axes.
+    assert ellipse["bbox"] == {"min_x": -2.0, "min_y": -1.0, "max_x": 4.0, "max_y": 5.0}
 
     point = r2018_entity_to_canonical(
         R2018Entity(0x12, 0x1B, "POINT", {"location": (7.0, 8.0, 0.0)})

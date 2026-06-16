@@ -190,6 +190,12 @@ def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
                           "bbox": {"min_x": 0.0, "min_y": 0.0, "max_x": 4.0, "max_y": 3.0}},
                 layer="0", handle="3",
             ),
+            DwgAdapterEntity(
+                raw_type="ELLIPSE",
+                geometry={"center": (1.0, 2.0, 0.0), "major_axis": (3.0, 0.0, 0.0),
+                          "ratio": 0.5, "start_param": 0.0, "end_param": 6.283185},
+                layer="0", handle="4",
+            ),
         ]
     )
     canonical = DwgImporter(adapter=DwgNativeAc1032Adapter()).import_adapter_drawing(
@@ -199,6 +205,11 @@ def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
     assert by_type["point"]["geometry"]["location"] == {"x": 1.0, "y": 2.0, "z": 0.0}
     dim = by_type["dimension"]["geometry"]
     assert dim["dimension_type"] == "linear" and dim["measurement"] == 42.5
+    # ELLIPSE tessellates to a canonical polyline (renders + diffs as a curve),
+    # keeping ELLIPSE as the recorded source raw type.
+    polyline = by_type["polyline"]
+    assert polyline["source"]["raw_type"] == "ELLIPSE"
+    assert len(polyline["geometry"]["vertices"]) > 8
     hatch = by_type["hatch"]
     assert hatch["geometry"]["pattern_name"] == "ANSI31"  # upper-cased, like the DXF path
     assert hatch["geometry"]["solid_fill"] is True
