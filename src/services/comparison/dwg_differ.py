@@ -1188,6 +1188,19 @@ class DwgDiffer:
             oda_installed, oda_path = detect_oda_installation()
         except Exception:  # noqa: BLE001 - status must never raise
             pass
+        # The directly-supported version set is AC1015 by default, but widens
+        # when the user has explicitly enabled the clean-room AC1032 native
+        # reader. Reporting it honestly stops the diagnostics string from
+        # steering opted-in users toward ODA conversion they don't need.
+        # (tech-debt audit DWG-2, docs/TECH_DEBT_AUDIT_REPORT.md)
+        dwg_supported_versions = ["AC1015"]
+        try:
+            from .dwg_native_ac1032_adapter import ac1032_native_opt_in
+
+            if ac1032_native_opt_in():
+                dwg_supported_versions.append("AC1032")
+        except Exception:  # noqa: BLE001 - status must never raise
+            pass
         return {
             "canonical_pipeline": True,
             "ezdxf": EZDXF_AVAILABLE,
@@ -1196,7 +1209,7 @@ class DwgDiffer:
             "oda_required": False,
             "dwg_support": True,
             "dwg_support_scope": "limited-read-only-adapter",
-            "dwg_supported_versions": ["AC1015"],
+            "dwg_supported_versions": dwg_supported_versions,
             "dwg_detectable_versions": [
                 "AC1009",
                 "AC1012",

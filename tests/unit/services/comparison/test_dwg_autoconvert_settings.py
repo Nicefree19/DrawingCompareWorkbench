@@ -100,3 +100,25 @@ def test_get_status_reports_actual_oda_installation(monkeypatch) -> None:
     status = DwgDiffer.get_status()
     assert status["oda_converter"] is False
     assert status["oda_path"] is None
+
+
+def test_get_status_reports_ac1032_when_native_opt_in_enabled(monkeypatch) -> None:
+    # DWG-2 (tech-debt audit, docs/TECH_DEBT_AUDIT_REPORT.md): get_status
+    # used to hardcode dwg_supported_versions=["AC1015"], so a user who
+    # explicitly enabled the clean-room AC1032 native reader was still told via
+    # the diagnostics string that AC1032 was unsupported and steered toward ODA
+    # conversion they did not need.
+    import src.services.comparison.dwg_native_ac1032_adapter as adapter
+    from src.services.comparison.dwg_differ import DwgDiffer
+
+    # Default (opt-in off): AC1032 stays out of the directly-supported set.
+    monkeypatch.setattr(adapter, "ac1032_native_opt_in", lambda *a, **k: False)
+    status = DwgDiffer.get_status()
+    assert status["dwg_supported_versions"] == ["AC1015"]
+    assert "AC1032" not in status["dwg_supported_versions"]
+
+    # Opt-in on: AC1032 is reported as directly supported.
+    monkeypatch.setattr(adapter, "ac1032_native_opt_in", lambda *a, **k: True)
+    status = DwgDiffer.get_status()
+    assert "AC1032" in status["dwg_supported_versions"]
+    assert status["dwg_supported_versions"] == ["AC1015", "AC1032"]
