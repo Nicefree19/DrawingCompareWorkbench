@@ -331,7 +331,13 @@ def _write_json_atomic(path: Path, payload: object) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as fp:
+    # errors="replace" (2026-06-16): primitive text/layer names decoded from a
+    # DWG via surrogateescape can carry lone surrogates (e.g. SHX/non-UTF-8 text)
+    # that crash a strict UTF-8 write — the same surrogate class as the
+    # zone-zoom render-cache-key crash. "replace" keeps the streamed write
+    # (no giant intermediate string) AND yields valid UTF-8 (U+FFFD for the
+    # undecodable char) so every JSON reader stays happy.
+    with tmp.open("w", encoding="utf-8", errors="replace") as fp:
         json.dump(payload, fp, ensure_ascii=False, separators=(",", ":"))
     tmp.replace(path)
 
@@ -462,14 +468,35 @@ def build_scene_pack(
     backend = CustomJSONBackend(orient_paths=False)
     ctx = RenderContext(doc)
     fe = Frontend(ctx, backend)
+    # Resilient per-entity draw (2026-06-16): a single ``draw_layout`` aborts the
+    # WHOLE layout at the first un-renderable entity — e.g. an INSERT whose block
+    # definition is missing ("Required block definition for DIMDOT does not
+    # exist") — keeping only the entities drawn before it (the partial-render
+    # bug: 471 of 5496 primitives). Drawing one entity at a time and skipping the
+    # failures renders everything else; one bad INSERT must not blank the drawing
+    # (same resilience class as the MLEADER/zone fixes). The backend accumulates
+    # primitives across calls; finalize once at the end.
+    skipped_entities = 0
+    first_skip_samples: List[str] = []
+    for entity in doc.modelspace():
+        try:
+            fe.draw_entities([entity])
+        except Exception as exc:  # noqa: BLE001 — one bad entity must not blank the rest
+            skipped_entities += 1
+            if len(first_skip_samples) < 5:
+                etype = getattr(entity, "dxftype", lambda: "?")()
+                first_skip_samples.append(f"{etype}: {exc}")
+                logger.warning("scene_pack: skipping un-renderable %s: %s", etype, exc)
     try:
-        fe.draw_layout(doc.modelspace(), finalize=True)
-    except Exception as exc:
-        # ezdxf occasionally raises mid-draw for proxy graphics / corrupt
-        # entities. We keep what's been recorded so far — it's still useful
-        # for navigation. Surface the warning so the GUI can show it.
-        warnings.append(f"Frontend.draw_layout raised mid-stream: {exc}")
-        logger.warning("Frontend.draw_layout raised mid-stream: %s", exc)
+        fe.pipeline.finalize()
+    except Exception as exc:  # noqa: BLE001 — finalize must not crash the build
+        warnings.append(f"Frontend finalize raised: {exc}")
+        logger.warning("scene_pack: frontend finalize failed: %s", exc)
+    if skipped_entities:
+        warnings.append(
+            f"Skipped {skipped_entities} un-renderable entities "
+            f"(missing block refs / bad geometry); e.g. {first_skip_samples[0]}"
+        )
 
     primitives = backend.get_json_data() or []
     truncated = False
