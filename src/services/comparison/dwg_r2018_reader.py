@@ -1034,6 +1034,9 @@ class R2018CommonHeader:
     #: BB linetype flags: 0=BYLAYER, 1=BYBLOCK, 2=CONTINUOUS, 3=handle in the
     #: handle stream (an LTYPE record reference).
     ltype_flags: int
+    #: ENC entity colour ACI index (the flag bits masked off): 256=BYLAYER,
+    #: 0=BYBLOCK, 1-255=an ACI colour. Matches the DXF group-62 the importer uses.
+    color_index: int = 256
 
 
 def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
@@ -1065,6 +1068,7 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     reader.read_bit()              # B: XDictionary-missing flag (R2004+)
     reader.read_bit()              # B: no-links flag (R2004+ always 1)
     color = reader.read_bit_short() & 0xFFFF  # ENC: entity colour number + flags
+    color_index = color & 0x1FFF   # ACI index with the 0x8000/0x4000/0x2000 flags masked
     if (color & 0x8000) and not (color & 0x4000):
         reader.read_bit_long()     # complex colour: RGB value in the data stream
     if color & 0x2000:
@@ -1079,7 +1083,9 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     reader.read_bit()              # B: has edge visual style (R2010+)
     reader.read_bit_short()        # BS: invisibility flag
     reader.read_bits(8)            # RC: lineweight
-    return R2018CommonHeader(handle=handle.value, ltype_flags=ltype_flags)
+    return R2018CommonHeader(
+        handle=handle.value, ltype_flags=ltype_flags, color_index=color_index
+    )
 
 
 def _decode_line_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
@@ -1715,6 +1721,7 @@ class R2018Entity:
     geometry: Dict[str, Any]
     layer: str = ""
     linetype: str = "BYLAYER"
+    color: int = 256  # ACI index: 256=BYLAYER, 0=BYBLOCK, 1-255=ACI colour
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1724,6 +1731,7 @@ class R2018Entity:
             "geometry": self.geometry,
             "layer": self.layer,
             "linetype": self.linetype,
+            "color": self.color,
         }
 
 
@@ -1828,6 +1836,7 @@ def decode_r2018_entity(
         geometry=geometry,
         layer=layer,
         linetype=linetype,
+        color=header.color_index,
     )
 
 
@@ -1991,7 +2000,7 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
         "space": "model",
         "handle": f"{entity.handle:X}",
         "bbox": _r2018_entity_bbox(entity),
-        "style": {"linetype": entity.linetype},
+        "style": {"linetype": entity.linetype, "color": entity.color},
     }
     if entity.type_name == "LINE":
         out["geometry"] = {

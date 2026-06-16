@@ -158,6 +158,15 @@ def test_real_ac1032_imports_through_pipeline_zero_oda(monkeypatch: pytest.Monke
     assert "BYLAYER" in style_linetypes
     assert "ACAD_ISO02W100" in style_linetypes  # a named LTYPE resolved via the handle stream
 
+    # ENC entity colour (ACI index) reaches the canonical style too.
+    style_colors = {
+        e.get("style", {}).get("color")
+        for e in canonical["entities"]
+        if e.get("style")
+    }
+    assert 256 in style_colors  # BYLAYER is the common default
+    assert any(isinstance(c, int) and 0 < c < 256 for c in style_colors)  # an explicit ACI
+
 
 def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
     # _map_entity maps the native DIMENSION/HATCH/POINT geometry to the same
