@@ -385,6 +385,7 @@ from src.gui.workbench_viewer_pair import (  # MONO-4 satellite extraction
     _viewer_pair_is_pdf,
     scale_pdf_bbox_to_render_pixels,
 )
+from src.gui.workbench_overlay_cache import OverlayCache  # MONO-4 #5 collaborator
 
 
 def _workbench_data_dir() -> Path:
@@ -2972,11 +2973,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._review_state_path_v2: Optional[Path] = None
         self._review_records_v2: dict[str, ReviewStateRecord] = {}
         self._viewer_pairs_by_id: dict[str, dict] = {}
-        self._viewer_overlay_cache: dict[str, list[dict]] = {}
-        self._viewer_overlay_cache_order_v2: list[str] = []
-        self._viewer_overlay_cache_bytes_by_pair_v2: dict[str, int] = {}
-        self._viewer_overlay_cache_total_bytes_v2: int = 0
-        self._viewer_overlay_cache_evictions_v2: int = 0
+        self._overlay_cache = OverlayCache()
         self._tile_manifest_cache_v2: dict[tuple[str, int, int, str, str], dict] = {}
         self._lightweight_raster_pairs: set[str] = set()
         self._render_status_by_pair: dict[str, str] = {}
@@ -6458,11 +6455,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._viewer_manifest_path = None
         self._viewer_root = None
         self._viewer_pairs_by_id = {}
-        self._viewer_overlay_cache = {}
-        self._viewer_overlay_cache_order_v2 = []
-        self._viewer_overlay_cache_bytes_by_pair_v2 = {}
-        self._viewer_overlay_cache_total_bytes_v2 = 0
-        self._viewer_overlay_cache_evictions_v2 = 0
+        self._overlay_cache.clear()
         self._tile_manifest_cache_v2 = {}
         self._lightweight_raster_pairs = set()
         self._render_status_by_pair = {}
@@ -6872,99 +6865,53 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         overlays = self._viewer_overlays_for_pair_v2(pair_id)
         return overlays[:limit], len(overlays) > limit, "overlay_json"
 
-    def _touch_viewer_overlay_cache_v2(self, pair_id: str) -> None:
-        if not pair_id:
-            return
-        try:
-            self._viewer_overlay_cache_order_v2.remove(pair_id)
-        except ValueError:
-            pass
-        self._viewer_overlay_cache_order_v2.append(pair_id)
+    @property
+    def _viewer_overlay_cache(self) -> dict:
+        return self._overlay_cache.cache
 
-    def _estimate_overlay_cache_bytes_v2(self, overlays: list[dict]) -> int:
-        total = 0
-        for overlay in overlays:
-            total += self._estimate_overlay_value_bytes_v2(overlay)
-        return total
+    @property
+    def _viewer_overlay_cache_order_v2(self) -> list:
+        return self._overlay_cache.order
+
+    @property
+    def _viewer_overlay_cache_bytes_by_pair_v2(self) -> dict:
+        return self._overlay_cache.bytes_by_pair
+
+    @property
+    def _viewer_overlay_cache_total_bytes_v2(self) -> int:
+        return self._overlay_cache.total_bytes
+
+    @property
+    def _viewer_overlay_cache_evictions_v2(self) -> int:
+        return self._overlay_cache.evictions
+
+    def _touch_viewer_overlay_cache_v2(self, pair_id: str) -> None:
+        self._overlay_cache.touch(pair_id)
 
     @staticmethod
     def _estimate_overlay_value_bytes_v2(value: object) -> int:
-        if value is None:
-            return 0
-        if isinstance(value, bool):
-            return 1
-        if isinstance(value, (int, float)):
-            return 8
-        if isinstance(value, str):
-            return len(value.encode("utf-8", errors="ignore"))
-        if isinstance(value, dict):
-            total = 256
-            for key, item in value.items():
-                total += len(str(key).encode("utf-8", errors="ignore"))
-                total += DrawingCompareWorkbenchV2._estimate_overlay_value_bytes_v2(item)
-            return total
-        if isinstance(value, (list, tuple)):
-            return 64 + sum(DrawingCompareWorkbenchV2._estimate_overlay_value_bytes_v2(item) for item in value)
-        return len(str(value).encode("utf-8", errors="ignore"))
+        return OverlayCache.estimate_value_bytes(value)
+
+    def _estimate_overlay_cache_bytes_v2(self, overlays: list[dict]) -> int:
+        return OverlayCache.estimate_bytes(overlays)
 
     def _cache_viewer_overlays_v2(self, pair_id: str, overlays: list[dict]) -> None:
-        if not pair_id:
-            return
-        previous_bytes = int(self._viewer_overlay_cache_bytes_by_pair_v2.get(pair_id, 0))
-        overlay_bytes = self._estimate_overlay_cache_bytes_v2(overlays)
-        self._viewer_overlay_cache[pair_id] = overlays
-        self._viewer_overlay_cache_bytes_by_pair_v2[pair_id] = overlay_bytes
-        self._viewer_overlay_cache_total_bytes_v2 = max(
-            0,
-            int(self._viewer_overlay_cache_total_bytes_v2) - previous_bytes + overlay_bytes,
+        self._overlay_cache.put(
+            pair_id,
+            overlays,
+            active_pair=str((self._active_row or {}).get("pair_id") or ""),
+            viewer_root=self._viewer_root,
+            pair_limit=GUI_OVERLAY_CACHE_PAIR_LIMIT,
+            byte_limit=GUI_OVERLAY_CACHE_BYTE_LIMIT,
         )
-        self._touch_viewer_overlay_cache_v2(pair_id)
-        self._evict_viewer_overlay_cache_if_needed_v2()
 
     def _evict_viewer_overlay_cache_if_needed_v2(self) -> None:
-        active_pair = str((self._active_row or {}).get("pair_id") or "")
-        pair_limit = max(1, int(GUI_OVERLAY_CACHE_PAIR_LIMIT))
-        byte_limit = max(1, int(GUI_OVERLAY_CACHE_BYTE_LIMIT))
-        while self._viewer_overlay_cache_order_v2 and (
-            len(self._viewer_overlay_cache_order_v2) > pair_limit
-            or self._viewer_overlay_cache_total_bytes_v2 > byte_limit
-        ):
-            reason = (
-                "pair_limit"
-                if len(self._viewer_overlay_cache_order_v2) > pair_limit
-                else "byte_limit"
-            )
-            evict_pair = self._viewer_overlay_cache_order_v2.pop(0)
-            if evict_pair == active_pair and self._viewer_overlay_cache_order_v2:
-                self._viewer_overlay_cache_order_v2.append(evict_pair)
-                continue
-            if evict_pair in self._viewer_overlay_cache:
-                evicted_bytes = int(self._viewer_overlay_cache_bytes_by_pair_v2.pop(evict_pair, 0))
-                self._viewer_overlay_cache.pop(evict_pair, None)
-                self._viewer_overlay_cache_total_bytes_v2 = max(
-                    0,
-                    self._viewer_overlay_cache_total_bytes_v2 - evicted_bytes,
-                )
-                self._viewer_overlay_cache_evictions_v2 += 1
-                if self._viewer_root:
-                    append_viewer_perf_event(
-                        self._viewer_root,
-                        "viewer_overlay_cache_evict",
-                        pair_uuid=evict_pair,
-                        overlay_cache_pair_limit=pair_limit,
-                        overlay_cache_byte_limit=byte_limit,
-                        overlay_cache_evicted_bytes=evicted_bytes,
-                        overlay_cache_total_bytes=self._viewer_overlay_cache_total_bytes_v2,
-                        overlay_cache_pair_count=len(self._viewer_overlay_cache),
-                        overlay_cache_eviction_reason=reason,
-                        overlay_cache_eviction_count=self._viewer_overlay_cache_evictions_v2,
-                    )
-            if (
-                len(self._viewer_overlay_cache_order_v2) == 1
-                and self._viewer_overlay_cache_order_v2[0] == active_pair
-                and self._viewer_overlay_cache_total_bytes_v2 > byte_limit
-            ):
-                break
+        self._overlay_cache.evict_if_needed(
+            active_pair=str((self._active_row or {}).get("pair_id") or ""),
+            viewer_root=self._viewer_root,
+            pair_limit=GUI_OVERLAY_CACHE_PAIR_LIMIT,
+            byte_limit=GUI_OVERLAY_CACHE_BYTE_LIMIT,
+        )
 
     def _schedule_full_zone_tree_rebuild_v2(self, pair_id: str) -> None:
         if not pair_id:

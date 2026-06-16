@@ -33,7 +33,7 @@
 | 3 | bbox↔pixel 변환 free 함수군 (`compute_pdf_page_pin_overlay`, `_cad_bbox_to_pixel_rect`, `_world_bbox_to_pixel_rect`, `_lightweight_tile_zoom_from_transform`) | 순수(수학) | `workbench_bbox_transform.py` | 낮음 | **완료 2026-06-16** (-150). `scale_pdf_bbox_to_render_pixels`는 30-use `_viewer_pair_is_pdf` 의존이라 잔류 |
 | 4 | viewer 소스/경로 resolve free 함수군 (`_resolve_viewer_artifact_path`, `_resolve_pdf_viewer_source_path`, `_existing_pdf_file`, `_is_redacted_artifact_path`) | 순수 | `workbench_viewer_source.py` | 낮음 | **완료 2026-06-16** (-91). `_viewer_pair_is_pdf` 의존 없음 확인; redaction 테스트 통과 |
 | 4b | viewer-pair 술어 + PDF bbox 스케일 (`_viewer_pair_is_pdf`, `scale_pdf_bbox_to_render_pixels`) | 순수 | `workbench_viewer_pair.py` | 낮음 | **완료 2026-06-17** (-49). #3에서 잔류했던 쌍을 묶음; `_viewer_pair_is_pdf` 31-use re-import |
-| 5 | `_viewer_overlay_cache*` 5필드+메서드 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | **안전망 완료 2026-06-17**: `test_overlay_cache_characterization.py`(8종)이 put/회계/LRU-touch/active-pair 보호/byte estimator/no-op 고정. 추출 시 5필드가 외부(telemetry·perf·reset·test)서 직접 읽히므로 **V2에 property 위임 + reset=`clear()` + 호출처 갱신** 필요(monolith 줄 추가 동반) — verbatim 이동 아님 |
+| 5 | `_viewer_overlay_cache*` 5필드+메서드 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | **완료 2026-06-17** (net -99). `workbench_overlay_cache.py`로 이동, V2엔 5 @property+5 delegator(facade)만 잔류. 안전망 `test_overlay_cache_characterization.py`(8종)이 행동 보존 입증(14+73+184 통과+라이브 부팅) |
 | 6 | review-state 메서드군 | 상태 | `ReviewStateController` 협력 객체 | 중간 | 가장 큰 응집 state 클러스터 |
 | 7 | 최장 `*_finished_v2` 렌더 콜백 (예: `_load_lightweight_pdf_v2` 265줄) | 콜백 | 명시 입력 받는 free 함수 + V2는 thin orchestrator | 높음 | **dead-island 버그가 역사적으로 숨는 곳 — 우선 테스트 보강 후** |
 
@@ -50,6 +50,6 @@
 
 ## 현황 / Status
 
-- 14,857 → V1 -1,021 → overlay -142 → 요약/포맷 -137 → bbox/pixel -150 → viewer-source -91 → viewer-pair -49 = **13,267줄** (누적 -1,590).
-- **순수-함수 위성 추출 단계 사실상 완결**(추출 5종, 신규 모듈 5개, 라이브 앱 기동 검증). 남은 작업은 상태/콜백 클러스터로 성격이 다름: V2가 method-rebinding hack으로만 테스트되므로 **추출 전 협력객체용 테스트 보강이 선행**돼야 안전 — 별도 세션 권장.
+- 14,857 → V1 -1,021 → overlay -142 → 요약/포맷 -137 → bbox/pixel -150 → viewer-source -91 → viewer-pair -49 → OverlayCache -99 = **13,168줄** (누적 -1,689).
+- 순수-함수 추출(#1~4b) + 첫 **상태 협력객체** 추출(#5 OverlayCache, 안전망 선행→추출→행동보존 검증의 모범 사이클) 완료. 남은 #6(review-state)·#7(렌더 콜백)은 동일 패턴(특성화 테스트 선행 → 협력객체 추출)으로, 각각 별도 PR 권장.
 - 검증 주의: `tests/unit/gui/`는 PySide6 6.10 비결정 AV로 **간헐 1-fail flaky** 가능 — 회귀 판정 전 반드시 결정적 재실행으로 확인(본 세션서 184-pass 재현).
