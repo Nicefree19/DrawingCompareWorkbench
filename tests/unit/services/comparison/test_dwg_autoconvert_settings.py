@@ -7,7 +7,9 @@ from pathlib import Path
 
 from src.services.comparison.dwg_autoconvert_settings import (
     detect_oda_installation,
+    load_ac1032_native_enabled,
     load_dwg_autoconvert_enabled,
+    save_ac1032_native_enabled,
     save_dwg_autoconvert_enabled,
 )
 
@@ -17,6 +19,20 @@ def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     save_dwg_autoconvert_enabled(True, target)
     assert load_dwg_autoconvert_enabled(target) is True
     save_dwg_autoconvert_enabled(False, target)
+    assert load_dwg_autoconvert_enabled(target) is False
+
+
+def test_ac1032_native_and_autoconvert_settings_coexist(tmp_path: Path) -> None:
+    # The two settings share one JSON file; saving either must preserve the other.
+    target = tmp_path / "dwg_autoconvert_settings.json"
+    assert load_ac1032_native_enabled(target) is None  # never chosen
+    save_dwg_autoconvert_enabled(True, target)
+    save_ac1032_native_enabled(True, target)
+    assert load_dwg_autoconvert_enabled(target) is True
+    assert load_ac1032_native_enabled(target) is True
+    # toggling one leaves the other intact
+    save_dwg_autoconvert_enabled(False, target)
+    assert load_ac1032_native_enabled(target) is True
     assert load_dwg_autoconvert_enabled(target) is False
 
 

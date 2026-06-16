@@ -28,6 +28,11 @@ from typing import Optional, Tuple
 DWG_AUTOCONVERT_SETTINGS_FILENAME = "dwg_autoconvert_settings.json"
 ODA_DOWNLOAD_URL = "https://www.opendesign.com/guestfiles/oda_file_converter"
 
+#: Setting keys persisted (possibly together) in the shared settings JSON.
+DWG_AUTOCONVERT_KEY = "dwg_auto_convert"
+#: Opt-in for the experimental clean-room AC1032 native reader (default off).
+AC1032_NATIVE_OPT_IN_KEY = "ac1032_native_opt_in"
+
 
 def default_dwg_autoconvert_settings_path() -> Path:
     """Per-user settings location (same data dir the Workbench GUI uses)."""
@@ -40,6 +45,33 @@ def default_dwg_autoconvert_settings_path() -> Path:
     return base / DWG_AUTOCONVERT_SETTINGS_FILENAME
 
 
+def _read_settings_dict(target: Path) -> dict:
+    """The settings JSON as a dict, or {} on a missing/corrupt/non-dict file."""
+
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_bool_setting(key: str, path: Optional[Path]) -> Optional[bool]:
+    target = Path(path) if path is not None else default_dwg_autoconvert_settings_path()
+    value = _read_settings_dict(target).get(key)
+    return value if isinstance(value, bool) else None
+
+
+def _save_bool_setting(key: str, enabled: bool, path: Optional[Path]) -> Path:
+    # Read-modify-write so the shared file's other keys survive (e.g. saving the
+    # AC1032 opt-in must not wipe the dwg_auto_convert choice, and vice versa).
+    target = Path(path) if path is not None else default_dwg_autoconvert_settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = _read_settings_dict(target)
+    data[key] = bool(enabled)
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
 def load_dwg_autoconvert_enabled(path: Optional[Path] = None) -> Optional[bool]:
     """Saved user decision, or None when the user never chose.
 
@@ -47,25 +79,29 @@ def load_dwg_autoconvert_enabled(path: Optional[Path] = None) -> Optional[bool]:
     an installed converter. Missing/corrupt files read as None, never raise.
     """
 
-    target = Path(path) if path is not None else default_dwg_autoconvert_settings_path()
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return None
-    value = data.get("dwg_auto_convert") if isinstance(data, dict) else None
-    if isinstance(value, bool):
-        return value
-    return None
+    return _load_bool_setting(DWG_AUTOCONVERT_KEY, path)
 
 
 def save_dwg_autoconvert_enabled(enabled: bool, path: Optional[Path] = None) -> Path:
     """Persist the user's explicit on/off choice. Creates parent dirs."""
 
-    target = Path(path) if path is not None else default_dwg_autoconvert_settings_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"dwg_auto_convert": bool(enabled)}, ensure_ascii=False, indent=2)
-    target.write_text(payload, encoding="utf-8")
-    return target
+    return _save_bool_setting(DWG_AUTOCONVERT_KEY, enabled, path)
+
+
+def load_ac1032_native_enabled(path: Optional[Path] = None) -> Optional[bool]:
+    """Saved AC1032 native-reader opt-in, or None when the user never chose.
+
+    None means "no explicit decision" — the resolver then falls back to the
+    default (off). Missing/corrupt files read as None, never raise.
+    """
+
+    return _load_bool_setting(AC1032_NATIVE_OPT_IN_KEY, path)
+
+
+def save_ac1032_native_enabled(enabled: bool, path: Optional[Path] = None) -> Path:
+    """Persist the AC1032 native-reader opt-in. Preserves the file's other keys."""
+
+    return _save_bool_setting(AC1032_NATIVE_OPT_IN_KEY, enabled, path)
 
 
 def detect_oda_installation() -> Tuple[bool, Optional[str]]:
@@ -90,9 +126,13 @@ def detect_oda_installation() -> Tuple[bool, Optional[str]]:
 
 __all__ = [
     "DWG_AUTOCONVERT_SETTINGS_FILENAME",
+    "DWG_AUTOCONVERT_KEY",
+    "AC1032_NATIVE_OPT_IN_KEY",
     "ODA_DOWNLOAD_URL",
     "default_dwg_autoconvert_settings_path",
     "detect_oda_installation",
     "load_dwg_autoconvert_enabled",
     "save_dwg_autoconvert_enabled",
+    "load_ac1032_native_enabled",
+    "save_ac1032_native_enabled",
 ]
