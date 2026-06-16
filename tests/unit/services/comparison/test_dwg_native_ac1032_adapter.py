@@ -6,10 +6,17 @@ SKIPs in CI (real-file verification is local-only), matching
 """
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
 
+from src.services.comparison.base import ComparisonResult
+from src.services.comparison.change_zones import ChangeZoneOptions, build_change_zones
+from src.services.comparison.drawing_compare_engine import (
+    DrawingCompareEngine,
+    DrawingCompareOptions,
+)
 from src.services.comparison.dwg_backend import create_dwg_backend_selection
 from src.services.comparison.dwg_importer import (
     DwgAdapterDrawing,
@@ -24,6 +31,7 @@ from src.services.comparison.dwg_native_ac1032_adapter import (
     ac1032_native_opt_in,
 )
 from src.services.comparison.dwg_native_reader import DwgNativeAc1015Adapter
+from src.services.comparison.revision_marker import revcloud_geometry_from_bbox
 
 
 _AC1032 = DwgVersionInfo("AC1032", "AutoCAD 2018+", "R2018", False)
@@ -186,3 +194,62 @@ def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
     assert hatch["geometry"]["pattern_name"] == "ANSI31"  # upper-cased, like the DXF path
     assert hatch["geometry"]["solid_fill"] is True
     assert hatch["bbox"]["max_x"] == 4.0 and hatch["bbox"]["max_y"] == 3.0
+
+
+def test_real_ac1032_opt_in_product_path_diffs_and_clouds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # End-to-end capstone: a real AC1032 imported through the OPT-IN PRODUCT path
+    # (DwgImporter + native adapter, not the diagnostic build_r2018_canonical_document)
+    # feeds the real compare engine -> change zones -> revision clouds, ZERO ODA.
+    if not _SAMPLE.exists():
+        pytest.skip(f"local AC1032 sample not present: {_SAMPLE}")
+    monkeypatch.setenv(AC1032_NATIVE_OPT_IN_ENV, "1")
+
+    adapter = DwgNativeAc1032Adapter(fallback_adapter=DwgNativeAc1015Adapter())
+    before = DwgImporter(adapter=adapter).import_file(_SAMPLE)
+    assert before["import_report"]["adapter"]["name"] == "native-ac1032"  # ZERO ODA
+    assert len(before["entities"]) > 200
+
+    engine = DrawingCompareEngine(DrawingCompareOptions(include_unchanged=False))
+
+    # (1) A drawing compared with itself produces NO changes (no false positives).
+    self_diff = engine.compare(before, copy.deepcopy(before))
+    self_edits = (
+        self_diff.summary_counts["added"]
+        + self_diff.summary_counts["removed"]
+        + self_diff.summary_counts["modified"]
+    )
+    assert self_edits == 0, self_diff.summary_counts
+    assert self_diff.summary_counts["unchanged"] == len(before["entities"])
+
+    # (2) A single edit on the after side is detected and isolated.
+    after = copy.deepcopy(before)
+    moved = next(e for e in after["entities"] if e["type"] == "line")
+    moved["geometry"]["end"]["x"] += 40.0
+    moved["geometry"]["end"]["y"] += 30.0
+    sx, ex = moved["geometry"]["start"]["x"], moved["geometry"]["end"]["x"]
+    sy, ey = moved["geometry"]["start"]["y"], moved["geometry"]["end"]["y"]
+    moved["bbox"] = {"min_x": min(sx, ex), "min_y": min(sy, ey),
+                     "max_x": max(sx, ex), "max_y": max(sy, ey)}
+    centroid = ((min(sx, ex) + max(sx, ex)) / 2.0, (min(sy, ey) + max(sy, ey)) / 2.0)
+
+    diff = engine.compare(before, after)
+    edits = (diff.summary_counts["added"] + diff.summary_counts["removed"]
+             + diff.summary_counts["modified"])
+    assert 1 <= edits <= 4, diff.summary_counts
+    assert diff.summary_counts["unchanged"] >= len(before["entities"]) - 4
+
+    # (3) The edit drives a change zone and a revision cloud that covers it.
+    result = ComparisonResult(source_a="before.dwg", source_b="after.dwg")
+    for record in diff.to_change_records():
+        result.add_change(record)
+    zones = build_change_zones(result, pair_id="P1", drawing_number="P1",
+                               options=ChangeZoneOptions(cluster_distance=120.0))
+    covering = [
+        z for z in zones
+        if z.bbox[0] <= centroid[0] <= z.bbox[2] and z.bbox[1] <= centroid[1] <= z.bbox[3]
+    ]
+    assert covering, f"no change zone covers the moved line at {centroid}"
+    cloud = revcloud_geometry_from_bbox(covering[0].bbox)
+    assert len(cloud.vertices) >= 4
+    assert min(v[0] for v in cloud.vertices) <= centroid[0] <= max(v[0] for v in cloud.vertices)
+    assert min(v[1] for v in cloud.vertices) <= centroid[1] <= max(v[1] for v in cloud.vertices)
