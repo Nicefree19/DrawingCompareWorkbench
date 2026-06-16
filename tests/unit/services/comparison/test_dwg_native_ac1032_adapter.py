@@ -127,6 +127,52 @@ def test_real_ac1032_imports_through_pipeline_zero_oda(monkeypatch: pytest.Monke
     report = canonical["import_report"]
     assert report["adapter"]["name"] == "native-ac1032"
     types = {entity["type"] for entity in canonical["entities"]}
-    # The mapped (renderable + semantic) types reach canonical.
-    assert {"line", "text", "mtext", "circle"}.issubset(types)
-    assert len(canonical["entities"]) > 100
+    # Every decoded type — including the DIMENSION/HATCH/POINT payloads — reaches
+    # canonical in the DXF importer's shape, so the structural diff reads them.
+    assert {"line", "text", "mtext", "circle", "dimension", "hatch", "point"}.issubset(types)
+    assert len(canonical["entities"]) > 200
+
+    dimension = next(e for e in canonical["entities"] if e["type"] == "dimension")
+    assert dimension["geometry"]["measurement"] is not None
+    assert dimension["geometry"]["dimension_type"] in {
+        "linear", "aligned", "angular", "diameter", "radius", "ordinate"
+    }
+    hatch = next(e for e in canonical["entities"] if e["type"] == "hatch")
+    assert hatch["geometry"]["pattern_name"]  # non-empty, upper-cased
+
+
+def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
+    # _map_entity maps the native DIMENSION/HATCH/POINT geometry to the same
+    # canonical shape the DXF importer emits (no real file needed).
+    from src.services.comparison.dwg_importer import DwgAdapterEntity
+
+    drawing = DwgAdapterDrawing(
+        model_space=[
+            DwgAdapterEntity(raw_type="POINT", geometry={"location": (1.0, 2.0, 0.0)},
+                             layer="0", handle="1"),
+            DwgAdapterEntity(
+                raw_type="DIMENSION",
+                geometry={"text_midpoint": (5.0, 6.0, 0.0), "measurement": 42.5,
+                          "dimtype": 0, "text": ""},
+                layer="0", handle="2",
+            ),
+            DwgAdapterEntity(
+                raw_type="HATCH",
+                geometry={"pattern": "ansi31", "solid": True, "is_gradient": False,
+                          "gradient_name": "LINEAR",
+                          "bbox": {"min_x": 0.0, "min_y": 0.0, "max_x": 4.0, "max_y": 3.0}},
+                layer="0", handle="3",
+            ),
+        ]
+    )
+    canonical = DwgImporter(adapter=DwgNativeAc1032Adapter()).import_adapter_drawing(
+        drawing, version=_AC1032
+    )
+    by_type = {e["type"]: e for e in canonical["entities"]}
+    assert by_type["point"]["geometry"]["location"] == {"x": 1.0, "y": 2.0, "z": 0.0}
+    dim = by_type["dimension"]["geometry"]
+    assert dim["dimension_type"] == "linear" and dim["measurement"] == 42.5
+    hatch = by_type["hatch"]
+    assert hatch["geometry"]["pattern_name"] == "ANSI31"  # upper-cased, like the DXF path
+    assert hatch["geometry"]["solid_fill"] is True
+    assert hatch["bbox"]["max_x"] == 4.0 and hatch["bbox"]["max_y"] == 3.0
