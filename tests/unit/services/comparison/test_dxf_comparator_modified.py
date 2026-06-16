@@ -279,6 +279,28 @@ class TestIsSignificantChange:
         )
         assert result is True
 
+    def test_forced_content_fallback_is_significant_uncategorized_change_guard(
+        self, comparator
+    ):
+        """ACC-1 회귀 가드 (tech-debt audit, docs/TECH_DEBT_AUDIT_REPORT.md).
+
+        _analyze_change_details 는 explicit 카테고리(position/dimension/rotation/
+        scale/content)가 없는 변경 — 예: CIRCLE radius, LWPOLYLINE vertex 등 —
+        을 표시용 catch-all categories=["content"] 로 채운다. 이 fallback 은
+        '데이터 변경' 표면 뒤의 실제 geometry 변경을 잡는 load-bearing 장치이므로
+        반드시 유의미로 남아야 한다. 강제-content 를 단순 조건으로 드롭하면
+        (예전 ACC-1 시도) radius 10→20 같은 실제 변경을 침묵시켜 recall 을 깎는다 —
+        test_region_aware_compare 의 world-bbox 매핑 테스트가 이를 잡았다. 안전한
+        제거는 실제 geometry-tolerance diff 가 필요한 별도 엔진 작업이다.
+        """
+        result = comparator._is_significant_change(
+            categories=["content"],
+            old_data={"center": (0.0, 0.0), "radius": 10.0},
+            new_data={"center": (0.0, 0.0), "radius": 20.0},
+            pos_diff=0.0,
+        )
+        assert result is True
+
 
 class TestCreateModifiedChange:
     """_create_modified_change() 테스트"""

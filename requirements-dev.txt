@@ -8,6 +8,9 @@ pre-commit==3.3.2
 # 테스트 관련 패키지
 pytest==7.3.1
 pytest-cov==4.1.0
+# pytest.ini가 timeout=300/timeout_method=thread 를 선언하지만 플러그인이 없으면
+# 조용히 무시된다(감사 TH-5). 선언된 5분 행 가드가 실제로 작동하도록 설치.
+pytest-timeout==2.3.1
 
 # 타입 스텁
 types-requests
