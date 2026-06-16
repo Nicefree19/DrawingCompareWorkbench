@@ -36,12 +36,44 @@ from .dwg_r2018_reader import R2018_VERSION_CODE, R2018Entity, read_r2018_entiti
 #: the product's default DWG path unchanged.
 AC1032_NATIVE_OPT_IN_ENV = "DRAWING_COMPARE_DWG_AC1032_NATIVE"
 _TRUTHY = {"1", "true", "yes", "on", "enable", "enabled"}
+_FALSY = {"0", "false", "no", "off", "disable", "disabled"}
 
 
-def ac1032_native_opt_in() -> bool:
-    """Whether the experimental AC1032 native decode path is opted in (default off)."""
+def ac1032_native_opt_in(*, settings_path: Optional["Path"] = None) -> bool:
+    """Whether the experimental AC1032 native decode path is opted in (default off).
 
-    return (os.environ.get(AC1032_NATIVE_OPT_IN_ENV) or "").strip().casefold() in _TRUTHY
+    Resolution order (mirrors the DWG auto-convert backend so the GUI behaves
+    consistently):
+    1. ``DRAWING_COMPARE_DWG_AC1032_NATIVE`` env var — an explicit on/off override
+       both ways (a launcher or a test can pin it regardless of saved settings).
+    2. The persisted settings file (``ac1032_native_opt_in`` key) — so the user
+       can enable it once without re-setting an env var on every launch.
+    3. Default: off.
+    """
+
+    raw = os.environ.get(AC1032_NATIVE_OPT_IN_ENV)
+    if raw is not None:
+        token = raw.strip().casefold()
+        if token in _TRUTHY:
+            return True
+        if token in _FALSY or token == "":
+            return False
+        # an unrecognised value falls through to the persisted setting
+    from .dwg_autoconvert_settings import load_ac1032_native_enabled
+
+    return bool(load_ac1032_native_enabled(settings_path))
+
+
+def set_ac1032_native_opt_in(enabled: bool, *, settings_path: Optional["Path"] = None) -> None:
+    """Persist the AC1032 native opt-in so it survives across launches.
+
+    A convenience for a settings UI / CLI to toggle the experimental path without
+    an env var; the env var still overrides this when set.
+    """
+
+    from .dwg_autoconvert_settings import save_ac1032_native_enabled
+
+    save_ac1032_native_enabled(enabled, settings_path)
 
 
 def _adapter_entity(entity: R2018Entity) -> DwgAdapterEntity:
@@ -216,4 +248,5 @@ __all__ = [
     "AC1032_NATIVE_OPT_IN_ENV",
     "DwgNativeAc1032Adapter",
     "ac1032_native_opt_in",
+    "set_ac1032_native_opt_in",
 ]

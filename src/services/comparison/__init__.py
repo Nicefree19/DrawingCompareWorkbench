@@ -74,6 +74,7 @@ from .dwg_native_ac1032_adapter import (
     AC1032_NATIVE_OPT_IN_ENV,
     DwgNativeAc1032Adapter,
     ac1032_native_opt_in,
+    set_ac1032_native_opt_in,
 )
 from .dwg_object_decoder import DwgMvpObjectType, DwgObjectDecodeError, DwgObjectDecoder
 from .dwg_section_reader import (
@@ -329,6 +330,7 @@ __all__ = [
     "DwgNativeAc1032Adapter",
     "AC1032_NATIVE_OPT_IN_ENV",
     "ac1032_native_opt_in",
+    "set_ac1032_native_opt_in",
     "DwgVersionDetector",
     "DwgVersionInfo",
     "DrawingNormalizer",

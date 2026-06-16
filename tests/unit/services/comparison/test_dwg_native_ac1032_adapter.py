@@ -62,14 +62,35 @@ class _RecordingFallback(DwgImporterAdapter):
         return DwgAdapterDrawing(header={"$ACADVER": version.code})
 
 
-def test_opt_in_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_opt_in_defaults_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"  # absent -> no saved decision
     monkeypatch.delenv(AC1032_NATIVE_OPT_IN_ENV, raising=False)
-    assert ac1032_native_opt_in() is False
+    assert ac1032_native_opt_in(settings_path=settings) is False
     for truthy in ("1", "true", "YES", "on"):
         monkeypatch.setenv(AC1032_NATIVE_OPT_IN_ENV, truthy)
-        assert ac1032_native_opt_in() is True
+        assert ac1032_native_opt_in(settings_path=settings) is True
     monkeypatch.setenv(AC1032_NATIVE_OPT_IN_ENV, "0")
-    assert ac1032_native_opt_in() is False
+    assert ac1032_native_opt_in(settings_path=settings) is False
+
+
+def test_opt_in_resolves_env_over_settings_over_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.services.comparison.dwg_native_ac1032_adapter import set_ac1032_native_opt_in
+
+    settings = tmp_path / "settings.json"
+    monkeypatch.delenv(AC1032_NATIVE_OPT_IN_ENV, raising=False)
+    # 3. default: no env, no settings -> off
+    assert ac1032_native_opt_in(settings_path=settings) is False
+    # 2. persisted setting (no env) -> the GUI/user can enable it without an env var
+    set_ac1032_native_opt_in(True, settings_path=settings)
+    assert ac1032_native_opt_in(settings_path=settings) is True
+    # 1. env is an explicit override BOTH ways, beating the saved setting
+    monkeypatch.setenv(AC1032_NATIVE_OPT_IN_ENV, "0")
+    assert ac1032_native_opt_in(settings_path=settings) is False  # env off > settings on
+    monkeypatch.setenv(AC1032_NATIVE_OPT_IN_ENV, "1")
+    set_ac1032_native_opt_in(False, settings_path=settings)
+    assert ac1032_native_opt_in(settings_path=settings) is True  # env on > settings off
 
 
 def test_backend_selection_unchanged_when_opt_in_off(monkeypatch: pytest.MonkeyPatch) -> None:
