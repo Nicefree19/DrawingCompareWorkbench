@@ -120,6 +120,7 @@ def content_frame_from_zone_bboxes(
     *,
     padding_ratio: float = 0.4,
     min_span: float = 1.0,
+    context_floor_ratio: float = 0.5,
 ) -> Optional[BBox]:
     """Padded world-space frame around the PRIMARY change zone, or ``None``.
 
@@ -147,6 +148,23 @@ def content_frame_from_zone_bboxes(
     if not indexed:
         return None
 
+    # Context floor (live-test 2026-06-17): on a large multi-detail sheet a tiny,
+    # ISOLATED primary zone (e.g. 889 mm in a 524 m sheet) framed bare zooms to a
+    # few mm/px and the user is stuck over-zoomed, unable to place the change
+    # ("전체 보이다가 클로즈업되어 고정"). Expand such a zone to a fraction of the
+    # TYPICAL (median) zone span so it shows surrounding detail like its
+    # neighbouring zones — WITHOUT using the outlier-inflated sheet extent. No-op
+    # when zones are uniform (the primary already exceeds the floor) or singular.
+    spans: list[float] = []
+    for _i, _ov in indexed:
+        zb = _zone_world_bbox(_ov, to_world)
+        if zb is not None:
+            spans.append(max(zb[2] - zb[0], zb[3] - zb[1]))
+    context_floor = 0.0
+    if len(spans) >= 2 and context_floor_ratio > 0.0:
+        spans.sort()
+        context_floor = float(context_floor_ratio) * spans[len(spans) // 2]
+
     for _index, overlay in sorted(indexed, key=_priority_key):
         boxes = _overlay_world_boxes(overlay, to_world)
         if not boxes:
@@ -156,8 +174,9 @@ def content_frame_from_zone_bboxes(
         x1 = max(b[2] for b in boxes)
         y1 = max(b[3] for b in boxes)
 
-        # Min-span floor — guards a tiny zone from collapsing to a zero-area window.
-        floor = max(0.0, float(min_span))
+        # Min-span floor — guards a tiny zone from collapsing to a zero-area
+        # window, and lifts an isolated tiny zone to the typical detail size.
+        floor = max(0.0, float(min_span), context_floor)
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
         if x1 - x0 < floor:
             x0, x1 = cx - floor / 2.0, cx + floor / 2.0

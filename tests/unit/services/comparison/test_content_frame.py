@@ -73,6 +73,45 @@ def test_deleted_uses_old_bbox_added_uses_new_bbox():
     assert frame is not None and frame[0] > 400000.0  # framed by old_bbox, not [0,0,0,0]
 
 
+def test_tiny_isolated_primary_expands_to_context_floor():
+    """A tiny rank-1 zone isolated among larger detail zones must NOT over-zoom:
+    its frame expands toward the typical (median) zone span so surrounding detail
+    is visible (live-test 2026-06-17: an 889 mm zone in a 524 m sheet was stuck at
+    upp 1.39 — "전체 보이다가 클로즈업되어 고정")."""
+    tiny = _box(415024.0, -183770.0, 415914.0, -183270.0)   # ~890 x 500
+    big_a = _box(476965.0, -114204.0, 510182.0, -95520.0)    # ~33k x 18k
+    big_b = _box(489440.0, -114554.0, 523900.0, -95170.0)    # ~34k x 19k
+    overlays = [
+        {"zone_id": "C-007", "change_type": "modified", "priority_rank": 1, "old_bbox": tiny, "bbox": tiny},
+        {"zone_id": "C-002", "change_type": "modified", "priority_rank": 2, "old_bbox": big_a, "bbox": big_a},
+        {"zone_id": "C-003", "change_type": "modified", "priority_rank": 3, "old_bbox": big_b, "bbox": big_b},
+    ]
+    frame = content_frame_from_zone_bboxes(overlays, _to_world)
+    assert frame is not None
+    span = max(frame[2] - frame[0], frame[3] - frame[1])
+    # Bare tiny zone (~890 mm) + 40% padding would be < 1300 mm; the context floor
+    # lifts it to the order of the median detail zone (~33k mm → floor ~16.6k).
+    assert span > 10000.0, f"tiny primary should expand for context, got span={span:.0f}"
+    # Still centred on the change (the tiny zone), not a union of all zones.
+    cx = (frame[0] + frame[2]) / 2.0
+    assert 414000.0 < cx < 417000.0
+
+
+def test_context_floor_noop_when_zones_uniform():
+    """When all zones are similar size, the floor is a no-op (no forced zoom-out)."""
+    a = _box(0.0, 0.0, 10000.0, 8000.0)
+    b = _box(50000.0, 0.0, 60000.0, 8000.0)
+    overlays = [
+        {"zone_id": "C-001", "change_type": "modified", "priority_rank": 1, "old_bbox": a, "bbox": a},
+        {"zone_id": "C-002", "change_type": "modified", "priority_rank": 2, "old_bbox": b, "bbox": b},
+    ]
+    frame = content_frame_from_zone_bboxes(overlays, _to_world)
+    assert frame is not None
+    # Primary 10k wide + 40% padding each side = 18k; floor (0.5×10k=5k < 10k) is
+    # a no-op, so the span is the natural zone+padding, not inflated by the median.
+    assert (frame[2] - frame[0]) < 19000.0
+
+
 def test_degenerate_primary_skips_to_next_zone():
     overlays = [
         {"change_type": "moved", "priority_rank": 1, "old_bbox": _box(0, 0, 0, 0), "bbox": None},
