@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -110,6 +111,28 @@ def _write_json_atomic(path: Path, payload: object) -> None:
     tmp.replace(path)
 
 
+# Process-local cache of the parsed + legibility-patched ezdxf doc, keyed by
+# (resolved DXF path, mtime_ns, size). The zone-render worker is PERSISTENT
+# (zone_render_process.main reads requests in a loop), but render_zone_focus
+# opened the doc with mutable=True on EVERY call (a fresh parse, to avoid
+# mutating the shared read-cache during the font remap) — so every zone the
+# user clicked re-parsed the multi-MB converted DXF, costing 4-5 s/zone
+# (live-test 2026-06-17). Caching the patched doc here lets the first zone pay
+# the parse and every later zone for the same source reuse it. Rendering only
+# READS the doc (draw + bbox), so cross-zone reuse is safe; the font patch is
+# applied once at parse time. Bounded so before+after of the current pair fit.
+_ZONE_DOC_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+_ZONE_DOC_CACHE_MAX = 3
+
+
+def _zone_doc_cache_key(dxf_path: Path) -> Optional[tuple]:
+    try:
+        st = dxf_path.stat()
+        return (str(dxf_path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def render_zone_focus(
     source_path: Path,
     zone_world_bbox: Bbox,
@@ -180,27 +203,39 @@ def render_zone_focus(
             skipped_reason=f"DXF resolution failed: {exc}",
         )
 
-    # 2. Open the doc. mutable=True: the font remap below must never touch
-    # the shared read-cache document other callers reuse.
-    try:
-        read_result = read_dxf_document_result(
-            dxf_path, ezdxf_module=ezdxf, mutable=True
-        )
-        doc = read_result.doc
-        patch_text_styles_for_legibility(doc)
-        read_warning = read_result.diagnostics.warning()
-        if read_warning:
-            warnings.append(read_warning)
-    except Exception as exc:
-        return ZoneFocusResult(
-            output_path="",
-            primitive_count=0,
-            entity_count=0,
-            truncated=False,
-            elapsed_ms=(time.perf_counter() - start) * 1000.0,
-            world_bbox=zone_world_bbox,
-            skipped_reason=f"ezdxf.readfile failed: {exc}",
-        )
+    # 2. Open the doc. Reuse a process-local cache of the parsed + patched doc
+    # across zones (the worker is persistent); only the first zone for a source
+    # pays the multi-MB parse. mutable=True still avoids mutating the SHARED
+    # read-cache during the font remap — we keep our own patched copy instead.
+    cache_key = _zone_doc_cache_key(dxf_path)
+    doc = _ZONE_DOC_CACHE.get(cache_key) if cache_key is not None else None
+    if doc is not None:
+        _ZONE_DOC_CACHE.move_to_end(cache_key)
+    else:
+        try:
+            read_result = read_dxf_document_result(
+                dxf_path, ezdxf_module=ezdxf, mutable=True
+            )
+            doc = read_result.doc
+            patch_text_styles_for_legibility(doc)
+            read_warning = read_result.diagnostics.warning()
+            if read_warning:
+                warnings.append(read_warning)
+        except Exception as exc:
+            return ZoneFocusResult(
+                output_path="",
+                primitive_count=0,
+                entity_count=0,
+                truncated=False,
+                elapsed_ms=(time.perf_counter() - start) * 1000.0,
+                world_bbox=zone_world_bbox,
+                skipped_reason=f"ezdxf.readfile failed: {exc}",
+            )
+        if cache_key is not None:
+            _ZONE_DOC_CACHE[cache_key] = doc
+            _ZONE_DOC_CACHE.move_to_end(cache_key)
+            while len(_ZONE_DOC_CACHE) > _ZONE_DOC_CACHE_MAX:
+                _ZONE_DOC_CACHE.popitem(last=False)
 
     # 3. Build the zone bbox + spatial filter.
     padded = _pad_bbox(zone_world_bbox, padding_ratio)

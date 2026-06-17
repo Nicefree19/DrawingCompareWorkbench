@@ -53,3 +53,30 @@ def test_raising_entities_are_skipped_not_fatal(tmp_path, monkeypatch):
     res = render_zone_focus(src, (-1.0, -1.0, 11.0, 4.0), out)
     # No exception escaped; the failure was contained and surfaced honestly.
     assert any("un-renderable" in w for w in res.warnings)
+
+
+def test_parsed_doc_cached_across_zones(tmp_path, monkeypatch):
+    """Speed lever (L-speed, 2026-06-17): the persistent zone worker re-parsed the
+    multi-MB DXF on every zone (4-5 s/zone). The doc is now parsed once and reused
+    for later zones of the same source."""
+    import src.services.comparison.dxf_read as dxf_read
+    import src.services.comparison.zone_render_worker as zrw
+
+    src = _doc_with_lines(tmp_path, n=4)
+
+    calls = {"n": 0}
+    real = dxf_read.read_dxf_document_result
+
+    def _counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dxf_read, "read_dxf_document_result", _counting)
+    zrw._ZONE_DOC_CACHE.clear()
+
+    out = tmp_path / "out"
+    out.mkdir()
+    zrw.render_zone_focus(src, (-1.0, -1.0, 11.0, 5.0), out / "z1")
+    zrw.render_zone_focus(src, (2.0, 0.0, 11.0, 5.0), out / "z2")  # different zone, same source
+
+    assert calls["n"] == 1  # parsed once; the second zone reused the cached doc
