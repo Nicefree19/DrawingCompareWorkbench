@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -517,43 +517,8 @@ def estimate_rigid_transform(
     return transform
 
 
-# ---------------------------------------------------------------------------
-# Application helpers
-# ---------------------------------------------------------------------------
-
-
-def apply_to_changes(
-    changes: Iterable[Any],
-    transform: RigidTransform,
-    *,
-    location_attr: str = "location",
-) -> None:
-    """주어진 change 객체 컬렉션의 location 을 in-place 업데이트.
-
-    DxfChange 와 같이 ``location: Optional[Tuple[float, float]]`` 필드가
-    있는 객체 컬렉션을 받아 location 을 transform.apply() 결과로 교체.
-    None 위치는 건너뜀.
-
-    inverse=True 의도로 사용할 경우 호출자가 ``transform.inverse()`` 를
-    먼저 적용한 결과를 전달.
-    """
-    for change in changes:
-        loc = getattr(change, location_attr, None)
-        if loc is None or not isinstance(loc, tuple) or len(loc) < 2:
-            continue
-        new_loc = transform.apply(float(loc[0]), float(loc[1]))
-        try:
-            setattr(change, location_attr, new_loc)
-        except (AttributeError, TypeError):
-            # frozen dataclass 등에 대한 보호 — 그런 경우는 호출자가 다른
-            # 필드 (e.g., applied_location) 를 이용해 따로 처리해야 함.
-            logger.debug("cannot mutate %r.%s — skipped", change, location_attr)
-            continue
-
-
 __all__ = [
     "RigidTransform",
     "estimate_rigid_transform",
     "estimate_coarse_translation",
-    "apply_to_changes",
 ]

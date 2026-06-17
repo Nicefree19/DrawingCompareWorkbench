@@ -18,7 +18,6 @@ from src.services.comparison.global_alignment import (
     RigidTransform,
     _entities_to_pairs,
     _estimate_median_shift,
-    apply_to_changes,
     estimate_coarse_translation,
     estimate_rigid_transform,
 )
@@ -226,26 +225,6 @@ def test_estimate_falls_back_to_median_when_cv2_missing():
     # B→A: -0.7
     assert transform.dx == pytest.approx(-0.7, abs=0.01)
     assert transform.dy == pytest.approx(0.0, abs=0.01)
-
-
-# ---------------------------------------------------------------------------
-# apply_to_changes — DxfChange-like 객체 in-place 변환
-# ---------------------------------------------------------------------------
-
-
-def test_apply_to_changes_inplace():
-    changes = [_Change(location=(10.0, 10.0)), _Change(location=(20.0, 20.0))]
-    transform = RigidTransform(dx=1.0, dy=-1.0, theta_rad=0.0)
-    apply_to_changes(changes, transform)
-    assert changes[0].location == (11.0, 9.0)
-    assert changes[1].location == (21.0, 19.0)
-
-
-def test_apply_to_changes_skips_none_location():
-    changes = [_Change(location=None), _Change(location=(10.0, 10.0))]
-    apply_to_changes(changes, RigidTransform(1.0, 1.0, 0.0))
-    assert changes[0].location is None
-    assert changes[1].location == (11.0, 11.0)
 
 
 # ---------------------------------------------------------------------------
