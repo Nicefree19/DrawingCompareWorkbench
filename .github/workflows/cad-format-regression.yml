@@ -53,9 +53,18 @@ jobs:
             tests\unit\services\comparison\test_zone_vector_renderer.py `
             -q -o log_cli=false
 
+      - name: Golden accuracy floor (no detection regression)
+        run: |
+          python scripts\measure_golden_accuracy_baseline.py `
+            --out-json build\reports\golden-accuracy.json `
+            --out-md build\reports\golden-accuracy.md `
+            --max-noise-fp 0 --min-precision 0.50 --min-recall 0.68
+
       - name: Upload CAD regression report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cad-format-regression-report
-          path: build/reports/cad-format-regression-report.md
+          path: |
+            build/reports/cad-format-regression-report.md
+            build/reports/golden-accuracy.md

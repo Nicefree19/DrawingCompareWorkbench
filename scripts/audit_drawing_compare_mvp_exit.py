@@ -5,6 +5,12 @@ This script does not run comparisons. It inspects one or more completed
 validation output folders and an optional release manifest, then maps the
 customer MVP requirements to concrete artifacts. It returns a non-zero exit code
 when any required exit criterion is missing.
+
+NOTE — manual audit tool, NOT a CI gate. The P5-G* MVP-exit criteria here run on
+demand against a validation run's --results-dir; nothing in .github/workflows
+invokes them. CI enforces only the CAD format regression and the golden accuracy
+floor (cad-format-regression.yml). Do not assume a P5-G criterion is
+automatically guarded just because it is defined here.
 """
 
 from __future__ import annotations

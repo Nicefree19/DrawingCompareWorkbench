@@ -350,12 +350,56 @@ def render_markdown(rows: List[dict], agg: dict, *, location_tol: float) -> str:
     return "\n".join(lines)
 
 
+def floor_failures(
+    agg: dict,
+    *,
+    min_precision: Optional[float],
+    min_recall: Optional[float],
+    max_noise_fp: Optional[int],
+) -> List[str]:
+    """Regression failures vs the supplied floor (empty list = within floor).
+
+    Powers the CI golden-accuracy gate (cad-format-regression.yml). It guards
+    against detection-accuracy regressions on the synthetic golden corpus
+    WITHOUT re-enabling the aspirational release thresholds the corpus cannot
+    meet (recall>=0.90 / precision>=0.85); the floors are set just under the
+    measured baseline. ``noise_fixture_fp_total`` is the strongest signal — it
+    is deterministic (identical/cosmetic fixtures carry no real change).
+    """
+    failures: List[str] = []
+    if max_noise_fp is not None and agg["noise_fixture_fp_total"] > max_noise_fp:
+        failures.append(
+            f"noise-fixture FP {agg['noise_fixture_fp_total']} > max {max_noise_fp}"
+        )
+    if min_precision is not None:
+        p = agg["micro_precision"]
+        if p is None or p < min_precision:
+            failures.append(f"precision {_fmt(p)} < floor {min_precision:.3f}")
+    if min_recall is not None:
+        r = agg["micro_recall"]
+        if r is None or r < min_recall:
+            failures.append(f"recall {_fmt(r)} < floor {min_recall:.3f}")
+    return failures
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--golden-root", type=Path, default=DEFAULT_GOLDEN_ROOT)
     parser.add_argument("--out-json", type=Path, default=DEFAULT_OUT_JSON)
     parser.add_argument("--out-md", type=Path, default=DEFAULT_OUT_MD)
     parser.add_argument("--location-tol", type=float, default=DEFAULT_LOCATION_TOL)
+    parser.add_argument(
+        "--min-precision", type=float, default=None,
+        help="Fail (exit 1) when micro precision drops below this floor (CI gate).",
+    )
+    parser.add_argument(
+        "--min-recall", type=float, default=None,
+        help="Fail (exit 1) when micro recall drops below this floor (CI gate).",
+    )
+    parser.add_argument(
+        "--max-noise-fp", type=int, default=None,
+        help="Fail (exit 1) when total FP on noise fixtures exceeds this (CI gate).",
+    )
     args = parser.parse_args(argv)
 
     pairs = discover_pairs(args.golden_root)
@@ -421,6 +465,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         render_markdown(rows, agg, location_tol=args.location_tol), encoding="utf-8"
     )
     print(f"\nwrote {args.out_json}\nwrote {args.out_md}")
+
+    failures = floor_failures(
+        agg,
+        min_precision=args.min_precision,
+        min_recall=args.min_recall,
+        max_noise_fp=args.max_noise_fp,
+    )
+    if failures:
+        print("\nGOLDEN ACCURACY FLOOR FAILED:")
+        for failure in failures:
+            print(f"  - {failure}")
+        return 1
     return 0
 
 
