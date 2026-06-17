@@ -246,11 +246,42 @@ def render_zone_focus(
     backend = CustomJSONBackend(orient_paths=False)
     ctx = RenderContext(doc)
     fe = Frontend(ctx, backend)
+    # Resilient per-entity draw (L2, 2026-06-17): a single ``draw_layout`` aborts
+    # the WHOLE zone at the first un-renderable entity — e.g. an INSERT raising
+    # "'Glyph' object has no attribute 'data'" — keeping only what was drawn
+    # before it (the partial, hard-to-read zone the user saw on the SPLICE pair,
+    # logged as "draw_layout raised mid-stream"). Draw one entity at a time
+    # through the same zone filter so one bad entity is skipped instead of
+    # truncating the rest. Same resilience the scene-pack builder already uses.
+    skipped_entities = 0
+    first_skip_sample = ""
+    for entity in doc.modelspace():
+        try:
+            if not _zone_filter(entity):
+                continue
+        except Exception:  # noqa: BLE001 — an unmeasurable entity must not abort the zone
+            continue
+        try:
+            fe.draw_entities([entity])
+        except Exception as exc:  # noqa: BLE001 — one bad entity must not blank the zone
+            skipped_entities += 1
+            if not first_skip_sample:
+                etype = getattr(entity, "dxftype", lambda: "?")()
+                first_skip_sample = f"{etype}: {exc}"
     try:
-        fe.draw_layout(doc.modelspace(), finalize=True, filter_func=_zone_filter)
-    except Exception as exc:
-        warnings.append(f"Frontend.draw_layout raised mid-stream: {exc}")
-        logger.warning("Zone focus draw_layout raised mid-stream: %s", exc)
+        fe.pipeline.finalize()
+    except Exception as exc:  # noqa: BLE001 — finalize must not crash the zone build
+        warnings.append(f"Frontend finalize raised: {exc}")
+        logger.warning("Zone focus finalize failed: %s", exc)
+    if skipped_entities:
+        warnings.append(
+            f"Skipped {skipped_entities} un-renderable entit"
+            f"{'y' if skipped_entities == 1 else 'ies'} in zone; e.g. {first_skip_sample}"
+        )
+        logger.warning(
+            "Zone focus: skipped %d un-renderable entities; e.g. %s",
+            skipped_entities, first_skip_sample,
+        )
 
     primitives = backend.get_json_data() or []
 
