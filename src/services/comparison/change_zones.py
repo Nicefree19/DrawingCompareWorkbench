@@ -55,10 +55,14 @@ class ChangeZoneOptions:
     # 커스텀 fnmatch 패턴 (예: ``("*COMPANY_TB*", "*PROJECT_HEADER*")``)
     # 을 설정한 경우만 매칭. SSoT 와 OR 로 결합.
     title_block_layer_patterns: Tuple[str, ...] = ()
-    # Phase O4 — single-entity zone promote 차단
-    # ``len(group) < min_changes_per_zone`` 이고 noise_score 가 임계 이상이면
-    # zone 으로 promote 안 함. default=1 → 기존 동작 보존 (모든 group 이 zone).
-    # 권장 운영 값: 2 (단일 entity 변경은 noise_score 가 높을 때만 살림).
+    # Phase O4 — single-entity zone promote 차단 (의도된 off-by-default 노브).
+    # 게이트: ``len(group) < min_changes_per_zone`` AND noise_score >= 임계
+    # → zone 미promote. default=1 이면 ``len < 1`` 이 항상 거짓 → 게이트 비활성.
+    # 이는 死코드가 아니라 안전상 의도된 기본값이다: 구조 도면 리뷰에서 변경
+    # 누락이 최대 리스크이므로 기본은 '모든 변경 노출'. 2 로 올리면 고노이즈
+    # 단일 변경 zone 만 억제하는 opt-in (노이즈 위주 리뷰용). 양쪽 동작은
+    # test_change_zone_noise_filter.py 가 고정. golden 정확도는 change 단위라 이
+    # zone 게이트에 둔감 → flip 효과는 golden 으로 검증 불가 (2026-06-17 확인).
     min_changes_per_zone: int = 1
     # Block-DEFINITION-space records (entity ``space == "block"``) carry
     # block-LOCAL coordinates — a bbox like (0,0)-(20,0) for a block inserted
