@@ -387,6 +387,11 @@ from src.gui.workbench_viewer_pair import (  # MONO-4 satellite extraction
 )
 from src.gui.workbench_overlay_cache import OverlayCache  # MONO-4 #5 collaborator
 from src.gui.workbench_review_state import count_review_records, review_status_ko  # MONO-4 #6
+from src.gui.workbench_render_decisions import (  # MONO-4 #7-A
+    active_zone_render_request_id,
+    is_current_zone_render_request,
+    is_usable_zone_render_source,
+)
 
 
 def _workbench_data_dir() -> Path:
@@ -7610,22 +7615,23 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         return request_id
 
     def _active_zone_render_request_id_v2(self, pair_id: str, zone_id: str) -> str:
-        active = self._active_zone_render_request_v2
-        if active and active[0] == pair_id and active[1] == zone_id:
-            return str(active[2] or "")
-        return ""
+        return active_zone_render_request_id(
+            self._active_zone_render_request_v2, pair_id, zone_id
+        )
 
     def _is_current_zone_render_request_v2(
         self, pair_id: str, zone_id: str, request_id: str = "",
     ) -> bool:
         current_pair = str((self._active_row or {}).get("pair_id") or "")
         current_zone = str(self._active_zone_id or "")
-        if pair_id != current_pair or zone_id != current_zone:
-            return False
-        if not request_id:
-            return True
-        active = self._active_zone_render_request_v2
-        return bool(active and active == (pair_id, zone_id, request_id))
+        return is_current_zone_render_request(
+            current_pair,
+            current_zone,
+            self._active_zone_render_request_v2,
+            pair_id,
+            zone_id,
+            request_id,
+        )
 
     def _schedule_initial_zone_heavy_render_v2(self, pair_id: str, zone_id: str) -> None:
         self._initial_zone_heavy_render_generation_v2 += 1
@@ -10186,14 +10192,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
 
     @staticmethod
     def _is_usable_zone_render_source_v2(value: Any) -> bool:
-        text = str(value or "").strip()
-        if not text or _is_redacted_artifact_path(text) or has_lossy_path_text(text):
-            return False
-        try:
-            path = Path(text)
-            return path.is_file() and path.suffix.lower() in SUPPORTED_DRAWING_EXTENSIONS
-        except (OSError, ValueError, RuntimeError):
-            return False
+        return is_usable_zone_render_source(value)
 
     def _start_pair_render_v2(self, pair_id: str, viewer_pair: dict, row: dict) -> None:
         if not self._viewer_root:
