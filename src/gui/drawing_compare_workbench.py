@@ -2630,6 +2630,14 @@ def _group_zones_by_category_v2(
     ]
 
 
+# When the whole change set is this small, expand every category header and
+# cluster by default so the reviewer sees ALL changes immediately instead of a
+# single collapsed cluster row (live-test 2026-06-17: a 14-zone drawing folded
+# to "only 1 listed"). Larger sets keep the tidy default-collapsed clustering
+# and rely on the explicit "모두 펼치기 / 접기" controls for on-demand access.
+ZONE_TREE_AUTO_EXPAND_MAX = 40
+
+
 def _build_zone_tree_plan_data_v2(
     *,
     dashboard_issues: list[dict],
@@ -2725,6 +2733,9 @@ def _build_zone_tree_plan_data_v2(
     cluster_opts = ClusterOptions(enabled=bool(allow_clustering and clustering_enabled))
     plan: list[dict] = []
     active_zone_id = str(active_zone_id or "")
+    # Small change sets: expand everything so no change is hidden behind a
+    # collapsed cluster / category header by default.
+    expand_all_small = len(zones_for_grouping) <= ZONE_TREE_AUTO_EXPAND_MAX
     for group_idx, (label, _boost, zones_in_group) in enumerate(groups):
         total_count = len(zones_in_group)
         clusters = cluster_zones(zones_in_group, options=cluster_opts)
@@ -2766,7 +2777,7 @@ def _build_zone_tree_plan_data_v2(
                         f"{cluster.summary_label} — {cluster.size}개 변경구역 묶음. "
                         f"펼쳐서 개별 구역을 검토할 수 있습니다."
                     ),
-                    "expanded": has_active,
+                    "expanded": bool(has_active or expand_all_small),
                     "children": children,
                 })
         plan.append({
@@ -2775,7 +2786,7 @@ def _build_zone_tree_plan_data_v2(
                 f"{label} · {total_count}개 변경구역"
                 + (f" ({row_count}행으로 묶임)" if row_count != total_count else "")
             ),
-            "expanded": bool((group_idx == 0) or active_zone_in_group),
+            "expanded": bool((group_idx == 0) or active_zone_in_group or expand_all_small),
             "items": items,
         })
     return plan, active_issue_by_zone
@@ -5248,6 +5259,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_zone_progress_v2.setProperty("role", "muted")
         self.lbl_zone_progress_v2.setWordWrap(True)
         layout.addWidget(self.lbl_zone_progress_v2)
+        # 변경목록 접근성 — 전체 펼치기/접기 (live-test 2026-06-17: 변경이
+        # 카테고리/묶음에 접혀 "1개만 리스트업"되던 문제. 작은 변경셋은
+        # 자동 펼침, 큰 셋은 이 버튼으로 on-demand 전체 접근).
+        zone_tree_tools_row = QHBoxLayout()
+        self.btn_zone_expand_all_v2 = QPushButton("⊞ 모두 펼치기")
+        self.btn_zone_expand_all_v2.setToolTip(
+            "모든 카테고리와 변경 묶음을 펼쳐 전체 변경구역을 한눈에 표시합니다."
+        )
+        self.btn_zone_expand_all_v2.clicked.connect(self._expand_all_zones_v2)
+        self.btn_zone_collapse_all_v2 = QPushButton("⊟ 모두 접기")
+        self.btn_zone_collapse_all_v2.setToolTip("카테고리/묶음을 접어 목록을 간략히 봅니다.")
+        self.btn_zone_collapse_all_v2.clicked.connect(self._collapse_all_zones_v2)
+        zone_tree_tools_row.addWidget(self.btn_zone_expand_all_v2)
+        zone_tree_tools_row.addWidget(self.btn_zone_collapse_all_v2)
+        zone_tree_tools_row.addStretch()
+        layout.addLayout(zone_tree_tools_row)
         # Phase I2 — zone list is now a category tree:
         #   Root
         #   ├── 🏗️ 구조 부재 변경  (12)         ← top-level item (category)
@@ -12010,6 +12037,21 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._set_batch_action_button_enabled_v2(bool(self._active_overlays_by_zone))
         plan = self._build_zone_tree_plan_v2(preview, overlays, prefer_overlays=prefer_overlays)
         self._append_zone_tree_plan_immediate_v2(plan)
+
+    def _expand_all_zones_v2(self) -> None:
+        """Expand every category header / cluster so all change zones show.
+
+        Live-test fix: near-duplicate changes cluster into a collapsed row, so a
+        14-zone drawing looked like "only 1 change". This gives the reviewer
+        one-click access to the full list regardless of set size.
+        """
+        if hasattr(self, "zone_list_v2"):
+            self.zone_list_v2.expandAll()
+
+    def _collapse_all_zones_v2(self) -> None:
+        """Collapse category/cluster nodes for a compact overview."""
+        if hasattr(self, "zone_list_v2"):
+            self.zone_list_v2.collapseAll()
 
     def _on_zone_selected_v2(self, current, _previous=None) -> None:
         selection_started = perf_counter()
