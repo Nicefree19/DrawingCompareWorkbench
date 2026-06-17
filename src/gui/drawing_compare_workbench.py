@@ -386,6 +386,7 @@ from src.gui.workbench_viewer_pair import (  # MONO-4 satellite extraction
     scale_pdf_bbox_to_render_pixels,
 )
 from src.gui.workbench_overlay_cache import OverlayCache  # MONO-4 #5 collaborator
+from src.gui.workbench_review_state import count_review_records, review_status_ko  # MONO-4 #6
 
 
 def _workbench_data_dir() -> Path:
@@ -7081,18 +7082,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         return int(declared)
 
     def _review_record_counts_for_pair_v2(self, pair_id: str) -> tuple[int, int]:
-        prefix = f"{pair_id}:"
-        done = 0
-        confirmed = 0
-        for key, record in (self._review_records_v2 or {}).items():
-            if not str(key).startswith(prefix):
-                continue
-            status = normalize_review_status(record.status)
-            if status != "needs_review":
-                done += 1
-            if status == "confirmed":
-                confirmed += 1
-        return done, confirmed
+        return count_review_records(self._review_records_v2, pair_id)
 
     def _start_full_zone_tree_overlay_load_worker_v2(
         self,
@@ -11267,12 +11257,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         return normalize_review_status(status)
 
     def _review_status_ko_v2(self, status: str) -> str:
-        return {
-            "needs_review": "추가 검토",
-            "confirmed": "확인",
-            "hold": "보류",
-            "false_positive": "오탐",
-        }.get(normalize_review_status(status), "추가 검토")
+        return review_status_ko(status)
 
     def _show_batch_zone_action_dialog_v2(self) -> None:
         """Phase G3.7 — Modal dialog for mass-applying a status to many
