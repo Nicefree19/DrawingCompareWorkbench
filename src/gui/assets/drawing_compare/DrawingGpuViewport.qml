@@ -41,6 +41,11 @@ Item {
     property real vectorSvgY: 0
     property real vectorSvgW: 0
     property real vectorSvgH: 0
+    // Capped raster grid for the SVG overlay (computed Python-side by
+    // capped_svg_source_size) so it stays under Qt's 256 MB QImageIOHandler
+    // limit and always decodes instead of being silently rejected.
+    property real vectorSvgSourceW: 2048
+    property real vectorSvgSourceH: 2048
     property real vectorSvgOpacity: 1.0
     // Phase F P0 — explicit fidelity & job status (driven by viewer_manifest_v2).
     // Background fidelity drives the colour of the small status badge in the top
@@ -157,11 +162,13 @@ Item {
             asynchronous: true
             opacity: root.vectorSvgOpacity
             // sourceSize controls the raster grid Qt allocates for the SVG.
-            // Setting it ~4x the displayed size keeps text and thin lines
-            // sharp through ~4x zoom; beyond that the user can re-trigger
-            // a higher-DPI render or just open the SVG externally.
-            sourceSize.width: Math.max(2048, Math.ceil(root.vectorSvgW * 4))
-            sourceSize.height: Math.max(2048, Math.ceil(root.vectorSvgH * 4))
+            // Computed Python-side (capped_svg_source_size): ~4x the displayed
+            // size for zoom sharpness, but scaled down to stay under Qt's 256 MB
+            // QImageIOHandler limit so the overlay always decodes. Previously a
+            // raw ``displayed * 4`` grid silently exceeded the limit on large
+            // zones and the change overlay vanished (live-test 2026-06-17).
+            sourceSize.width: Math.max(1, Math.round(root.vectorSvgSourceW))
+            sourceSize.height: Math.max(1, Math.round(root.vectorSvgSourceH))
         }
 
         Repeater {

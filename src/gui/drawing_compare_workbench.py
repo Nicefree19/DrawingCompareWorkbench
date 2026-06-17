@@ -1973,6 +1973,15 @@ class GpuDrawingViewport(QWidget):
         root.setProperty("vectorSvgY", float(y))
         root.setProperty("vectorSvgW", float(width))
         root.setProperty("vectorSvgH", float(height))
+        # Cap the SVG raster grid under Qt's 256 MB QImageIOHandler limit so the
+        # overlay always decodes — large zones (a big fraction of the 8000 px
+        # render) previously blew past it and the change cloud vanished
+        # (live-test 2026-06-17).
+        from src.gui.workbench_render_decisions import capped_svg_source_size
+
+        src_w, src_h = capped_svg_source_size(width, height)
+        root.setProperty("vectorSvgSourceW", int(src_w))
+        root.setProperty("vectorSvgSourceH", int(src_h))
         root.setProperty("vectorSvgOpacity", max(0.0, min(1.0, float(opacity))))
 
     def clear_vector_overlay(self) -> None:
@@ -13182,6 +13191,17 @@ def _consume_smoke_exit_ms(argv: list[str]) -> Optional[int]:
 def main() -> int:
     smoke_exit_ms = _consume_smoke_exit_ms(sys.argv)
     app = QApplication(sys.argv)
+    # Live-test 2026-06-17: the SVG vector overlay for zones filling a large
+    # fraction of the 8000 px render rasterised past Qt's default 256 MB
+    # QImageIOHandler limit and was SILENTLY dropped (the change cloud vanished).
+    # The per-overlay sourceSize is now capped (capped_svg_source_size); also
+    # raise the global ceiling so large PNG backgrounds / SVGs always decode.
+    try:
+        from PySide6.QtGui import QImageReader
+
+        QImageReader.setAllocationLimit(512)  # MB; 0 disables. 512 >> any single layer.
+    except Exception:  # noqa: BLE001 — ceiling raise is best-effort, never blocks startup
+        pass
     app.setApplicationName(APP_TITLE_KO)
     app.setOrganizationName("센엔지니어링 그룹 AI 동아리")
     app_icon = QIcon(str(_drawing_compare_asset_path("app_icon.ico")))
