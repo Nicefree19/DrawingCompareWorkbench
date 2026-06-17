@@ -3002,6 +3002,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._overlay_cache = OverlayCache()
         self._tile_manifest_cache_v2: dict[tuple[str, int, int, str, str], dict] = {}
         self._lightweight_raster_pairs: set[str] = set()
+        # Pairs whose SKELETON-only preview has had the content-aware camera
+        # frame applied (raster-skipped path). Prevents re-framing over a user's
+        # zone zoom on later per-side state pushes. See _apply_session_state_to_viewport_v2.
+        self._lightweight_skeleton_framed_pairs: set[str] = set()
         self._render_status_by_pair: dict[str, str] = {}
         self._render_worker: Optional[PairPreviewRenderWorker] = None
         self._visible_tile_worker_v2: Optional[VisibleTileWindowWorker] = None
@@ -6500,6 +6504,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._overlay_cache.clear()
         self._tile_manifest_cache_v2 = {}
         self._lightweight_raster_pairs = set()
+        self._lightweight_skeleton_framed_pairs = set()
         self._render_status_by_pair = {}
         self._active_issue_by_zone = {}
         self._active_all_overlays_by_zone = {}
@@ -8592,6 +8597,31 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 self._push_overlays_to_lightweight_v2(
                     pair_id, focus_zone_id=self._active_zone_id or "",
                 )
+                # Content-aware INITIAL framing for the SKELETON-ONLY path
+                # (live test 2026-06-18, AC1027 multi-detail pair). When the
+                # raster background is skipped (fast budget on heavy CAD:
+                # render_skipped_large_cad_fast_budget), the raster-load site's
+                # apply_shared_lightweight_camera_frame never runs, so QML
+                # fit-to-view frames the whole ~678k-mm multi-detail sheet and
+                # every change becomes sub-pixel -> blank preview. Apply the same
+                # proven content frame here, ONCE per pair, so the load view shows
+                # the primary change at real size. Gated so it never overrides a
+                # raster-framed pair nor a later user zone-zoom (per-pair set).
+                if (
+                    pair_id not in self._lightweight_raster_pairs
+                    and pair_id not in self._lightweight_skeleton_framed_pairs
+                ):
+                    viewer_pair = self._viewer_pairs_by_id.get(pair_id, {})
+                    try:
+                        visual_ext.apply_shared_lightweight_camera_frame(
+                            self, viewer_pair
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Skeleton content-frame apply failed", exc_info=True
+                        )
+                    finally:
+                        self._lightweight_skeleton_framed_pairs.add(pair_id)
             except Exception as exc:
                 logger.exception("Failed to load scene pack into viewport: %s", exc)
         elif mode == "render_pending":
