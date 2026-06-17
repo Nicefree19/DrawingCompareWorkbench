@@ -2630,6 +2630,14 @@ def _group_zones_by_category_v2(
     ]
 
 
+# Above this many spatial regions the grouping is not a clean multi-detail
+# structure but noise — e.g. a pair with outlier/corrupted zone coordinates that
+# scatter into dozens of singletons (validation 2026-06-18: a 철근간섭 AC1024 pair
+# whose change zones spanned 36.7 km produced 67 "regions"). Past the cap, fall
+# back to plain category grouping rather than emit a useless 67-region tree.
+_MAX_DETAIL_REGIONS = 8
+
+
 def _group_zones_by_region_then_category_v2(
     zones: list[dict],
     classify_fn,
@@ -2658,7 +2666,7 @@ def _group_zones_by_region_then_category_v2(
             if r is not None:
                 regions.add(int(r))
 
-    if not region_by_zone or len(regions) < 2:
+    if not region_by_zone or not (2 <= len(regions) <= _MAX_DETAIL_REGIONS):
         return [
             (None, label, boost, grp)
             for label, boost, grp in _group_zones_by_category_v2(
@@ -12073,7 +12081,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 )
 
             clusters = cluster_zone_bboxes(overlays, _to_world)
-            if len(clusters) < 2:
+            # 2..N clean detail regions only; an excessive count means
+            # outlier/corrupted zone coordinates (validation: a 36.7 km-spread
+            # pair fragmented into 67) -> skip region grouping, keep category-only.
+            if not (2 <= len(clusters) <= _MAX_DETAIL_REGIONS):
                 return {}
             region_by_zone: dict[str, int] = {}
             for idx, cluster in enumerate(clusters, start=1):

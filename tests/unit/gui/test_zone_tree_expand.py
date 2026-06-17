@@ -146,6 +146,17 @@ def test_region_grouping_degrades_to_category_only_without_two_regions():
     assert g_one and all(g[0] is None for g in g_one)
 
 
+def test_region_grouping_caps_excessive_regions():
+    """Validation 2026-06-18 (철근간섭 AC1024, 36.7 km spread -> 67 regions): an
+    excessive region count means outlier/corrupted coords, not a clean multi-detail
+    sheet — fall back to plain category grouping instead of a 67-region tree."""
+    zones = [{"zone_id": f"z{i}"} for i in range(20)]
+    cats = {f"z{i}": _cat("기타") for i in range(20)}
+    region_by_zone = {f"z{i}": i + 1 for i in range(20)}  # 20 distinct > cap
+    groups = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), region_by_zone)
+    assert groups and all(g[0] is None for g in groups)  # category-only fallback
+
+
 def test_region_grouping_keeps_unknown_region_zones():
     """A zone missing from the region map is never dropped (trailing region-less bucket)."""
     zones = [{"zone_id": "a"}, {"zone_id": "b"}, {"zone_id": "x"}]
