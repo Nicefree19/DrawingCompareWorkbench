@@ -23,6 +23,7 @@ from src.gui.drawing_compare_workbench import (
     ZONE_TREE_AUTO_EXPAND_MAX,
     DrawingCompareWorkbenchV2,
     _build_zone_tree_plan_data_v2,
+    _group_zones_by_region_then_category_v2,
 )
 
 
@@ -115,6 +116,66 @@ def test_large_set_active_zone_still_forces_open():
     assert dim_group["expanded"] is True
     dim_clusters = [it for it in dim_group["items"] if it["kind"] == "cluster"]
     assert dim_clusters and all(c["expanded"] for c in dim_clusters)
+
+
+def _classify_from(cats):
+    return lambda zid: cats.get(zid)
+
+
+def test_region_grouping_groups_by_region_then_category():
+    """Multi-detail (P4): with >=2 detail regions, zones group by (region, category)
+    ordered left-to-right by region."""
+    zones = [{"zone_id": z} for z in ("a", "b", "c", "d")]
+    region_by_zone = {"a": 1, "b": 1, "c": 2, "d": 2}
+    cats = {"a": _cat("치수"), "b": _cat("치수"), "c": _cat("구조"), "d": _cat("구조")}
+    groups = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), region_by_zone)
+    regions = [g[0] for g in groups]
+    assert regions == [1, 2]  # ordered by region
+    assert groups[0][0] == 1 and "치수" in groups[0][1] and len(groups[0][3]) == 2
+    assert groups[1][0] == 2 and "구조" in groups[1][1] and len(groups[1][3]) == 2
+
+
+def test_region_grouping_degrades_to_category_only_without_two_regions():
+    zones = [{"zone_id": "a"}, {"zone_id": "b"}]
+    cats = {"a": _cat("치수"), "b": _cat("치수")}
+    # No map -> category only (region_idx None)
+    g_none = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), None)
+    assert g_none and all(g[0] is None for g in g_none)
+    # Single region -> still category only
+    g_one = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), {"a": 1, "b": 1})
+    assert g_one and all(g[0] is None for g in g_one)
+
+
+def test_region_grouping_keeps_unknown_region_zones():
+    """A zone missing from the region map is never dropped (trailing region-less bucket)."""
+    zones = [{"zone_id": "a"}, {"zone_id": "b"}, {"zone_id": "x"}]
+    cats = {"a": _cat("치수"), "b": _cat("구조"), "x": _cat("기타")}
+    groups = _group_zones_by_region_then_category_v2(
+        zones, _classify_from(cats), {"a": 1, "b": 2}  # x unmapped
+    )
+    all_ids = {z["zone_id"] for g in groups for z in g[3]}
+    assert all_ids == {"a", "b", "x"}
+
+
+def test_plan_builder_emits_region_headers_when_multi_region():
+    overlays = [_ov("a"), _ov("b"), _ov("c")]
+    cats = {"a": _cat("치수", 5), "b": _cat("치수", 5), "c": _cat("구조", 10)}
+    region = {"a": 1, "b": 1, "c": 2}
+    plan, _ = _build_zone_tree_plan_data_v2(
+        dashboard_issues=[], overlays=overlays, preview_zones=[],
+        category_by_zone=cats, active_zone_id="", clustering_enabled=True,
+        region_by_zone=region,
+    )
+    headers = [g["header_text"] for g in plan]
+    assert any("📍 디테일 1" in h for h in headers), headers
+    assert any("📍 디테일 2" in h for h in headers), headers
+
+    # Backward-compat: without a region map, headers carry NO detail prefix.
+    plan2, _ = _build_zone_tree_plan_data_v2(
+        dashboard_issues=[], overlays=overlays, preview_zones=[],
+        category_by_zone=cats, active_zone_id="", clustering_enabled=True,
+    )
+    assert all("디테일" not in g["header_text"] for g in plan2)
 
 
 def test_expand_collapse_controls_drive_the_tree(qapp):

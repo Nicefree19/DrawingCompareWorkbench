@@ -2630,6 +2630,64 @@ def _group_zones_by_category_v2(
     ]
 
 
+def _group_zones_by_region_then_category_v2(
+    zones: list[dict],
+    classify_fn,
+    region_by_zone: Optional[Mapping[str, int]] = None,
+    *,
+    fallback_label: str = "기타 변경",
+) -> list[tuple]:
+    """Group zones by spatial DETAIL REGION, then AI category within each region.
+
+    Multi-detail compare (P4): on a sheet whose changes sit in several far-apart
+    detail views, the flat category tree ("치수 3 · 구조 2") never says WHICH detail
+    changed. When ``region_by_zone`` (zone_id -> 1-based detail index, left-to-right,
+    from ``content_frame.cluster_zone_bboxes``) resolves >= 2 regions, group by
+    (region, category) so the list reads "📍 디테일 1 · 치수 (2)" — organised by
+    detail. With < 2 regions (or no map) this degrades to plain category grouping.
+
+    Returns ``(region_idx_or_None, category_label, severity_boost, zones)`` tuples,
+    ordered by region ascending then the existing category sort. Zones whose region
+    is unknown are kept in a trailing region-less bucket so none are dropped.
+    """
+
+    regions: set[int] = set()
+    if region_by_zone:
+        for zone in zones:
+            r = region_by_zone.get(str((zone or {}).get("zone_id") or ""))
+            if r is not None:
+                regions.add(int(r))
+
+    if not region_by_zone or len(regions) < 2:
+        return [
+            (None, label, boost, grp)
+            for label, boost, grp in _group_zones_by_category_v2(
+                zones, classify_fn, fallback_label=fallback_label
+            )
+        ]
+
+    out: list[tuple] = []
+    for region_idx in sorted(regions):
+        region_zones = [
+            zone for zone in zones
+            if region_by_zone.get(str((zone or {}).get("zone_id") or "")) == region_idx
+        ]
+        for label, boost, grp in _group_zones_by_category_v2(
+            region_zones, classify_fn, fallback_label=fallback_label
+        ):
+            out.append((region_idx, label, boost, grp))
+    unknown = [
+        zone for zone in zones
+        if region_by_zone.get(str((zone or {}).get("zone_id") or "")) is None
+    ]
+    if unknown:
+        for label, boost, grp in _group_zones_by_category_v2(
+            unknown, classify_fn, fallback_label=fallback_label
+        ):
+            out.append((None, label, boost, grp))
+    return out
+
+
 # When the whole change set is this small, expand every category header and
 # cluster by default so the reviewer sees ALL changes immediately instead of a
 # single collapsed cluster row (live-test 2026-06-17: a 14-zone drawing folded
@@ -2648,6 +2706,7 @@ def _build_zone_tree_plan_data_v2(
     allow_clustering: bool = True,
     clustering_enabled: bool = True,
     prefer_overlays: bool = False,
+    region_by_zone: Optional[Mapping[str, int]] = None,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Pure zone-tree plan builder safe to run off the GUI thread.
 
@@ -2722,9 +2781,10 @@ def _build_zone_tree_plan_data_v2(
     if not zones_for_grouping or row_label_fn is None:
         return [], active_issue_by_zone
 
-    groups = _group_zones_by_category_v2(
+    groups = _group_zones_by_region_then_category_v2(
         zones_for_grouping,
         lambda zid: category_by_zone.get(str(zid or "")),
+        region_by_zone,
     )
     from src.services.comparison.zone_clusterer import (
         ClusterOptions, cluster_zones,
@@ -2736,7 +2796,7 @@ def _build_zone_tree_plan_data_v2(
     # Small change sets: expand everything so no change is hidden behind a
     # collapsed cluster / category header by default.
     expand_all_small = len(zones_for_grouping) <= ZONE_TREE_AUTO_EXPAND_MAX
-    for group_idx, (label, _boost, zones_in_group) in enumerate(groups):
+    for group_idx, (region_idx, label, _boost, zones_in_group) in enumerate(groups):
         total_count = len(zones_in_group)
         clusters = cluster_zones(zones_in_group, options=cluster_opts)
         row_count = len(clusters)
@@ -2780,12 +2840,24 @@ def _build_zone_tree_plan_data_v2(
                     "expanded": bool(has_active or expand_all_small),
                     "children": children,
                 })
-        plan.append({
-            "header_text": f"{_zone_category_icon_v2(label)} {label}  ({total_count})",
-            "tooltip": (
+        if region_idx is not None:
+            header_text = (
+                f"📍 디테일 {region_idx}  ·  {_zone_category_icon_v2(label)} {label}  ({total_count})"
+            )
+            header_tooltip = (
+                f"디테일 영역 {region_idx} · {label} · {total_count}개 변경구역"
+                + (f" ({row_count}행으로 묶임)" if row_count != total_count else "")
+                + " — 같은 디테일(도면) 안의 변경끼리 묶었습니다."
+            )
+        else:
+            header_text = f"{_zone_category_icon_v2(label)} {label}  ({total_count})"
+            header_tooltip = (
                 f"{label} · {total_count}개 변경구역"
                 + (f" ({row_count}행으로 묶임)" if row_count != total_count else "")
-            ),
+            )
+        plan.append({
+            "header_text": header_text,
+            "tooltip": header_tooltip,
             "expanded": bool((group_idx == 0) or active_zone_in_group or expand_all_small),
             "items": items,
         })
@@ -11961,6 +12033,58 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_zone_progress_v2.setTextFormat(Qt.RichText)
         self.lbl_zone_progress_v2.setText(html)
 
+    def _compute_region_by_zone_v2(self) -> dict[str, int]:
+        """Map zone_id -> 1-based detail-region index (left-to-right) for the
+        active drawing, via the SAME spatial clustering the cluster navigator uses
+        (content_frame.cluster_zone_bboxes). Multi-detail compare (P4): lets the
+        change list group changes by which detail view they sit in. Returns ``{}``
+        when there are < 2 regions, no overlays, or for PDF pairs (image_pixels,
+        whose Y conversion needs a page height not available here) — so the list
+        safely falls back to plain category grouping.
+        """
+
+        try:
+            overlays = list((getattr(self, "_active_overlays_by_zone", {}) or {}).values())
+            if len(overlays) < 2:
+                return {}
+            if any(
+                str((o or {}).get("bbox_coordinate_space") or "") == "image_pixels"
+                for o in overlays
+                if isinstance(o, dict)
+            ):
+                return {}
+            from src.services.comparison.content_frame import cluster_zone_bboxes
+            from src.gui.lightweight_viewport import (
+                _page_height_points_from_world_bbox,
+                convert_bbox_to_world_space,
+            )
+
+            before_vp = getattr(self, "preview_before_lightweight_v2", None)
+            page_height = _page_height_points_from_world_bbox(
+                getattr(before_vp, "world_bbox", (0.0, 0.0, 0.0, 0.0))
+            )
+
+            def _to_world(raw, space, dpi):
+                return convert_bbox_to_world_space(
+                    raw,
+                    coordinate_space=space,
+                    pdf_dpi=dpi,
+                    page_height_points=page_height,
+                )
+
+            clusters = cluster_zone_bboxes(overlays, _to_world)
+            if len(clusters) < 2:
+                return {}
+            region_by_zone: dict[str, int] = {}
+            for idx, cluster in enumerate(clusters, start=1):
+                for zid in cluster.get("zone_ids") or []:
+                    if zid:
+                        region_by_zone[str(zid)] = idx
+            return region_by_zone
+        except Exception:  # noqa: BLE001 — region grouping is best-effort
+            logger.debug("region-by-zone computation failed", exc_info=True)
+            return {}
+
     def _build_zone_tree_plan_v2(
         self,
         preview: Optional[PreviewArtifact],
@@ -11991,6 +12115,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             allow_clustering=allow_clustering,
             clustering_enabled=bool(getattr(self, "_zone_clustering_enabled_v2", True)),
             prefer_overlays=prefer_overlays,
+            region_by_zone=self._compute_region_by_zone_v2(),
         )
         self._active_issue_by_zone = active_issue_by_zone
         return plan
