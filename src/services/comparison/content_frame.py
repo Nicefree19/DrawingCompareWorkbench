@@ -114,6 +114,32 @@ def _overlay_world_boxes(overlay: Mapping[str, Any], to_world: ToWorld) -> list[
     return boxes
 
 
+def context_floor_span(
+    bboxes: Sequence[Any],
+    *,
+    ratio: float = 0.15,
+) -> float:
+    """Minimum world span that keeps a tiny zone in context.
+
+    Returns ``ratio`` × the overall extent (union span) of all change-zone
+    bboxes, so a tiny isolated zone's crop/camera can be widened to show
+    surrounding detail at a scale proportional to the drawing — WITHOUT using
+    the outlier-inflated raw sheet extent. ``0.0`` for fewer than two valid
+    boxes (nothing to contextualise against). Span only — origin/coordinate
+    space is irrelevant, so it is safe to apply to either side of a re-origined
+    before/after pair (live-test 2026-06-17: an 889 mm zone in a 524 m sheet
+    cropped bare zoomed to upp ~3 and the user was stuck over-zoomed).
+    """
+    valid = [b for b in (normalise_bbox(x) for x in (bboxes or ())) if b is not None]
+    if len(valid) < 2:
+        return 0.0
+    x0 = min(b[0] for b in valid)
+    y0 = min(b[1] for b in valid)
+    x1 = max(b[2] for b in valid)
+    y1 = max(b[3] for b in valid)
+    return max(0.0, max(x1 - x0, y1 - y0) * float(ratio))
+
+
 def content_frame_from_zone_bboxes(
     overlays: Sequence[Mapping[str, Any]],
     to_world: ToWorld,
@@ -339,4 +365,5 @@ __all__ = [
     "ToWorld",
     "cluster_zone_bboxes",
     "content_frame_from_zone_bboxes",
+    "context_floor_span",
 ]

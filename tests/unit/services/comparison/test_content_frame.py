@@ -12,6 +12,7 @@ from __future__ import annotations
 from src.services.comparison.content_frame import (
     cluster_zone_bboxes,
     content_frame_from_zone_bboxes,
+    context_floor_span,
 )
 from src.services.comparison.transform import normalise_bbox
 
@@ -95,6 +96,19 @@ def test_tiny_isolated_primary_expands_to_context_floor():
     # Still centred on the change (the tiny zone), not a union of all zones.
     cx = (frame[0] + frame[2]) / 2.0
     assert 414000.0 < cx < 417000.0
+
+
+def test_context_floor_span_scales_with_changed_region():
+    """Floor = ratio × the union span of all change zones; 0 for < 2 zones.
+    This is what the zone-CROP path uses to widen a tiny isolated crop window."""
+    tiny = _box(415024.0, -183770.0, 415914.0, -183270.0)   # ~890 mm
+    far = _box(493000.0, -114000.0, 510000.0, -95000.0)
+    # union x-span ~95k (415k..510k); 0.15× ≈ 14.2k
+    floor = context_floor_span([tiny, far])
+    assert 10000.0 < floor < 20000.0
+    # nothing to contextualise against → no floor (avoid spurious zoom-out)
+    assert context_floor_span([tiny]) == 0.0
+    assert context_floor_span([]) == 0.0
 
 
 def test_context_floor_noop_when_zones_uniform():

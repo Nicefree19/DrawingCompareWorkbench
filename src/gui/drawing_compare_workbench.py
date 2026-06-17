@@ -10513,6 +10513,35 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             render_bbox = bbox
         before_render_bbox = _bbox_for_zone_crop_transform(overlay, viewer_pair, before=True) or render_bbox
         after_render_bbox = _bbox_for_zone_crop_transform(overlay, viewer_pair, before=False) or render_bbox
+        # Context floor (2026-06-17 live-test): a tiny isolated zone (e.g. 889 mm
+        # in a 524 m multi-detail sheet) cropped bare zooms to upp ~3 and the user
+        # is stuck over-zoomed, unable to place the change ("전체 보이다가 클로즈업
+        # 되어 고정"). Expand the crop window to a fraction of the overall
+        # changed-region extent so it renders WITH surrounding detail; the change
+        # stays findable via its never-dimmed revision cloud + focus marker. Span
+        # only (origin-independent) so it is safe on both re-origined sides, and
+        # only ever ENLARGES — never narrows a well-sized zone. CAD only (PDF crop
+        # bboxes are pixel-space). Best-effort: never breaks the render.
+        if not _viewer_pair_is_pdf(viewer_pair):
+            try:
+                from src.services.comparison.content_frame import context_floor_span
+                from src.services.comparison.transform import normalise_bbox
+                from src.gui.lightweight_viewport import ensure_min_world_span
+
+                _peer = [
+                    union_bboxes(o.get("old_bbox"), o.get("bbox"))
+                    for o in (self._active_overlays_by_zone or {}).values()
+                ]
+                _floor = context_floor_span([b for b in _peer if b])
+                if _floor > 0:
+                    _nb = normalise_bbox(before_render_bbox)
+                    _na = normalise_bbox(after_render_bbox)
+                    if _nb is not None:
+                        before_render_bbox = ensure_min_world_span(_nb, _floor)
+                    if _na is not None:
+                        after_render_bbox = ensure_min_world_span(_na, _floor)
+            except Exception:  # noqa: BLE001 — context floor must never break the render
+                logger.debug("zone-crop context floor failed", exc_info=True)
         request = {
             "request_id": request_id,
             "pair_uuid": pair_id,
