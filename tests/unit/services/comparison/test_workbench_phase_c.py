@@ -2399,7 +2399,7 @@ def test_viewer_manifest_load_clears_previous_compare_session_state(qapp, tmp_pa
         workbench._active_zone_id = "old_zone"
         workbench._active_issue_by_zone = {"old_zone": {"zone_id": "old_zone"}}
         workbench._active_overlays_by_zone = {"old_zone": {"zone_id": "old_zone"}}
-        workbench._viewer_overlay_cache = {"old_pair": [{"zone_id": "old_zone"}]}
+        workbench._cache_viewer_overlays_v2("old_pair", [{"zone_id": "old_zone"}])
         workbench._render_status_by_pair = {"old_pair": "ready"}
         workbench._lightweight_raster_pairs = {"old_pair"}
         workbench._pending_render_request_v2 = ("old_pair", {}, {})
