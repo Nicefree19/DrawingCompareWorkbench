@@ -228,6 +228,35 @@ def resolve_dxf_path(
                     src,
                     exc_info=True,
                 )
+        if fallback is None:
+            # Active ODA conversion (2026-06-18): every cache READ above missed —
+            # e.g. the compare resolved this pair via a ``dxf_registered`` sibling
+            # (dwg_dxf_fallback) so the ``oda_auto`` cache was never populated.
+            # Convert the DWG NOW with the configured converter — the same
+            # effective path the compare uses — instead of failing. Without this
+            # the viewer raised DWG_UNSUPPORTED_VERSION on AC1018-1027 DWGs and the
+            # user saw "미리보기 실패" even though the compare itself had succeeded
+            # (live test 2026-06-18, AC1027 pair). ODA-unavailable returns
+            # converted=False so the honest error below still fires — never a stub.
+            try:
+                from .dwg_dxf_fallback import auto_convert_unsupported_dwg
+
+                converted, did_convert, _convert_note = auto_convert_unsupported_dwg(
+                    src, cache_dir
+                )
+                converted_path = Path(converted)
+                if (
+                    did_convert
+                    and converted_path.exists()
+                    and converted_path.stat().st_size > 0
+                ):
+                    fallback = converted_path
+            except Exception:
+                logger.debug(
+                    "Active ODA auto-convert fallback failed for %s",
+                    src,
+                    exc_info=True,
+                )
         if fallback is not None:
             if failure_codes is not None:
                 failure_codes.append("dwg_vector_normalise_failed")

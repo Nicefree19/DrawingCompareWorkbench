@@ -648,6 +648,64 @@ def test_resolve_dxf_path_prefers_oda_cache_over_stale_same_stem(
     assert resolved == oda_cached
 
 
+def test_resolve_dxf_path_actively_converts_via_oda_when_caches_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live test 2026-06-18 (AC1027 pair): native import fails AND every cache
+    READ misses — e.g. the compare resolved the pair via a ``dxf_registered``
+    sibling, so the ``oda_auto`` cache was never populated. resolve_dxf_path must
+    ACTIVELY convert the DWG via the configured converter rather than raise
+    DWG_UNSUPPORTED_VERSION; that hard raise was the "미리보기 실패" the user saw
+    while the compare itself had succeeded (all four render paths route here)."""
+
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1027 unsupported native fixture")
+    cache_dir = tmp_path / "cache"  # empty: no oda_auto / shared / legacy hit
+
+    produced = tmp_path / "actively_converted.dxf"
+    produced.write_text("0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n", encoding="utf-8")
+
+    calls: dict = {"n": 0}
+
+    def fake_auto_convert(src, cdir, **kwargs):
+        calls["n"] += 1
+        return produced, True, "oda_converted_slimmed"
+
+    monkeypatch.setattr(
+        "src.services.comparison.dwg_dxf_fallback.auto_convert_unsupported_dwg",
+        fake_auto_convert,
+    )
+
+    collected: list = []
+    resolved = resolve_dxf_path(source, cache_dir=cache_dir, failure_codes=collected)
+
+    assert calls["n"] == 1, "active ODA conversion must be attempted on cache miss"
+    assert resolved == produced
+    assert "dwg_vector_normalise_failed" in collected  # honest: native fell back
+
+
+def test_resolve_dxf_path_still_raises_when_oda_unavailable_and_caches_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No silent stub: if active conversion cannot produce a DXF (ODA not
+    installed / fails), resolve_dxf_path raises the honest error so the caller
+    surfaces an accurate failure instead of a blank-but-OK render."""
+
+    source = tmp_path / "detail.dwg"
+    source.write_bytes(b"AC1027 unsupported native fixture")
+
+    def fake_no_convert(src, cdir, **kwargs):
+        return src, False, "converter_module_unavailable"
+
+    monkeypatch.setattr(
+        "src.services.comparison.dwg_dxf_fallback.auto_convert_unsupported_dwg",
+        fake_no_convert,
+    )
+
+    with pytest.raises(OSError, match="DWG canonical import/export failed"):
+        resolve_dxf_path(source, cache_dir=tmp_path / "cache")
+
+
 def test_patch_text_styles_for_legibility_remaps_only_unrenderable_fonts(
     tmp_path: Path,
 ) -> None:
