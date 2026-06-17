@@ -80,3 +80,31 @@ def test_parsed_doc_cached_across_zones(tmp_path, monkeypatch):
     zrw.render_zone_focus(src, (2.0, 0.0, 11.0, 5.0), out / "z2")  # different zone, same source
 
     assert calls["n"] == 1  # parsed once; the second zone reused the cached doc
+
+
+def test_bbox_cache_persisted_and_reused_across_zones(tmp_path):
+    """Speed (FIX 2a, 2026-06-18): the zone filter sweeps EVERY entity's bbox.
+    A fresh ezdxf bbox Cache per zone cost ~5 s/zone on a real AC1027 pair
+    (measured 5.67 s build vs 0.13 s reused). The per-doc bbox Cache is now stored
+    alongside the cached doc and reused so zone 2..N skip the rebuild."""
+    import src.services.comparison.zone_render_worker as zrw
+
+    src = _doc_with_lines(tmp_path, n=6)
+    zrw._ZONE_DOC_CACHE.clear()
+    out = tmp_path / "out"
+    out.mkdir()
+
+    zrw.render_zone_focus(src, (-1.0, -1.0, 11.0, 7.0), out / "z1")
+    (entry,) = list(zrw._ZONE_DOC_CACHE.values())
+    assert isinstance(entry, tuple) and len(entry) == 2  # (doc, bbox_cache)
+    doc1, cache1 = entry
+    hits_before = cache1.hits
+
+    # Different zone, same source -> must reuse the SAME doc AND bbox cache.
+    zrw.render_zone_focus(src, (2.0, 0.0, 11.0, 7.0), out / "z2")
+    (entry2,) = list(zrw._ZONE_DOC_CACHE.values())
+    doc2, cache2 = entry2
+
+    assert doc2 is doc1          # cached doc reused
+    assert cache2 is cache1      # SAME bbox cache reused, not rebuilt per zone
+    assert cache1.hits > hits_before  # the 2nd sweep hit cached entity bboxes

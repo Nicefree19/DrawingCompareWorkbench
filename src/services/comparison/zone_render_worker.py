@@ -208,8 +208,9 @@ def render_zone_focus(
     # pays the multi-MB parse. mutable=True still avoids mutating the SHARED
     # read-cache during the font remap — we keep our own patched copy instead.
     cache_key = _zone_doc_cache_key(dxf_path)
-    doc = _ZONE_DOC_CACHE.get(cache_key) if cache_key is not None else None
-    if doc is not None:
+    cached_entry = _ZONE_DOC_CACHE.get(cache_key) if cache_key is not None else None
+    if cached_entry is not None:
+        doc, bbox_cache = cached_entry
         _ZONE_DOC_CACHE.move_to_end(cache_key)
     else:
         try:
@@ -231,8 +232,16 @@ def render_zone_focus(
                 world_bbox=zone_world_bbox,
                 skipped_reason=f"ezdxf.readfile failed: {exc}",
             )
+        # Persist the per-entity bbox cache ALONGSIDE the doc (speed, 2026-06-18):
+        # the zone filter sweeps EVERY entity's bbox, and a fresh ezdxf bbox Cache
+        # per zone cost ~5 s/zone on the AC1027 pair (measured: 5.67 s to build vs
+        # 0.13 s when the same Cache is reused — 43x). One Cache per cached doc
+        # makes zone 2..N near-instant. Lazy-fill only; concurrent fills across the
+        # 2 zone-focus worker threads are benign (independent keys under the GIL;
+        # same-key recompute is idempotent), matching the existing lockless doc cache.
+        bbox_cache = ezdxf_bbox.Cache()
         if cache_key is not None:
-            _ZONE_DOC_CACHE[cache_key] = doc
+            _ZONE_DOC_CACHE[cache_key] = (doc, bbox_cache)
             _ZONE_DOC_CACHE.move_to_end(cache_key)
             while len(_ZONE_DOC_CACHE) > _ZONE_DOC_CACHE_MAX:
                 _ZONE_DOC_CACHE.popitem(last=False)
@@ -245,7 +254,8 @@ def render_zone_focus(
 
     accepted_count = [0]
     truncated = [False]
-    bbox_cache = ezdxf_bbox.Cache()
+    # ``bbox_cache`` is the per-doc shared ezdxf bbox Cache created/reused above
+    # (FIX 2a) — NOT a fresh per-zone cache, so the entity-bbox sweep is paid once.
 
     def _entity_overlaps_zone(entity) -> Optional[bool]:
         try:
