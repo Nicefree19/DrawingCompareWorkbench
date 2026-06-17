@@ -680,6 +680,64 @@ def test_oda_fallback_prechecks_cached_dxf_token_budget(tmp_path: Path) -> None:
     assert result.import_report["fallback"]["cache"]["hit"] is False
 
 
+def test_oda_fallback_slims_objects_bloat_before_token_budget(tmp_path: Path, monkeypatch) -> None:
+    """P0 regression (2026-06-17): a converted DXF whose OBJECTS section pushes
+    it over the token budget must be OBJECTS-slimmed BEFORE the gate, not
+    fail-closed. A real AC1027 detail sheet converted to 2.58M tokens (83%
+    OBJECTS) was rejected 0.03% over the 2.5M budget; the strip drops it to
+    0.43M. The comparison pipeline never reads OBJECTS, so the gate must
+    measure the slimmed file (shipped pilot uses the oda_converter backend)."""
+    import pytest
+
+    ezdxf = pytest.importorskip("ezdxf")
+    import src.services.comparison.dxf_slim as slim_mod
+    from src.services.comparison.dxf_slim import strip_objects_section
+
+    # Valid converted DXF carrying an OBJECTS section (mirrors the dxf_slim
+    # fixture proven to slim: lines + a block).
+    converted = tmp_path / "objects_bloated.dxf"
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    for i in range(5):
+        msp.add_line((0.0, float(i)), (100.0, float(i) + 5.0))
+    block = doc.blocks.new(name="DETAIL_A")
+    block.add_circle((5.0, 5.0), 2.5)
+    msp.add_blockref("DETAIL_A", (50.0, 50.0))
+    doc.saveas(converted)
+    assert "OBJECTS" in converted.read_text(encoding="utf-8")
+
+    def _tokens(p: Path) -> int:
+        return p.read_text(encoding="utf-8").count("\n") // 2
+
+    pre_tokens = _tokens(converted)
+    probe = tmp_path / "stripped_probe.dxf"
+    strip_objects_section(converted, probe)
+    post_tokens = _tokens(probe)
+    assert post_tokens < pre_tokens, "fixture must carry a strippable OBJECTS section"
+
+    # Production slims only above 8 MB; force it on for this small fixture.
+    monkeypatch.setattr(slim_mod, "SLIM_MIN_BYTES", 0)
+    budget = (pre_tokens + post_tokens) // 2
+    assert post_tokens <= budget < pre_tokens
+
+    source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
+    with patch("src.services.comparison.dwg_converter.DwgConverter") as converter_class:
+        converter_class.return_value.convert.return_value = converted
+        result = ImportPipeline(
+            ImportPipelineOptions(
+                dwg_backend_mode="oda_converter",
+                allow_oda_fallback=True,
+                dwg_conversion_cache_dir=tmp_path / "cache",
+                stability_limits=CadStabilityLimits(max_dxf_tokens=budget),
+            )
+        ).import_file(source)
+
+    # Pre-fix: TOKEN_LIMIT_EXCEEDED (fail-closed). Post-fix: slimmed then imported.
+    assert result.error_code != CadPipelineErrorCode.TOKEN_LIMIT_EXCEEDED
+    assert result.status != CadPipelineStatus.FAILED
+    assert result.import_report["fallback"]["cache"]["slim_note"] == "slimmed"
+
+
 def test_oda_fallback_converted_dxf_import_timeout_keeps_provenance(tmp_path: Path) -> None:
     source = _write_dwg_fixture(tmp_path / "detail.dwg", version="AC1032")
     converted = _write_two_layer_dxf(tmp_path / "converted.dxf", ignored_line_end_x=100)
