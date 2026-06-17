@@ -408,6 +408,7 @@ class ImportPipeline:
                 cache_details["converter_path"] = str(converter.converter_path)
                 _write_converter_cache_metadata(metadata_path, USER_CONVERTER_CACHE_NAMESPACE, cache_details)
 
+            _slim_converted_dxf_before_budget(cached_dxf, cache_details)
             budget_failure = _converted_dxf_budget_failure(cached_dxf, self.options)
             if budget_failure is not None:
                 failed = self._failed(
@@ -499,6 +500,7 @@ class ImportPipeline:
                 cache_details["converter_path"] = str(getattr(converter, "oda_path", "") or "")
                 _write_converter_cache_metadata(metadata_path, ODA_FALLBACK_CACHE_NAMESPACE, cache_details)
 
+            _slim_converted_dxf_before_budget(cached_dxf, cache_details)
             budget_failure = _converted_dxf_budget_failure(cached_dxf, self.options)
             if budget_failure is not None:
                 failed = self._failed(
@@ -943,6 +945,26 @@ def _cleanup_oda_converter_output(converted: str | Path, cache_dir: Path) -> Non
     except (OSError, ValueError):
         return
     shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def _slim_converted_dxf_before_budget(cached_dxf: Path, cache_details: Dict[str, Any]) -> None:
+    """Strip the dead-weight OBJECTS section before the token-budget gate.
+
+    ODA/user converters emit DXFs whose OBJECTS section is mostly proxy-
+    dictionary dead weight — measured at ~83% of a real AC1027 detail sheet,
+    which pushed a 2.58M-token file 0.03% over the 2.5M budget and fail-closed
+    the entire compare with zero output. The comparison pipeline reads
+    ENTITIES/BLOCKS/TABLES only, so the budget gate must measure the slimmed
+    file. ``slim_converted_dxf`` is in-place, parity-verified, idempotent
+    (re-slim short-circuits on the 8 MB size gate), and never fatal.
+    """
+    try:
+        from .dxf_slim import slim_converted_dxf
+
+        _, slim_note = slim_converted_dxf(cached_dxf)
+        cache_details["slim_note"] = slim_note
+    except Exception:  # noqa: BLE001 — slimming is best-effort, never fatal
+        cache_details["slim_note"] = "slim_errored"
 
 
 def _converted_dxf_budget_failure(
