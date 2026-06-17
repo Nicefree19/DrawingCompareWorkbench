@@ -308,6 +308,89 @@ def _simple_entity_extents(
     return (min_x, min_y, max_x, max_y)
 
 
+def _content_extent_excluding_outliers(
+    boxes: list,
+    *,
+    keep_fraction: float = 0.99,
+    inflate_trigger: float = 1.5,
+    grid: int = 64,
+) -> Optional[Tuple[float, float, float, float]]:
+    """Outlier-resistant content extent from per-entity (xmin,ymin,xmax,ymax).
+
+    Multi-detail-region compare P1 (design: MULTI_DETAIL_REGION_COMPARE_DESIGN.md;
+    live-test 2026-06-17): a few far-flung entities (stray block base points /
+    mis-placed INSERTs) inflate the raw extent to many times the real content,
+    so the raster render and the viewer camera frame the whole inflated space —
+    real content becomes sub-pixel and changes scatter sheet-wide.
+
+    Measured on the AC1027 PSRC sheet (gui live test): 13,370 entities, raw extent
+    693k x 407k mm, but 96% of entities sit in one dense ~60k-wide cluster plus a
+    real ~300-entity secondary cluster; the far corners (e.g. x=808k) are *single*
+    stray entities. A multi-detail sheet is therefore NOT one blob with a few
+    outliers but several spatially separated clusters — an IQR/percentile fence
+    either cuts into a real cluster or misses the strays entirely.
+
+    Method (density, cluster-agnostic): bin entity centres into a coarse ``grid``,
+    then drop the SPARSEST cells whose entities together total at most
+    ``1 - keep_fraction`` of all entities. This removes the far strays (sparse AND
+    detached) while protecting every dense cluster by entity budget — >= keep_fraction
+    of entities (hence every real detail view) is always retained. Return the union
+    bbox of the kept entities only if it is materially smaller than the full extent
+    (> ``inflate_trigger``x on either axis); otherwise return the full extent
+    unchanged, so normal (non-inflated) drawings are never altered.
+    """
+
+    if not boxes:
+        return None
+    arr = np.asarray(boxes, dtype=float)
+    full = (
+        float(arr[:, 0].min()), float(arr[:, 1].min()),
+        float(arr[:, 2].max()), float(arr[:, 3].max()),
+    )
+    n = arr.shape[0]
+    budget = int((1.0 - keep_fraction) * n)
+    if n < 50 or budget < 1:  # too few to separate strays from content reliably
+        return full
+    cx = (arr[:, 0] + arr[:, 2]) * 0.5
+    cy = (arr[:, 1] + arr[:, 3]) * 0.5
+    xmin, xmax = float(cx.min()), float(cx.max())
+    ymin, ymax = float(cy.min()), float(cy.max())
+    if xmax <= xmin or ymax <= ymin:
+        return full
+    gx = np.clip(((cx - xmin) / (xmax - xmin) * (grid - 1)).astype(np.int64), 0, grid - 1)
+    gy = np.clip(((cy - ymin) / (ymax - ymin) * (grid - 1)).astype(np.int64), 0, grid - 1)
+    cell = gy * grid + gx
+    uniq, counts = np.unique(cell, return_counts=True)
+    # Drop sparsest cells greedily until the entity budget is exhausted.
+    order = np.argsort(counts, kind="stable")
+    dropped = []
+    removed = 0
+    for idx in order:
+        c = int(counts[idx])
+        if removed + c <= budget:
+            dropped.append(int(uniq[idx]))
+            removed += c
+        else:
+            break
+    if not dropped:
+        return full
+    keep_mask = ~np.isin(cell, np.asarray(dropped))
+    if not keep_mask.any():
+        return full
+    kept = arr[keep_mask]
+    content = (
+        float(kept[:, 0].min()), float(kept[:, 1].min()),
+        float(kept[:, 2].max()), float(kept[:, 3].max()),
+    )
+    full_w, full_h = full[2] - full[0], full[3] - full[1]
+    cont_w, cont_h = content[2] - content[0], content[3] - content[1]
+    inflated = (
+        (cont_w > 0 and full_w > cont_w * inflate_trigger)
+        or (cont_h > 0 and full_h > cont_h * inflate_trigger)
+    )
+    return content if inflated else full
+
+
 def _resilient_msp_extents(msp) -> Optional[Tuple[float, float, float, float]]:
     """True render extent, computed entity-by-entity so one un-boundable entity
     cannot abort the whole bbox.
@@ -325,9 +408,7 @@ def _resilient_msp_extents(msp) -> Optional[Tuple[float, float, float, float]]:
     the AFTER side, no outlier).
     """
 
-    xmin = ymin = float("inf")
-    xmax = ymax = float("-inf")
-    found = False
+    boxes: list = []
     for entity in msp:
         try:
             box = ezdxf_bbox.extents([entity])
@@ -338,12 +419,16 @@ def _resilient_msp_extents(msp) -> Optional[Tuple[float, float, float, float]]:
         lo, hi = box.extmin, box.extmax
         if not all(np.isfinite(v) for v in (lo.x, lo.y, hi.x, hi.y)):
             continue
-        xmin = min(xmin, float(lo.x)); ymin = min(ymin, float(lo.y))
-        xmax = max(xmax, float(hi.x)); ymax = max(ymax, float(hi.y))
-        found = True
-    if not found or not _valid_extents(xmin, ymin, xmax, ymax):
+        boxes.append((float(lo.x), float(lo.y), float(hi.x), float(hi.y)))
+    if not boxes:
         return None
-    return (xmin, ymin, xmax, ymax)
+    # P1: drop far-flung outlier entities that inflate the raw extent (a 150 m
+    # multi-detail sheet recovered to 524 m) so the render/camera frame the real
+    # content. No-op for normal drawings (returns the full extent).
+    extent = _content_extent_excluding_outliers(boxes)
+    if extent is None or not _valid_extents(*extent):
+        return None
+    return extent
 
 
 # --- ezdxf + PyMuPDF 백엔드 임포트 (선택적; 없으면 Matplotlib만 사용) ----
@@ -522,6 +607,33 @@ class DxfRenderer:
                 min_x, min_y = float(min_pt.x), float(min_pt.y)
                 max_x, max_y = float(max_pt.x), float(max_pt.y)
                 extent_source = "ezdxf_bbox"
+                # P1 (multi-detail content extent): the whole-modelspace bbox
+                # includes far-flung stray entities that inflate the frame many-fold
+                # (AC1027 PSRC sheet: 693k mm raw vs ~140-300k mm of real content),
+                # so the viewer frames the inflated space and real content is
+                # sub-pixel. Re-derive a content extent from the cached per-entity
+                # boxes — ``multi_flat`` reuses the warm cache (~0.1s, measured) —
+                # and frame to it when it is materially smaller than the raw extent.
+                try:
+                    boxes = []
+                    for box in ezdxf_bbox.multi_flat(msp, cache=cache):
+                        if not box.has_data:
+                            continue
+                        lo, hi = box.extmin, box.extmax
+                        if not all(np.isfinite(v) for v in (lo.x, lo.y, hi.x, hi.y)):
+                            continue
+                        boxes.append((float(lo.x), float(lo.y), float(hi.x), float(hi.y)))
+                    content = _content_extent_excluding_outliers(boxes)
+                    if (
+                        content is not None
+                        and _valid_extents(*content)
+                        and content != (min_x, min_y, max_x, max_y)
+                    ):
+                        min_x, min_y, max_x, max_y = content
+                        extent_source = "ezdxf_bbox_content"
+                        logger.info("DXF content extent (strays excluded): %s", content)
+                except Exception as exc:  # pragma: no cover - 방어 코드
+                    logger.debug("content-extent refine skipped: %s", exc)
         except Exception as exc:  # pragma: no cover - 방어 코드
             logger.warning("범위 계산 실패 (entity-resilient 재시도): %s", exc)
 
