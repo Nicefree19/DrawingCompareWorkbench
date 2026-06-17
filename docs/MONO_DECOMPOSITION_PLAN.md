@@ -35,7 +35,8 @@
 | 4b | viewer-pair 술어 + PDF bbox 스케일 (`_viewer_pair_is_pdf`, `scale_pdf_bbox_to_render_pixels`) | 순수 | `workbench_viewer_pair.py` | 낮음 | **완료 2026-06-17** (-49). #3에서 잔류했던 쌍을 묶음; `_viewer_pair_is_pdf` 31-use re-import |
 | 5 | `_viewer_overlay_cache*` 5필드+메서드 (상태) | 상태 | `OverlayCache` 협력 객체 | 중간 | **완료 2026-06-17** (net -99). `workbench_overlay_cache.py`로 이동, V2엔 5 @property+5 delegator(facade)만 잔류. 안전망 `test_overlay_cache_characterization.py`(8종)이 행동 보존 입증(14+73+184 통과+라이브 부팅) |
 | 6 | review-state 순수 헬퍼 (`review_status_ko`·`count_review_records`) | 순수 | `workbench_review_state.py` | 낮음 | **완료 2026-06-17** (-15). 안전망 5종 검증. stateful `_review_records_v2`/path + set-status UI 메서드(~7위젯, 안전망 미커버)는 V2 잔류 — 완전한 stateful ReviewStateController는 **보류**(레버리지 ~0 + 테스트 미커버 사이트 리스크) |
-| 7 | 최장 `*_finished_v2` 렌더 콜백 (예: `_load_lightweight_pdf_v2` 265줄) | 콜백 | 명시 입력 받는 free 함수 + V2는 thin orchestrator | 높음 | **dead-island 버그가 역사적으로 숨는 곳 — 우선 테스트 보강 후** |
+| 7-A | 순수 render-decision (`is_usable_zone_render_source`·request-id 매처 2종) | 순수 | `workbench_render_decisions.py` | 낮음 | **완료 2026-06-17** (net ~0; 격리/테스트성 가치). 안전망 `test_render_decisions_characterization.py`(4종) |
+| 7-B | 최장 렌더 콜백 본문 (`_load_lightweight_pdf_v2` 등) | 콜백 | 순수 sub-logic(DPI/cache-state/stats)만 free 함수 | 높음 | **dead-island 영역 — 슬라이스별 안전망 선행**. 본문 대부분(워커+위젯)은 추출 불가 |
 
 ## 가드레일 / Guardrails
 
