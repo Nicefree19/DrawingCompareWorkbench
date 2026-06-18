@@ -142,6 +142,54 @@ def test_dxf_zone_focus_passes_world_coords_through_unchanged():
     assert world_bbox[0] == pytest.approx(100.0, abs=0.01)  # unchanged
 
 
+# --- L6: before/after coordinate alignment for one-sided (added/deleted) zones --
+# A zone that exists on only one side ("한쪽 빈 화면") must still frame BOTH panes
+# to the SAME world window of the side that HAS the content, so the empty pane
+# shows that exact location's surroundings instead of a blank/unrelated frame.
+# Real 240111 AC1027 coords: C-002 added @x~370k, C-001 deleted @x~444k.
+
+def test_added_zone_frames_both_panes_to_same_after_location():
+    pair = {"coordinate_source": "world", "source_a": "a.dxf", "source_b": "b.dxf"}
+    overlay = {"zone_id": "C-002",
+               "bbox": {"min_x": 362000.0, "min_y": -90000.0,
+                        "max_x": 378000.0, "max_y": -72000.0},
+               "old_bbox": [],  # added → absent on the before side
+               "change_type": "added"}
+    ns, before, after = _make_fake(pair, overlay)
+    before.world_bbox = (0.0, -100000.0, 460000.0, 0.0)
+    after.world_bbox = (0.0, -100000.0, 460000.0, 0.0)
+
+    DrawingCompareWorkbenchV2._focus_lightweight_on_zone_v2(ns, "C-002")
+
+    assert before.camera_calls and after.camera_calls
+    assert before.camera_calls[-1][0] == after.camera_calls[-1][0], (
+        "both panes must frame the SAME world window for an added zone"
+    )
+    cx = (after.camera_calls[-1][0][0] + after.camera_calls[-1][0][2]) / 2.0
+    assert 360000.0 <= cx <= 380000.0  # the after location, not blank/origin
+
+
+def test_deleted_zone_frames_both_panes_to_same_before_location():
+    pair = {"coordinate_source": "world", "source_a": "a.dxf", "source_b": "b.dxf"}
+    overlay = {"zone_id": "C-001",
+               "old_bbox": {"min_x": 444000.0, "min_y": -94000.0,
+                            "max_x": 460000.0, "max_y": -76000.0},
+               "bbox": [],  # deleted → absent on the after side
+               "change_type": "deleted"}
+    ns, before, after = _make_fake(pair, overlay)
+    before.world_bbox = (0.0, -100000.0, 460000.0, 0.0)
+    after.world_bbox = (0.0, -100000.0, 460000.0, 0.0)
+
+    DrawingCompareWorkbenchV2._focus_lightweight_on_zone_v2(ns, "C-001")
+
+    assert before.camera_calls and after.camera_calls
+    assert before.camera_calls[-1][0] == after.camera_calls[-1][0], (
+        "both panes must frame the SAME world window for a deleted zone"
+    )
+    cx = (before.camera_calls[-1][0][0] + before.camera_calls[-1][0][2]) / 2.0
+    assert 444000.0 <= cx <= 460000.0  # the before location
+
+
 class _CaptureZoneRenderController:
     def __init__(self):
         self.requests: list[dict] = []
