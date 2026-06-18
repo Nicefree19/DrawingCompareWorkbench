@@ -436,6 +436,35 @@ def build_change_zones(
     return zones
 
 
+# Relocation distance cap (2026-06-18, rebar AC1024 robustness): a relocation is
+# a move WITHIN the drawing, so the from→to distance cannot plausibly exceed the
+# drawing's content extent. Without a cap, a size-identical deleted/added pair was
+# linked regardless of distance — a 160×160 mm stray hatch (a runaway block-local
+# ±34.9M-coord entity inserted on one side) got "relocation"-linked to a same-size
+# add 34.8 KM away. Cap at FACTOR × the ROBUST centroid diagonal (IQR-fenced so the
+# strays themselves don't inflate the cap), floored for tiny/clean drawings.
+_RELOCATION_DIST_CAP_FACTOR = 2.0
+_RELOCATION_DIST_CAP_FLOOR = 500_000.0  # mm
+
+
+def _robust_span(values: Sequence[float]) -> float:
+    """Span of ``values`` after dropping Tukey far outliers (k=3) — so a few
+    runaway coordinates don't dominate. Falls back to the full span for < 4."""
+
+    vals = sorted(float(v) for v in values)
+    n = len(vals)
+    if n == 0:
+        return 0.0
+    if n < 4:
+        return vals[-1] - vals[0]
+    q1 = vals[n // 4]
+    q3 = vals[(3 * n) // 4]
+    iqr = q3 - q1
+    lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
+    kept = [v for v in vals if lo <= v <= hi]
+    return (kept[-1] - kept[0]) if len(kept) >= 2 else (vals[-1] - vals[0])
+
+
 def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
     """Link size-identical deleted↔added zone pairs as probable relocations.
 
@@ -476,6 +505,16 @@ def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
         box = zone.bbox
         return (float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
 
+    # A move can't exceed the drawing's (robust) content extent — cap the link
+    # distance so runaway strays aren't paired across the whole inflated space.
+    dist_cap = max(
+        _RELOCATION_DIST_CAP_FACTOR * math.hypot(
+            _robust_span([float(z.centroid[0]) for z in zones]),
+            _robust_span([float(z.centroid[1]) for z in zones]),
+        ),
+        _RELOCATION_DIST_CAP_FLOOR,
+    )
+
     candidates: list[tuple[float, float, "DrawingChangeZone", "DrawingChangeZone"]] = []
     for d_zone in deleted:
         dw, dh = _dims(d_zone)
@@ -492,6 +531,10 @@ def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
                 float(a_zone.centroid[0]) - float(d_zone.centroid[0]),
                 float(a_zone.centroid[1]) - float(d_zone.centroid[1]),
             )
+            # Reject implausibly far "moves" (runaway-stray false links). A real
+            # relocation stays within the content; a 34.8 km pair is a stray.
+            if dist > dist_cap:
+                continue
             candidates.append((size_diff, dist, d_zone, a_zone))
 
     candidates.sort(key=lambda item: (item[0], item[1]))

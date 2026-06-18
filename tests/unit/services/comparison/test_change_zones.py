@@ -1114,6 +1114,34 @@ def test_relocation_ambiguity_resolved_by_nearest_centroid() -> None:
     assert "relocation_pair_id" not in far.metadata
 
 
+def test_relocation_distance_cap_rejects_runaway_stray_pair() -> None:
+    """Rebar AC1024 robustness (rebar_36km_stray_entity_rootcause): a stray entity
+    (block-local ±34.9M coord, inserted on one side only) was 'relocation'-linked
+    to a same-size add 34.8 KM away. With in-content zones establishing the robust
+    extent, a pair beyond it is rejected — a real move can't exceed the drawing."""
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    # 10 in-content zones (modified → not link candidates) fix the robust extent
+    # at ~a few-k mm around x~600k, so the single 35M stray is a far outlier.
+    zones = [
+        _reloc_zone(f"M{i}", "modified", (600000.0 + i * 200, 0.0, 600400.0 + i * 200, 200.0), count=99)
+        for i in range(10)
+    ]
+    # Legit near move within content (~5 m) — must link.
+    d_near = _reloc_zone("D-near", "deleted", (600000.0, 0.0, 600160.0, 160.0), count=7)
+    a_near = _reloc_zone("A-near", "added", (605000.0, 0.0, 605160.0, 160.0), count=7)
+    # Runaway stray del at 35 M + same-size add in content — must NOT link.
+    d_stray = _reloc_zone("D-stray", "deleted", (35000000.0, 0.0, 35000160.0, 160.0), count=8)
+    a_other = _reloc_zone("A-other", "added", (601000.0, 0.0, 601160.0, 160.0), count=8)
+
+    linked = link_relocation_zone_pairs([*zones, d_near, a_near, d_stray, a_other])
+
+    assert linked == 1  # only the near, in-content pair
+    assert d_near.metadata.get("relocation_counterpart") == "A-near"
+    assert "relocation_pair_id" not in d_stray.metadata  # 34.8 km stray rejected
+    assert "relocation_pair_id" not in a_other.metadata
+
+
 def test_build_change_zones_links_relocation_and_counts_it() -> None:
     # End-to-end through build_change_zones: two far-apart same-size groups
     # (deleted vs added) get linked and the result metadata records the count.
