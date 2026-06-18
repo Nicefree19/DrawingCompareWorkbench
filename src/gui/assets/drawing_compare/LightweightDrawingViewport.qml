@@ -48,6 +48,11 @@ Item {
     property var overlaysFocus: []
     // User-controlled overlay opacity scale (0.3-1.0).
     property real overlayOpacityScale: 1.0
+    // L3 — CAD background/colour convention. false = light (white bg, dark ink);
+    // true = dark (black bg, native ACI colours preserved). The Python side
+    // re-normalises primitive colours per mode; QML drives the bg + default ink.
+    property bool darkMode: false
+    property string inkColor: darkMode ? "#E5E7EB" : "#0F172A"
     // Phase Q1 — minimum on-screen footprint (px) for a change marker so
     // small change zones (e.g. a 110 mm text edit) stay perceptible even
     // when the camera fits the whole multi-detail drawing (fitToView yields
@@ -124,7 +129,7 @@ Item {
     // ---- BACKGROUND ----------------------------------------------------
     Rectangle {
         anchors.fill: parent
-        color: "#FAFAFA"
+        color: root.darkMode ? "#0B0F1A" : "#FAFAFA"
         border.color: "#9CA3AF"
         border.width: 1
     }
@@ -283,9 +288,10 @@ Item {
             ctx.scale(s, -s)
             ctx.translate(-cx, -cy)
 
-            // Pen — thin black line scaled to look ~1 px regardless of zoom.
+            // Pen — thin line scaled to look ~1 px regardless of zoom. Default
+            // ink follows the colour mode (dark ink on light bg / light on dark).
             ctx.lineWidth = upp
-            ctx.strokeStyle = "#0F172A"
+            ctx.strokeStyle = root.inkColor
             ctx.lineCap = "round"
             ctx.lineJoin = "round"
 
@@ -311,14 +317,14 @@ Item {
             // 4000 segments) instead of beginPath/stroke per segment. Round
             // caps render disjoint moveTo/lineTo subpaths identically to the
             // old per-segment strokes.
-            var batchColor = "#0F172A"
+            var batchColor = root.inkColor
             var batchN = 0
 
             for (var i = 0; i < root.primitives.length; ++i) {
                 var prim = root.primitives[i]
                 if (!prim) continue
                 var props = prim.properties
-                var color = (props && props.color) ? props.color : "#0F172A"
+                var color = (props && props.color) ? props.color : root.inkColor
                 var t = prim.type
                 var g = prim.geometry
                 if (!g) continue

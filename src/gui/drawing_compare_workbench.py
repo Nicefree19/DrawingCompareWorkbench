@@ -4172,6 +4172,16 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_overlay_opacity_value_v2 = QLabel("100%")
         self.lbl_overlay_opacity_value_v2.setFixedWidth(48)
         header_row.addWidget(self.lbl_overlay_opacity_value_v2)
+        # L3 — CAD background/colour toggle. OFF (default): white background, dark
+        # lines. ON: black background, native ACI colours (classic model-space
+        # look). Drives both lightweight viewports; instant (no reload/reframe).
+        self.btn_dark_mode_v2 = QPushButton("🌙 검은 배경")
+        self.btn_dark_mode_v2.setCheckable(True)
+        self.btn_dark_mode_v2.setToolTip(
+            "끄면 흰 배경 + 어두운 선, 켜면 검은 배경 + 도면 고유색(ACI)으로 표시합니다."
+        )
+        self.btn_dark_mode_v2.toggled.connect(self._on_color_mode_toggled_v2)
+        header_row.addWidget(self.btn_dark_mode_v2)
         layout.addLayout(header_row)
 
         # Phase H + multi-page navigation — surfaced only when the
@@ -4368,6 +4378,23 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 viewport.set_overlay_opacity_scale(scale)
         if hasattr(self, "lbl_overlay_opacity_value_v2"):
             self.lbl_overlay_opacity_value_v2.setText(f"{int(round(scale * 100))}%")
+
+    def _on_color_mode_toggled_v2(self, checked: bool) -> None:
+        """L3 — switch both lightweight viewports between the white-bg/dark-ink and
+        black-bg/native-ACI CAD colour conventions (the user live-test request:
+        '배경이 흰색이면 라인은 어두운색, 블랙이면 고유 색상')."""
+
+        mode = "dark" if checked else "light"
+        if hasattr(self, "btn_dark_mode_v2"):
+            self.btn_dark_mode_v2.setText("☀️ 흰 배경" if checked else "🌙 검은 배경")
+        for attr in ("preview_before_lightweight_v2", "preview_after_lightweight_v2"):
+            viewport = getattr(self, attr, None)
+            setter = getattr(viewport, "set_color_mode", None) if viewport is not None else None
+            if callable(setter):
+                try:
+                    setter(mode)
+                except Exception:  # noqa: BLE001 — colour toggle is best-effort
+                    logger.debug("set_color_mode failed for %s", attr, exc_info=True)
 
     def _report_settings_path_v2(self) -> Path:
         return _workbench_data_dir() / REPORT_SETTINGS_FILENAME

@@ -122,42 +122,60 @@ def _create_quick_widget(parent: QWidget) -> QWidget:
         return _FallbackQuickWidget(parent)
 
 
-_SKELETON_INK = "#0F172A"
+_SKELETON_INK = "#0F172A"        # dark ink for the light (white-bg) mode
+_SKELETON_INK_DARK = "#E5E7EB"   # light ink for the dark (black-bg) mode
 
 
-def normalize_skeleton_ink(primitives: list) -> list:
-    """Map near-white stroke colours to dark ink, in place.
+def normalize_skeleton_ink(primitives: list, *, dark_mode: bool = False) -> list:
+    """Return primitives with stroke colours adapted to the background, NON-
+    destructively (the input list/dicts are left untouched so the same raw pack
+    can be re-normalised when the user toggles the background mode).
 
-    Real scene packs carry DXF colour 7 ("white", meant for dark CAD
-    backgrounds) verbatim — measured 1,229 of 1,256 primitives at
-    ``#ffffff`` on one real detail sheet — which is invisible on the
-    viewer's #FAFAFA background. Colours with relative luminance > 0.9
-    become the Canvas default ink; genuinely coloured layers (red/green
-    revision marks, mid greys) pass through untouched.
+    CAD convention (L3): a white background needs dark lines; a black background
+    shows each layer's native colour. Real scene packs carry DXF colour 7
+    ("white", meant for a dark CAD background) verbatim — measured 1,229 of 1,256
+    primitives at ``#ffffff`` on one real sheet.
+
+    - Light mode (default, #FAFAFA bg): near-white (relative luminance > 0.9) ->
+      dark ink, else native. (Genuine red/green revision marks, mid greys stay.)
+    - Dark mode (black bg): native ACI colours preserved (colour 7 = white shows
+      as intended); only near-black (luminance < 0.1) is lifted to a light ink so
+      the few dark-on-white-intended layers stay visible.
     """
 
+    out: list = []
     for prim in primitives or []:
         if not isinstance(prim, dict):
+            out.append(prim)
             continue
         props = prim.get("properties")
-        if not isinstance(props, dict):
-            continue
-        color = props.get("color")
-        if not isinstance(color, str):
-            continue
-        value = color.lstrip("#")
-        if len(value) < 6:
-            continue
-        try:
-            r = int(value[0:2], 16)
-            g = int(value[2:4], 16)
-            b = int(value[4:6], 16)
-        except ValueError:
-            continue
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-        if luminance > 0.9:
-            props["color"] = _SKELETON_INK
-    return primitives
+        new_color = None
+        if isinstance(props, dict):
+            color = props.get("color")
+            if isinstance(color, str):
+                value = color.lstrip("#")
+                if len(value) >= 6:
+                    try:
+                        r = int(value[0:2], 16)
+                        g = int(value[2:4], 16)
+                        b = int(value[4:6], 16)
+                        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+                        if dark_mode:
+                            if luminance < 0.1:
+                                new_color = _SKELETON_INK_DARK
+                        elif luminance > 0.9:
+                            new_color = _SKELETON_INK
+                    except ValueError:
+                        new_color = None
+        if new_color is not None:
+            new_props = dict(props)
+            new_props["color"] = new_color
+            new_prim = dict(prim)
+            new_prim["properties"] = new_props
+            out.append(new_prim)
+        else:
+            out.append(prim)
+    return out
 
 
 def _normalise_bbox(raw) -> Optional[tuple[float, float, float, float]]:
@@ -652,6 +670,11 @@ class LightweightDrawingViewport(QWidget):
         super().__init__(parent)
         self._side = side
         self._overlay_opacity_scale: float = 1.0
+        # L3 CAD colour mode: "light" (white bg, dark ink — default) or "dark"
+        # (black bg, native ACI colours). Raw primitives are kept so a toggle can
+        # re-normalise without re-reading the pack from disk.
+        self._color_mode: str = "light"
+        self._raw_primitives: Optional[list] = None
         self._render_mode: RenderMode = "relative_only"
         self._world_bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
         self._loaded_pack_path: Optional[str] = None
@@ -975,7 +998,11 @@ class LightweightDrawingViewport(QWidget):
             )
             return 0
 
-        primitives = normalize_skeleton_ink(source.primitives)
+        # L3: keep the raw pack so a colour-mode toggle can re-normalise without a
+        # disk reload; normalisation is non-destructive so the raw stays pristine.
+        self._raw_primitives = source.primitives
+        dark = self._color_mode == "dark"
+        primitives = normalize_skeleton_ink(source.primitives, dark_mode=dark)
         world_bbox = source.world_bbox
         try:
             self._world_bbox = (
@@ -988,6 +1015,7 @@ class LightweightDrawingViewport(QWidget):
         # Push to QML: world bbox first (triggers fitToView), then primitives.
         # Scene mode must clear any previous PDF/raster bitmap first.
         _clear_pdf_background_state(self, root)
+        root.setProperty("darkMode", dark)
         root.setProperty("worldBbox", list(self._world_bbox))
         root.setProperty("primitives", primitives)
         root.setProperty("primitiveSourceProvenance", dict(source.provenance))
@@ -1521,6 +1549,35 @@ class LightweightDrawingViewport(QWidget):
     @property
     def overlay_opacity_scale(self) -> float:
         return self._overlay_opacity_scale
+
+    def set_color_mode(self, mode: str) -> None:
+        """L3 — switch the CAD background/colour convention.
+
+        ``"light"`` (default): white background, near-white lines remapped to dark
+        ink. ``"dark"``: black background, native ACI colours preserved (the
+        classic model-space look). Re-normalises the already-loaded raw primitives
+        in place (no disk reload, no camera change) so the toggle is instant and
+        does not disturb the current zoom/pan.
+        """
+
+        dark = str(mode).lower() == "dark"
+        self._color_mode = "dark" if dark else "light"
+        root = self._quick.rootObject()
+        if root is None:
+            return
+        root.setProperty("darkMode", dark)
+        if self._raw_primitives is not None:
+            primitives = normalize_skeleton_ink(self._raw_primitives, dark_mode=dark)
+            root.setProperty("primitives", primitives)
+            self._primitive_count = len(primitives)
+            try:
+                self._push_primitives_to_qsg(primitives)
+            except Exception:  # noqa: BLE001 — QSG push is best-effort
+                logger.debug("color-mode QSG re-push failed", exc_info=True)
+
+    @property
+    def color_mode(self) -> str:
+        return self._color_mode
 
     # ------------------------------------------------------------------
     # Render mode (drives badge + watermark)

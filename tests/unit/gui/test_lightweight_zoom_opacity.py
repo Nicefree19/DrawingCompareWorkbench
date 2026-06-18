@@ -229,3 +229,39 @@ def test_overlay_opacity_scale_clamps_in_real_qml_root():
     viewport.set_overlay_opacity_scale(1.5)  # above 1.0 ceiling
     assert viewport.overlay_opacity_scale == pytest.approx(1.0)
     assert root.property("overlayOpacityScale") == pytest.approx(1.0)
+
+
+def test_set_color_mode_propagates_dark_mode_to_qml_root():
+    """L3 — the CAD colour toggle drives the QML root's darkMode (black bg +
+    native colours) and re-normalises the loaded primitives, instantly + both
+    ways, without a reload."""
+    from PySide6.QtWidgets import QApplication
+
+    from src.gui.lightweight_viewport import (
+        _SKELETON_INK_DARK,
+        LightweightDrawingViewport,
+    )
+
+    _ = QApplication.instance() or QApplication([])
+    viewport = LightweightDrawingViewport()
+    root = viewport._quick.rootObject()
+    assert root is not None
+    assert viewport.color_mode == "light"
+    assert root.property("darkMode") is False
+
+    # Seed raw primitives so the toggle re-normalises them.
+    viewport._raw_primitives = [
+        {"type": "lines", "geometry": [], "properties": {"color": "#ffffff"}},
+        {"type": "lines", "geometry": [], "properties": {"color": "#000000"}},
+    ]
+
+    viewport.set_color_mode("dark")
+    assert viewport.color_mode == "dark"
+    assert root.property("darkMode") is True
+    prims = root.property("primitives")
+    assert prims[0]["properties"]["color"] == "#ffffff"        # native preserved
+    assert prims[1]["properties"]["color"] == _SKELETON_INK_DARK  # black lifted
+
+    viewport.set_color_mode("light")
+    assert viewport.color_mode == "light"
+    assert root.property("darkMode") is False
