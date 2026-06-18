@@ -1,0 +1,211 @@
+# -*- coding: utf-8 -*-
+"""Change-list accessibility: small change sets must not hide changes.
+
+Live-test bug (2026-06-17): "변경사항이 1개만 리스트업되어서 무엇이 바뀐건지
+확인이 안 된다." A 14-zone drawing whose changes were near-duplicates folded into
+ONE collapsed cluster row under ONE auto-expanded category header, so the
+reviewer saw a single line. The data (all zones) was present as collapsed
+children. Fix: when the whole set is small (<= ZONE_TREE_AUTO_EXPAND_MAX) expand
+every category header AND cluster by default so nothing is hidden; large sets
+keep the tidy default-collapsed clustering (+ explicit expand-all control).
+"""
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from types import SimpleNamespace
+
+import pytest
+
+from src.gui.drawing_compare_workbench import (
+    ZONE_TREE_AUTO_EXPAND_MAX,
+    DrawingCompareWorkbenchV2,
+    _build_zone_tree_plan_data_v2,
+    _group_zones_by_region_then_category_v2,
+)
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+def _ov(zone_id, *, change_type="modified", severity="medium", entity_type="LINE",
+        layer="BEAM", raw_change_count=1):
+    return {
+        "zone_id": zone_id,
+        "change_type": change_type,
+        "change_label": change_type,
+        "severity": severity,
+        "entity_type": entity_type,
+        "layer": layer,
+        "raw_change_count": raw_change_count,
+    }
+
+
+def _cat(name, boost=0):
+    return SimpleNamespace(category=name, severity_boost=boost)
+
+
+def _plan(overlays, category_by_zone, *, active=""):
+    plan, _ = _build_zone_tree_plan_data_v2(
+        dashboard_issues=[],
+        overlays=overlays,
+        preview_zones=[],
+        category_by_zone=category_by_zone,
+        active_zone_id=active,
+        clustering_enabled=True,
+    )
+    return plan
+
+
+def test_small_set_expands_every_header_and_cluster():
+    # 3 near-duplicates (one cluster) in 구조 + 2 singletons in 치수 = 5 zones.
+    overlays = [
+        _ov("s1"), _ov("s2"), _ov("s3"),                       # identical -> cluster
+        _ov("d1", layer="DIM-A"), _ov("d2", layer="DIM-B"),    # distinct singletons
+    ]
+    cats = {
+        "s1": _cat("구조", 10), "s2": _cat("구조", 10), "s3": _cat("구조", 10),
+        "d1": _cat("치수", 0), "d2": _cat("치수", 0),
+    }
+    plan = _plan(overlays, cats)
+    assert len(plan) == 2
+    # Every category header is expanded (no change hidden behind a collapsed header).
+    assert all(group["expanded"] for group in plan), plan
+    # The cluster of near-duplicates is expanded too.
+    clusters = [it for group in plan for it in group["items"] if it["kind"] == "cluster"]
+    assert clusters and all(c["expanded"] for c in clusters)
+    # And it genuinely holds all 3 members (data is reachable, not dropped).
+    assert sum(len(c["children"]) for c in clusters) == 3
+
+
+def test_large_set_keeps_default_collapse():
+    # 3 near-dup cluster in 구조 (group 0) + 42 distinct singletons in 치수 (group 1).
+    overlays = [_ov("s1"), _ov("s2"), _ov("s3")]
+    cats = {"s1": _cat("구조", 10), "s2": _cat("구조", 10), "s3": _cat("구조", 10)}
+    for i in range(42):
+        zid = f"d{i}"
+        overlays.append(_ov(zid, layer=f"DIM-{i}"))
+        cats[zid] = _cat("치수", 0)
+    assert len(overlays) > ZONE_TREE_AUTO_EXPAND_MAX
+    plan = _plan(overlays, cats)
+    assert len(plan) == 2
+    assert plan[0]["expanded"] is True          # first category always expands
+    assert plan[1]["expanded"] is False         # later categories stay collapsed
+    # The 구조 cluster stays collapsed when the set is large and not active.
+    structural_clusters = [it for it in plan[0]["items"] if it["kind"] == "cluster"]
+    assert structural_clusters and all(c["expanded"] is False for c in structural_clusters)
+
+
+def test_large_set_active_zone_still_forces_open():
+    # Large set, but the active zone lives in the 2nd category's cluster:
+    # that header AND that cluster must open even though the set is large.
+    overlays = [_ov(f"x{i}", layer=f"L{i}") for i in range(42)]  # 구조 singletons
+    cats = {f"x{i}": _cat("구조", 10) for i in range(42)}
+    for zid in ("c1", "c2", "c3"):                               # 치수 cluster
+        overlays.append(_ov(zid, change_type="added", layer="DIM"))
+        cats[zid] = _cat("치수", 0)
+    plan = _plan(overlays, cats, active="c2")
+    dim_group = next(g for g in plan if "치수" in g["header_text"])
+    assert dim_group["expanded"] is True
+    dim_clusters = [it for it in dim_group["items"] if it["kind"] == "cluster"]
+    assert dim_clusters and all(c["expanded"] for c in dim_clusters)
+
+
+def _classify_from(cats):
+    return lambda zid: cats.get(zid)
+
+
+def test_region_grouping_groups_by_region_then_category():
+    """Multi-detail (P4): with >=2 detail regions, zones group by (region, category)
+    ordered left-to-right by region."""
+    zones = [{"zone_id": z} for z in ("a", "b", "c", "d")]
+    region_by_zone = {"a": 1, "b": 1, "c": 2, "d": 2}
+    cats = {"a": _cat("치수"), "b": _cat("치수"), "c": _cat("구조"), "d": _cat("구조")}
+    groups = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), region_by_zone)
+    regions = [g[0] for g in groups]
+    assert regions == [1, 2]  # ordered by region
+    assert groups[0][0] == 1 and "치수" in groups[0][1] and len(groups[0][3]) == 2
+    assert groups[1][0] == 2 and "구조" in groups[1][1] and len(groups[1][3]) == 2
+
+
+def test_region_grouping_degrades_to_category_only_without_two_regions():
+    zones = [{"zone_id": "a"}, {"zone_id": "b"}]
+    cats = {"a": _cat("치수"), "b": _cat("치수")}
+    # No map -> category only (region_idx None)
+    g_none = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), None)
+    assert g_none and all(g[0] is None for g in g_none)
+    # Single region -> still category only
+    g_one = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), {"a": 1, "b": 1})
+    assert g_one and all(g[0] is None for g in g_one)
+
+
+def test_region_grouping_caps_excessive_regions():
+    """Validation 2026-06-18 (철근간섭 AC1024, 36.7 km spread -> 67 regions): an
+    excessive region count means outlier/corrupted coords, not a clean multi-detail
+    sheet — fall back to plain category grouping instead of a 67-region tree."""
+    zones = [{"zone_id": f"z{i}"} for i in range(20)]
+    cats = {f"z{i}": _cat("기타") for i in range(20)}
+    region_by_zone = {f"z{i}": i + 1 for i in range(20)}  # 20 distinct > cap
+    groups = _group_zones_by_region_then_category_v2(zones, _classify_from(cats), region_by_zone)
+    assert groups and all(g[0] is None for g in groups)  # category-only fallback
+
+
+def test_region_grouping_keeps_unknown_region_zones():
+    """A zone missing from the region map is never dropped (trailing region-less bucket)."""
+    zones = [{"zone_id": "a"}, {"zone_id": "b"}, {"zone_id": "x"}]
+    cats = {"a": _cat("치수"), "b": _cat("구조"), "x": _cat("기타")}
+    groups = _group_zones_by_region_then_category_v2(
+        zones, _classify_from(cats), {"a": 1, "b": 2}  # x unmapped
+    )
+    all_ids = {z["zone_id"] for g in groups for z in g[3]}
+    assert all_ids == {"a", "b", "x"}
+
+
+def test_plan_builder_emits_region_headers_when_multi_region():
+    overlays = [_ov("a"), _ov("b"), _ov("c")]
+    cats = {"a": _cat("치수", 5), "b": _cat("치수", 5), "c": _cat("구조", 10)}
+    region = {"a": 1, "b": 1, "c": 2}
+    plan, _ = _build_zone_tree_plan_data_v2(
+        dashboard_issues=[], overlays=overlays, preview_zones=[],
+        category_by_zone=cats, active_zone_id="", clustering_enabled=True,
+        region_by_zone=region,
+    )
+    headers = [g["header_text"] for g in plan]
+    assert any("📍 디테일 1" in h for h in headers), headers
+    assert any("📍 디테일 2" in h for h in headers), headers
+
+    # Backward-compat: without a region map, headers carry NO detail prefix.
+    plan2, _ = _build_zone_tree_plan_data_v2(
+        dashboard_issues=[], overlays=overlays, preview_zones=[],
+        category_by_zone=cats, active_zone_id="", clustering_enabled=True,
+    )
+    assert all("디테일" not in g["header_text"] for g in plan2)
+
+
+def test_expand_collapse_controls_drive_the_tree(qapp):
+    """The '모두 펼치기 / 접기' buttons exist and drive the real QTreeWidget."""
+    from PySide6.QtWidgets import QTreeWidgetItem
+
+    wb = DrawingCompareWorkbenchV2()
+    try:
+        assert hasattr(wb, "btn_zone_expand_all_v2")
+        assert hasattr(wb, "btn_zone_collapse_all_v2")
+        tree = wb.zone_list_v2
+        tree.clear()
+        parent = QTreeWidgetItem(["category"])
+        parent.addChild(QTreeWidgetItem(["leaf"]))
+        tree.addTopLevelItem(parent)
+
+        wb._collapse_all_zones_v2()
+        assert not parent.isExpanded()
+        wb._expand_all_zones_v2()
+        assert parent.isExpanded()
+    finally:
+        wb.deleteLater()

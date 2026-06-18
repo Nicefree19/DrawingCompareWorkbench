@@ -1973,6 +1973,15 @@ class GpuDrawingViewport(QWidget):
         root.setProperty("vectorSvgY", float(y))
         root.setProperty("vectorSvgW", float(width))
         root.setProperty("vectorSvgH", float(height))
+        # Cap the SVG raster grid under Qt's 256 MB QImageIOHandler limit so the
+        # overlay always decodes — large zones (a big fraction of the 8000 px
+        # render) previously blew past it and the change cloud vanished
+        # (live-test 2026-06-17).
+        from src.gui.workbench_render_decisions import capped_svg_source_size
+
+        src_w, src_h = capped_svg_source_size(width, height)
+        root.setProperty("vectorSvgSourceW", int(src_w))
+        root.setProperty("vectorSvgSourceH", int(src_h))
         root.setProperty("vectorSvgOpacity", max(0.0, min(1.0, float(opacity))))
 
     def clear_vector_overlay(self) -> None:
@@ -2621,6 +2630,80 @@ def _group_zones_by_category_v2(
     ]
 
 
+# Above this many spatial regions the grouping is not a clean multi-detail
+# structure but noise — e.g. a pair with outlier/corrupted zone coordinates that
+# scatter into dozens of singletons (validation 2026-06-18: a 철근간섭 AC1024 pair
+# whose change zones spanned 36.7 km produced 67 "regions"). Past the cap, fall
+# back to plain category grouping rather than emit a useless 67-region tree.
+_MAX_DETAIL_REGIONS = 8
+
+
+def _group_zones_by_region_then_category_v2(
+    zones: list[dict],
+    classify_fn,
+    region_by_zone: Optional[Mapping[str, int]] = None,
+    *,
+    fallback_label: str = "기타 변경",
+) -> list[tuple]:
+    """Group zones by spatial DETAIL REGION, then AI category within each region.
+
+    Multi-detail compare (P4): on a sheet whose changes sit in several far-apart
+    detail views, the flat category tree ("치수 3 · 구조 2") never says WHICH detail
+    changed. When ``region_by_zone`` (zone_id -> 1-based detail index, left-to-right,
+    from ``content_frame.cluster_zone_bboxes``) resolves >= 2 regions, group by
+    (region, category) so the list reads "📍 디테일 1 · 치수 (2)" — organised by
+    detail. With < 2 regions (or no map) this degrades to plain category grouping.
+
+    Returns ``(region_idx_or_None, category_label, severity_boost, zones)`` tuples,
+    ordered by region ascending then the existing category sort. Zones whose region
+    is unknown are kept in a trailing region-less bucket so none are dropped.
+    """
+
+    regions: set[int] = set()
+    if region_by_zone:
+        for zone in zones:
+            r = region_by_zone.get(str((zone or {}).get("zone_id") or ""))
+            if r is not None:
+                regions.add(int(r))
+
+    if not region_by_zone or not (2 <= len(regions) <= _MAX_DETAIL_REGIONS):
+        return [
+            (None, label, boost, grp)
+            for label, boost, grp in _group_zones_by_category_v2(
+                zones, classify_fn, fallback_label=fallback_label
+            )
+        ]
+
+    out: list[tuple] = []
+    for region_idx in sorted(regions):
+        region_zones = [
+            zone for zone in zones
+            if region_by_zone.get(str((zone or {}).get("zone_id") or "")) == region_idx
+        ]
+        for label, boost, grp in _group_zones_by_category_v2(
+            region_zones, classify_fn, fallback_label=fallback_label
+        ):
+            out.append((region_idx, label, boost, grp))
+    unknown = [
+        zone for zone in zones
+        if region_by_zone.get(str((zone or {}).get("zone_id") or "")) is None
+    ]
+    if unknown:
+        for label, boost, grp in _group_zones_by_category_v2(
+            unknown, classify_fn, fallback_label=fallback_label
+        ):
+            out.append((None, label, boost, grp))
+    return out
+
+
+# When the whole change set is this small, expand every category header and
+# cluster by default so the reviewer sees ALL changes immediately instead of a
+# single collapsed cluster row (live-test 2026-06-17: a 14-zone drawing folded
+# to "only 1 listed"). Larger sets keep the tidy default-collapsed clustering
+# and rely on the explicit "모두 펼치기 / 접기" controls for on-demand access.
+ZONE_TREE_AUTO_EXPAND_MAX = 40
+
+
 def _build_zone_tree_plan_data_v2(
     *,
     dashboard_issues: list[dict],
@@ -2631,6 +2714,7 @@ def _build_zone_tree_plan_data_v2(
     allow_clustering: bool = True,
     clustering_enabled: bool = True,
     prefer_overlays: bool = False,
+    region_by_zone: Optional[Mapping[str, int]] = None,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Pure zone-tree plan builder safe to run off the GUI thread.
 
@@ -2705,9 +2789,10 @@ def _build_zone_tree_plan_data_v2(
     if not zones_for_grouping or row_label_fn is None:
         return [], active_issue_by_zone
 
-    groups = _group_zones_by_category_v2(
+    groups = _group_zones_by_region_then_category_v2(
         zones_for_grouping,
         lambda zid: category_by_zone.get(str(zid or "")),
+        region_by_zone,
     )
     from src.services.comparison.zone_clusterer import (
         ClusterOptions, cluster_zones,
@@ -2716,7 +2801,10 @@ def _build_zone_tree_plan_data_v2(
     cluster_opts = ClusterOptions(enabled=bool(allow_clustering and clustering_enabled))
     plan: list[dict] = []
     active_zone_id = str(active_zone_id or "")
-    for group_idx, (label, _boost, zones_in_group) in enumerate(groups):
+    # Small change sets: expand everything so no change is hidden behind a
+    # collapsed cluster / category header by default.
+    expand_all_small = len(zones_for_grouping) <= ZONE_TREE_AUTO_EXPAND_MAX
+    for group_idx, (region_idx, label, _boost, zones_in_group) in enumerate(groups):
         total_count = len(zones_in_group)
         clusters = cluster_zones(zones_in_group, options=cluster_opts)
         row_count = len(clusters)
@@ -2757,16 +2845,28 @@ def _build_zone_tree_plan_data_v2(
                         f"{cluster.summary_label} — {cluster.size}개 변경구역 묶음. "
                         f"펼쳐서 개별 구역을 검토할 수 있습니다."
                     ),
-                    "expanded": has_active,
+                    "expanded": bool(has_active or expand_all_small),
                     "children": children,
                 })
-        plan.append({
-            "header_text": f"{_zone_category_icon_v2(label)} {label}  ({total_count})",
-            "tooltip": (
+        if region_idx is not None:
+            header_text = (
+                f"📍 디테일 {region_idx}  ·  {_zone_category_icon_v2(label)} {label}  ({total_count})"
+            )
+            header_tooltip = (
+                f"디테일 영역 {region_idx} · {label} · {total_count}개 변경구역"
+                + (f" ({row_count}행으로 묶임)" if row_count != total_count else "")
+                + " — 같은 디테일(도면) 안의 변경끼리 묶었습니다."
+            )
+        else:
+            header_text = f"{_zone_category_icon_v2(label)} {label}  ({total_count})"
+            header_tooltip = (
                 f"{label} · {total_count}개 변경구역"
                 + (f" ({row_count}행으로 묶임)" if row_count != total_count else "")
-            ),
-            "expanded": bool((group_idx == 0) or active_zone_in_group),
+            )
+        plan.append({
+            "header_text": header_text,
+            "tooltip": header_tooltip,
+            "expanded": bool((group_idx == 0) or active_zone_in_group or expand_all_small),
             "items": items,
         })
     return plan, active_issue_by_zone
@@ -2982,6 +3082,10 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._overlay_cache = OverlayCache()
         self._tile_manifest_cache_v2: dict[tuple[str, int, int, str, str], dict] = {}
         self._lightweight_raster_pairs: set[str] = set()
+        # Pairs whose SKELETON-only preview has had the content-aware camera
+        # frame applied (raster-skipped path). Prevents re-framing over a user's
+        # zone zoom on later per-side state pushes. See _apply_session_state_to_viewport_v2.
+        self._lightweight_skeleton_framed_pairs: set[str] = set()
         self._render_status_by_pair: dict[str, str] = {}
         self._render_worker: Optional[PairPreviewRenderWorker] = None
         self._visible_tile_worker_v2: Optional[VisibleTileWindowWorker] = None
@@ -4068,6 +4172,16 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_overlay_opacity_value_v2 = QLabel("100%")
         self.lbl_overlay_opacity_value_v2.setFixedWidth(48)
         header_row.addWidget(self.lbl_overlay_opacity_value_v2)
+        # L3 — CAD background/colour toggle. OFF (default): white background, dark
+        # lines. ON: black background, native ACI colours (classic model-space
+        # look). Drives both lightweight viewports; instant (no reload/reframe).
+        self.btn_dark_mode_v2 = QPushButton("🌙 검은 배경")
+        self.btn_dark_mode_v2.setCheckable(True)
+        self.btn_dark_mode_v2.setToolTip(
+            "끄면 흰 배경 + 어두운 선, 켜면 검은 배경 + 도면 고유색(ACI)으로 표시합니다."
+        )
+        self.btn_dark_mode_v2.toggled.connect(self._on_color_mode_toggled_v2)
+        header_row.addWidget(self.btn_dark_mode_v2)
         layout.addLayout(header_row)
 
         # Phase H + multi-page navigation — surfaced only when the
@@ -4264,6 +4378,23 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 viewport.set_overlay_opacity_scale(scale)
         if hasattr(self, "lbl_overlay_opacity_value_v2"):
             self.lbl_overlay_opacity_value_v2.setText(f"{int(round(scale * 100))}%")
+
+    def _on_color_mode_toggled_v2(self, checked: bool) -> None:
+        """L3 — switch both lightweight viewports between the white-bg/dark-ink and
+        black-bg/native-ACI CAD colour conventions (the user live-test request:
+        '배경이 흰색이면 라인은 어두운색, 블랙이면 고유 색상')."""
+
+        mode = "dark" if checked else "light"
+        if hasattr(self, "btn_dark_mode_v2"):
+            self.btn_dark_mode_v2.setText("☀️ 흰 배경" if checked else "🌙 검은 배경")
+        for attr in ("preview_before_lightweight_v2", "preview_after_lightweight_v2"):
+            viewport = getattr(self, attr, None)
+            setter = getattr(viewport, "set_color_mode", None) if viewport is not None else None
+            if callable(setter):
+                try:
+                    setter(mode)
+                except Exception:  # noqa: BLE001 — colour toggle is best-effort
+                    logger.debug("set_color_mode failed for %s", attr, exc_info=True)
 
     def _report_settings_path_v2(self) -> Path:
         return _workbench_data_dir() / REPORT_SETTINGS_FILENAME
@@ -5239,6 +5370,22 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_zone_progress_v2.setProperty("role", "muted")
         self.lbl_zone_progress_v2.setWordWrap(True)
         layout.addWidget(self.lbl_zone_progress_v2)
+        # 변경목록 접근성 — 전체 펼치기/접기 (live-test 2026-06-17: 변경이
+        # 카테고리/묶음에 접혀 "1개만 리스트업"되던 문제. 작은 변경셋은
+        # 자동 펼침, 큰 셋은 이 버튼으로 on-demand 전체 접근).
+        zone_tree_tools_row = QHBoxLayout()
+        self.btn_zone_expand_all_v2 = QPushButton("⊞ 모두 펼치기")
+        self.btn_zone_expand_all_v2.setToolTip(
+            "모든 카테고리와 변경 묶음을 펼쳐 전체 변경구역을 한눈에 표시합니다."
+        )
+        self.btn_zone_expand_all_v2.clicked.connect(self._expand_all_zones_v2)
+        self.btn_zone_collapse_all_v2 = QPushButton("⊟ 모두 접기")
+        self.btn_zone_collapse_all_v2.setToolTip("카테고리/묶음을 접어 목록을 간략히 봅니다.")
+        self.btn_zone_collapse_all_v2.clicked.connect(self._collapse_all_zones_v2)
+        zone_tree_tools_row.addWidget(self.btn_zone_expand_all_v2)
+        zone_tree_tools_row.addWidget(self.btn_zone_collapse_all_v2)
+        zone_tree_tools_row.addStretch()
+        layout.addLayout(zone_tree_tools_row)
         # Phase I2 — zone list is now a category tree:
         #   Root
         #   ├── 🏗️ 구조 부재 변경  (12)         ← top-level item (category)
@@ -6464,6 +6611,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._overlay_cache.clear()
         self._tile_manifest_cache_v2 = {}
         self._lightweight_raster_pairs = set()
+        self._lightweight_skeleton_framed_pairs = set()
         self._render_status_by_pair = {}
         self._active_issue_by_zone = {}
         self._active_all_overlays_by_zone = {}
@@ -8556,6 +8704,31 @@ class DrawingCompareWorkbenchV2(QMainWindow):
                 self._push_overlays_to_lightweight_v2(
                     pair_id, focus_zone_id=self._active_zone_id or "",
                 )
+                # Content-aware INITIAL framing for the SKELETON-ONLY path
+                # (live test 2026-06-18, AC1027 multi-detail pair). When the
+                # raster background is skipped (fast budget on heavy CAD:
+                # render_skipped_large_cad_fast_budget), the raster-load site's
+                # apply_shared_lightweight_camera_frame never runs, so QML
+                # fit-to-view frames the whole ~678k-mm multi-detail sheet and
+                # every change becomes sub-pixel -> blank preview. Apply the same
+                # proven content frame here, ONCE per pair, so the load view shows
+                # the primary change at real size. Gated so it never overrides a
+                # raster-framed pair nor a later user zone-zoom (per-pair set).
+                if (
+                    pair_id not in self._lightweight_raster_pairs
+                    and pair_id not in self._lightweight_skeleton_framed_pairs
+                ):
+                    viewer_pair = self._viewer_pairs_by_id.get(pair_id, {})
+                    try:
+                        visual_ext.apply_shared_lightweight_camera_frame(
+                            self, viewer_pair
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Skeleton content-frame apply failed", exc_info=True
+                        )
+                    finally:
+                        self._lightweight_skeleton_framed_pairs.add(pair_id)
             except Exception as exc:
                 logger.exception("Failed to load scene pack into viewport: %s", exc)
         elif mode == "render_pending":
@@ -10504,6 +10677,35 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             render_bbox = bbox
         before_render_bbox = _bbox_for_zone_crop_transform(overlay, viewer_pair, before=True) or render_bbox
         after_render_bbox = _bbox_for_zone_crop_transform(overlay, viewer_pair, before=False) or render_bbox
+        # Context floor (2026-06-17 live-test): a tiny isolated zone (e.g. 889 mm
+        # in a 524 m multi-detail sheet) cropped bare zooms to upp ~3 and the user
+        # is stuck over-zoomed, unable to place the change ("전체 보이다가 클로즈업
+        # 되어 고정"). Expand the crop window to a fraction of the overall
+        # changed-region extent so it renders WITH surrounding detail; the change
+        # stays findable via its never-dimmed revision cloud + focus marker. Span
+        # only (origin-independent) so it is safe on both re-origined sides, and
+        # only ever ENLARGES — never narrows a well-sized zone. CAD only (PDF crop
+        # bboxes are pixel-space). Best-effort: never breaks the render.
+        if not _viewer_pair_is_pdf(viewer_pair):
+            try:
+                from src.services.comparison.content_frame import context_floor_span
+                from src.services.comparison.transform import normalise_bbox
+                from src.gui.lightweight_viewport import ensure_min_world_span
+
+                _peer = [
+                    union_bboxes(o.get("old_bbox"), o.get("bbox"))
+                    for o in (self._active_overlays_by_zone or {}).values()
+                ]
+                _floor = context_floor_span([b for b in _peer if b])
+                if _floor > 0:
+                    _nb = normalise_bbox(before_render_bbox)
+                    _na = normalise_bbox(after_render_bbox)
+                    if _nb is not None:
+                        before_render_bbox = ensure_min_world_span(_nb, _floor)
+                    if _na is not None:
+                        after_render_bbox = ensure_min_world_span(_na, _floor)
+            except Exception:  # noqa: BLE001 — context floor must never break the render
+                logger.debug("zone-crop context floor failed", exc_info=True)
         request = {
             "request_id": request_id,
             "pair_uuid": pair_id,
@@ -11866,6 +12068,61 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self.lbl_zone_progress_v2.setTextFormat(Qt.RichText)
         self.lbl_zone_progress_v2.setText(html)
 
+    def _compute_region_by_zone_v2(self) -> dict[str, int]:
+        """Map zone_id -> 1-based detail-region index (left-to-right) for the
+        active drawing, via the SAME spatial clustering the cluster navigator uses
+        (content_frame.cluster_zone_bboxes). Multi-detail compare (P4): lets the
+        change list group changes by which detail view they sit in. Returns ``{}``
+        when there are < 2 regions, no overlays, or for PDF pairs (image_pixels,
+        whose Y conversion needs a page height not available here) — so the list
+        safely falls back to plain category grouping.
+        """
+
+        try:
+            overlays = list((getattr(self, "_active_overlays_by_zone", {}) or {}).values())
+            if len(overlays) < 2:
+                return {}
+            if any(
+                str((o or {}).get("bbox_coordinate_space") or "") == "image_pixels"
+                for o in overlays
+                if isinstance(o, dict)
+            ):
+                return {}
+            from src.services.comparison.content_frame import cluster_zone_bboxes
+            from src.gui.lightweight_viewport import (
+                _page_height_points_from_world_bbox,
+                convert_bbox_to_world_space,
+            )
+
+            before_vp = getattr(self, "preview_before_lightweight_v2", None)
+            page_height = _page_height_points_from_world_bbox(
+                getattr(before_vp, "world_bbox", (0.0, 0.0, 0.0, 0.0))
+            )
+
+            def _to_world(raw, space, dpi):
+                return convert_bbox_to_world_space(
+                    raw,
+                    coordinate_space=space,
+                    pdf_dpi=dpi,
+                    page_height_points=page_height,
+                )
+
+            clusters = cluster_zone_bboxes(overlays, _to_world)
+            # 2..N clean detail regions only; an excessive count means
+            # outlier/corrupted zone coordinates (validation: a 36.7 km-spread
+            # pair fragmented into 67) -> skip region grouping, keep category-only.
+            if not (2 <= len(clusters) <= _MAX_DETAIL_REGIONS):
+                return {}
+            region_by_zone: dict[str, int] = {}
+            for idx, cluster in enumerate(clusters, start=1):
+                for zid in cluster.get("zone_ids") or []:
+                    if zid:
+                        region_by_zone[str(zid)] = idx
+            return region_by_zone
+        except Exception:  # noqa: BLE001 — region grouping is best-effort
+            logger.debug("region-by-zone computation failed", exc_info=True)
+            return {}
+
     def _build_zone_tree_plan_v2(
         self,
         preview: Optional[PreviewArtifact],
@@ -11896,6 +12153,7 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             allow_clustering=allow_clustering,
             clustering_enabled=bool(getattr(self, "_zone_clustering_enabled_v2", True)),
             prefer_overlays=prefer_overlays,
+            region_by_zone=self._compute_region_by_zone_v2(),
         )
         self._active_issue_by_zone = active_issue_by_zone
         return plan
@@ -11972,6 +12230,21 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         self._set_batch_action_button_enabled_v2(bool(self._active_overlays_by_zone))
         plan = self._build_zone_tree_plan_v2(preview, overlays, prefer_overlays=prefer_overlays)
         self._append_zone_tree_plan_immediate_v2(plan)
+
+    def _expand_all_zones_v2(self) -> None:
+        """Expand every category header / cluster so all change zones show.
+
+        Live-test fix: near-duplicate changes cluster into a collapsed row, so a
+        14-zone drawing looked like "only 1 change". This gives the reviewer
+        one-click access to the full list regardless of set size.
+        """
+        if hasattr(self, "zone_list_v2"):
+            self.zone_list_v2.expandAll()
+
+    def _collapse_all_zones_v2(self) -> None:
+        """Collapse category/cluster nodes for a compact overview."""
+        if hasattr(self, "zone_list_v2"):
+            self.zone_list_v2.collapseAll()
 
     def _on_zone_selected_v2(self, current, _previous=None) -> None:
         selection_started = perf_counter()
@@ -13182,6 +13455,17 @@ def _consume_smoke_exit_ms(argv: list[str]) -> Optional[int]:
 def main() -> int:
     smoke_exit_ms = _consume_smoke_exit_ms(sys.argv)
     app = QApplication(sys.argv)
+    # Live-test 2026-06-17: the SVG vector overlay for zones filling a large
+    # fraction of the 8000 px render rasterised past Qt's default 256 MB
+    # QImageIOHandler limit and was SILENTLY dropped (the change cloud vanished).
+    # The per-overlay sourceSize is now capped (capped_svg_source_size); also
+    # raise the global ceiling so large PNG backgrounds / SVGs always decode.
+    try:
+        from PySide6.QtGui import QImageReader
+
+        QImageReader.setAllocationLimit(512)  # MB; 0 disables. 512 >> any single layer.
+    except Exception:  # noqa: BLE001 — ceiling raise is best-effort, never blocks startup
+        pass
     app.setApplicationName(APP_TITLE_KO)
     app.setOrganizationName("센엔지니어링 그룹 AI 동아리")
     app_icon = QIcon(str(_drawing_compare_asset_path("app_icon.ico")))

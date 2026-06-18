@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 Bbox = Sequence[float]
 OnPan = Callable[[Bbox], None]
 
+# Above this many clusters the strip is noise, not a navigable detail map (a pair
+# with outlier/corrupted zone coordinates scatters into dozens of singletons).
+MAX_NAV_CLUSTERS = 8
+
 
 class ClusterNavigator(QWidget):
     """A thin horizontal strip of per-cluster jump buttons (hidden when <2)."""
@@ -47,10 +51,13 @@ class ClusterNavigator(QWidget):
             btn.deleteLater()
 
     def set_clusters(self, clusters: Sequence[dict], on_pan: OnPan) -> None:
-        """Rebuild the strip. Shows one button per cluster; hides when <2."""
+        """Rebuild the strip. Shows one button per cluster; hides when < 2 or when
+        excessive (> MAX): dozens of clusters mean outlier/corrupted zone coords
+        (validation 2026-06-18: a 36.7 km-spread pair fragmented into 67), not a
+        navigable multi-detail map — a 67-button strip is worse than none."""
 
         self._clear_buttons()
-        if not clusters or len(clusters) < 2:
+        if not clusters or not (2 <= len(clusters) <= MAX_NAV_CLUSTERS):
             self.setVisible(False)
             return
         for index, cluster in enumerate(clusters):

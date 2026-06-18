@@ -130,3 +130,16 @@ def test_navigator_widget_hidden_for_single_cluster(qapp):
     nav.set_clusters([{"bbox": (0.0, 0.0, 100.0, 100.0), "count": 1, "zone_ids": ["a"]}], lambda b: None)
     assert nav._buttons == []
     assert nav.isVisible() is False
+
+
+def test_navigator_widget_hidden_for_excessive_clusters(qapp):
+    """Validation 2026-06-18: a corrupted-coords pair scattered into 67 clusters —
+    a 67-button strip is noise, not navigation, so hide past the cap."""
+    nav = ClusterNavigator()
+    clusters = [
+        {"bbox": (i * 1000.0, 0.0, i * 1000.0 + 100.0, 100.0), "count": 1, "zone_ids": [f"z{i}"]}
+        for i in range(20)
+    ]
+    nav.set_clusters(clusters, lambda b: None)
+    assert nav._buttons == []
+    assert nav.isVisible() is False

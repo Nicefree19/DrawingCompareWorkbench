@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -110,6 +111,28 @@ def _write_json_atomic(path: Path, payload: object) -> None:
     tmp.replace(path)
 
 
+# Process-local cache of the parsed + legibility-patched ezdxf doc, keyed by
+# (resolved DXF path, mtime_ns, size). The zone-render worker is PERSISTENT
+# (zone_render_process.main reads requests in a loop), but render_zone_focus
+# opened the doc with mutable=True on EVERY call (a fresh parse, to avoid
+# mutating the shared read-cache during the font remap) — so every zone the
+# user clicked re-parsed the multi-MB converted DXF, costing 4-5 s/zone
+# (live-test 2026-06-17). Caching the patched doc here lets the first zone pay
+# the parse and every later zone for the same source reuse it. Rendering only
+# READS the doc (draw + bbox), so cross-zone reuse is safe; the font patch is
+# applied once at parse time. Bounded so before+after of the current pair fit.
+_ZONE_DOC_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+_ZONE_DOC_CACHE_MAX = 3
+
+
+def _zone_doc_cache_key(dxf_path: Path) -> Optional[tuple]:
+    try:
+        st = dxf_path.stat()
+        return (str(dxf_path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def render_zone_focus(
     source_path: Path,
     zone_world_bbox: Bbox,
@@ -180,27 +203,48 @@ def render_zone_focus(
             skipped_reason=f"DXF resolution failed: {exc}",
         )
 
-    # 2. Open the doc. mutable=True: the font remap below must never touch
-    # the shared read-cache document other callers reuse.
-    try:
-        read_result = read_dxf_document_result(
-            dxf_path, ezdxf_module=ezdxf, mutable=True
-        )
-        doc = read_result.doc
-        patch_text_styles_for_legibility(doc)
-        read_warning = read_result.diagnostics.warning()
-        if read_warning:
-            warnings.append(read_warning)
-    except Exception as exc:
-        return ZoneFocusResult(
-            output_path="",
-            primitive_count=0,
-            entity_count=0,
-            truncated=False,
-            elapsed_ms=(time.perf_counter() - start) * 1000.0,
-            world_bbox=zone_world_bbox,
-            skipped_reason=f"ezdxf.readfile failed: {exc}",
-        )
+    # 2. Open the doc. Reuse a process-local cache of the parsed + patched doc
+    # across zones (the worker is persistent); only the first zone for a source
+    # pays the multi-MB parse. mutable=True still avoids mutating the SHARED
+    # read-cache during the font remap — we keep our own patched copy instead.
+    cache_key = _zone_doc_cache_key(dxf_path)
+    cached_entry = _ZONE_DOC_CACHE.get(cache_key) if cache_key is not None else None
+    if cached_entry is not None:
+        doc, bbox_cache = cached_entry
+        _ZONE_DOC_CACHE.move_to_end(cache_key)
+    else:
+        try:
+            read_result = read_dxf_document_result(
+                dxf_path, ezdxf_module=ezdxf, mutable=True
+            )
+            doc = read_result.doc
+            patch_text_styles_for_legibility(doc)
+            read_warning = read_result.diagnostics.warning()
+            if read_warning:
+                warnings.append(read_warning)
+        except Exception as exc:
+            return ZoneFocusResult(
+                output_path="",
+                primitive_count=0,
+                entity_count=0,
+                truncated=False,
+                elapsed_ms=(time.perf_counter() - start) * 1000.0,
+                world_bbox=zone_world_bbox,
+                skipped_reason=f"ezdxf.readfile failed: {exc}",
+            )
+        # Persist the per-entity bbox cache ALONGSIDE the doc (speed, 2026-06-18):
+        # the zone filter sweeps EVERY entity's bbox, and a fresh ezdxf bbox Cache
+        # per zone cost ~5 s/zone on the AC1027 pair (measured: 5.67 s to build vs
+        # 0.13 s when the same Cache is reused — 43x). One Cache per cached doc
+        # makes zone 2..N near-instant. Lazy-fill only; concurrent fills across the
+        # 2 zone-focus worker threads are benign (independent keys under the GIL;
+        # same-key recompute is idempotent), matching the existing lockless doc cache.
+        bbox_cache = ezdxf_bbox.Cache()
+        if cache_key is not None:
+            _ZONE_DOC_CACHE[cache_key] = (doc, bbox_cache)
+            _ZONE_DOC_CACHE.move_to_end(cache_key)
+            while len(_ZONE_DOC_CACHE) > _ZONE_DOC_CACHE_MAX:
+                _ZONE_DOC_CACHE.popitem(last=False)
 
     # 3. Build the zone bbox + spatial filter.
     padded = _pad_bbox(zone_world_bbox, padding_ratio)
@@ -210,7 +254,8 @@ def render_zone_focus(
 
     accepted_count = [0]
     truncated = [False]
-    bbox_cache = ezdxf_bbox.Cache()
+    # ``bbox_cache`` is the per-doc shared ezdxf bbox Cache created/reused above
+    # (FIX 2a) — NOT a fresh per-zone cache, so the entity-bbox sweep is paid once.
 
     def _entity_overlaps_zone(entity) -> Optional[bool]:
         try:
@@ -246,11 +291,42 @@ def render_zone_focus(
     backend = CustomJSONBackend(orient_paths=False)
     ctx = RenderContext(doc)
     fe = Frontend(ctx, backend)
+    # Resilient per-entity draw (L2, 2026-06-17): a single ``draw_layout`` aborts
+    # the WHOLE zone at the first un-renderable entity — e.g. an INSERT raising
+    # "'Glyph' object has no attribute 'data'" — keeping only what was drawn
+    # before it (the partial, hard-to-read zone the user saw on the SPLICE pair,
+    # logged as "draw_layout raised mid-stream"). Draw one entity at a time
+    # through the same zone filter so one bad entity is skipped instead of
+    # truncating the rest. Same resilience the scene-pack builder already uses.
+    skipped_entities = 0
+    first_skip_sample = ""
+    for entity in doc.modelspace():
+        try:
+            if not _zone_filter(entity):
+                continue
+        except Exception:  # noqa: BLE001 — an unmeasurable entity must not abort the zone
+            continue
+        try:
+            fe.draw_entities([entity])
+        except Exception as exc:  # noqa: BLE001 — one bad entity must not blank the zone
+            skipped_entities += 1
+            if not first_skip_sample:
+                etype = getattr(entity, "dxftype", lambda: "?")()
+                first_skip_sample = f"{etype}: {exc}"
     try:
-        fe.draw_layout(doc.modelspace(), finalize=True, filter_func=_zone_filter)
-    except Exception as exc:
-        warnings.append(f"Frontend.draw_layout raised mid-stream: {exc}")
-        logger.warning("Zone focus draw_layout raised mid-stream: %s", exc)
+        fe.pipeline.finalize()
+    except Exception as exc:  # noqa: BLE001 — finalize must not crash the zone build
+        warnings.append(f"Frontend finalize raised: {exc}")
+        logger.warning("Zone focus finalize failed: %s", exc)
+    if skipped_entities:
+        warnings.append(
+            f"Skipped {skipped_entities} un-renderable entit"
+            f"{'y' if skipped_entities == 1 else 'ies'} in zone; e.g. {first_skip_sample}"
+        )
+        logger.warning(
+            "Zone focus: skipped %d un-renderable entities; e.g. %s",
+            skipped_entities, first_skip_sample,
+        )
 
     primitives = backend.get_json_data() or []
 

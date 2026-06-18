@@ -40,7 +40,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
 
 from .dxf_read import read_dxf_document_result
 from .render_failure_codes import RenderFailureCode
@@ -169,6 +169,21 @@ def resolve_dxf_path(
         logger.info("Reusing cached DXF for %s -> %s", src.name, cached)
         return cached
 
+    # L4 (2026-06-17): once native canonical normalisation has failed for this
+    # exact source and we fell back to a cached DXF, skip the failing import on
+    # every later zone/skeleton render. The live log showed the same "DWG vector
+    # normalisation failed ... using cached DXF" 24x in one session, re-running
+    # the unsupported-version import each time.
+    _fail_key = _native_normalise_fail_key(src)
+    _memo_fallback = _NATIVE_NORMALISE_FALLBACK_MEMO.get(_fail_key)
+    if _memo_fallback:
+        _fb = Path(_memo_fallback)
+        if _fb.exists() and _fb.stat().st_size > 0:
+            if failure_codes is not None:
+                failure_codes.append("dwg_vector_normalise_failed")
+            return _fb
+        _NATIVE_NORMALISE_FALLBACK_MEMO.pop(_fail_key, None)
+
     try:
         from .dxf_writer import DxfExportOptions, DxfWriter
         from .import_pipeline import CadPipelineStatus, ImportPipeline, ImportPipelineOptions
@@ -213,9 +228,40 @@ def resolve_dxf_path(
                     src,
                     exc_info=True,
                 )
+        if fallback is None:
+            # Active ODA conversion (2026-06-18): every cache READ above missed —
+            # e.g. the compare resolved this pair via a ``dxf_registered`` sibling
+            # (dwg_dxf_fallback) so the ``oda_auto`` cache was never populated.
+            # Convert the DWG NOW with the configured converter — the same
+            # effective path the compare uses — instead of failing. Without this
+            # the viewer raised DWG_UNSUPPORTED_VERSION on AC1018-1027 DWGs and the
+            # user saw "미리보기 실패" even though the compare itself had succeeded
+            # (live test 2026-06-18, AC1027 pair). ODA-unavailable returns
+            # converted=False so the honest error below still fires — never a stub.
+            try:
+                from .dwg_dxf_fallback import auto_convert_unsupported_dwg
+
+                converted, did_convert, _convert_note = auto_convert_unsupported_dwg(
+                    src, cache_dir
+                )
+                converted_path = Path(converted)
+                if (
+                    did_convert
+                    and converted_path.exists()
+                    and converted_path.stat().st_size > 0
+                ):
+                    fallback = converted_path
+            except Exception:
+                logger.debug(
+                    "Active ODA auto-convert fallback failed for %s",
+                    src,
+                    exc_info=True,
+                )
         if fallback is not None:
             if failure_codes is not None:
                 failure_codes.append("dwg_vector_normalise_failed")
+            # Memo the failure so later renders skip the failing native import.
+            _NATIVE_NORMALISE_FALLBACK_MEMO[_fail_key] = str(fallback)
             logger.warning(
                 "DWG vector normalisation failed for %s; using cached DXF %s: %s",
                 src.name,
@@ -226,6 +272,20 @@ def resolve_dxf_path(
         raise OSError(
             f"DWG canonical import/export failed for {src.name}: {exc}"
         ) from exc
+
+
+# Per-source memo of "native canonical normalisation failed -> use this cached
+# DXF fallback" (L4, 2026-06-17). Keyed by (path, mtime_ns, size) so an edited
+# source re-attempts the native path. Process-local; cleared on restart.
+_NATIVE_NORMALISE_FALLBACK_MEMO: dict[str, str] = {}
+
+
+def _native_normalise_fail_key(src: Path) -> str:
+    try:
+        st = src.stat()
+        return f"{src}|{st.st_mtime_ns}|{st.st_size}"
+    except OSError:
+        return str(src)
 
 
 def _oda_autoconvert_cache(source_path: Path, cache_dir: Path) -> Optional[Path]:

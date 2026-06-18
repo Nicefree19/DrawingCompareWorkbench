@@ -88,3 +88,30 @@ def test_normalize_skeleton_ink_maps_near_white_only() -> None:
     assert out[2]["properties"]["color"] == "#cccccc"  # mid grey stays
     assert out[3]["properties"]["color"] == "#ff0000"  # red stays
     assert "color" not in out[4]["properties"]
+
+
+def test_normalize_skeleton_ink_dark_mode_preserves_native_lifts_black() -> None:
+    """L3 dark mode (black bg): native ACI colours preserved (DXF colour 7 = white
+    shows as intended); only near-black is lifted to a light ink so it stays
+    visible."""
+    prims = [
+        {"type": "lines", "geometry": [], "properties": {"color": "#ffffff"}},
+        {"type": "lines", "geometry": [], "properties": {"color": "#ff0000"}},
+        {"type": "lines", "geometry": [], "properties": {"color": "#000000"}},
+        {"type": "lines", "geometry": [], "properties": {"color": "#0a0a0a"}},
+    ]
+    out = normalize_skeleton_ink(prims, dark_mode=True)
+    assert out[0]["properties"]["color"] == "#ffffff"   # white stays (visible on black)
+    assert out[1]["properties"]["color"] == "#ff0000"   # red stays
+    assert out[2]["properties"]["color"] == "#E5E7EB"   # black → light ink
+    assert out[3]["properties"]["color"] == "#E5E7EB"   # near-black → light ink
+
+
+def test_normalize_skeleton_ink_is_non_destructive() -> None:
+    """The toggle re-normalises the same raw pack each time, so the input must be
+    left untouched (else light→dark→light would lose the original colours)."""
+    prims = [{"type": "lines", "geometry": [], "properties": {"color": "#ffffff"}}]
+    out = normalize_skeleton_ink(prims)
+    assert out[0]["properties"]["color"] == "#0F172A"      # output remapped
+    assert prims[0]["properties"]["color"] == "#ffffff"    # INPUT untouched
+    assert out[0] is not prims[0]                          # new dict, not aliased
