@@ -14,3 +14,9 @@ psutil>=5.9.0
 pyyaml>=6.0.1
 rich>=12.5.0
 rtree>=1.0.0,<2.0.0
+# Required runtime modules (release_environment_check.py): without them the
+# optimal matcher silently degrades to greedy (dxf_comparator.py) and SSIM is
+# disabled (drawing_differ.py). Both are permissively licensed (BSD) — no
+# copyleft concern, unlike the deliberately-excluded proprietary CAD deps.
+scikit-image>=0.21.0,<1.0.0
+scipy>=1.10.0,<2.0.0

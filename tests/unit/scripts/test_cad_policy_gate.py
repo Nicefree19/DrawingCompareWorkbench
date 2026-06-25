@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.cad_policy_gate import scan_repo
+from scripts.cad_policy_gate import (
+    MONOLITH_LINE_CEILINGS,
+    check_monolith_line_ceiling,
+    scan_repo,
+)
 
 
 def _write(path: Path, text: str) -> None:
@@ -146,6 +150,38 @@ def test_policy_gate_rejects_cad_visual_conversion_in_viewer_hot_path(tmp_path: 
     codes = {violation.code for violation in scan_repo(tmp_path)}
 
     assert "CAD_POLICY_CAD_VISUAL_HOT_PATH_CONVERSION" in codes
+
+
+def test_policy_gate_flags_monolith_over_line_ceiling(tmp_path: Path) -> None:
+    rel = "src/gui/drawing_compare_workbench.py"
+    ceiling = MONOLITH_LINE_CEILINGS[rel]
+    _write(tmp_path / rel, "\n".join(["pass"] * (ceiling + 1)) + "\n")
+
+    codes = {violation.code for violation in scan_repo(tmp_path)}
+
+    assert "CAD_POLICY_MONOLITH_LINE_CEILING" in codes
+
+
+def test_policy_gate_accepts_monolith_at_line_ceiling(tmp_path: Path) -> None:
+    rel = "src/gui/drawing_compare_workbench.py"
+    ceiling = MONOLITH_LINE_CEILINGS[rel]
+    _write(tmp_path / rel, "\n".join(["pass"] * ceiling) + "\n")
+
+    codes = {violation.code for violation in scan_repo(tmp_path)}
+
+    assert "CAD_POLICY_MONOLITH_LINE_CEILING" not in codes
+
+
+def test_monolith_line_ceiling_skips_absent_files(tmp_path: Path) -> None:
+    # No monolith file under tmp_path → no violation (keeps synthetic policy
+    # fixtures unaffected by the new check).
+    assert check_monolith_line_ceiling(tmp_path) == []
+
+
+def test_real_monoliths_are_within_their_pinned_ceilings() -> None:
+    # The repo as it stands must satisfy its own ratchet (regression guard so the
+    # pinned ceilings are never set below the current size by mistake).
+    assert check_monolith_line_ceiling(Path(__file__).resolve().parents[3]) == []
 
 
 def test_policy_gate_accepts_disabled_cad_visual_backend_descriptors(tmp_path: Path) -> None:

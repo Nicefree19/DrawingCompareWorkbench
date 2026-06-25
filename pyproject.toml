@@ -40,6 +40,10 @@ dependencies = [
     "pyyaml>=6.0.1",
     "rich>=12.5.0",
     "rtree>=1.0.0,<2.0.0",
+    # Required runtime modules per scripts/release_environment_check.py; absent
+    # they silently degrade matching (Hungarian->greedy) and disable SSIM.
+    "scikit-image>=0.21.0,<1.0.0",
+    "scipy>=1.10.0,<2.0.0",
 ]
 
 [project.urls]

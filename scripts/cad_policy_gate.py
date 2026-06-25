@@ -7,6 +7,9 @@ regressions that would invalidate the ODA-free/customer-build direction:
 * ODA executable or LibreDWG/GPL CAD reader references outside quarantined files.
 * Missing clean-room approval contract for planned AC1024/AC1032 DWG decoding.
 * Customer-facing text that implies full DWG or AC1024/AC1032 native support.
+* Monolith line-count regression past its frozen non-increase ceiling
+  (docs/MONO_DECOMPOSITION_PLAN.md authorises this as strengthening the existing
+  decomposition freeze — it is NOT a new audit gate).
 """
 
 from __future__ import annotations
@@ -82,6 +85,17 @@ QUARANTINED_CODE_FILES = {
     "src/services/comparison/dwg_converter.py",
     "src/services/comparison/dwg_differ.py",
     "src/services/comparison/import_pipeline.py",
+}
+# Non-increase ceilings for the GUI monoliths. The decomposition freeze
+# (docs/MONO_DECOMPOSITION_PLAN.md) forbids adding logic to these god-classes;
+# extraction may only lower a ceiling. Pinned at the current line count so the
+# gate ratchets — it blocks future inflation without red-flagging today's state.
+# The plan explicitly permits this non-increase assertion as "기존 의도의 강화
+# (신규 audit 게이트 아님)". Lowering a ceiling after an extraction is expected
+# and encouraged. Counted with the same splitlines() basis the gate reads with.
+MONOLITH_LINE_CEILINGS = {
+    "src/gui/drawing_compare_workbench.py": 13482,
+    "src/gui/lightweight_viewport.py": 2106,
 }
 FORBIDDEN_CODE_PATTERNS = (
     (
@@ -197,6 +211,7 @@ def scan_repo(root: Path = ROOT) -> list[PolicyViolation]:
     root = root.resolve()
     violations: list[PolicyViolation] = []
     violations.extend(check_runtime_requirements(root))
+    violations.extend(check_monolith_line_ceiling(root))
     violations.extend(check_product_code(root))
     violations.extend(check_policy_wording(root))
     violations.extend(check_cad_visual_backend_policy(root))
@@ -230,6 +245,36 @@ def check_runtime_requirements(root: Path) -> list[PolicyViolation]:
                             stripped,
                         )
                     )
+    return violations
+
+
+def check_monolith_line_ceiling(root: Path) -> list[PolicyViolation]:
+    """Fail if a frozen GUI monolith grew past its pinned non-increase ceiling.
+
+    Catches the silent freeze regression where new methods are added to the
+    god-class across feature commits with no mechanical guard. Files absent from
+    ``root`` are skipped so the synthetic ``tmp_path`` policy tests are unaffected.
+    """
+    violations: list[PolicyViolation] = []
+    for rel, ceiling in MONOLITH_LINE_CEILINGS.items():
+        path = root / rel
+        if not path.exists():
+            continue
+        line_count = len(_read_lines(path))
+        if line_count > ceiling:
+            violations.append(
+                PolicyViolation(
+                    rel,
+                    0,
+                    "CAD_POLICY_MONOLITH_LINE_CEILING",
+                    (
+                        f"{rel} is {line_count} lines, over its frozen ceiling of "
+                        f"{ceiling}. The decomposition freeze forbids adding logic to "
+                        "this god-class — extract instead, then lower the ceiling in "
+                        "scripts/cad_policy_gate.py (MONOLITH_LINE_CEILINGS)."
+                    ),
+                )
+            )
     return violations
 
 
