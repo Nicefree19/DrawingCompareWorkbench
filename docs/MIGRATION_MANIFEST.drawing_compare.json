@@ -89,7 +89,6 @@
                   "src/gui/lightweight_viewport.py",
                   "src/gui/noise_filter_dialog.py",
                   "src/gui/theme/__init__.py",
-                  "src/gui/theme/nano_v2_theme.py",
                   "src/gui/unified_load_module/utils/comparison_settings.py",
                   "src/gui/unified_load_module/workers/compare_worker.py",
                   "src/services/__init__.py",
