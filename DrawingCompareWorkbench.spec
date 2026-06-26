@@ -43,7 +43,13 @@ hiddenimports = [
     "src.services.comparison.visual_asset",
 ]
 
-for package_name in ("ezdxf", "cv2", "fitz", "openpyxl", "PIL", "scipy"):
+# skimage + rtree join scipy here so the bundled exe ships their data files and
+# native libraries. Without collect_all, skimage.metrics (SSIM) can fail to load
+# and rtree's native libspatialindex DLLs are dropped — the latter silently
+# downgrades the spatial-index acceleration to the linear fallback on a clean
+# machine (RTREE_AVAILABLE=False in spatial_index.py), the packaging-layer twin
+# of the scipy/skimage clean-install gap.
+for package_name in ("ezdxf", "cv2", "fitz", "openpyxl", "PIL", "scipy", "skimage", "rtree"):
     try:
         package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     except Exception:
@@ -86,6 +92,10 @@ a = Analysis(
         "langchain",
         "llama_cpp",
         "nltk",
+        # onnxruntime backs the opt-in embedding AI tier, which ships inert (no
+        # model bundled). It is lazy-imported, so PyInstaller would otherwise
+        # pull its ~200 MB of binaries into the default build as dead weight.
+        "onnxruntime",
         "paddle",
         "paddleocr",
         "playwright",
