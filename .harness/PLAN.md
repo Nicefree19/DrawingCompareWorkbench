@@ -4,42 +4,42 @@
 
 ## 단계 (순서대로)
 
-### S1. 결정성 검증 (선결)  (복잡도: 낮)
-- 무엇을: 5개 결정적 후보 테스트를 각각 단독 + 2회 연속 실행해 per-PR 안전(빠름·flaky 아님) 확인. GUI 테스트는 offscreen 결정성 별도 평가.
-- 산출: 후보별 통과/시간/결정성 표(STATUS 검증로그).
-- 검증: T4
+### S1. changed-files lint 메커니즘 설계·로컬 검증 (선결)  (복잡도: 중)
+- 무엇을: GH Actions `pull_request`서 변경 .py 목록 추출(`git diff --name-only origin/${{ github.base_ref }}...HEAD` → `*.py` 필터) → `black --check` + `isort --check-only` 그 목록만. push-only 트리거엔 skip(base 없음). 로컬서 동일 로직 재현(깨끗한 변경 pass·망친 변경 fail).
+- 산출: 검증된 셸 스니펫.
+- 검증: T1
 - 의존: 없음
 
-### S2. per-PR 목록에 추가 (C1)  (복잡도: 낮)
-- 무엇을: `cad-format-regression.yml`의 pytest 목록에 S1 통과 결정적 파일 추가(Windows backtick 줄연속 형식 유지).
+### S2. CI 워크플로에 lint step 추가 (L1)  (복잡도: 낮)
+- 무엇을: cad-format-regression.yml에 `Lint changed Python files` step(`if: github.event_name == 'pull_request'`). 기존 step 보존.
 - 산출: 워크플로 diff.
-- 검증: T1
+- 검증: T1, T4(YAML)
 - 의존: S1 →
 
-### S3. GUI 테스트 처리 결정 (C3)  (복잡도: 중)
-- 무엇을: zone_tree_failure_surfacing 결정성 따라 — 안정적이면 목록 포함, AV-prone이면 **별도 명시 step/job**(continue-on-error 아님; 격리 사유 주석). silent-skip 금지.
-- 산출: 결정 + 사유.
-- 검증: T3
-- 의존: S1 →
-
-### S4. check_ci_gate 메타-가드 확장 (C2)  (복잡도: 낮)
-- 무엇을: `cad_policy_gate.check_ci_gate`에 critical 테스트 파일 존재 단언 추가(기존 required_snippets 패턴 재사용). 워크플로에서 빠지면 violation.
-- 산출: 게이트 코드 + tmp_path 테스트(누락 시뮬→violation).
+### S3. mypy 설정 정정 (L2)  (복잡도: 낮)
+- 무엇을: `pyproject.toml`의 `[[tool.mypy.overrides]]`서 실존하지 않는 모듈(src.core.parsers.*·src.core.validators.* 등) 제거 — 잔재 정리. (게이팅은 안 함.)
+- 산출: pyproject diff + 잔재 0 확인.
 - 검증: T2
-- 의존: S2 →(목록 확정 후)
+- 의존: 없음 (S1~S2와 독립)
 
-### S5. 통합 비퇴행 (C5)  (복잡도: 낮)
-- 무엇을: `cad_policy_gate` 그린·기존 워크플로 step(golden floor·diff-check·policy) 보존 확인.
-- 검증: T5
+### S4. meta-guard (L3)  (복잡도: 낮)
+- 무엇을: lint step 존재를 `check_ci_gate` required_snippets에 추가(예: "black --check") 또는 전용 테스트. 제거 시 violation.
+- 산출: 게이트/테스트 + 누락-시뮬 케이스.
+- 검증: T3
+- 의존: S2 →
+
+### S5. 통합 비퇴행 (L4)  (복잡도: 낮)
+- 무엇을: 기존 step(테스트·golden·diff-check·policy) 보존·cad_policy_gate 그린·YAML 유효 확인.
+- 검증: T4
 - 의존: S2~S4 →
 
 ## 리스크 & 대응
 | 리스크 | 영향 | 대응 |
 |--------|------|------|
-| 추가 테스트가 CI서 flaky(특히 GUI) | 상 | S1서 결정성 선검증. GUI는 격리. flaky면 드롭+사유. |
-| e2e_smoke가 CI 환경서 느림/실패 | 중 | 로컬 ~5s 측정. CI Qt offscreen 의존성 확인. 실패시 격리. |
-| check_ci_gate 확장이 기존 테스트 깸 | 중 | 누락-시뮬 tmp_path 테스트로 정밀 검증, accepts 케이스 갱신. |
-| 과한 목록→CI 시간 폭증 | 하 | 결정적·빠른 것만(각 <10s 목표). |
+| changed-files diff 로직이 CI서 오작동(base ref/rename/삭제) | 상 | S1 로컬 정밀 검증 + 삭제파일 제외(`--diff-filter=d`). pull_request만. |
+| black/isort 버전 불일치로 CI vs 로컬 결과 다름 | 중 | requirements-dev 핀 버전 사용(black 23.12·isort 5.12). CI도 동일 설치. |
+| 변경파일이 백로그 파일(이미 미포맷)일 때 PR이 reformat 강제→큰 diff | 중 | 의도된 동작(만지면 정리). 단 모놀리스 변경 시 라인-실링 동시 주의 — 사유 기록. |
+| mypy override 제거가 의도된 strict 의도 깸 | 하 | 해당 모듈 부재 입증(MISSING) → 死설정이라 무영향. |
 
 ## 변경 이력
-- 2026-06-26 생성: CI-enforcement 캡스톤. cad-format-regression 하드코딩 목록에 세션 테스트 미포함 확인 기반.
+- 2026-06-26 생성: BDC-2. 백로그 실측(black160/isort112)으로 전체게이트→changed-files 범위 축소. mypy=잔재정리만.
