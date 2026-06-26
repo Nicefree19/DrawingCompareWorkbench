@@ -51,6 +51,23 @@ jobs:
             tests\unit\services\comparison\test_drawing_batch.py `
             tests\unit\services\comparison\test_preflight.py `
             tests\unit\services\comparison\test_zone_vector_renderer.py `
+            tests\unit\services\comparison\test_change_zones.py `
+            tests\unit\services\comparison\test_canonical_text_recall.py `
+            tests\unit\services\comparison\test_e2e_pipeline_smoke.py `
+            tests\unit\scripts\test_release_environment_check.py `
+            tests\unit\scripts\test_build_spec_bundling.py `
+            -q -o log_cli=false
+
+      # GUI fail-loud surfacing tests run offscreen and are kept in a SEPARATE
+      # gating step (not continue-on-error) so a PySide6 native-AV crash is
+      # clearly attributed here rather than conflated with the deterministic
+      # headless bulk above. Deterministic locally (offscreen, 2x green).
+      - name: Run GUI fail-loud surfacing tests (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest `
+            tests\unit\gui\test_zone_tree_failure_surfacing.py `
             -q -o log_cli=false
 
       - name: Golden accuracy floor (no detection regression)

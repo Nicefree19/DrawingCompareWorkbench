@@ -457,6 +457,18 @@ def check_ci_gate(root: Path) -> list[PolicyViolation]:
         "CAD_POLICY_CI_DIFF_CHECK": "git diff --check",
         "CAD_POLICY_CI_POLICY_GATE": "python scripts\\cad_policy_gate.py",
     }
+    # Reliability test files that must stay in the per-PR gate so the gates/tests
+    # shipped for them never become silently inert (the CI-layer silent_fallback
+    # this guard closes). Names only — the gate asserts presence, not the exact
+    # pytest invocation, so reorganizing the steps stays free.
+    required_reliability_tests = {
+        "CAD_POLICY_CI_TEST_RELEASE_ENV": "test_release_environment_check.py",
+        "CAD_POLICY_CI_TEST_BUILD_SPEC": "test_build_spec_bundling.py",
+        "CAD_POLICY_CI_TEST_RECALL": "test_canonical_text_recall.py",
+        "CAD_POLICY_CI_TEST_E2E_SMOKE": "test_e2e_pipeline_smoke.py",
+        "CAD_POLICY_CI_TEST_CHANGE_ZONES": "test_change_zones.py",
+        "CAD_POLICY_CI_TEST_ZONE_TREE_FAILURE": "test_zone_tree_failure_surfacing.py",
+    }
     violations = []
     for code, snippet in required_snippets.items():
         if snippet not in text:
@@ -466,6 +478,17 @@ def check_ci_gate(root: Path) -> list[PolicyViolation]:
                     0,
                     code,
                     f"CI workflow must run `{snippet}`.",
+                )
+            )
+    for code, test_file in required_reliability_tests.items():
+        if test_file not in text:
+            violations.append(
+                PolicyViolation(
+                    ".github/workflows/cad-format-regression.yml",
+                    0,
+                    code,
+                    f"per-PR CI must keep running the reliability test `{test_file}` "
+                    "(do not let it become silently inert).",
                 )
             )
     return violations

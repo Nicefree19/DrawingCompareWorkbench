@@ -1,27 +1,26 @@
 # STATUS — 실시간 진행 추적
 
-> 매 반복 ⑥ 기록 스텝에서 즉시 갱신. 상태: ⬜대기 / 🔄진행 / ✅완료 / 🚧블록
+> 매 반복 ⑥ 즉시 갱신. 상태: ⬜대기 / 🔄진행 / ✅완료 / 🚧블록
 
 ## 현재 포커스
-- **지금 무엇을, 왜**: ✅ Phase 2 완료 — D1·D2·D3 구현·검증, D4 드롭(verified-satisfied). 17 신규 테스트 그린.
+- **지금 무엇을, 왜**: ✅ Phase 2 완료 — C1~C5 전부 충족. 세션 신뢰성 테스트가 per-PR 강제됨.
 - **마지막 갱신**: 2026-06-26 / Phase 2 종료
 
 ## 단계 현황
 | 단계 | 상태 | 결과 | 검증(T) | 메모 |
 |------|------|-----------|---------|------|
-| S1 release env-check 게이트 (D1) | ✅ | `--strict` nonzero-on-missing + 릴리스 스크립트 PyInstaller-전 게이트 | T1 | clean. 4 테스트 |
-| S2 bundle-presence 테스트 (D2) | ✅ | datas(src/scripts) 단언 + critical 파일 존재 가드 | T2 | clean. 2 테스트 |
-| S3 zone-failure 표면화 (D3) | ✅ | tree-rebuild 실패 콜백 2종 → lbl_status_v2. **satellite 추출로 net -15줄**(13482→13467) | T3,T5 | 라인-실링 준수. 4 테스트 |
-| S4 zero-change 명시 (D4) | ⏭️ DROP | **verified-satisfied**: `natural_change_summary`가 이미 "변경 없음" 반환(satellite). "파일 일치" 추가는 cosmetic·모놀리스 churn 불가치 | — | verify-then-drop |
-| S5 통합 비퇴행 | ✅ | 17 테스트 그린·policy gate(라인-실링) pass·offscreen boot OK | T5,T6 | — |
+| S1 결정성 검증 | ✅ | 결정적 5종 53 pass×2(9.3/5.3s)·GUI 4 pass×2(offscreen) | T4 | 전부 결정적 |
+| S2 per-PR 목록 추가 (C1) | ✅ | 5 결정적 테스트를 main pytest step에 추가 | T1 | |
+| S3 GUI 테스트 처리 (C3) | ✅ | **별도 offscreen step**(gating, continue-on-error 아님)로 격리 — AV 귀속 명확, silent-skip 없음 | T3 | 결정적이나 격리 |
+| S4 check_ci_gate 메타-가드 (C2) | ✅ | 6 critical 테스트 파일 존재 단언 추가(기존 패턴) + 누락-시뮬 테스트 | T2 | |
+| S5 통합 비퇴행 (C5) | ✅ | gate passed·기존 step(golden/diff/policy) 보존·YAML 유효 | T5 | |
 
 ## 검증 로그 (증거)
-- [x] T1 release gate: `--strict` 누락-시뮬→exit 1, 전부 있으면 0 (4 테스트 pass)
-- [x] T2 bundle: datas src/scripts 단언 + critical 파일 존재 (test_build_spec_bundling 5 pass)
-- [x] T3 zone-failure: offscreen 콜백 2종→`lbl_status_v2`=실패메시지 단언 (4 pass)
-- [⏭️] T4 zero-change: 드롭(이미 "변경 없음")
-- [x] T5 cad_policy_gate: `passed`(모놀리스 13,467≤13,482)
-- [x] T6: 17 신규 테스트 그린 + offscreen boot OK
+- [x] T1 워크플로 신규 테스트: 6 파일 매치(grep)
+- [x] T2 메타-가드: test_policy_gate_flags_dropped_reliability_test_in_ci pass(누락→violation)
+- [x] T3 GUI: 결정적(offscreen 2x) → 별도 gating step로 포함(격리·사유 주석). silent-skip 없음
+- [x] T4 결정성: 결정적 5종 2회 연속 53 pass
+- [x] T5: `cad_policy_gate passed`·기존 3 step 보존·YAML valid. test_cad_policy_gate 12 pass
 
 ## 블록/이슈
-- 없음. 정직성 노트: 감사 에이전트 주장 다수(R1/R2/G2/G4/D4/zone-crop) 재검증서 과장→드롭. 실제 fail-loud 갭은 D1·D3 핵심 + D2 테스트 갭뿐. 앱은 surface 감사보다 견고.
+- 없음. 정직성: GUI 테스트는 결정적이나 AV-prone 카테고리라 **별도 step 격리**(향후 CI서 flaky 판명 시 명시 사유로 처리 — silent 아님).

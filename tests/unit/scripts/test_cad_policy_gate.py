@@ -83,7 +83,10 @@ def test_policy_gate_accepts_customer_safe_wording_and_ci(tmp_path: Path) -> Non
     )
     _write(
         tmp_path / ".github/workflows/cad-format-regression.yml",
-        "steps:\n  - run: git diff --check\n  - run: python scripts\\cad_policy_gate.py\n",
+        "steps:\n  - run: git diff --check\n  - run: python scripts\\cad_policy_gate.py\n"
+        "  - run: python -m pytest test_release_environment_check.py test_build_spec_bundling.py "
+        "test_canonical_text_recall.py test_e2e_pipeline_smoke.py test_change_zones.py "
+        "test_zone_tree_failure_surfacing.py\n",
     )
     _write(
         tmp_path / "docs/DWG_CLEANROOM_FORMAT_CONTRACT.md",
@@ -113,6 +116,27 @@ def test_policy_gate_accepts_customer_safe_wording_and_ci(tmp_path: Path) -> Non
     )
 
     assert scan_repo(tmp_path) == []
+
+
+def test_policy_gate_flags_dropped_reliability_test_in_ci(tmp_path: Path) -> None:
+    # CI-enforcement meta-guard: a workflow that drops a reliability test file
+    # must be flagged so the gates/tests never become silently inert.
+    _write(tmp_path / "requirements.txt", "-r requirements-core.txt\n")
+    _write(
+        tmp_path / ".github/workflows/cad-format-regression.yml",
+        "steps:\n  - run: git diff --check\n  - run: python scripts\\cad_policy_gate.py\n"
+        # change_zones + zone_tree_failure_surfacing intentionally OMITTED
+        "  - run: python -m pytest test_release_environment_check.py test_build_spec_bundling.py "
+        "test_canonical_text_recall.py test_e2e_pipeline_smoke.py\n",
+    )
+
+    codes = {violation.code for violation in scan_repo(tmp_path)}
+
+    assert "CAD_POLICY_CI_TEST_CHANGE_ZONES" in codes
+    assert "CAD_POLICY_CI_TEST_ZONE_TREE_FAILURE" in codes
+    # The ones still present must NOT be flagged.
+    assert "CAD_POLICY_CI_TEST_RELEASE_ENV" not in codes
+    assert "CAD_POLICY_CI_TEST_E2E_SMOKE" not in codes
 
 
 def test_policy_gate_rejects_default_enabled_nonapproved_cad_visual_backend(tmp_path: Path) -> None:

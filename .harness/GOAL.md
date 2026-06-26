@@ -1,36 +1,30 @@
 # GOAL — 핵심 목표
 
 ## 한 줄 정의
-**검증된 silent-failure 경로를 visible(사용자 신호) 또는 gated(빌드 차단)로 전환**해, 치명적 실패가 조용히 넘어가지 않게 한다 — 각 전환은 결정적 테스트로 고정.
+**per-PR CI가 이번 신뢰성 작업(게이트·테스트)을 실제로 강제**하게 한다 — silently-inert(존재하나 미실행) 테스트 0.
 
 ## 배경/맥락
-"프로그램 안정적 실행/작동" 북극성의 다음 단계. 3각도 멀티에이전트 감사(error-UX · runtime · build/deploy) 결과 **단일 뿌리 = silent_fallback**: 코드는 우아하게 저하/삼키지만 사용자·빌드가 모른다.
+신뢰성 아크의 **캡스톤**. 직전까지 deps·freeze·recall·build-spec·fail-loud을 게이트/테스트로 추가했으나, **per-PR 게이트(`.github/workflows/cad-format-regression.yml`)는 하드코딩 15-파일 pytest 목록만 실행** → 이번 세션 신규 테스트 **전부 미포함**:
+- `test_release_environment_check.py`(D1·deps 계약) · `test_build_spec_bundling.py`(D2·#52) · `test_canonical_text_recall.py`(recall) · `test_e2e_pipeline_smoke.py`(E2E) · `test_change_zones.py`(rebar cap) · `test_zone_tree_failure_surfacing.py`(D3).
 
-**정직성 노트(중요):** 감사 에이전트의 "top lever" 다수가 재검증에서 **과장**으로 드러나 제외함 —
-- R1 cosmetic 루프(dxf_comparator.py:1320): O(n) 선형, 행 아님 → 드롭.
-- R2 viewer OOM: `assert_within_memory_budget` 가드 이미 존재(viewer_package.py:365) → 드롭.
-- G2 smoke flag: exe가 `--smoke-exit-ms` 이미 처리(drawing_compare_workbench.py:13456) → 마진.
-- G4 cache writability: `ensure_subdir`에 `except OSError` 이미 있음 → 마진.
+즉 게이트는 만들었으나 **PR을 보호하지 않는다** = silent_fallback의 CI-층 재발. (단 golden floor `--min-recall 0.68`·`cad_policy_gate`·`git diff --check`는 이미 per-PR.)
 
-아래 DoD는 **재검증에서 살아남은 real 항목만**. 목표는 "감사 리스트 소화"가 아니라 verified-real만 고친다.
+**정직성 노트**: 전체 comparison 스위트 gating은 PySide6 native-AV 천장([[full_suite_health]])으로 비결정 → 범위 밖. 목표는 **결정적** 테스트만 per-PR로.
 
-## 검증 가능한 종료조건 (Definition of Done)
-> 각 항목 객관 체크 + 검증 명령. 모호어 금지.
+## 검증 가능한 종료조건 (DoD)
+- [ ] **C1**: 결정적 신규 테스트가 per-PR pytest 목록에 추가됨 — release_environment_check·build_spec_bundling·canonical_text_recall·e2e_pipeline_smoke·change_zones. · 검증: 워크플로 grep + 각 테스트 그린
+- [ ] **C2 (meta-guard)**: `cad_policy_gate.check_ci_gate`가 위 critical 테스트 파일이 워크플로에 있음을 단언(미래 silent 제거 방지) — **기존 check_ci_gate 확장**(신규 게이트 아님). · 검증: 파일 제거 시뮬→게이트 violation
+- [ ] **C3**: GUI 테스트(zone_tree_failure_surfacing)는 결정성 평가 후 **포함 or 별도 명시 job으로 격리**(silent-skip 금지). · 검증: 결정 + 사유 기록
+- [ ] **C4**: 추가 테스트가 per-PR서 **결정적 그린**(반복 실행 flaky 아님). · 검증: 2회 연속 그린
+- [ ] **C5 (no regression)**: `cad_policy_gate` 그린(라인-실링 포함)·기존 게이트 무변. · 검증: gate + 기존 워크플로 step 보존
 
-- [ ] **D1 (release gate)**: `scripts/release_environment_check.py`가 REQUIRED 모듈 누락 시 **nonzero 종료**(현재 무조건 `return 0`), 릴리스 스크립트가 PyInstaller **전에 하드 게이트**로 호출. · 검증: 필수모듈 누락 시뮬 → 종료코드≠0 단위테스트
-- [ ] **D2 (bundle proof)**: `test_build_spec_bundling.py`가 **datas 존재**(QML assets·`scripts/render_viewer_package_subprocess.py`) 단언 + spec 누락 시 명시. · 검증: `pytest tests/unit/scripts/test_build_spec_bundling.py`
-- [ ] **D3 (zone-failure visible)**: zone-tree 로드 실패(`_on_full_zone_tree_overlay_failed_v2`/`_plan_failed_v2`, L7311/7611)·zone-crop 에러(L11223)가 status/badge에 **표면화**(현재 log+perf만). · 검증: offscreen 인스턴스+실패 콜백 → status/badge 갱신 단언
-- [ ] **D4 (zero-change clarity)**: 변경 0건 결과가 "변경 없음 · 파일 일치"로 **명시**(현재 모호한 빈 요약). · 검증: 동일 도면쌍 → 요약/상태 텍스트 단언
-- [ ] **D5 (no regression)**: comparison at-risk 유닛 + 신규 테스트 그린 · `cad_policy_gate` 그린(**모놀리스 라인-실링 비증가 포함**). · 검증: `pytest` + `cad_policy_gate.py`
+## 범위 밖
+- 전체 comparison/gui 스위트 gating(native-AV 천장).
+- **lint/type CI**(별도 작업).
+- workflow_dispatch full-suite 변경.
+- 새 비교 로직·정확도(분식 금지).
 
-## 범위 밖 (Out of Scope)
-- **코드 서명**(인증서)·**클린 VM 빌드-실행 테스트**(VM) — P2 잔여, 환경 의존.
-- **드롭된 과장 항목**(R1/R2/G2/G4).
-- **recall 정확도**(완료).
-- **대형 실도면 라이브 GUI 행 재현**(사람·환경).
-
-## 산출물 목록
-- `scripts/release_environment_check.py` + `release_drawing_compare_workbench.py` (D1)
-- `tests/unit/scripts/test_build_spec_bundling.py` (+spec 필요시) (D2)
-- `src/gui/drawing_compare_workbench.py` 또는 satellite (D3/D4, **라인-실링 비증가**)
-- 신규 회귀 테스트 + 완료 보고(통과 명령·출력·DoD 충족표)
+## 산출물
+- `.github/workflows/cad-format-regression.yml`(테스트 목록 확장)
+- `scripts/cad_policy_gate.py`(check_ci_gate 확장) + `tests/unit/scripts/test_cad_policy_gate.py`
+- 완료 보고(워크플로 diff·테스트 그린·DoD 충족표)
