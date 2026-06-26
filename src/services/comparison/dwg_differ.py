@@ -593,6 +593,12 @@ class DwgDiffer:
                 tolerance=tolerance,
                 structural_position_tolerance_mm=float(sensitivity.structural_position_threshold),
                 search_radius_mm=float(sensitivity.near_match_radius),
+                # Text-like labels can shift further than the base radius while
+                # their content changes; pass the (existing) text radius so the
+                # canonical engine merges them as modified instead of add+delete.
+                text_search_radius_mm=float(
+                    getattr(sensitivity, "text_near_match_radius", 50.0)
+                ),
                 max_spatial_cells_per_entity=stability_limits.max_spatial_cells_per_entity,
                 include_unchanged=bool(self.config.get("include_unchanged", False)),
                 include_entity_snapshots=True,

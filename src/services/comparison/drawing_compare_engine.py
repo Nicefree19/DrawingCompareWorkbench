@@ -51,6 +51,11 @@ class DrawingCompareOptions:
     tolerance: CompareTolerance = field(default_factory=CompareTolerance)
     structural_position_tolerance_mm: Optional[float] = None
     search_radius_mm: float = 5.0
+    # Wider candidate radius for text-like entities (TEXT/MTEXT/DIMENSION/
+    # MULTILEADER). A label that shifts more than ``search_radius_mm`` while its
+    # content also changes would otherwise split into added+deleted instead of a
+    # single modified ("치수가 두 개로" bug). 0 ⇒ fall back to search_radius_mm.
+    text_search_radius_mm: float = 0.0
     match_threshold: float = 0.62
     spatial_cell_size_mm: Optional[float] = None
     max_spatial_cells_per_entity: int = 4096
@@ -63,6 +68,7 @@ class DrawingCompareOptions:
             "tolerance": self.tolerance.to_dict(),
             "structural_position_tolerance_mm": self.structural_position_tolerance_mm,
             "search_radius_mm": self.search_radius_mm,
+            "text_search_radius_mm": self.text_search_radius_mm,
             "match_threshold": self.match_threshold,
             "spatial_cell_size_mm": self.spatial_cell_size_mm,
             "max_spatial_cells_per_entity": self.max_spatial_cells_per_entity,
@@ -406,7 +412,7 @@ class EntityMatcher:
             if index is None:
                 index = _CanonicalSpatialIndex(
                     cell_size=self.options.spatial_cell_size_mm
-                    or max(candidate_radius, 1.0),
+                    or max(self._radius_for_type(entity_type), 1.0),
                     max_cells_per_entity=self.options.max_spatial_cells_per_entity,
                 )
                 index_by_type[entity_type] = index
@@ -419,7 +425,9 @@ class EntityMatcher:
             index = index_by_type.get(_entity_type_key(old_entity))
             if index is None:
                 continue
-            for new_entity in index.query(old_entity, radius=candidate_radius):
+            for new_entity in index.query(
+                old_entity, radius=self._radius_for_type(_entity_type_key(old_entity))
+            ):
                 candidate = self.score(old_entity, new_entity)
                 if candidate.score >= self.options.match_threshold:
                     candidate_by_pair[(candidate.old_entity_id, candidate.new_entity_id)] = candidate
@@ -468,7 +476,7 @@ class EntityMatcher:
         centroid_distance = _point_distance_2d(old_centroid, new_centroid)
         bbox_iou = _bbox_iou(old_bbox, new_bbox)
         bbox_distance = _bbox_distance(old_bbox, new_bbox)
-        radius = self._candidate_radius()
+        radius = self._radius_for_type(old_type or new_type)
         type_score = 1.0 if old_type == new_type and old_type else 0.0
         layer_score = 1.0 if _layer_key(old_entity) == _layer_key(new_entity) else 0.35
         centroid_score = _distance_score(centroid_distance, radius)
@@ -501,6 +509,10 @@ class EntityMatcher:
             bbox_iou=bbox_iou,
         )
 
+    #: Entity types whose labels routinely move further than the base radius
+    #: while their content changes — matched with ``text_search_radius_mm``.
+    _TEXT_LIKE_TYPES = frozenset({"text", "mtext", "dimension", "multileader", "mleader"})
+
     def _candidate_radius(self) -> float:
         return max(
             float(self.options.search_radius_mm or 0.0),
@@ -508,6 +520,15 @@ class EntityMatcher:
             float(self.options.tolerance.bbox_tolerance_mm or 0.0),
             1e-9,
         )
+
+    def _radius_for_type(self, entity_type: str) -> float:
+        """Candidate radius for an entity type — the wider text radius for
+        text-like entities (mirrors the legacy comparator's per-type threshold),
+        otherwise the base radius."""
+        base = self._candidate_radius()
+        if str(entity_type or "").lower() in self._TEXT_LIKE_TYPES:
+            return max(base, float(self.options.text_search_radius_mm or 0.0))
+        return base
 
     def _recover_reorigin_matches(
         self,
@@ -846,7 +867,11 @@ class DrawingCompareEngine:
         comparison_new = match.registered_new_entity or match.new_entity
         comparison_new_bbox = _bbox2(comparison_new.get("bbox"))
         bbox = _bbox_union([old_bbox, comparison_new_bbox])
-        location = _centroid(bbox)
+        location = (
+            _entity_anchor(match.new_entity)
+            or _entity_anchor(match.old_entity)
+            or _centroid(bbox)
+        )
         layer_id = match.new_entity.get("layer_id") or match.old_entity.get("layer_id")
         layer_name = _layer_name(layer_id, new_layers) or _layer_name(match.old_entity.get("layer_id"), old_layers)
         return DrawingDiffChange(
@@ -875,7 +900,7 @@ class DrawingCompareEngine:
         layers: Dict[str, Dict[str, Any]],
     ) -> DrawingDiffChange:
         bbox = _bbox2(entity.get("bbox"))
-        location = _centroid(bbox)
+        location = _entity_anchor(entity) or _centroid(bbox)
         layer_id = entity.get("layer_id")
         return DrawingDiffChange(
             change_id="",
@@ -1247,6 +1272,28 @@ def _centroid(bbox: BBox2D) -> Point2D:
         "x": round((bbox["min_x"] + bbox["max_x"]) / 2.0, 6),
         "y": round((bbox["min_y"] + bbox["max_y"]) / 2.0, 6),
     }
+
+
+def _entity_anchor(entity: Dict[str, Any]) -> Optional[Point2D]:
+    """Insertion/anchor point of an entity (``geometry.insert``) when present.
+
+    The insert point (DXF group 10) is an entity's canonical origin, which is a
+    more faithful change location than the bbox centroid: a left-aligned TEXT's
+    origin sits at its insert, not the middle of its glyph run, so a change
+    marker lands where the reader looks. Returns ``None`` for entities without
+    an insert (e.g. lines), which then fall back to the centroid.
+    """
+
+    geometry = entity.get("geometry")
+    if not isinstance(geometry, dict):
+        return None
+    insert = geometry.get("insert")
+    if not isinstance(insert, dict):
+        return None
+    try:
+        return {"x": round(float(insert["x"]), 6), "y": round(float(insert["y"]), 6)}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _bbox_union(boxes: Sequence[BBox2D]) -> BBox2D:
