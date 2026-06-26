@@ -144,9 +144,29 @@ def _console_summary(report: dict[str, Any]) -> str:
     )
 
 
+def missing_required_modules(report: dict[str, Any]) -> list[str]:
+    """Names of REQUIRED runtime modules that are unavailable in this env.
+
+    The ``runtime_modules`` block lists modules the product needs at runtime
+    (optional/licensed ones live in ``optional_or_licensed_modules`` and are not
+    checked here). A non-empty result means a by-the-book build would ship an app
+    that silently degrades or fails on a clean machine — the release gate must
+    block on it rather than report ``passed`` (the advisory-only bug)."""
+    return sorted(
+        name
+        for name, info in (report.get("runtime_modules") or {}).items()
+        if not info.get("available")
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Drawing Compare Workbench release environment gate.")
     parser.add_argument("--json-output", help="Optional JSON output path")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit nonzero if any REQUIRED runtime module is unavailable (release gate).",
+    )
     args = parser.parse_args()
 
     report = collect_environment_report()
@@ -156,6 +176,15 @@ def main() -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"JSON report written to: {output_path}")
+    if args.strict:
+        missing = missing_required_modules(report)
+        if missing:
+            print(
+                "RELEASE GATE FAILED — required runtime modules unavailable: "
+                + ", ".join(missing),
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 

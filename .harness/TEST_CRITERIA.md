@@ -1,54 +1,49 @@
 # TEST_CRITERIA — 검증 시나리오
 
-> ⚠️ "동작 확인" 금지. 아래는 모두 **실행 검증된** 실명령(2026-06-26 확인). 단일 진입점 우선.
+> ⚠️ "동작 확인" 금지. 실제 실행 명령 + 기대 결과. 일부 테스트는 Phase 2에서 신설(아래는 검증 계약).
 
 ## 단일 진입점
 ```bash
-# 1) 정확도 측정 (per-pair + AGGREGATE recall/precision/f1/noise_fp 출력 + 리포트 갱신)
-python scripts/measure_golden_accuracy_baseline.py
-# 2) 회귀 (comparison 유닛 전체)
-python -m pytest tests/unit/services/comparison/ -q
-# 3) 정책/동결 게이트
+# 게이트류
 python scripts/cad_policy_gate.py
+python scripts/release_environment_check.py --strict   # D1 신설 플래그(또는 항상 게이트)
+# 단위/회귀 (offscreen은 GUI 테스트용)
+python -m pytest tests/unit/scripts/test_release_environment_check.py tests/unit/scripts/test_build_spec_bundling.py -q
+QT_QPA_PLATFORM=offscreen python -m pytest tests/unit/services/comparison/ -k "zone_failure or zero_change or canonical_text or e2e_pipeline" -q
 ```
 
 ## 개별 시나리오
 
-### T1. Aggregate recall ≥ 0.90  → DoD-1
-- 실행: `python scripts/measure_golden_accuracy_baseline.py`
-- 기대: 마지막 줄 `AGGREGATE ... recall=` 값이 **≥ 0.90** (baseline 0.714).
-- 연결 DoD: DoD-1
+### T1. release env-check가 누락 시 차단 → D1
+- 실행: 신설 단위테스트 — `runtime_modules`의 한 REQUIRED(예: scipy) `_import_status`를 unavailable로 monkeypatch → 게이트 함수 호출
+- 기대: 종료코드/반환값 **≠0** (nonzero), 메시지에 누락 모듈명. 모두 가용 시 0.
+- 연결 DoD: D1
 
-### T2. fixture 07 (ATTRIB) recall 회복  → DoD-2
-- 실행: `python scripts/measure_golden_accuracy_baseline.py` → `07_block_attribute_text_change:` 줄 확인
-- 기대: `r=1.000` (현재 `r=0.000 fn=1`). 그 변경이 **modified ATTRIB @ (500,400)** 로 surface.
-- 연결 DoD: DoD-2
+### T2. spec datas 번들 보증 → D2
+- 실행: `python -m pytest tests/unit/scripts/test_build_spec_bundling.py -q`
+- 기대: 신규 케이스 — spec `datas`가 `src`(QML assets 포함)·`scripts`(render_viewer_package_subprocess.py)를 싣음을 단언. PASS.
+- 연결 DoD: D2
 
-### T3. fixture 10 (TEXT near-match) recall 회복 + 분할 제거  → DoD-2
-- 실행: `python scripts/measure_golden_accuracy_baseline.py` → `10_dimension_text_shifted:` 줄 확인
-- 기대: `r=1.000` 그리고 `fp` 가 현재 2 → **0** (add+deleted 분할이 1 modified로 병합).
-- 연결 DoD: DoD-2, DoD-4
+### T3. zone 실패가 사용자에게 보임 → D3
+- 실행: `QT_QPA_PLATFORM=offscreen python -m pytest ...test_zone_failure_surfacing.py -q` (신설)
+- 기대: offscreen 인스턴스에서 `_on_full_zone_tree_overlay_failed_v2`/`_on_zone_crop_render_error_v2`를 강제 호출 → `lbl_status_v2` 텍스트 또는 FailureBadge 코드가 갱신됨을 단언(현재는 무변).
+- 연결 DoD: D3
 
-### T4. fixture 04·11 잔여 FN 해소  → DoD-2
-- 실행: `python scripts/measure_golden_accuracy_baseline.py` → `04_added_deleted:` / `11_block_geometry_change:` 줄
-- 기대: 두 줄 모두 `fn=0` (진짜 변경 누락 0). 단, 채점 아티팩트로 판명되면 RULES에 따라 truth 미수정 + 사유 기록.
-- 연결 DoD: DoD-2
+### T4. 변경 0건이 명시됨 → D4
+- 실행: 신설 테스트 — 동일 도면쌍(golden 01_identical) 요약 포맷 → "변경 없음"/"일치" 포함 단언 (가능하면 `workbench_summary_format` 순수 함수 레벨)
+- 기대: 0-change 요약 텍스트에 명시 문구. 1+ change엔 미포함(특수 케이스만).
+- 연결 DoD: D4
 
-### T5. 분식 금지 가드 — noise_fp=0 & precision 비퇴행  → DoD-3, DoD-4, DoD-7
-- 실행: `python scripts/measure_golden_accuracy_baseline.py` → `AGGREGATE` 줄
-- 기대: `noise_fp=0` (불가침) **AND** `precision` ≥ 0.556. 01/03/05 각 `fp=0`.
-- 연결 DoD: DoD-3, DoD-4, DoD-7
+### T5. 동결·분식 가드 → D3/D4/D5
+- 실행: `python scripts/cad_policy_gate.py` + `python scripts/measure_golden_accuracy_baseline.py`
+- 기대: policy gate `passed`(모놀리스 라인-실링 비증가) **AND** golden `noise_fp=0`·recall/precision 비퇴행(가시성 작업이 정확도 안 건드림 입증).
+- 연결 DoD: D5(분식 없음·라인-실링)
 
-### T6. 회귀 없음 — comparison 유닛 전체 그린  → DoD-5
-- 실행: `python -m pytest tests/unit/services/comparison/ -q`
-- 기대: 종료코드 0, `failed` 0. 각 소스 수정마다 회귀 테스트 1건 신규 포함.
-- 연결 DoD: DoD-5
-
-### T7. 정책/동결 게이트 그린  → DoD-6
-- 실행: `python scripts/cad_policy_gate.py`
-- 기대: `CAD policy gate passed.` 종료코드 0 (모놀리스 라인-실링·정책 무위반).
-- 연결 DoD: DoD-6
+### T6. 회귀 없음 → D5
+- 실행: `python -m pytest tests/unit/services/comparison/ -k "canonical_text or e2e_pipeline or change_zones or region_aware" -q` + 신규 테스트
+- 기대: 종료코드 0, 신규 테스트 포함 그린.
+- 연결 DoD: D5
 
 ## 통과 기준
-- [ ] T1~T7 전 시나리오 PASS + 각 명령 출력 요약을 STATUS.md "검증 로그"에 증거로 기록
-- [ ] 회귀 없음(기존 테스트 그대로 통과, noise_fp 불변)
+- [ ] T1~T6 전 시나리오 PASS + 출력 요약을 STATUS.md "검증 로그"에 증거 기록
+- [ ] 드롭한 타겟(약함 판정)은 STATUS에 사유 기록(silent 누락 금지)

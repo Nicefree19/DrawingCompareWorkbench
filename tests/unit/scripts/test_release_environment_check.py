@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import scripts.release_environment_check as release_environment_check
 from scripts.release_environment_check import (
     PROJECT_ROOT,
     _console_summary,
     _oda_status,
     collect_environment_report,
+    missing_required_modules,
 )
 
 
@@ -94,3 +96,41 @@ def test_every_required_runtime_module_is_a_declared_dependency() -> None:
         "release gate marks these REQUIRED but no requirements file declares them: "
         + ", ".join(f"{m} ({_IMPORT_TO_DISTRIBUTION[m]})" for m in sorted(undeclared))
     )
+
+
+def test_missing_required_modules_flags_unavailable() -> None:
+    report = {"runtime_modules": {"scipy": {"available": False}, "PySide6": {"available": True}}}
+    assert missing_required_modules(report) == ["scipy"]
+
+
+def test_missing_required_modules_empty_when_all_present() -> None:
+    report = {"runtime_modules": {"scipy": {"available": True}, "PySide6": {"available": True}}}
+    assert missing_required_modules(report) == []
+
+
+def test_strict_gate_exits_nonzero_when_a_required_module_is_missing(monkeypatch) -> None:
+    """D1: the release gate must BLOCK (exit nonzero) on a clean build host that
+    is missing a REQUIRED runtime module, instead of the old advisory `return 0`."""
+    real_import_status = release_environment_check._import_status
+
+    def fake_import_status(name: str):
+        if name == "scipy":
+            return {"available": False, "error": "No module named 'scipy'"}
+        return real_import_status(name)
+
+    monkeypatch.setattr(release_environment_check, "_import_status", fake_import_status)
+    monkeypatch.setattr("sys.argv", ["release_environment_check.py", "--strict"])
+    assert release_environment_check.main() == 1
+
+
+def test_strict_gate_passes_when_all_required_present(monkeypatch) -> None:
+    # The dev/test environment has all required runtime modules installed.
+    monkeypatch.setattr("sys.argv", ["release_environment_check.py", "--strict"])
+    assert release_environment_check.main() == 0
+
+
+def test_default_mode_stays_advisory(monkeypatch) -> None:
+    # Without --strict, behaviour is unchanged (advisory, exit 0) for callers
+    # that only want the report.
+    monkeypatch.setattr("sys.argv", ["release_environment_check.py"])
+    assert release_environment_check.main() == 0
