@@ -128,7 +128,7 @@ Status: **PASS**
 
 | Case | Total Changes | Added / Removed / Modified / Unchanged | Fingerprint |
 | --- | ---: | --- | --- |
-| simple_base_vs_modified | 3 | +1 / -0 / ~2 / =2 | 0c08f73be8c0 |
+| simple_base_vs_modified | 3 | +1 / -0 / ~2 / =2 | ae23aaf641de |
 
 ## Normalization Policy
 
