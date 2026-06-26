@@ -78,6 +78,7 @@ jobs:
             tests\unit\scripts\test_release_environment_check.py `
             tests\unit\scripts\test_build_spec_bundling.py `
             tests\unit\scripts\test_lint_ci_enforced.py `
+            tests\unit\scripts\test_run_pilot_spotcheck.py `
             -q -o log_cli=false
 
       # GUI fail-loud surfacing tests run offscreen and are kept in a SEPARATE

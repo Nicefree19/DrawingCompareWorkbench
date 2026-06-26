@@ -4,39 +4,42 @@
 
 ## 단일 진입점
 ```bash
-# 도구(핀 버전)
-python -m black --version && python -m isort --vn
-# changed-files lint 로직 로컬 재현 (예: main 대비 변경 .py)
-git diff --name-only --diff-filter=d origin/main...HEAD -- "*.py" | tr '\n' ' '
-# 메타-가드 + 비퇴행
-python -m pytest tests/unit/scripts/test_cad_policy_gate.py -q
+# 러너를 골든쌍에 (헤드리스)
+python scripts/run_pilot_spotcheck.py tests/data/comparison/golden/dxf/02_single_modification/before.dxf tests/data/comparison/golden/dxf/02_single_modification/after.dxf -o build/pilot_demo
+# 결정적 테스트 + dogfood lint + gate
+python -m pytest tests/unit/scripts/test_run_pilot_spotcheck.py -q
+python -m black --check scripts/run_pilot_spotcheck.py tests/unit/scripts/test_run_pilot_spotcheck.py
+python -m isort --check-only scripts/run_pilot_spotcheck.py tests/unit/scripts/test_run_pilot_spotcheck.py
 python scripts/cad_policy_gate.py
-python -c "import tomllib; tomllib.load(open('pyproject.toml','rb')); print('pyproject OK')"
-python -c "import yaml; yaml.safe_load(open('.github/workflows/cad-format-regression.yml',encoding='utf-8')); print('YAML OK')"
 ```
 
 ## 개별 시나리오
 
-### T1. changed-files lint 게이트 동작 → L1
-- 실행(로컬 재현): 변경 .py 목록 추출 → `black --check`/`isort --check-only` 그 목록만. 깨끗한 변경 1개 + 일부러 망친 변경 1개로 양방향 확인.
-- 기대: 깨끗→exit 0, 망침→exit≠0(reformat 필요 보고). 워크플로엔 `pull_request` 스코프 lint step 존재.
-- 연결 DoD: L1
+### T1. 러너가 spotcheck 시트 산출 → PE1
+- 실행: 단일 진입점 1번 명령(골든 02쌍)
+- 기대: `<out>/pilot_spotcheck.md` 존재. 검출 변경 1+ 행(위치·타입·요약) + 운영자 칸 헤더(아는변경/검출Y-N/위치정확Y-N/비고) + 쌍 이름·총 검출수.
+- 연결 DoD: PE1
 
-### T2. mypy 설정 잔재 정리 → L2
-- 실행: `grep -E "src.core.parsers|src.core.validators" pyproject.toml` + `python -c "import tomllib; tomllib.load(open('pyproject.toml','rb'))"`
-- 기대: 존재하지 않는 모듈 override **0건**, pyproject 파싱 OK.
-- 연결 DoD: L2
+### T2. ground-truth 스켈레톤 → PE2
+- 실행: 동일 실행 후 `<out>/review_ground_truth.csv` 확인
+- 기대: 헤더 = **기존 review_ground_truth 스키마**(drawing_label,category,summary_contains,source_format,detection_source,bbox_status), 검출 기반 행 존재, 운영자 확인용 칸은 사실/공란.
+- 연결 DoD: PE2
 
-### T3. meta-guard → L3
-- 실행: `python -m pytest tests/unit/scripts/test_cad_policy_gate.py -q` (신규/확장 케이스: 워크플로서 lint step 제거 시뮬 → violation) 또는 전용 테스트
-- 기대: lint step 없으면 violation/fail, 있으면 통과.
-- 연결 DoD: L3
+### T3. 골든 결정적 → PE3
+- 실행: `python -m pytest tests/unit/scripts/test_run_pilot_spotcheck.py -q`
+- 기대: 골든 02쌍(단일 수정)서 spotcheck가 그 변경을 나열, csv 스켈레톤에 대응 행. 2회 동일.
+- 연결 DoD: PE3
 
-### T4. 비퇴행·기존 보존 → L4
-- 실행: `python scripts/cad_policy_gate.py` + `grep -E "measure_golden_accuracy_baseline|git diff --check|cad_policy_gate.py|test_change_zones.py" .github/workflows/cad-format-regression.yml` + YAML 파싱
-- 기대: gate `passed`; 기존 테스트목록·golden·diff-check·policy step 모두 잔존; YAML 유효.
-- 연결 DoD: L4
+### T4. 운영자 가이드 → PE4
+- 실행: `grep -nE "run_pilot_spotcheck|배포 진행|누락" docs/INTERNAL_PILOT_SPOTCHECK.md`
+- 기대: 실행 명령 1줄 + 판정 기준(누락 0 → 배포가/부) 존재.
+- 연결 DoD: PE4
+
+### T5. dogfood lint + 비퇴행 → PE5
+- 실행: `black --check`/`isort --check-only` (신규 .py 2개) + `cad_policy_gate.py` + 워크플로 grep(test_run_pilot_spotcheck 포함)
+- 기대: 신규 .py 전부 clean(exit 0); gate `passed`; per-PR 목록에 신규 테스트 포함; 기존 step 보존.
+- 연결 DoD: PE5
 
 ## 통과 기준
-- [ ] T1~T4 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
-- [ ] changed-files 범위/보류(mypy 게이팅)는 STATUS에 명시(silent 금지)
+- [x] T1~T5 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
+- [x] 정답을 지어내지 않음(스켈레톤=사실+공란) STATUS에 확인

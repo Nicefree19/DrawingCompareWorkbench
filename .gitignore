@@ -184,6 +184,7 @@ run_*.py
 !scripts/run_dwg_product_bridge_evidence.py
 !scripts/run_dwg_release_performance_probe.py
 !scripts/run_dwg_release_supplemental_probe.py
+!scripts/run_pilot_spotcheck.py
 launch_*.py
 analyze_*.py
 accurate_mgt_load_analyzer*.py
