@@ -17,7 +17,7 @@ unmatched half then counts as FP).
 
 | pairs | TP | FP | FN | precision | recall | F1 | cosmetic FP | noise-fixture FP |
 |---|---|---|---|---|---|---|---|---|
-| 15 | 10 | 8 | 4 | 0.556 | 0.714 | 0.625 | 0 | 0 (on 3 fixtures) |
+| 15 | 11 | 6 | 3 | 0.647 | 0.786 | 0.710 | 0 | 0 (on 3 fixtures) |
 
 ## Per-pair
 
@@ -32,7 +32,7 @@ unmatched half then counts as FP).
 | 07_block_attribute_text_change | 1 | 1 | 0 | 1 | 1 | 0.000 | 0.000 | MISSED 1 |
 | 08_intentional_zone_shift_beam | 1 | 2 | 1 | 1 | 0 | 0.500 | 1.000 |  |
 | 09_korean_layer_single_change | 1 | 2 | 1 | 1 | 0 | 0.500 | 1.000 |  |
-| 10_dimension_text_shifted | 1 | 2 | 0 | 2 | 1 | 0.000 | 0.000 | MISSED 1 |
+| 10_dimension_text_shifted | 1 | 1 | 1 | 0 | 0 | 1.000 | 1.000 |  |
 | 11_block_geometry_change | 2 | 2 | 1 | 1 | 1 | 0.500 | 0.500 | MISSED 1 |
 | 12_ocs_circle_extrusion_flip | 1 | 1 | 1 | 0 | 0 | 1.000 | 1.000 |  |
 | 13_paperspace_layout_move | 1 | 1 | 1 | 0 | 0 | 1.000 | 1.000 |  |
@@ -43,7 +43,6 @@ unmatched half then counts as FP).
 
 - `04_added_deleted` @ (500.0, 400.0) (added): 대각선 LINE 추가 (중점 기준)
 - `07_block_attribute_text_change` @ (500.0, 400.0) (modified): ATTRIB text @100 → @200 — 사용자 사례 직접 재현. Phase O Commit 1 (ATTRIB 정식 지원) 만으로 검출됨 — 이 fixture 는 ATTRIB-realized text 변경이라 Commit 1 만 필요. Commit 2 (INSERT block-internal text fingerprint) 는 ATTRIB 으로 realize 되지 않은 block 정의 내부 TEXT 변경 케이스용 (별도 시나리오).
-- `10_dimension_text_shifted` @ (215.0, 100.0) (modified): TEXT 좌표 30mm shift + 내용 1500→1550. Phase O 의 1mm tolerance 로는 added+deleted, Phase P 의 50mm text radius 로는 modified.
 - `11_block_geometry_change` @ (510.0, 400.0) (added): Q3 block-internal LINE (end=20) added.
 
 ## Reading the numbers

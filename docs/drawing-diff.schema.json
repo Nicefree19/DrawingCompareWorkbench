@@ -107,6 +107,10 @@
           "type": "number",
           "minimum": 0
         },
+        "text_search_radius_mm": {
+          "type": "number",
+          "minimum": 0
+        },
         "structural_position_tolerance_mm": {
           "type": [
             "number",
