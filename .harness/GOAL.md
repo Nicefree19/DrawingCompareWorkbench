@@ -1,30 +1,29 @@
 # GOAL — 핵심 목표
 
 ## 한 줄 정의
-**per-PR CI가 이번 신뢰성 작업(게이트·테스트)을 실제로 강제**하게 한다 — silently-inert(존재하나 미실행) 테스트 0.
+**lint/format가 PR 변경 .py에 대해 CI 게이트**되게 한다 — 새 스타일 드리프트 차단, 기존 백로그(black 160·isort 112)는 비차단, mypy 설정 잔재 정리.
 
 ## 배경/맥락
-신뢰성 아크의 **캡스톤**. 직전까지 deps·freeze·recall·build-spec·fail-loud을 게이트/테스트로 추가했으나, **per-PR 게이트(`.github/workflows/cad-format-regression.yml`)는 하드코딩 15-파일 pytest 목록만 실행** → 이번 세션 신규 테스트 **전부 미포함**:
-- `test_release_environment_check.py`(D1·deps 계약) · `test_build_spec_bundling.py`(D2·#52) · `test_canonical_text_recall.py`(recall) · `test_e2e_pipeline_smoke.py`(E2E) · `test_change_zones.py`(rebar cap) · `test_zone_tree_failure_surfacing.py`(D3).
+BDC-2(tech-debt audit): black/isort/mypy가 설치·설정됐으나 **CI 실행 0** (.github/workflows에 lint step 없음). CI-enforcement 캡스톤(테스트 게이트)의 **품질-인프라 짝** — 테스트는 게이트되나 스타일/타입은 미강제.
 
-즉 게이트는 만들었으나 **PR을 보호하지 않는다** = silent_fallback의 CI-층 재발. (단 golden floor `--min-recall 0.68`·`cad_policy_gate`·`git diff --check`는 이미 per-PR.)
+**백로그 실측(2026-06-26)**: `black --check src/` = 160 파일, `isort --check-only src/` = 112 파일. → **전체 일괄 게이트 불가**(red-wall + 160파일 reformat은 모놀리스 freeze 라인-실링 충돌 + 거대 diff). 정직한 범위 = **changed-files-only**(만지는 파일만 깨끗하게).
 
-**정직성 노트**: 전체 comparison 스위트 gating은 PySide6 native-AV 천장([[full_suite_health]])으로 비결정 → 범위 밖. 목표는 **결정적** 테스트만 per-PR로.
+**mypy 잔재**: `pyproject [[tool.mypy.overrides]]`가 `src.core.parsers.unified_mgt_parser`·`src.core.validators.*` 등 **이 standalone 레포에 없는 모듈** 참조(monorepo 잔재, 실측 MISSING). → 정리 필요.
 
 ## 검증 가능한 종료조건 (DoD)
-- [ ] **C1**: 결정적 신규 테스트가 per-PR pytest 목록에 추가됨 — release_environment_check·build_spec_bundling·canonical_text_recall·e2e_pipeline_smoke·change_zones. · 검증: 워크플로 grep + 각 테스트 그린
-- [ ] **C2 (meta-guard)**: `cad_policy_gate.check_ci_gate`가 위 critical 테스트 파일이 워크플로에 있음을 단언(미래 silent 제거 방지) — **기존 check_ci_gate 확장**(신규 게이트 아님). · 검증: 파일 제거 시뮬→게이트 violation
-- [ ] **C3**: GUI 테스트(zone_tree_failure_surfacing)는 결정성 평가 후 **포함 or 별도 명시 job으로 격리**(silent-skip 금지). · 검증: 결정 + 사유 기록
-- [ ] **C4**: 추가 테스트가 per-PR서 **결정적 그린**(반복 실행 flaky 아님). · 검증: 2회 연속 그린
-- [ ] **C5 (no regression)**: `cad_policy_gate` 그린(라인-실링 포함)·기존 게이트 무변. · 검증: gate + 기존 워크플로 step 보존
+- [ ] **L1 (changed-files lint 게이트)**: CI가 PR 변경 .py에 `black --check` + `isort --check-only` 실행(전체 아님), `pull_request` 스코프. · 검증: 깨끗한 diff pass, 일부러 망친 변경파일 fail(로컬 재현)
+- [ ] **L2 (mypy 설정 정정)**: 존재하지 않는 모듈 override 제거(또는 실존 clean 모듈로 교체). · 검증: `python -m mypy --version` + 설정 파싱 OK + 잔재 override 0
+- [ ] **L3 (meta-guard)**: lint step이 워크플로에 존재함을 단언(silent-inert 방지) — `cad_policy_gate.check_ci_gate` 확장 or 전용 테스트. · 검증: lint step 제거 시뮬 → violation/fail
+- [ ] **L4 (no regression)**: 기존 step(테스트·golden·diff-check·policy) 보존 · `cad_policy_gate` 그린 · 워크플로 YAML 유효. · 검증: grep + gate
 
 ## 범위 밖
-- 전체 comparison/gui 스위트 gating(native-AV 천장).
-- **lint/type CI**(별도 작업).
-- workflow_dispatch full-suite 변경.
-- 새 비교 로직·정확도(분식 금지).
+- **전체 코드베이스 일괄 reformat**(160/112 churn, 모놀리스 freeze 충돌) — changed-files만.
+- **mypy 게이팅**(설정 정정만; 게이트는 설정 안정화 후 별도).
+- pylint · pre-commit 훅(선택, 별도).
+- workflow_dispatch full-suite.
 
 ## 산출물
-- `.github/workflows/cad-format-regression.yml`(테스트 목록 확장)
-- `scripts/cad_policy_gate.py`(check_ci_gate 확장) + `tests/unit/scripts/test_cad_policy_gate.py`
-- 완료 보고(워크플로 diff·테스트 그린·DoD 충족표)
+- `.github/workflows/cad-format-regression.yml` (changed-files lint step)
+- `pyproject.toml` (mypy override 정정)
+- `scripts/cad_policy_gate.py` + test (메타-가드, 해당 시)
+- 완료 보고(워크플로 diff·lint 동작·DoD 충족표)

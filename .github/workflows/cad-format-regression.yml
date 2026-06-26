@@ -29,6 +29,27 @@ jobs:
           git diff --check
           python scripts\cad_policy_gate.py
 
+      # Lint ONLY the Python files changed in this PR (black + isort). The repo
+      # has a large pre-existing format backlog (160/112 files), so a full-repo
+      # gate would be a red wall + would reformat the frozen GUI monolith; the
+      # changed-files scope keeps new/touched code clean without that churn.
+      # PR-only: a push to main has no base to diff against.
+      - name: Lint changed Python files (black + isort, PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+          $changed = git diff --name-only --diff-filter=d ${{ github.event.pull_request.base.sha }} HEAD -- "*.py"
+          if (-not $changed) {
+            Write-Host "No changed Python files to lint."
+          } else {
+            Write-Host "Linting changed Python files:"
+            $changed | ForEach-Object { Write-Host "  $_" }
+            python -m black --check --diff @($changed)
+            if ($LASTEXITCODE -ne 0) { Write-Error "black: changed files need formatting (run 'black <files>')"; exit 1 }
+            python -m isort --check-only --diff @($changed)
+            if ($LASTEXITCODE -ne 0) { Write-Error "isort: changed files need import sorting (run 'isort <files>')"; exit 1 }
+          }
+
       - name: Validate CAD sample manifest, golden results, and regression report
         run: |
           python scripts\cad_format_regression.py --check --report build\reports\cad-format-regression-report.md
@@ -56,6 +77,7 @@ jobs:
             tests\unit\services\comparison\test_e2e_pipeline_smoke.py `
             tests\unit\scripts\test_release_environment_check.py `
             tests\unit\scripts\test_build_spec_bundling.py `
+            tests\unit\scripts\test_lint_ci_enforced.py `
             -q -o log_cli=false
 
       # GUI fail-loud surfacing tests run offscreen and are kept in a SEPARATE

@@ -1,21 +1,22 @@
 # RULES — 핵심 제약 (경량화)
 
-> ⚠️ 이 목표(CI enforcement)에 직결되는 조항만.
+> ⚠️ 이 목표(lint/type CI)에 직결되는 조항만.
 
 ## 절대 규칙 (위배 시 작업 중단)
-- **silent-skip 금지**: 테스트를 게이트서 빼거나 격리할 때 **반드시 명시 + 사유 기록**. `continue-on-error`/조용한 xfail로 실패를 숨기지 않는다. (이 목표 자체가 silent-inert 제거 — 자기모순 금지.)
-- **결정성 우선**: per-PR 게이트에는 **결정적·빠른** 테스트만. flaky하면 추가하지 말고 격리+사유(verify-then-DROP).
-- **새 P5-G* 게이트 금지**([[gate_inflation_risk]]): `check_ci_gate` 확장은 **기존 함수·기존 required_snippets 패턴**의 강화이지 신규 audit 게이트가 아니다. 새 워크플로 파일·새 게이트 스크립트 만들지 말 것.
-- **분식 금지**: 정확도/카운트 메트릭 손대지 않는다(이건 CI 배선 작업).
+- **백로그 일괄 reformat 금지**: 160 black + 112 isort 백로그를 한 번에 고치지 않는다(거대 diff·모놀리스 freeze 라인-실링 충돌). changed-files-only.
+- **모놀리스 라인-실링 비증가**: black/isort가 `drawing_compare_workbench.py`(13,467)/`lightweight_viewport.py`를 reformat해 라인 증가 시 `cad_policy_gate` trip → 이 작업서 그 파일들 reformat하지 않는다(건드리면 별도 처리).
+- **silent 금지**: lint step은 **gating**(continue-on-error 아님). 단 changed-files 범위는 명시(전체인 척 금지).
+- **새 P5-G* 게이트 금지**: check_ci_gate 확장은 기존 패턴. 새 워크플로/게이트 스크립트 신설 금지.
 
 ## 설계/코드 제약
-- 워크플로 편집은 기존 형식 유지(Windows PowerShell backtick 줄연속). 기존 step(golden floor·diff-check·policy gate) **보존**.
-- check_ci_gate 확장은 `required_snippets` 딕셔너리에 항목 추가 수준으로 최소.
-- 한 반복 = 한 단계. 모놀리스 무관(이 작업은 CI/스크립트 층).
+- 도구 버전은 requirements-dev 핀(black 23.12·isort 5.12) — CI/로컬 일치.
+- 워크플로 편집은 기존 형식·기존 step 보존(PowerShell backtick).
+- mypy는 **설정 정정만**(死 override 제거), 게이팅 안 함(범위 밖).
+- 한 반복 = 한 단계.
 
 ## 우선순위 (충돌 시)
-1. 정직성(silent-skip 금지·없는 강제 안 만듦) > 2. 결정성(flaky 배제) > 3. 커버리지(많이 게이트) > 4. CI 속도 > 5. 편의
+1. 정직성(범위 명시·死설정 정리) > 2. 비파괴(백로그 비차단·freeze 준수) > 3. 강제(changed-files gating) > 4. 커버리지 > 5. 편의
 
 ## 검증 연결
-- silent-skip 없음·기존 보존 = TEST **T3·T5**.
-- 메타-가드 동작 = **T2**.
+- 범위/비파괴 = T1(changed-files만). freeze = `cad_policy_gate`(T4).
+- meta-guard = T3.

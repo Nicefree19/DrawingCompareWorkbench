@@ -120,18 +120,10 @@ ignore_missing_imports = true
 show_error_codes = true
 # 타입 에러 조기 발견
 local_partial_types = true
-# 새 파일 strict 모드 (점진적 적용)
-# 핵심 모듈만 strict 적용
-
-[[tool.mypy.overrides]]
-module = [
-    "src.core.parsers.unified_mgt_parser",
-    "src.core.converters.unified_mgt_tekla_converter",
-    "src.core.mappers.external_mapping_loader",
-    "src.core.validators.*",
-]
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
+# NOTE: a previous strict per-module override pointed at src.core.parsers /
+# converters / mappers / validators — modules from the source monorepo that do
+# NOT exist in this standalone repo (verified MISSING). It was dead config and
+# was removed; reintroduce strict overrides only for modules that exist here.
 
 [[tool.mypy.overrides]]
 module = [

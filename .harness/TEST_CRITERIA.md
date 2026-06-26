@@ -4,42 +4,39 @@
 
 ## 단일 진입점
 ```bash
-# 추가 대상 테스트가 결정적으로 그린인가 (per-PR 후보)
-python -m pytest tests/unit/scripts/test_release_environment_check.py tests/unit/scripts/test_build_spec_bundling.py tests/unit/services/comparison/test_canonical_text_recall.py tests/unit/services/comparison/test_e2e_pipeline_smoke.py tests/unit/services/comparison/test_change_zones.py -q
-# GUI(offscreen) 결정성
-QT_QPA_PLATFORM=offscreen python -m pytest tests/unit/gui/test_zone_tree_failure_surfacing.py -q
-# 메타-가드
+# 도구(핀 버전)
+python -m black --version && python -m isort --vn
+# changed-files lint 로직 로컬 재현 (예: main 대비 변경 .py)
+git diff --name-only --diff-filter=d origin/main...HEAD -- "*.py" | tr '\n' ' '
+# 메타-가드 + 비퇴행
 python -m pytest tests/unit/scripts/test_cad_policy_gate.py -q
 python scripts/cad_policy_gate.py
+python -c "import tomllib; tomllib.load(open('pyproject.toml','rb')); print('pyproject OK')"
+python -c "import yaml; yaml.safe_load(open('.github/workflows/cad-format-regression.yml',encoding='utf-8')); print('YAML OK')"
 ```
 
 ## 개별 시나리오
 
-### T1. 워크플로가 신규 테스트를 실행 → C1
-- 실행: `grep -E "test_(release_environment_check|build_spec_bundling|canonical_text_recall|e2e_pipeline_smoke|change_zones)" .github/workflows/cad-format-regression.yml`
-- 기대: 5개 파일 모두 매치(per-PR pytest step에 포함).
-- 연결 DoD: C1
+### T1. changed-files lint 게이트 동작 → L1
+- 실행(로컬 재현): 변경 .py 목록 추출 → `black --check`/`isort --check-only` 그 목록만. 깨끗한 변경 1개 + 일부러 망친 변경 1개로 양방향 확인.
+- 기대: 깨끗→exit 0, 망침→exit≠0(reformat 필요 보고). 워크플로엔 `pull_request` 스코프 lint step 존재.
+- 연결 DoD: L1
 
-### T2. check_ci_gate 메타-가드 → C2
-- 실행: `python -m pytest tests/unit/scripts/test_cad_policy_gate.py -q` (신규 케이스: 워크플로서 critical 테스트 줄 제거 시뮬 → violation 코드)
-- 기대: 누락 시 `CAD_POLICY_CI_*` violation, 정상 워크플로엔 violation 없음.
-- 연결 DoD: C2
+### T2. mypy 설정 잔재 정리 → L2
+- 실행: `grep -E "src.core.parsers|src.core.validators" pyproject.toml` + `python -c "import tomllib; tomllib.load(open('pyproject.toml','rb'))"`
+- 기대: 존재하지 않는 모듈 override **0건**, pyproject 파싱 OK.
+- 연결 DoD: L2
 
-### T3. GUI 테스트 처리 결정 → C3
-- 실행: `QT_QPA_PLATFORM=offscreen python -m pytest tests/unit/gui/test_zone_tree_failure_surfacing.py -q` 2회
-- 기대: 안정적 그린 → 게이트 포함; 불안정 → 별도 명시 step/job(주석 사유). **silent-skip 없음**(STATUS에 결정 기록).
-- 연결 DoD: C3
+### T3. meta-guard → L3
+- 실행: `python -m pytest tests/unit/scripts/test_cad_policy_gate.py -q` (신규/확장 케이스: 워크플로서 lint step 제거 시뮬 → violation) 또는 전용 테스트
+- 기대: lint step 없으면 violation/fail, 있으면 통과.
+- 연결 DoD: L3
 
-### T4. 추가 테스트 결정성 → C4
-- 실행: 단일 진입점 1번 명령 **2회 연속**
-- 기대: 2회 모두 종료코드 0, 동일 pass 수(flaky 아님).
-- 연결 DoD: C4
-
-### T5. 비퇴행·기존 보존 → C5
-- 실행: `python scripts/cad_policy_gate.py` + 워크플로 기존 step 존재 확인(`grep -E "measure_golden_accuracy_baseline|git diff --check|cad_policy_gate" .github/workflows/cad-format-regression.yml`)
-- 기대: gate `passed`; golden floor·diff-check·policy step 모두 잔존.
-- 연결 DoD: C5
+### T4. 비퇴행·기존 보존 → L4
+- 실행: `python scripts/cad_policy_gate.py` + `grep -E "measure_golden_accuracy_baseline|git diff --check|cad_policy_gate.py|test_change_zones.py" .github/workflows/cad-format-regression.yml` + YAML 파싱
+- 기대: gate `passed`; 기존 테스트목록·golden·diff-check·policy step 모두 잔존; YAML 유효.
+- 연결 DoD: L4
 
 ## 통과 기준
-- [ ] T1~T5 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
-- [ ] 격리/드롭한 테스트는 STATUS에 사유 기록(silent 금지)
+- [ ] T1~T4 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
+- [ ] changed-files 범위/보류(mypy 게이팅)는 STATUS에 명시(silent 금지)
