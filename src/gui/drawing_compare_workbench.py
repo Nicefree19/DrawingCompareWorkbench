@@ -392,6 +392,7 @@ from src.gui.workbench_render_decisions import (  # MONO-4 #7-A
     is_current_zone_render_request,
     is_usable_zone_render_source,
 )
+from src.gui.workbench_zone_tree_failure import append_zone_tree_rebuild_failure
 
 
 def _workbench_data_dir() -> Path:
@@ -7314,20 +7315,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
         if not self._full_zone_tree_request_is_current_v2(pair_id, generation):
             return
         self._pending_full_zone_tree_pair_id_v2 = ""
-        if self._viewer_root:
-            append_viewer_perf_event(
-                self._viewer_root,
-                "full_zone_tree_rebuild",
-                pair_uuid=pair_id,
-                elapsed_ms=0.0,
-                overlay_count=0,
-                visible_overlay_count=0,
-                chunked=False,
-                chunk_count=0,
-                max_chunk_elapsed_ms=0.0,
-                overlay_load_worker=True,
-                error_message=str(message or "overlay_load_failed"),
+        # Surface the failure (was perf-log only → silent empty zone list).
+        self.lbl_status_v2.setText(
+            append_zone_tree_rebuild_failure(
+                self._viewer_root, pair_id, message, plan_worker=False
             )
+        )
 
     def _continue_full_zone_tree_rebuild_with_overlays_v2(
         self,
@@ -7615,20 +7608,12 @@ class DrawingCompareWorkbenchV2(QMainWindow):
             return
         self._full_zone_tree_chunk_state_v2 = None
         self._pending_full_zone_tree_pair_id_v2 = ""
-        if self._viewer_root:
-            append_viewer_perf_event(
-                self._viewer_root,
-                "full_zone_tree_rebuild",
-                pair_uuid=pair_id,
-                elapsed_ms=0.0,
-                overlay_count=0,
-                visible_overlay_count=0,
-                chunked=True,
-                chunk_count=0,
-                max_chunk_elapsed_ms=0.0,
-                plan_build_worker=True,
-                error_message=str(message or "plan_build_failed"),
+        # Surface the failure (was perf-log only → silent empty zone list).
+        self.lbl_status_v2.setText(
+            append_zone_tree_rebuild_failure(
+                self._viewer_root, pair_id, message, plan_worker=True
             )
+        )
 
     def _run_full_zone_tree_item_chunk_v2(
         self,

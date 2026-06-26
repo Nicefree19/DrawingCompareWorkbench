@@ -388,7 +388,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
 
-    if not args.skip_build:
+    # Hard environment gate BEFORE PyInstaller: a clean build host missing a
+    # REQUIRED runtime module (e.g. scipy/skimage) would otherwise produce an
+    # exe that silently degrades on the user's machine. The check was previously
+    # advisory (always exit 0); --strict makes it block the build.
+    env_gate_failures = _run_step(
+        manifest,
+        "environment_gate",
+        [args.python, str(ROOT / "scripts" / "release_environment_check.py"), "--strict"],
+    )
+    failures += env_gate_failures
+
+    if env_gate_failures and not args.skip_build:
+        manifest["steps"].append(
+            {
+                "name": "pyinstaller_build",
+                "status": "skipped",
+                "reason": "environment_gate failed — required runtime modules missing",
+            }
+        )
+    elif not args.skip_build:
         dist_dir = out_dir / "dist"
         build_dir = out_dir / "build"
         failures += _run_step(
