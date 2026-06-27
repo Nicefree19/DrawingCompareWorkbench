@@ -41,10 +41,23 @@
 
 | 파일 | 용도 |
 |---|---|
+| `pilot_spotcheck.md` | **스팟체크 시트** — 검출된 변경 표 + 운영자 작성칸. ⬇ 아래 안내 |
+| `review_ground_truth.csv` | 정답 스켈레톤(검출 기반) — 운영자 확정용 |
 | `artifacts/cloud_marked/*_after_marked.dxf` | **구름마크가 그려진 DXF** — CAD에서 바로 열람 |
 | `artifacts/change_register.xlsx` | 변경 대장 (구역별 목록) |
 | `artifacts/change_zones.csv` | 변경 구역 데이터 |
 | `artifacts/drawing_change_brief.md` | 요약 브리핑 |
+
+### 🔴 dry-run 기록 — `pilot_spotcheck.md`를 **작성해서 반송**해 주세요
+
+이 시트는 비교가 끝나면 결과 폴더에 **자동 생성**됩니다(별도 실행 불필요). 파일럿의 핵심 산출물입니다:
+
+1. `pilot_spotcheck.md`를 텍스트 편집기로 엽니다.
+2. 검출 표에서, **내가 아는 변경**에 해당하는 행에 `검출됨?(Y)`·`위치정확?(Y/N)`을 표시합니다.
+3. 아는 변경이 **어느 행에도 없으면** '누락 기록'에 한 줄 추가합니다(= 검출 누락, 가장 중요한 신호).
+4. 작성한 `pilot_spotcheck.md`를 **개발 담당에게 반송**합니다.
+
+> **이 작성·반송이 곧 파일럿의 목적입니다.** 시트가 자동 생성되는 것만으로는 검증이 아닙니다 — **실제 도면으로 한 번 작성해 반송된 시트**가 release-readiness의 진짜 증거입니다. (현재 이 외부 dry-run은 **미완(OPEN)** 상태입니다.)
 
 ## 5. 알려진 한계 (정직 고지)
 

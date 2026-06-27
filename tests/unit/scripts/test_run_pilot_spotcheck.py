@@ -11,6 +11,7 @@ Two layers:
 from __future__ import annotations
 
 import csv
+import json
 import shutil
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from scripts.run_pilot_spotcheck import (
     PilotSpotcheckError,
     build_ground_truth_rows,
     build_spotcheck_md,
+    emit_spotcheck_artifacts,
     run_pilot_spotcheck,
 )
 
@@ -152,6 +154,43 @@ def test_spotcheck_md_single_pair_keeps_pr56_shape() -> None:
 def test_ground_truth_rows_distinguish_batch_pairs() -> None:
     rows = build_ground_truth_rows([_FIXTURE_ISSUE_ALPHA, _FIXTURE_ISSUE_BETA])
     assert [row[0] for row in rows] == ["alpha", "beta"]
+
+
+# --- emit_spotcheck_artifacts (GS1): shared by CLI runner + GUI ------------
+
+
+def test_emit_spotcheck_artifacts_from_dashboard(tmp_path: Path) -> None:
+    """The extracted emitter writes both files from a pre-written dashboard
+    (no pipeline run) — this is the function the GUI compare-completion path
+    reuses so a reviewer gets the sheet without a dev checkout."""
+    out = tmp_path / "run"
+    (out / "artifacts").mkdir(parents=True)
+    (out / "artifacts" / "review_dashboard.json").write_text(
+        json.dumps({"top_issues": [_FIXTURE_ISSUE]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    summary = emit_spotcheck_artifacts(out, "테스트 비교")
+
+    assert summary["detected_count"] == 1
+    md = (out / "pilot_spotcheck.md").read_text(encoding="utf-8")
+    assert "테스트 비교" in md
+    assert "BEAM" in md
+    with (out / "review_ground_truth.csv").open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.reader(fh))
+    assert rows[0] == GROUND_TRUTH_HEADER
+    assert any("BEAM" in cell for row in rows[1:] for cell in row)
+
+
+def test_emit_spotcheck_artifacts_handles_missing_dashboard(tmp_path: Path) -> None:
+    # No artifacts/review_dashboard.json → 0 detections, still writes the sheet
+    # (so the GUI emit never crashes on a degenerate run).
+    out = tmp_path / "run"
+    out.mkdir()
+    summary = emit_spotcheck_artifacts(out)
+    assert summary["detected_count"] == 0
+    assert (out / "pilot_spotcheck.md").exists()
+    assert (out / "review_ground_truth.csv").exists()
 
 
 # --- DWG on-ramp (PB2) ----------------------------------------------------

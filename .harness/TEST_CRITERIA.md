@@ -1,46 +1,47 @@
 # TEST_CRITERIA — 검증 시나리오
 
-> ⚠️ 실제 실행 명령 + 기대 결과. 외부 신호(종료코드·measure 리포트·단언)만 통과 증거.
+> ⚠️ 실제 실행 명령 + 기대 결과. 외부 신호(파일·단언·소스)만 통과 증거.
 
 ## 단일 진입점
 ```bash
-# synonym 단위테스트
-python -m pytest tests/unit/services/comparison/test_accuracy_metrics.py -q
-# 전체 골든 measure (07 회복 + only-07 + noise_fp=0)
-python scripts/measure_golden_accuracy_baseline.py --out-json build/reports/golden-accuracy.json --out-md build/reports/golden-accuracy.md --max-noise-fp 0 --min-precision 0.50 --min-recall 0.68
+# emission 함수 + GUI 배선 테스트
+python -m pytest tests/unit/scripts/test_run_pilot_spotcheck.py tests/unit/gui/test_gui_spotcheck_emission.py -q -o log_cli=false
 # dogfood + 정책
-python -m black --check <수정/신규 .py>
-python -m isort --check-only <수정/신규 .py>
+python -m black --check scripts/run_pilot_spotcheck.py src/gui/drawing_compare_workbench.py tests/unit/gui/test_gui_spotcheck_emission.py
+python -m isort --check-only scripts/run_pilot_spotcheck.py tests/unit/gui/test_gui_spotcheck_emission.py
 python scripts/cad_policy_gate.py
+# anti-theater 가드 grep
+grep -nE "pilot_spotcheck|작성|반송|OPEN" docs/INTERNAL_PILOT_GUIDE.md
+grep -rn "build_customer_pilot_" docs/release/   # 정리 후 0 또는 실 producer로
 ```
 
 ## 개별 시나리오
 
-### T-SC1. synonym 매칭 → SC1
-- 실행: synonym 단위테스트
-- 기대: `entity_type="block_reference"` 예측이 `entity_type="attrib"` truth와 **동일 위치서 매칭**(TP). 무관 타입(line vs attrib)은 비매칭. 위치 먼 경우 비매칭(거리 게이트 병존).
-- 연결 DoD: SC1
+### T-GS1. emission 함수 → GS1
+- 실행: 합성 `<tmp>/artifacts/review_dashboard.json`(top_issues 1행) 만들고 `emit_spotcheck_artifacts(<tmp>)` 호출
+- 기대: `<tmp>/pilot_spotcheck.md`(검출행) + `review_ground_truth.csv`(기존 스키마) 산출.
+- 연결 DoD: GS1
 
-### T-SC2. 07 recall 회복 → SC2
-- 실행: 전체 골든 measure
-- 기대: `07_block_attribute_text_change` per-pair `r=1.000`(이전 0.000). aggregate recall 상승(≈0.786→~0.86).
-- 연결 DoD: SC2
+### T-GS2. GUI 발화 증명 → GS2
+- 실행: (방법A) offscreen GUI 핸들러 `_on_auto_finished_v2`에 합성 result 주입→구동 후 output_dir/pilot_spotcheck.md 존재 단언. (방법B 폴백) `inspect.getsource(_on_auto_finished_v2)`가 `emit_spotcheck_artifacts` 호출 포함 단언.
+- 기대: GUI 경로가 시트를 **실제 발화**(or 호출 배선 단언). fail-safe(예외 시 비교 흐름 무손상)도 단언.
+- 연결 DoD: GS2
 
-### T-SC3. only-07 + noise 무회귀 → SC3
-- 실행: measure 전/후 per-pair 리포트 비교
-- 기대: 07 외 14개 fixture의 tp/fp/fn **불변**, `noise_fp=0` 유지. 변화는 07 한 줄.
-- 연결 DoD: SC3
+### T-GS3. 러너 비퇴행 → GS3
+- 실행: `pytest test_run_pilot_spotcheck.py`(기존 14)
+- 기대: 추출 리팩터 후 전량 통과, 산출 불변.
+- 연결 DoD: GS3
 
-### T-SC4. 결정적 → SC4
-- 실행: `pytest test_accuracy_metrics.py`(+골든 07 회복 단언 테스트)
-- 기대: 2회 동일 PASS.
-- 연결 DoD: SC4
+### T-GS4. anti-theater 가드 → GS4
+- 실행: 단일진입점의 grep
+- 기대: INTERNAL_PILOT_GUIDE에 pilot_spotcheck 행 + "작성·반송" 지시 + 인간 P0 OPEN 명시. `build_customer_pilot_*` vapor 참조 0(or 실 producer).
+- 연결 DoD: GS4
 
-### T-SC5. dogfood + 정책 + floor → SC5
-- 실행: black/isort --check + `cad_policy_gate` + measure floor + 기존 정확도 테스트
-- 기대: 신규/수정 .py clean; gate `passed`; floor exit 0(noise_fp 0·p≥0.50·r≥0.68); 기존 테스트 통과; per-PR 목록 갱신.
-- 연결 DoD: SC5
+### T-GS5. dogfood + 정책 → GS5
+- 실행: black/isort --check + `cad_policy_gate` + per-PR grep
+- 기대: 신규/수정 .py clean; gate `passed`; per-PR 목록에 GUI emission 테스트.
+- 연결 DoD: GS5
 
 ## 통과 기준
-- [x] T-SC1~SC5 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
-- [x] 엔진 실검출 입증·검출 무변경·only-07 변화 STATUS에 확인
+- [x] T-GS1~GS5 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
+- [x] GUI 발화 증명(unfired 아님)·fail-safe·인간 P0 OPEN STATUS에 확인

@@ -77,3 +77,15 @@ def test_real_pipeline_completes_end_to_end_on_golden_pair(tmp_path: Path) -> No
     else:
         zone_list = zones
     assert zone_list, "change_zones.json is empty — compare detected nothing"
+
+    # 6) B1 pilot enablement — the pipeline emits the operator spotcheck sheet +
+    #    ground-truth skeleton (shared producer pilot_spotcheck_sheet), so a GUI
+    #    compare yields the dry-run artifact without a dev Python checkout. This
+    #    is the firing proof that the emission is wired into the real run, not a
+    #    present-but-unfired dead island.
+    assert (od / "pilot_spotcheck.md").exists(), "pipeline did not emit pilot_spotcheck.md"
+    assert (
+        od / "review_ground_truth.csv"
+    ).exists(), "pipeline did not emit review_ground_truth.csv skeleton"
+    spotcheck = (od / "pilot_spotcheck.md").read_text(encoding="utf-8")
+    assert "검출된 변경" in spotcheck  # the detected-changes section rendered
