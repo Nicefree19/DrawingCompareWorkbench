@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ if str(ROOT) not in sys.path:
 
 from src.services.comparison.dwg_backend import DWG_BACKEND_ODA_CONVERTER
 from src.services.comparison.dwg_converter import converter_installation_status
+from src.services.comparison.dwg_dxf_fallback import auto_convert_unsupported_dwg
 from src.services.comparison.folder_compare_pipeline import (
     FolderComparePipeline,
     FolderCompareRunRequest,
@@ -256,19 +258,65 @@ def _resolve_dwg_backend_mode(before: Path, after: Path) -> str | None:
     return DWG_BACKEND_ODA_CONVERTER
 
 
+def _convert_folder_dwgs(root: Path, staging: Path) -> Path:
+    """Pre-convert each ``.dwg`` in a folder input to DXF.
+
+    The pipeline auto-converts a DWG only on the explicit single-file path; its
+    folder-scan path passes the directory to the converter (→ ``not_dwg``) and
+    leaves DWGs unconverted, so an unsupported-version DWG inside a folder fails
+    preflight. This pre-converts each DWG file via the existing approved path
+    (no conversion logic re-implemented) into a staging folder of DXF (and
+    pass-through) files. Non-folder inputs are returned unchanged (the single-
+    file DWG path keeps the pipeline's own conversion). Fails loud if a DWG
+    needs conversion but none is installed — never a silent drop.
+    """
+    if not root.is_dir():
+        return root
+    files = [child for child in root.iterdir() if child.is_file()]
+    if not any(f.suffix.lower() == ".dwg" for f in files):
+        return root
+    if not converter_installation_status().get("installed"):
+        raise PilotSpotcheckError(
+            "DWG가 포함된 폴더 입력이 감지됐으나 로컬 DWG 변환기가 설치되어 있지 "
+            "않습니다.\n  → DWG를 먼저 DXF로 변환한 뒤 입력하거나, 변환기를 설치한 "
+            "뒤 다시 실행하세요."
+        )
+    staging.mkdir(parents=True, exist_ok=True)
+    cache = staging / "_oda_cache"
+    for child in files:
+        if child.suffix.lower() == ".dwg":
+            converted, _did, note = auto_convert_unsupported_dwg(child, cache)
+            converted = Path(converted)
+            if converted.suffix.lower() == ".dxf":
+                shutil.copy(converted, staging / f"{child.stem}.dxf")
+            elif note == "native_supported":
+                shutil.copy(child, staging / child.name)  # native reader handles it
+            else:
+                raise PilotSpotcheckError(
+                    f"DWG 변환 실패: {child.name} (사유 {note}) — 먼저 DXF로 변환한 " "뒤 입력하세요."
+                )
+        else:
+            shutil.copy(child, staging / child.name)
+    return staging
+
+
 def run_pilot_spotcheck(before: Path, after: Path, output: Path) -> dict[str, Any]:
     """Run the real pipeline and emit the spotcheck sheet + ground-truth skeleton."""
     output.mkdir(parents=True, exist_ok=True)
+    orig_before, orig_after = before, after
+    staging = output / "_dwg_staging"
+    before = _convert_folder_dwgs(before, staging / "before")
+    after = _convert_folder_dwgs(after, staging / "after")
     dwg_backend_mode = _resolve_dwg_backend_mode(before, after)
     request = FolderCompareRunRequest(before, after, output, dwg_backend_mode=dwg_backend_mode)
     result = FolderComparePipeline(request).run()
     output_dir = Path(result.output_dir)
 
     issues = _load_top_issues(output_dir)
-    if before.is_dir() or after.is_dir():
-        pair_name = f"{before.name}/ ↔ {after.name}/ (폴더 배치)"
+    if orig_before.is_dir() or orig_after.is_dir():
+        pair_name = f"{orig_before.name}/ ↔ {orig_after.name}/ (폴더 배치)"
     else:
-        pair_name = f"{before.stem} → {after.stem}"
+        pair_name = f"{orig_before.stem} → {orig_after.stem}"
 
     spotcheck_path = output_dir / "pilot_spotcheck.md"
     spotcheck_path.write_text(build_spotcheck_md(pair_name, issues), encoding="utf-8")

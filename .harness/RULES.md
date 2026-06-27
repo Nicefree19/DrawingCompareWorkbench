@@ -1,21 +1,22 @@
 # RULES — 핵심 제약 (경량화)
 
-> ⚠️ 이 목표(러너 DWG 온램프 + 폴더 배치)에 직결되는 조항만.
+> ⚠️ 이 목표(폴더-DWG 변환 수정 + 실-ODA 증명)에 직결되는 조항만.
 
 ## 절대 규칙 (위배 시 작업 중단)
-- **compare/변환 재구현 금지**: 폴더 배치 = `FolderComparePipeline` 폴더 스캔 / `BatchCompareJob` 그대로. DWG 변환 = 기존 `dwg_converter`/auto_convert 경로 그대로. 러너는 **입력 라우팅 + 출력 그룹핑만**. 새 비교/변환 로직 0.
-- **정책 게이트 준수**: DWG "완전/네이티브 완전지원" 미주장. ODA를 "필수"로 표기 금지. `cad_policy_gate` 그린 유지(token-free).
-- **침묵 다운그레이드 금지**: DWG 변환 불가/ODA 부재 시 **fail-loud**(사전변환 안내). 조용히 빈 결과/단일파일 폴백 금지 ([[oda_dual_path_slim_gap]] 교훈).
-- **단일쌍 비퇴행**: PR#56 단일 DXF 쌍 동작·산출물 불변(기존 경로 무변경, 분기만 추가).
-- **정답 미조작·스키마 보존**: csv 스켈레톤 = 기존 스키마·사실만(PR#56 규칙 승계).
+- **변환 재구현 금지**: 폴더 내 DWG 변환은 기존 `auto_convert_unsupported_dwg`(per-file) 그대로 호출. 새 변환 로직 0.
+- **최소 blast-radius**: 공유 파이프라인/GUI 폴더 경로를 불필요하게 건드리지 않는다. 가능하면 러너-레벨 수정. 파이프라인 수정이 불가피하면 기존 폴더-compare 테스트 전량 보존.
+- **실증명 우선(mock 보존)**: mock 단위테스트는 유지하되, **실 AC1032 DWG fixture로 비-skip 로컬 실행**해 end-to-end 증명. skip-only로 "통과" 주장 금지.
+- **단일 DWG·DXF 비퇴행**: 현재 작동하는 단일 DWG 쌍·모든 DXF 경로 동작 불변.
+- **정책 준수**: DWG "완전지원" 미주장, ODA "필수" 미표기, `cad_policy_gate` 그린.
 
 ## 설계/코드 제약
-- 경량: argparse 입력 분기(파일 vs 폴더, dxf vs dwg) + 파이프라인 호출 + 포맷. 무거운 customer-evidence 게이트 의존 금지.
-- 신규 테스트는 결정적·헤드리스(real ODA 불요 — 변환은 mock/배선 단언). per-PR 목록 유지(silent-inert 금지).
+- 경량: 폴더 입력 분기서 per-file 변환 + 기존 파이프라인 호출. 무거운 customer-evidence 의존 금지.
+- 커밋 DWG fixture는 AC1032(native 미지원→변환 강제), 작게(<100KB/파일). 생성 절차 기록(재현성).
+- e2e는 `@skipif(not installed)` + 명시적 skip 사유. per-PR 목록 추가(로컬 실행 증거 STATUS 기록).
 - 한 반복 = 한 단계.
 
 ## 우선순위 (충돌 시)
-1. 정직성(재구현 안 함·침묵 다운그레이드 안 함) > 2. 정책 준수 > 3. 무마찰(실폴더/DWG 그대로) > 4. 결정성 > 5. 단순성
+1. 정직성(실증명·재구현 안 함) > 2. 비퇴행(공유 경로·단일 DWG) > 3. 정책 준수 > 4. 결정성 > 5. 단순성
 
 ## 검증 연결
-- 재구현 금지·라우팅 = T-PB1/T-PB2. 정책·dogfood = T-PB5. 비퇴행 = T-PB3.
+- 변환 수정·실증명 = T-DF1/T-DF3. 비퇴행 = T-DF4/T-DF5. dogfood·정책·골든floor = T-DF5.
