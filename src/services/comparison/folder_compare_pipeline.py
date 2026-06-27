@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
+import gc
+import inspect
 import json
 import logging
 import os
-import gc
 import shutil
-import inspect
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -28,17 +28,14 @@ def _is_explicit_oda_converter_backend(value: Any) -> bool:
 
 
 from .change_zones import (
+    ChangeZoneOptions,
     CloudMarkOptions,
     ExecutiveReviewPackage,
     export_change_artifacts,
     export_executive_review_from_artifacts,
 )
 from .comparison_config import ComparisonConfig
-from .change_zones import ChangeZoneOptions
-from .noise_filter_io import (
-    NoiseFilterSettings,
-    load_noise_filter_settings,
-)
+from .confirmed_cloud_export import export_selected_cloud_marks
 from .drawing_batch import (
     BatchCompareJob,
     BatchCompareOptions,
@@ -46,34 +43,31 @@ from .drawing_batch import (
     DescriptorBuildOptions,
     DrawingFileDescriptor,
     MatchCandidate,
-    MatchStatus,
     MatchingOptions,
-    _descriptor_uses_commercial_sdk,
+    MatchStatus,
     _descriptor_user_converter_dxf,
+    _descriptor_uses_commercial_sdk,
     are_compatible,
     match_drawing_sets,
     scan_drawing_inputs,
 )
-from .dxf_read import dxf_document_cache_scope
+from .dwg_backend import DWG_BACKEND_ODA_CONVERTER, normalize_dwg_backend_mode
 from .dwg_dxf_fallback import (
     auto_convert_unsupported_dwg,
     fallback_review_notice,
     resolve_dwg_dxf_fallback_pair,
 )
-from .dwg_backend import DWG_BACKEND_ODA_CONVERTER, normalize_dwg_backend_mode
-from .confirmed_cloud_export import export_selected_cloud_marks
+from .dxf_read import dxf_document_cache_scope
 from .export_profiles import (
     apply_export_profile_to_file,
     apply_export_profile_to_json,
     audit_sharable_paths,
     normalize_export_profile,
 )
+from .noise_filter_io import NoiseFilterSettings, load_noise_filter_settings
+from .perf_events import PERF_EVENTS_SUMMARY_FILENAME, PerfEventWriter, remove_raw_perf_events
+from .pilot_spotcheck_sheet import emit_spotcheck_artifacts_safely
 from .preflight import PreflightResult, run_preflight
-from .perf_events import (
-    PERF_EVENTS_SUMMARY_FILENAME,
-    PerfEventWriter,
-    remove_raw_perf_events,
-)
 from .review_project import (
     PreviewPackage,
     export_preview_artifacts,
@@ -83,10 +77,7 @@ from .review_project import (
 )
 from .run_contract import RunManifestWriter
 from .viewer_package import ViewerPackage, export_viewer_package
-from .viewer_package_proxy import (
-    SubprocessRunReport,
-    export_viewer_package_isolated,
-)
+from .viewer_package_proxy import SubprocessRunReport, export_viewer_package_isolated
 
 ProgressCallback = Callable[[str, float, str], None]
 # Callback receives ``(stage, percent, message)``. ``percent`` is typically an
@@ -259,15 +250,21 @@ class FolderCompareRunResult:
 
     @property
     def review_required_pairs(self) -> int:
-        return sum(1 for candidate in self.candidates if candidate.status == MatchStatus.REVIEW_REQUIRED)
+        return sum(
+            1 for candidate in self.candidates if candidate.status == MatchStatus.REVIEW_REQUIRED
+        )
 
     @property
     def unmatched_a(self) -> int:
-        return sum(1 for candidate in self.candidates if candidate.status == MatchStatus.UNMATCHED_A)
+        return sum(
+            1 for candidate in self.candidates if candidate.status == MatchStatus.UNMATCHED_A
+        )
 
     @property
     def unmatched_b(self) -> int:
-        return sum(1 for candidate in self.candidates if candidate.status == MatchStatus.UNMATCHED_B)
+        return sum(
+            1 for candidate in self.candidates if candidate.status == MatchStatus.UNMATCHED_B
+        )
 
 
 class FolderComparePipeline:
@@ -314,9 +311,7 @@ class FolderComparePipeline:
         from .stage_hang_watchdog import StageHangWatchdog
 
         hang_watchdog = StageHangWatchdog(output_dir).start()
-        run_manifest.on_stage = (
-            lambda name, status: hang_watchdog.pet(f"{name}:{status}")
-        )
+        run_manifest.on_stage = lambda name, status: hang_watchdog.pet(f"{name}:{status}")
         perf_writer = PerfEventWriter(
             output_dir,
             run_id=str(run_manifest.payload.get("run_id") or ""),
@@ -343,9 +338,7 @@ class FolderComparePipeline:
                 noise_filter = NoiseFilterSettings.default()
         zone_options = ChangeZoneOptions(
             min_changes_per_zone=noise_filter.min_changes_per_zone,
-            single_entity_noise_score_threshold=(
-                noise_filter.single_entity_noise_score_threshold
-            ),
+            single_entity_noise_score_threshold=(noise_filter.single_entity_noise_score_threshold),
         )
 
         # Issue-1 lever #2 (2026-06-11): share parsed DXF documents across the
@@ -483,7 +476,9 @@ class FolderComparePipeline:
             self._emit(progress_callback, "scan", 18, "변경 전 도면 확인 완료")
             self._check_cancelled(is_cancelled)
             descriptors_b = scan_drawing_inputs(source_b_input, options=scan_options)
-            run_manifest.stage(active_stage, "completed", a_count=len(descriptors_a), b_count=len(descriptors_b))
+            run_manifest.stage(
+                active_stage, "completed", a_count=len(descriptors_a), b_count=len(descriptors_b)
+            )
             perf_writer.stage_event(
                 active_stage,
                 "completed",
@@ -508,12 +503,16 @@ class FolderComparePipeline:
                 descriptors_b,
             )
             if candidates is None:
-                candidates = match_drawing_sets(descriptors_a, descriptors_b, options=MatchingOptions())
+                candidates = match_drawing_sets(
+                    descriptors_a, descriptors_b, options=MatchingOptions()
+                )
             run_manifest.stage(
                 active_stage,
                 "completed",
                 confirmed=sum(1 for candidate in candidates if candidate.is_confirmed),
-                review_required=sum(1 for candidate in candidates if candidate.status == MatchStatus.REVIEW_REQUIRED),
+                review_required=sum(
+                    1 for candidate in candidates if candidate.status == MatchStatus.REVIEW_REQUIRED
+                ),
             )
             perf_writer.stage_event(
                 active_stage,
@@ -522,9 +521,7 @@ class FolderComparePipeline:
                 pair_count=len(candidates),
                 confirmed=sum(1 for candidate in candidates if candidate.is_confirmed),
                 review_required=sum(
-                    1
-                    for candidate in candidates
-                    if candidate.status == MatchStatus.REVIEW_REQUIRED
+                    1 for candidate in candidates if candidate.status == MatchStatus.REVIEW_REQUIRED
                 ),
             )
             if (
@@ -574,18 +571,23 @@ class FolderComparePipeline:
             if overrides_path.exists():
                 try:
                     from .manual_page_overrides import load_overrides as _load_overrides
+
                     overrides_by_pair = _load_overrides(overrides_path)
                     if overrides_by_pair:
+
                         def override_lookup(pair_uuid: str) -> Sequence[Any]:  # noqa: E306
                             return overrides_by_pair.get(pair_uuid, ())
+
                         logger.info(
                             "Loaded %d pair(s) of manual page overrides from %s",
-                            len(overrides_by_pair), overrides_path,
+                            len(overrides_by_pair),
+                            overrides_path,
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Failed to load manual page overrides from %s: %s",
-                        overrides_path, exc,
+                        overrides_path,
+                        exc,
                     )
 
             # Phase O — apply user-saved noise filter settings to
@@ -596,9 +598,7 @@ class FolderComparePipeline:
             comparison_config.sensitivity.global_alignment_enabled = (
                 noise_filter.global_alignment_enabled
             )
-            comparison_config.sensitivity.hungarian_max_subset = (
-                noise_filter.hungarian_max_subset
-            )
+            comparison_config.sensitivity.hungarian_max_subset = noise_filter.hungarian_max_subset
             comparison_config.sensitivity.cosmetic_detection_enabled = (
                 noise_filter.cosmetic_detection_enabled
             )
@@ -704,9 +704,7 @@ class FolderComparePipeline:
                 zone_options=zone_options,
             )
             if compare_failure_path is not None:
-                artifact_package.output_paths["compare_failures_json"] = str(
-                    compare_failure_path
-                )
+                artifact_package.output_paths["compare_failures_json"] = str(compare_failure_path)
             region_paths = _export_region_aware_artifacts(
                 compare_summary=compare_summary,
                 artifact_package=artifact_package,
@@ -824,6 +822,12 @@ class FolderComparePipeline:
                 fold_repetitive_layers=self.request.fold_repetitive_layers,
             )
             artifact_package.output_paths.update(executive_package.output_paths)
+            # B1 pilot enablement — emit the operator spotcheck sheet now that
+            # review_dashboard.json exists, so a GUI compare (and the CLI) yields
+            # pilot_spotcheck.md + the ground-truth skeleton without a dev Python
+            # checkout. Shared producer (pilot_spotcheck_sheet); fail-safe so a
+            # sheet problem can never break the compare run.
+            emit_spotcheck_artifacts_safely(output_dir)
             perf_writer.stage_event(
                 active_stage,
                 "completed",
@@ -860,17 +864,11 @@ class FolderComparePipeline:
             # ``ViewerPackage.to_dict()``. ``runtime_sampler`` is omitted
             # because the subprocess starts its own sampler internally.
             effective_viewer_render_policy = (
-                "top-issues"
-                if fast_first_review
-                else self.request.viewer_render_policy
+                "top-issues" if fast_first_review else self.request.viewer_render_policy
             )
-            effective_max_zone_tiles = (
-                0 if fast_first_review else self.request.max_zone_tiles
-            )
+            effective_max_zone_tiles = 0 if fast_first_review else self.request.max_zone_tiles
             effective_prefetch_neighbor_tiles = (
-                False
-                if fast_first_review
-                else self.request.prefetch_neighbor_tiles
+                False if fast_first_review else self.request.prefetch_neighbor_tiles
             )
             effective_tile_prefetch_radius = (
                 0 if fast_first_review else self.request.tile_prefetch_radius
@@ -878,9 +876,7 @@ class FolderComparePipeline:
             effective_export_marked_pdf = (
                 False if fast_first_review else self.request.export_marked_pdf
             )
-            effective_marked_pdf_mode = (
-                "off" if fast_first_review else self.request.marked_pdf_mode
-            )
+            effective_marked_pdf_mode = "off" if fast_first_review else self.request.marked_pdf_mode
             effective_build_lod_tiles = not fast_first_review
             effective_max_viewer_pages = self.request.max_viewer_pages
             effective_render_timeout_seconds = self.request.render_timeout_seconds
@@ -1001,18 +997,16 @@ class FolderComparePipeline:
                     # OR the second attempt also raises, propagate the
                     # original exception.
                     from .adaptive_quality import (
-                        InputCharacteristics,
                         QUALITY_TIERS,
+                        SCHEMA_VERSION,
+                        InputCharacteristics,
                         QualityDecision,
                         QualityTier,
-                        SCHEMA_VERSION,
                         downgrade_one_step,
                     )
 
                     current_dpi = int(viewer_options.get("preview_dpi") or 80)
-                    current_max_edge = int(
-                        viewer_options.get("preview_max_edge_px") or 2400
-                    )
+                    current_max_edge = int(viewer_options.get("preview_max_edge_px") or 2400)
                     # Find the matching tier; if no exact match, build an
                     # ad-hoc tier so downgrade_one_step still has a starting
                     # index to walk down from. Ad-hoc tiers (e.g. DPI 400)
@@ -1054,11 +1048,8 @@ class FolderComparePipeline:
                         # Already at the lowest tier (or no real downgrade
                         # available) — propagate without retrying.
                         raise MemoryBudgetExceeded(
-                            stage=viewer_report.error_stage
-                            or "viewer_package_subprocess",
-                            current_mb=float(
-                                viewer_report.error_current_mb or 0.0
-                            ),
+                            stage=viewer_report.error_stage or "viewer_package_subprocess",
+                            current_mb=float(viewer_report.error_current_mb or 0.0),
                             max_mb=float(viewer_report.error_max_mb or 0.0),
                         )
                     # Update viewer_options with downgraded tier and retry.
@@ -1092,9 +1083,7 @@ class FolderComparePipeline:
                             raise MemoryBudgetExceeded(
                                 stage=viewer_report.error_stage
                                 or "viewer_package_subprocess_retry",
-                                current_mb=float(
-                                    viewer_report.error_current_mb or 0.0
-                                ),
+                                current_mb=float(viewer_report.error_current_mb or 0.0),
                                 max_mb=float(viewer_report.error_max_mb or 0.0),
                             )
                         raise RuntimeError(
@@ -1106,9 +1095,7 @@ class FolderComparePipeline:
                         "viewer_package subprocess failed: "
                         f"{viewer_report.error_type}: {viewer_report.error_message}"
                     )
-            viewer_output_paths: dict[str, Any] = (
-                viewer_package_dict.get("output_paths") or {}
-            )
+            viewer_output_paths: dict[str, Any] = viewer_package_dict.get("output_paths") or {}
             viewer_overlay_count: int = int(viewer_package_dict.get("overlay_count", 0))
             viewer_manifest_path_value: str = str(
                 viewer_output_paths.get("viewer_manifest_json") or ""
@@ -1118,9 +1105,7 @@ class FolderComparePipeline:
             # GUI bindings) keep their attribute access pattern. The proxy
             # returns a payload that matches ViewerPackage.to_dict().
             viewer_package = ViewerPackage(
-                viewer_dir=Path(
-                    viewer_package_dict.get("viewer_dir") or viewer_dir
-                ),
+                viewer_dir=Path(viewer_package_dict.get("viewer_dir") or viewer_dir),
                 manifest_path=Path(viewer_manifest_path_value)
                 if viewer_manifest_path_value
                 else (Path(viewer_dir) / "viewer_manifest.json"),
@@ -1136,13 +1121,9 @@ class FolderComparePipeline:
                 marked_pdf_skipped_count=int(
                     viewer_package_dict.get("marked_pdf_skipped_count", 0)
                 ),
-                rendered_pair_count=int(
-                    viewer_package_dict.get("rendered_pair_count", 0)
-                ),
+                rendered_pair_count=int(viewer_package_dict.get("rendered_pair_count", 0)),
                 lazy_pair_count=int(viewer_package_dict.get("lazy_pair_count", 0)),
-                transform_complete=bool(
-                    viewer_package_dict.get("transform_complete", True)
-                ),
+                transform_complete=bool(viewer_package_dict.get("transform_complete", True)),
                 warnings=[str(w) for w in (viewer_package_dict.get("warnings") or [])],
                 output_paths={k: str(v) for k, v in viewer_output_paths.items()},
             )
@@ -1166,7 +1147,9 @@ class FolderComparePipeline:
             ready_artifacts = {
                 key: value
                 for key, value in {
-                    "review_dashboard_json": executive_package.output_paths.get("review_dashboard_json"),
+                    "review_dashboard_json": executive_package.output_paths.get(
+                        "review_dashboard_json"
+                    ),
                     "viewer_manifest_json": viewer_manifest_path_value,
                     "viewer_index_html": viewer_package.output_paths.get("viewer_index_html"),
                     "preview_manifest_json": preview_package.manifest_path,
@@ -1208,7 +1191,9 @@ class FolderComparePipeline:
                 "fast_first_review": fast_first_review,
                 "fast_first_review_auto": auto_fast_first_review_triggered,
                 "fast_first_review_auto_reason": auto_fast_first_review_reason,
-                "review_dashboard_json": executive_package.output_paths.get("review_dashboard_json"),
+                "review_dashboard_json": executive_package.output_paths.get(
+                    "review_dashboard_json"
+                ),
                 "viewer_manifest_json": viewer_manifest_path_value,
                 "viewer_render_policy": effective_viewer_render_policy,
                 "max_zone_tiles": effective_max_zone_tiles,
@@ -1225,9 +1210,7 @@ class FolderComparePipeline:
                 "deferred_outputs": deferred_outputs,
             }
             run_manifest.stage("first_review_ready", "completed", **first_review_metadata)
-            if runtime_sampler is not None and hasattr(
-                runtime_sampler, "mark_first_review_ready"
-            ):
+            if runtime_sampler is not None and hasattr(runtime_sampler, "mark_first_review_ready"):
                 try:
                     runtime_sampler.mark_first_review_ready()
                 except Exception:
@@ -1291,12 +1274,16 @@ class FolderComparePipeline:
                     "구조 핵심 자동 구름마크 추출 중",
                 )
                 auto_cloud_outputs = _export_auto_structural_clouds(
-                    review_dashboard_path=executive_package.output_paths.get("review_dashboard_json"),
+                    review_dashboard_path=executive_package.output_paths.get(
+                        "review_dashboard_json"
+                    ),
                     viewer_manifest_path=viewer_manifest_path_value,
                     output_dir=artifact_dir / "auto_structural_clouds",
                 )
                 artifact_package.output_paths.update(auto_cloud_outputs)
-                auto_structural_cloud_count = int(auto_cloud_outputs.get("auto_structural_cloud_count") or 0)
+                auto_structural_cloud_count = int(
+                    auto_cloud_outputs.get("auto_structural_cloud_count") or 0
+                )
             self._emit(progress_callback, "export_profile", 98, "결과 패키지 정리 중")
             run_manifest.stage(
                 active_stage,
@@ -1314,9 +1301,7 @@ class FolderComparePipeline:
             try:
                 from .scene_pack_prewarm import launch_detached_prewarm
 
-                launch_detached_prewarm(
-                    [str(source_a_input), str(source_b_input)]
-                )
+                launch_detached_prewarm([str(source_a_input), str(source_b_input)])
             except Exception:  # noqa: BLE001 - prewarm is best-effort only
                 logger.debug("scene-pack prewarm launch failed", exc_info=True)
 
@@ -1481,6 +1466,7 @@ class FolderComparePipeline:
         if is_cancelled and is_cancelled():
             raise RuntimeError("사용자가 도면 비교 작업을 취소했습니다.")
 
+
 def _compare_failure_records(compare_summary: BatchCompareSummary) -> list[dict[str, Any]]:
     """Return compact per-pair failure diagnostics for run artifacts."""
 
@@ -1489,9 +1475,7 @@ def _compare_failure_records(compare_summary: BatchCompareSummary) -> list[dict[
         if getattr(item, "status", "") != "failed":
             continue
         candidate_payload = (
-            item.candidate.to_dict()
-            if getattr(item, "candidate", None) is not None
-            else {}
+            item.candidate.to_dict() if getattr(item, "candidate", None) is not None else {}
         )
         result = getattr(item, "result", None)
         metadata = getattr(result, "metadata", None)
@@ -1500,8 +1484,7 @@ def _compare_failure_records(compare_summary: BatchCompareSummary) -> list[dict[
         warnings = getattr(result, "warnings", None)
         records.append(
             {
-                "pair_id": candidate_payload.get("pair_id")
-                or candidate_payload.get("pair_uuid"),
+                "pair_id": candidate_payload.get("pair_id") or candidate_payload.get("pair_uuid"),
                 "display_label": candidate_payload.get("display_label"),
                 "status": getattr(item, "status", ""),
                 "error": getattr(item, "error", "") or "",
@@ -1547,7 +1530,9 @@ def _should_auto_fast_first_review(
     except (TypeError, ValueError):
         safe_threshold = 20
     try:
-        largest_count = max(int(pair_count or 0), int(source_a_count or 0), int(source_b_count or 0))
+        largest_count = max(
+            int(pair_count or 0), int(source_a_count or 0), int(source_b_count or 0)
+        )
     except (TypeError, ValueError):
         largest_count = 0
     return largest_count >= safe_threshold
@@ -1686,7 +1671,9 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def _export_viewer_package_isolated_compat(*args: Any, **kwargs: Any) -> tuple[Any, SubprocessRunReport]:
+def _export_viewer_package_isolated_compat(
+    *args: Any, **kwargs: Any
+) -> tuple[Any, SubprocessRunReport]:
     """Call viewer export while tolerating older test doubles.
 
     Production export accepts cancel_callback. Some tests monkeypatch it with
@@ -1719,7 +1706,10 @@ def _resolve_multi_frame_mode() -> tuple[str, str]:
     if raw == "sidecar_only":
         return "sidecar_only", "region-aware output is diagnostic sidecar only"
     if raw == "review_gate":
-        return "review_gate", "region-aware output requires review before automatic localized compare"
+        return (
+            "review_gate",
+            "region-aware output requires review before automatic localized compare",
+        )
     return "off", "region-aware multi-frame output disabled"
 
 
@@ -1752,9 +1742,7 @@ def _resolve_region_local_default_enablement(
             "mode": raw_mode,
             "status": "disabled",
             "automatic_localized_compare_requested": False,
-            "gate_reasons": [
-                f"invalid {REGION_LOCAL_DEFAULT_ENV} value; use off or pilot_passed"
-            ],
+            "gate_reasons": [f"invalid {REGION_LOCAL_DEFAULT_ENV} value; use off or pilot_passed"],
         }
     if raw_mode == "off":
         return {
@@ -1851,7 +1839,9 @@ def _high_confidence_region_local_default_gate(
         region_counts.append(len(non_whole))
         whole_modelspace_count += len(regions) - len(non_whole)
     if not region_counts or any(count < 2 for count in region_counts):
-        gate_reasons.append("single-detail or incomplete multi-detail detection; kept global compare")
+        gate_reasons.append(
+            "single-detail or incomplete multi-detail detection; kept global compare"
+        )
     if whole_modelspace_count:
         gate_reasons.append("whole-modelspace fallback requires manual review")
 
@@ -1949,23 +1939,23 @@ def _export_region_aware_artifacts(
             match_sheet_regions,
             write_region_match_summary,
         )
-        from .region_match_overrides import load_region_match_overrides
+        from .dxf_entity_extractor import DxfEntityExtractor
         from .localized_compare import (
             LocalizedCompareSummary,
+            compare_localized_region_entities,
             localize_change_zones,
             read_change_zones,
             serialize_localized_region_result,
-            write_localized_region_compare_results,
             write_localized_compare_summary,
-            compare_localized_region_entities,
+            write_localized_region_compare_results,
         )
+        from .pair_identity import candidate_pair_uuid
         from .region_compare_pipeline import (
             build_region_local_primary_change_zones,
             write_region_local_primary_change_zones,
         )
+        from .region_match_overrides import load_region_match_overrides
         from .region_viewer_package import export_region_viewer_package
-        from .dxf_entity_extractor import DxfEntityExtractor
-        from .pair_identity import candidate_pair_uuid
         from .sheet_region_detector import (
             RegionDetectionResult,
             detect_sheet_regions,
@@ -1986,7 +1976,11 @@ def _export_region_aware_artifacts(
 
         for item in getattr(compare_summary, "items", []) or []:
             candidate = getattr(item, "candidate", None)
-            if not candidate or not getattr(candidate, "source_a", None) or not getattr(candidate, "source_b", None):
+            if (
+                not candidate
+                or not getattr(candidate, "source_a", None)
+                or not getattr(candidate, "source_b", None)
+            ):
                 continue
             if str(getattr(item, "status", "")).lower() not in {"completed", "success", "passed"}:
                 continue
@@ -2109,9 +2103,9 @@ def _export_region_aware_artifacts(
                 compare_localized_region_entities=compare_localized_region_entities,
                 serialize_localized_region_result=serialize_localized_region_result,
             )
-            auto_region_payload["automatic_localized_compare_request_source"] = (
-                auto_region_request_source
-            )
+            auto_region_payload[
+                "automatic_localized_compare_request_source"
+            ] = auto_region_request_source
             auto_region_payload["default_enablement"] = default_enablement
             auto_region_path = write_localized_region_compare_results(
                 auto_region_payload,
@@ -2153,9 +2147,7 @@ def _export_region_aware_artifacts(
                 "region_default_enablement_pilot_summary_json": str(
                     default_enablement.get("pilot_summary_json") or ""
                 ),
-                "region_local_primary_enabled": bool(
-                    primary_region_payload.get("primary_enabled")
-                ),
+                "region_local_primary_enabled": bool(primary_region_payload.get("primary_enabled")),
                 "region_local_primary_status": str(
                     primary_region_payload.get("status") or "not_requested"
                 ),
@@ -2288,10 +2280,14 @@ def _build_auto_region_compare_payload(
             )
         if getattr(match_summary, "review_required_count", 0):
             pair_reasons.append("one or more region matches require manual review")
-        if getattr(match_summary, "unmatched_before_count", 0) or getattr(match_summary, "unmatched_after_count", 0):
+        if getattr(match_summary, "unmatched_before_count", 0) or getattr(
+            match_summary, "unmatched_after_count", 0
+        ):
             pair_reasons.append("one or more detected regions are unmatched")
         if getattr(localized_summary, "gate_status", "passed") != "passed":
-            pair_reasons.extend(str(reason) for reason in getattr(localized_summary, "gate_reasons", ()) or ())
+            pair_reasons.extend(
+                str(reason) for reason in getattr(localized_summary, "gate_reasons", ()) or ()
+            )
         if pair_reasons:
             skipped_pair_count += 1
             gate_reasons.extend(f"{pair_id}: {reason}" for reason in pair_reasons)
@@ -2312,12 +2308,10 @@ def _build_auto_region_compare_payload(
             continue
 
         before_regions = {
-            region.region_id: region
-            for region in getattr(before_result, "regions", ()) or ()
+            region.region_id: region for region in getattr(before_result, "regions", ()) or ()
         }
         after_regions = {
-            region.region_id: region
-            for region in getattr(after_result, "regions", ()) or ()
+            region.region_id: region for region in getattr(after_result, "regions", ()) or ()
         }
         try:
             entities_before = extractor.extract_from_file(source_a)
@@ -2513,7 +2507,9 @@ def _build_multi_frame_validation_payload(
     """Return a hard-gate oriented summary for multi-frame review decisions."""
 
     total_zones = sum(int(getattr(summary, "total_zones", 0)) for summary in localized_summaries)
-    assigned_zones = sum(int(getattr(summary, "assigned_zones", 0)) for summary in localized_summaries)
+    assigned_zones = sum(
+        int(getattr(summary, "assigned_zones", 0)) for summary in localized_summaries
+    )
     unassigned_zones = sum(
         int(getattr(summary, "unassigned_zone_count", 0)) for summary in localized_summaries
     )
@@ -2547,16 +2543,12 @@ def _build_multi_frame_validation_payload(
     if unmatched_before or unmatched_after:
         gate_reasons.append("one or more detected regions are unmatched")
     auto_requested = bool(
-        auto_region_payload
-        and auto_region_payload.get("automatic_localized_compare_requested")
+        auto_region_payload and auto_region_payload.get("automatic_localized_compare_requested")
     )
     auto_enabled = bool(
-        auto_region_payload
-        and auto_region_payload.get("automatic_localized_compare_enabled")
+        auto_region_payload and auto_region_payload.get("automatic_localized_compare_enabled")
     )
-    auto_status = str(
-        (auto_region_payload or {}).get("status") or "not_requested"
-    )
+    auto_status = str((auto_region_payload or {}).get("status") or "not_requested")
     if auto_requested and auto_status != "passed":
         reasons = list((auto_region_payload or {}).get("gate_reasons") or [])
         gate_reasons.extend(reasons or ["automatic region-local compare did not pass"])
@@ -2576,7 +2568,9 @@ def _build_multi_frame_validation_payload(
                 ),
                 "unassigned_zone_count": int(getattr(summary, "unassigned_zone_count", 0)),
                 "cross_region_zone_count": int(getattr(summary, "cross_region_zone_count", 0)),
-                "review_required_zone_count": int(getattr(summary, "review_required_zone_count", 0)),
+                "review_required_zone_count": int(
+                    getattr(summary, "review_required_zone_count", 0)
+                ),
                 "gate_status": str(getattr(summary, "gate_status", "passed")),
                 "gate_reasons": list(getattr(summary, "gate_reasons", ())),
             }
@@ -2653,7 +2647,9 @@ def _apply_export_profile_outputs(
             continue
         apply_export_profile_to_file(path, profile=export_profile, package_root=output_dir)
         applied.add(resolved)
-    apply_export_profile_to_json(review_project_path, profile=export_profile, package_root=output_dir)
+    apply_export_profile_to_json(
+        review_project_path, profile=export_profile, package_root=output_dir
+    )
 
 
 def _enforce_sharable_path_audit(export_profile: str, output_dir: Path) -> list[dict[str, str]]:
@@ -2728,8 +2724,14 @@ def _export_auto_structural_clouds(
             if not isinstance(overlays, list):
                 overlays = []
             after_image_path = _resolve_package_path(pair.get("after_image"), viewer_base)
-            after_transform = pair.get("after_transform") if isinstance(pair.get("after_transform"), dict) else {}
-            image_dpi = _float_value(after_transform.get("dpi")) if isinstance(after_transform, dict) else 0.0
+            after_transform = (
+                pair.get("after_transform") if isinstance(pair.get("after_transform"), dict) else {}
+            )
+            image_dpi = (
+                _float_value(after_transform.get("dpi"))
+                if isinstance(after_transform, dict)
+                else 0.0
+            )
             result = export_selected_cloud_marks(
                 pair_id=pair_id,
                 after_image_path=str(after_image_path) if after_image_path else "",

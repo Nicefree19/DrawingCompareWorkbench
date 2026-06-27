@@ -4,43 +4,43 @@
 
 ## 단계 (순서대로)
 
-### S1. Honesty linchpin + 정확한 수정 지점 실측 (선결)  (복잡도: 낮)
-- 무엇을: ① **honesty 확인** — 골든 07에 실 measure/compare 1회 실행, 예측 산출을 덤프해 엔진이 (500,400)에 변경을 실제 검출(`entity_type=block_reference`, 거리≈0)하고 채점기가 **오직 entity_type 불일치로** 거부함을 실측 확인. (검출 안 하면 = 분식이므로 **중단**.) ② 정확한 필터 코드(`accuracy_metrics.py` match_changes_to_truth)와 정규화(`measure_golden_accuracy_baseline.py`)의 entity_type 처리 줄 확인. ③ 현재 07 r=0 재현(red).
-- 산출: 예측 덤프(검출 입증) + 필터 위치 + red.
-- 검증: 실측(엔진 검출 입증)
+### S1. 배선점 실측 + 발화증명 방법 확정 (선결)  (복잡도: 낮)
+- 무엇을: ① `_on_auto_finished_v2`(L5929) 본문 읽고 output_dir/dashboard 가용 시점·기존 산출물 쓰는 위치 확인. ② emission 호출을 끼울 정확한 지점. ③ **발화증명 방법 택일** — offscreen GUI 인스턴스화로 핸들러 구동이 이 환경서 가능한지 probe([[headless_gui_wiring_verification]]: LOCALAPPDATA temp 격리); 불가/불안정이면 소스레벨 호출 단언(`inspect.getsource`)으로 폴백. ④ vapor 런북·INTERNAL_PILOT_GUIDE 아티팩트 표 위치 확인.
+- 산출: 삽입 지점 + 증명방법 결정 메모.
+- 검증: 실측
 - 의존: 없음
 
-### S2. synonym 수정 (SC1)  (복잡도: 낮)
-- 무엇을: entity_type 비교에 블록-속성 family synonym 세트 도입. 같은 family면 호환. 다른 타입(line/circle/text/dimension)은 불변. 채점 레이어 한정.
-- 산출: 수정.
-- 검증: T-SC1
+### S2. emission 함수 추출 (GS1)  (복잡도: 낮)
+- 무엇을: `run_pilot_spotcheck`의 인라인(md/csv 쓰기) 로직을 모듈 함수 `emit_spotcheck_artifacts(output_dir, pair_name)`로 추출. `run_pilot_spotcheck`는 이를 호출(동작 불변). 단위테스트: 합성 dashboard→md/csv.
+- 산출: 함수 + 테스트.
+- 검증: T-GS1, T-GS3(러너 불변)
 - 의존: S1 →
 
-### S3. 단위테스트 (SC4)  (복잡도: 낮)
-- 무엇을: synonym 매칭 단위테스트(block_reference 예측 + attrib truth 동일위치 → 매칭; 다른 family는 비매칭; 위치 멀면 비매칭). black/isort clean. per-PR 목록 추가.
-- 산출: 테스트.
-- 검증: T-SC4
+### S3. GUI fail-safe 배선 (GS2)  (복잡도: 중)
+- 무엇을: `_on_auto_finished_v2`에 `emit_spotcheck_artifacts(output_dir, pair_name)` try/except 호출(실패 시 logger.warning, GUI 흐름 무손상). pair_name은 result/output_dir서 파생.
+- 산출: 배선 + 발화증명 테스트(S1 결정 방법).
+- 검증: T-GS2
 - 의존: S2 →
 
-### S4. 전체 골든 measure 전/후 diff (SC2/SC3)  (복잡도: 중)
-- 무엇을: 전체 골든 measure 실행 → 07 `r=1.000`, aggregate recall 상승, **noise_fp=0**, 07 외 fixture per-pair tp/fp/fn **불변**(전/후 비교).
-- 산출: measure 리포트 전/후.
-- 검증: T-SC2, T-SC3
-- 의존: S2 →
+### S4. anti-theater 가드 (GS4)  (복잡도: 낮)
+- 무엇을: `INTERNAL_PILOT_GUIDE.md` 아티팩트 표에 `pilot_spotcheck.md` 행 + "작성·반송" 지시. vapor 런북(`docs/release/CUSTOMER_PILOT_*`의 부재 `build_customer_pilot_*` 호출) 정리(실 producer로 리다이렉트 or 삭제). 인간 P0 OPEN 명시.
+- 검증: T-GS4
+- 의존: 없음(병행 가능)
 
-### S5. 비퇴행 + dogfood + floor (SC5)  (복잡도: 낮)
-- 무엇을: 기존 정확도 단위테스트 통과, `cad_policy_gate` 그린, dogfood lint, CI 골든 floor 통과 확인. recall floor 상향은 **선택**(보수적으로 보류 가능 — 다른 fixture 변동 대비).
-- 검증: T-SC5
+### S5. 비퇴행 + dogfood + gate (GS5)  (복잡도: 낮)
+- 무엇을: 신규/수정 .py black/isort clean, `cad_policy_gate` 그린, per-PR 목록 추가, 전체 관련 테스트 결정적.
+- 검증: T-GS5
 - 의존: S2~S4 →
 
 ## 리스크 & 대응
 | 리스크 | 영향 | 대응 |
 |--------|------|------|
-| 엔진이 07을 실제 검출 안 함(=분식) | 치명 | **S1서 예측 덤프로 검출 입증 못 하면 즉시 중단·방향 재고**. |
-| synonym이 과매칭(다른 fixture 오TP) | 상 | family 세트만(블록계열). S4서 07 외 per-pair 불변 증명. 위치 거리 게이트 병존. |
-| noise_fp 회귀 | 상 | noise fixture는 expected=0 → recall측 FN→TP 수정은 FP 무생성(구조적). S4서 noise_fp=0 확인. |
-| floor 상향이 다른 fixture 변동에 취약 | 중 | floor는 보수적 유지(상향 보류). 측정 개선은 리포트로 표시. |
-| 기존 accuracy 테스트가 정확-문자열 가정 | 중 | S5서 기존 테스트 실행. 깨지면 synonym 의도 반영하도록 보수 갱신(약화 아님). |
+| emission 실패가 GUI 비교 흐름 깨뜨림 | 상 | **fail-safe try/except 필수**(실패=warning 로그, 비교 산출 무손상). |
+| wired-but-unfired(이 프로젝트 시그니처) | 상 | 발화증명 테스트 필수 — offscreen 구동 or 소스레벨 호출 단언. 함수존재만으론 불충분. |
+| GUI offscreen 인스턴스화 크래시(QML AV) | 중 | S1 probe. 불안정이면 소스레벨 단언 폴백(정직히 한계 명시). |
+| scripts→GUI import가 frozen서 실패 | 중 | 선례 `workbench_subprocess.py:100`. 함수는 지연 import. |
+| 빈 시트만 찍는 theater | 상 | GS4 가이드 "작성·반송"+인간 P0 OPEN 동반 필수(GOAL 명시). |
+| 추출 리팩터가 러너 회귀 | 상 | run_pilot_spotcheck가 추출함수 호출, 기존 14테스트 보존. |
 
 ## 변경 이력
-- 2026-06-27 생성: 멀티에이전트가 07 근인을 검출결함→채점어휘갭으로 정정. 채점기 synonym 수정(검출 무변경). honesty linchpin=S1 실측.
+- 2026-06-27 생성: 냉철 리뷰(0.49) 추천 #1. 러너↔GUI 심 붕괴 — 엔지니어가 더블클릭만으로 시트 산출. anti-theater 가드 동반.
