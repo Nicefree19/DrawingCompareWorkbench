@@ -4,43 +4,43 @@
 
 ## 단계 (순서대로)
 
-### S1. 배선점 실측 + 발화증명 방법 확정 (선결)  (복잡도: 낮)
-- 무엇을: ① `_on_auto_finished_v2`(L5929) 본문 읽고 output_dir/dashboard 가용 시점·기존 산출물 쓰는 위치 확인. ② emission 호출을 끼울 정확한 지점. ③ **발화증명 방법 택일** — offscreen GUI 인스턴스화로 핸들러 구동이 이 환경서 가능한지 probe([[headless_gui_wiring_verification]]: LOCALAPPDATA temp 격리); 불가/불안정이면 소스레벨 호출 단언(`inspect.getsource`)으로 폴백. ④ vapor 런북·INTERNAL_PILOT_GUIDE 아티팩트 표 위치 확인.
-- 산출: 삽입 지점 + 증명방법 결정 메모.
+### S1. 패킷 소스 실측 + 가이드 베이스 확정 (선결)  (복잡도: 낮)
+- 무엇을: v0.9.2 패킷의 `사용가이드.md`/`스팟체크_기록양식.md`/`.bat` 전문을 읽어 버전관리 소스 베이스 확정. app-dir 구조(`DrawingCompareWorkbench.exe`+`_internal/`) 확인. 샘플 쌍(골든02) 경로 확정. `cad_policy_gate` 금지문구(패킷 텍스트 대비) 확인.
+- 산출: 가이드 베이스 + 조립 항목 목록.
 - 검증: 실측
 - 의존: 없음
 
-### S2. emission 함수 추출 (GS1)  (복잡도: 낮)
-- 무엇을: `run_pilot_spotcheck`의 인라인(md/csv 쓰기) 로직을 모듈 함수 `emit_spotcheck_artifacts(output_dir, pair_name)`로 추출. `run_pilot_spotcheck`는 이를 호출(동작 불변). 단위테스트: 합성 dashboard→md/csv.
-- 산출: 함수 + 테스트.
-- 검증: T-GS1, T-GS3(러너 불변)
+### S2. 버전관리 가이드 소스 (PK2)  (복잡도: 낮)
+- 무엇을: `docs/pilot_packet/사용가이드.md` 생성 — v0.9.2 가이드 기반 + **자동 `pilot_spotcheck.md`(비교 완료 시 결과폴더에 자동 생성)+작성·반송** 섹션으로 빈 수기 양식 대체. 정직 고지 유지.
+- 산출: 가이드 소스.
+- 검증: T-PK2(부분)
 - 의존: S1 →
 
-### S3. GUI fail-safe 배선 (GS2)  (복잡도: 중)
-- 무엇을: `_on_auto_finished_v2`에 `emit_spotcheck_artifacts(output_dir, pair_name)` try/except 호출(실패 시 logger.warning, GUI 흐름 무손상). pair_name은 result/output_dir서 파생.
-- 산출: 배선 + 발화증명 테스트(S1 결정 방법).
-- 검증: T-GS2
+### S3. 조립 스크립트 (PK1/PK3)  (복잡도: 중)
+- 무엇을: `scripts/build_pilot_packet.py` — argparse(app-dir, -o, --version, --zip). app-dir 검증(exe 존재)→패킷 디렉터리: app 복사 + `.bat`(인라인, 버전) + `docs/pilot_packet/사용가이드.md` 복사 + 샘플 쌍(골든02 before/after.dxf)→`샘플도면/` + 매니페스트(버전·git sha·내용). --zip 시 zip.
+- 산출: 스크립트.
+- 검증: T-PK1, T-PK3
 - 의존: S2 →
 
-### S4. anti-theater 가드 (GS4)  (복잡도: 낮)
-- 무엇을: `INTERNAL_PILOT_GUIDE.md` 아티팩트 표에 `pilot_spotcheck.md` 행 + "작성·반송" 지시. vapor 런북(`docs/release/CUSTOMER_PILOT_*`의 부재 `build_customer_pilot_*` 호출) 정리(실 producer로 리다이렉트 or 삭제). 인간 P0 OPEN 명시.
-- 검증: T-GS4
-- 의존: 없음(병행 가능)
+### S4. 결정적 테스트 (PK4)  (복잡도: 중)
+- 무엇을: `test_build_pilot_packet.py` — tmp stub app-dir(가짜 exe)→`build_pilot_packet` 호출→`.bat`/가이드/`샘플도면`/`app` 존재·매니페스트 단언. black/isort clean. per-PR 추가.
+- 산출: 테스트.
+- 검증: T-PK4
+- 의존: S3 →
 
-### S5. 비퇴행 + dogfood + gate (GS5)  (복잡도: 낮)
-- 무엇을: 신규/수정 .py black/isort clean, `cad_policy_gate` 그린, per-PR 목록 추가, 전체 관련 테스트 결정적.
-- 검증: T-GS5
+### S5. vapor 리다이렉트 + gate (PK5)  (복잡도: 낮)
+- 무엇을: `CUSTOMER_PILOT_*` 런북의 "미구현" 배너를 `build_pilot_packet.py` 실 producer로 리다이렉트(명령 명시). `cad_policy_gate` 그린·dogfood·per-PR 확인.
+- 검증: T-PK5
 - 의존: S2~S4 →
 
 ## 리스크 & 대응
 | 리스크 | 영향 | 대응 |
 |--------|------|------|
-| emission 실패가 GUI 비교 흐름 깨뜨림 | 상 | **fail-safe try/except 필수**(실패=warning 로그, 비교 산출 무손상). |
-| wired-but-unfired(이 프로젝트 시그니처) | 상 | 발화증명 테스트 필수 — offscreen 구동 or 소스레벨 호출 단언. 함수존재만으론 불충분. |
-| GUI offscreen 인스턴스화 크래시(QML AV) | 중 | S1 probe. 불안정이면 소스레벨 단언 폴백(정직히 한계 명시). |
-| scripts→GUI import가 frozen서 실패 | 중 | 선례 `workbench_subprocess.py:100`. 함수는 지연 import. |
-| 빈 시트만 찍는 theater | 상 | GS4 가이드 "작성·반송"+인간 P0 OPEN 동반 필수(GOAL 명시). |
-| 추출 리팩터가 러너 회귀 | 상 | run_pilot_spotcheck가 추출함수 호출, 기존 14테스트 보존. |
+| exe 빌드까지 끌어들여 범위 폭발 | 상 | app-dir를 **입력**으로. 빌드는 범위 밖·문서로 안내. stub로 테스트. |
+| 패킷 텍스트가 정책 게이트 위반(DWG 완전지원 등) | 중 | v0.9.2 가이드 문구 보존(이미 통과)·자동시트 섹션만 추가. S5 gate. |
+| 거대 app 복사로 테스트 느림 | 중 | 테스트는 stub app-dir(가짜 exe 1개)만. 실 복사는 빌드머신서. |
+| `release/` gitignore라 소스 유실 | 상 | 소스는 `docs/pilot_packet/`(추적). 패킷 산출물만 release/(ignore). |
+| 샘플 쌍 라이선스/기밀 | 낮 | 합성 골든 DXF만(기밀 아님). |
 
 ## 변경 이력
-- 2026-06-27 생성: 냉철 리뷰(0.49) 추천 #1. 러너↔GUI 심 붕괴 — 엔지니어가 더블클릭만으로 시트 산출. anti-theater 가드 동반.
+- 2026-06-27 생성: 냉철 리뷰 release-distribution 0.28 후속. v0.9.2 패킷 stale(6/11)+조립 스크립트 부재 → 재현 빌더 + 자동시트 가이드. exe 빌드는 범위 밖.
