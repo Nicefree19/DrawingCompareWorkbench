@@ -3,28 +3,28 @@
 > 매 반복 ⑥ 즉시 갱신. 상태: ⬜대기 / 🔄진행 / ✅완료 / 🚧블록
 
 ## 현재 포커스
-- **지금 무엇을, 왜**: S1~S5 전부 완료. 클로저 게이트 통과(단일 진입점 클린 재실행 전량 PASS) → 종료 판정
+- **지금 무엇을, 왜**: S1~S5 전부 완료. 클로저 게이트 → 종료 판정
 - **마지막 갱신**: 2026-06-27 / Phase 2 종료(5회차)
-- **HARNESS_GATE**: tests=PASS · DoD 5/5 · 회귀 0(기존 코드 무변경·단일쌍 보존)
+- **HARNESS_GATE**: tests=PASS · DoD 5/5 · 검출 src 변경 0·골든 floor 비퇴행(r=0.786,noise_fp=0)
 
 ## 단계 현황
 | 단계 | 상태 | 다음 할 일 | 검증(T) | 메모 |
 |------|------|-----------|---------|------|
-| S1 배치/DWG 배선점 실측 | ✅ | (완료) | 실측 | 디렉터리 입력→자동 폴더분기(새필드 불요). top_issues `display_label`=쌍식별 |
-| S2 폴더 배치 (PB1) | ✅ | (완료) | T-PB1✅ | 2쌍 폴더→spotcheck `### 쌍: alpha/beta` 분리, csv 쌍 구분행 |
-| S3 DWG 온램프 (PB2) | ✅ | (완료) | T-PB2✅ | `_resolve_dwg_backend_mode`: .dwg→ODA배선, 미설치→fail-loud(exit2) |
-| S4 결정적+비퇴행 (PB3/PB4) | ✅ | (완료) | T-PB2✅,T-PB3✅,T-PB4✅ | **12 passed**(5→12: 배치3+DWG4). black/isort clean |
-| S5 가이드+dogfood+게이트 (PB5) | ✅ | (완료) | T-PB5✅ | 가이드 폴더/DWG 사용법·gate passed·per-PR 유지 |
+| S1 최소 훅 + fixture + red 재현 | ✅ | (완료) | 실측 | red 재현(폴더 AC1032 preflight 실패)·단일OK·DXF→AC1032 15,876B. **훅=러너 additive 폴더 사전변환** |
+| S2 커밋 fixture (DF2) | ✅ | (완료) | T-DF2✅ | dwg/{before,after}.dwg AC1032·15,876B·trackable + README |
+| S3 폴더-DWG 변환 수정 (DF1) | ✅ | (완료) | T-DF1✅ | `_convert_folder_dwgs` 러너 additive. 폴더 DWG red→green(detected=1), 단일 불변 |
+| S4 실-ODA e2e (DF3/DF4) | ✅ | (완료) | T-DF3✅,T-DF4✅ | 14 passed. e2e 단일59s+폴더64s 비-skip(실 ODA). mock 12건 보존 |
+| S5 비퇴행+정책+골든floor (DF5) | ✅ | (완료) | T-DF5✅ | gate passed·골든 floor exit0(r0.786/noise0)·per-PR L81·검출 src 0변경 |
 
 ## 검증 로그 (증거)
-- [x] T-PB1 폴더 배치(쌍≥2 구분): 골든 2쌍 폴더 실행 exit0 → `pilot_spotcheck.md` `### 쌍:` 섹션 2개(alpha/beta), csv drawing_label=alpha/beta 구분. (closure 재실행 `쌍 섹션 수=2`)
-- [x] T-PB2 DWG 온램프(라우팅/fail-loud): 단위테스트 — .dwg→`DWG_BACKEND_ODA_CONVERTER` 배선(설치 시), 미설치 mock→`PilotSpotcheckError`("DXF로 변환" 안내). DXF→None.
-- [x] T-PB3 단일쌍 비퇴행: 기존 PR#56 단일쌍 테스트 전량 통과(single-pair `### 쌍:` 미생성 단언 포함).
-- [x] T-PB4 결정적: `pytest` **12 passed** 2회 연속(44.2s·72.9s) 동일.
-- [x] T-PB5 dogfood+정책+가이드: black/isort `unchanged`·clean, `CAD policy gate passed`, 가이드 폴더(L15-17)/DWG(L36-37) 사용법, per-PR L81 유지.
+- [x] T-DF1 폴더-DWG 변환 수정(red→green): S1 probe 폴더 DWG 수정 전 `Preflight failed AC1032`→수정 후 `detected_count=1`. 단일 DWG도 `=1`(불변).
+- [x] T-DF2 커밋 fixture(AC1032·<100KB): `dwg/{before,after}.dwg` 헤더 `AC1032`·각 15,876B·git trackable + 재현 README.
+- [x] T-DF3 실-ODA e2e(단일+폴더, 비-skip): `pytest` **14 passed**. e2e 2건 **비-skip**(단일 59.2s·폴더 63.9s = 실 ODA 변환 수행), BEAM 검출 단언.
+- [x] T-DF4 단일 DWG 비퇴행+mock 보존: 기존 mock 단위테스트 12건 전량 통과, 단일 DWG 경로 불변.
+- [x] T-DF5 dogfood+정책+골든floor: black/isort clean·`CAD policy gate passed`·골든 floor `pairs=15 p=0.647 r=0.786 noise_fp=0` exit0·per-PR L81·detection src 0변경.
 
 ## 블록/이슈
-- 없음. Phase 2 완결. **남은 진짜 P0는 여전히 사람**: 개발자가 실 DWG 폴더로 이 러너를 돌려 dry-run 수행(이번 작업은 그 입력 마찰만 제거). [[cold_critique_2026_06_17]]
+- 없음. Phase 2 완결. PR#58의 폴더+DWG 실버그 수정 + mock-only→실 AC1032 비-skip 증명. **남은 진짜 P0는 여전히 사람**(실 DWG 폴더 dry-run).
 
 ## HARNESS_GATE
-- tests=PASS | closure: DoD 5/5 met · TEST 0 unmet · steps 🔄0/🚧0 · 단일진입점 클린 재실행 전량 PASS(폴더배치 exit0·pytest 12×2·black/isort clean·gate passed) · 검증기 무약화(신규 테스트만 추가) · 회귀 0(기존 코드 무변경)
+- tests=PASS | closure: DoD 5/5 met · TEST 0 unmet · steps 🔄0/🚧0 · pytest 14 passed(e2e 비-skip) · 검증기 무약화(신규 테스트만 추가) · 검출 src 0변경·골든 floor 비퇴행 · 정책 그린

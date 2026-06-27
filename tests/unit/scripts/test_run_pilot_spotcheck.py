@@ -11,6 +11,7 @@ Two layers:
 from __future__ import annotations
 
 import csv
+import shutil
 from pathlib import Path
 
 import pytest
@@ -210,3 +211,50 @@ def test_resolve_dwg_backend_mode_fails_loud_without_converter(tmp_path: Path, m
         run_mod._resolve_dwg_backend_mode(dwg, other)
     # fail-loud message tells the operator to pre-convert — not a silent empty run
     assert "DXF로 변환" in str(excinfo.value)
+
+
+# --- Real-ODA end-to-end (DF3): proves the DWG on-ramp, not just the wiring ---
+#
+# These run the REAL ODA conversion (AC1032 DWG -> DXF -> compare), which the
+# tests above only mock. Committed AC1032 fixtures live next to the golden DXF
+# pair. Skipped when no converter is installed (e.g. CI) — honestly gated, not
+# silently inert; a dev machine with ODA runs them and proves the path.
+
+_DWG = _GOLDEN / "dwg"
+
+
+def _oda_installed() -> bool:
+    try:
+        return bool(run_mod.converter_installation_status().get("installed"))
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+_dwg_e2e_skip = pytest.mark.skipif(
+    not (_DWG / "before.dwg").exists() or not _oda_installed(),
+    reason="real DWG on-ramp not exercised: ODA converter not installed or AC1032 fixture missing",
+)
+
+
+@_dwg_e2e_skip
+def test_real_dwg_single_pair_converts_and_detects(tmp_path: Path) -> None:
+    summary = run_pilot_spotcheck(_DWG / "before.dwg", _DWG / "after.dwg", tmp_path / "run")
+    assert summary["detected_count"] >= 1
+    md = (Path(summary["output_dir"]) / "pilot_spotcheck.md").read_text(encoding="utf-8")
+    assert "BEAM" in md  # the known single modification is on the BEAM layer
+
+
+@_dwg_e2e_skip
+def test_real_dwg_folder_batch_converts_and_detects(tmp_path: Path) -> None:
+    # Folder input with an AC1032 DWG used to fail preflight (unsupported version)
+    # because the pipeline's folder path never converted per-file. Now pre-converted.
+    before = tmp_path / "before"
+    after = tmp_path / "after"
+    before.mkdir()
+    after.mkdir()
+    shutil.copy(_DWG / "before.dwg", before / "p1.dwg")
+    shutil.copy(_DWG / "after.dwg", after / "p1.dwg")
+    summary = run_pilot_spotcheck(before, after, tmp_path / "run")
+    assert summary["detected_count"] >= 1
+    md = (Path(summary["output_dir"]) / "pilot_spotcheck.md").read_text(encoding="utf-8")
+    assert "BEAM" in md
