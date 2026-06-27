@@ -8,8 +8,13 @@
 GUI를 열지 않고 **명령 1줄**로 비교를 돌려 "검출 변경 표 + 정답 스켈레톤"을 자동 생성한다. 운영자는 *아는 변경이 표에 있는지만* 표시하면 된다.
 
 ```bash
+# 단일 쌍 (파일)
 python scripts/run_pilot_spotcheck.py <이전도면> <이후도면> -o <출력폴더>
 # 예) python scripts/run_pilot_spotcheck.py before.dxf after.dxf -o build/pilot_demo
+
+# 폴더 배치 (다중 쌍) — 이전/이후 폴더를 주면 파일명으로 자동 매칭해 쌍마다 검출
+python scripts/run_pilot_spotcheck.py <이전폴더> <이후폴더> -o <출력폴더>
+# 예) python scripts/run_pilot_spotcheck.py rev0/ rev1/ -o build/pilot_batch
 ```
 
 산출물 (출력폴더 하위 run 폴더):
@@ -28,8 +33,8 @@ python scripts/run_pilot_spotcheck.py <이전도면> <이후도면> -o <출력�
 - **배포 진행 후보**: '누락 기록'이 비어 있음(아는 변경 누락 0) + 위치 오류 0.
 - **보류·원인 분석**: '누락' 1건 이상 → 해당 쌍과 누락 내용을 개발 담당에게 전달.
 
-> 포맷: DXF/지원 포맷 우선. DWG는 먼저 DXF로 변환 후 입력한다.
-> 여러 쌍을 돌렸다면 결과를 아래 '기록 표'에 집계한다.
+> 포맷: DXF 우선. **DWG**는 로컬 변환기가 설치돼 있으면 자동 변환되어 그대로 입력할 수 있고, 변환기가 없으면 러너가 즉시 멈추며 "먼저 DXF로 변환" 안내를 출력한다(침묵 빈 결과 없음).
+> **폴더 배치**: `pilot_spotcheck.md`가 쌍별 섹션(`### 쌍: <이름>`)으로, `review_ground_truth.csv`가 쌍별 행으로 나뉜다. 여러 쌍 결과는 아래 '기록 표'에도 집계할 수 있다.
 
 ## 방법 (수동 대안, 쌍당 ~5분)
 

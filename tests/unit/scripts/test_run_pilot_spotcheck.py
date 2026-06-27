@@ -15,8 +15,11 @@ from pathlib import Path
 
 import pytest
 
+import scripts.run_pilot_spotcheck as run_mod
 from scripts.run_pilot_spotcheck import (
+    DWG_BACKEND_ODA_CONVERTER,
     GROUND_TRUTH_HEADER,
+    PilotSpotcheckError,
     build_ground_truth_rows,
     build_spotcheck_md,
     run_pilot_spotcheck,
@@ -114,3 +117,96 @@ def test_real_pipeline_golden_emits_spotcheck_and_truth(tmp_path: Path) -> None:
     assert header == GROUND_TRUTH_HEADER
     assert data_rows  # at least one detection-derived skeleton row
     assert any("BEAM" in cell for row in data_rows for cell in row)
+
+
+# --- Folder batch (PB1) ---------------------------------------------------
+
+_FIXTURE_ISSUE_ALPHA = {**_FIXTURE_ISSUE, "display_label": "alpha"}
+_FIXTURE_ISSUE_BETA = {
+    **_FIXTURE_ISSUE,
+    "display_label": "beta",
+    "major_layers": "기둥-1F",
+    "severity_ko": "보통",
+}
+
+
+def test_spotcheck_md_groups_folder_batch_by_pair() -> None:
+    md = build_spotcheck_md("배치", [_FIXTURE_ISSUE_ALPHA, _FIXTURE_ISSUE_BETA])
+    assert "총 검출 변경(top_issues): **2**" in md
+    assert "비교 쌍: **2**" in md
+    # one detected-changes section per pair, labelled by display_label
+    assert "### 쌍: alpha (검출 1)" in md
+    assert "### 쌍: beta (검출 1)" in md
+    # each pair's layer surfaces under its own section
+    assert "BEAM" in md and "기둥-1F" in md
+
+
+def test_spotcheck_md_single_pair_keeps_pr56_shape() -> None:
+    # A single pair must NOT grow per-pair headers (PR#56 output preserved).
+    md = build_spotcheck_md("before → after", [_FIXTURE_ISSUE])
+    assert "### 쌍:" not in md
+    assert "비교 쌍:" not in md
+
+
+def test_ground_truth_rows_distinguish_batch_pairs() -> None:
+    rows = build_ground_truth_rows([_FIXTURE_ISSUE_ALPHA, _FIXTURE_ISSUE_BETA])
+    assert [row[0] for row in rows] == ["alpha", "beta"]
+
+
+# --- DWG on-ramp (PB2) ----------------------------------------------------
+
+
+def test_inputs_include_dwg_detects_file_and_folder(tmp_path: Path) -> None:
+    before = tmp_path / "before"
+    after = tmp_path / "after"
+    before.mkdir()
+    after.mkdir()
+    (before / "p1.dxf").write_text("x", encoding="utf-8")
+    (after / "p1.dxf").write_text("x", encoding="utf-8")
+    assert run_mod._inputs_include_dwg(before, after) is False
+    # a DWG anywhere in the inputs flips detection on
+    (after / "p2.dwg").write_text("x", encoding="utf-8")
+    assert run_mod._inputs_include_dwg(before, after) is True
+    # single-file DWG input is also detected
+    dwg = tmp_path / "x.dwg"
+    dwg.write_text("x", encoding="utf-8")
+    assert run_mod._inputs_include_dwg(dwg, before / "p1.dxf") is True
+
+
+def test_resolve_dwg_backend_mode_dxf_returns_none(tmp_path: Path) -> None:
+    a = tmp_path / "a.dxf"
+    b = tmp_path / "b.dxf"
+    a.write_text("x", encoding="utf-8")
+    b.write_text("x", encoding="utf-8")
+    assert run_mod._resolve_dwg_backend_mode(a, b) is None
+
+
+def test_resolve_dwg_backend_mode_wires_converter_when_installed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dwg = tmp_path / "a.dwg"
+    other = tmp_path / "b.dxf"
+    dwg.write_text("x", encoding="utf-8")
+    other.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        run_mod,
+        "converter_installation_status",
+        lambda: {"installed": True, "message": "ok"},
+    )
+    assert run_mod._resolve_dwg_backend_mode(dwg, other) == DWG_BACKEND_ODA_CONVERTER
+
+
+def test_resolve_dwg_backend_mode_fails_loud_without_converter(tmp_path: Path, monkeypatch) -> None:
+    dwg = tmp_path / "a.dwg"
+    other = tmp_path / "b.dxf"
+    dwg.write_text("x", encoding="utf-8")
+    other.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        run_mod,
+        "converter_installation_status",
+        lambda: {"installed": False, "message": "not found"},
+    )
+    with pytest.raises(PilotSpotcheckError) as excinfo:
+        run_mod._resolve_dwg_backend_mode(dwg, other)
+    # fail-loud message tells the operator to pre-convert — not a silent empty run
+    assert "DXF로 변환" in str(excinfo.value)

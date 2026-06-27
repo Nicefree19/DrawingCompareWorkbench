@@ -1,21 +1,21 @@
 # RULES — 핵심 제약 (경량화)
 
-> ⚠️ 이 목표(파일럿 무마찰 러너)에 직결되는 조항만.
+> ⚠️ 이 목표(러너 DWG 온램프 + 폴더 배치)에 직결되는 조항만.
 
 ## 절대 규칙 (위배 시 작업 중단)
-- **compare 재구현 금지**: 검출은 기존 `FolderComparePipeline`(또는 cad-compare) 그대로 호출. 러너는 **출력 변환기**일 뿐. 새 비교 로직 0.
-- **정답 스키마 보존**: `review_ground_truth.csv`는 **기존 헤더 그대로**. 스켈레톤 행은 사실만(detection_source 등), 운영자가 채울 칸은 비움. 정답을 AI가 지어내지 않는다.
-- **dogfood lint**: 신규 .py는 **black/isort clean**(방금 머지한 changed-files lint 게이트 통과) — 자기 게이트 위반 금지.
-- **분식 금지**: 검출 수/정확도 메트릭 손대지 않는다.
+- **compare/변환 재구현 금지**: 폴더 배치 = `FolderComparePipeline` 폴더 스캔 / `BatchCompareJob` 그대로. DWG 변환 = 기존 `dwg_converter`/auto_convert 경로 그대로. 러너는 **입력 라우팅 + 출력 그룹핑만**. 새 비교/변환 로직 0.
+- **정책 게이트 준수**: DWG "완전/네이티브 완전지원" 미주장. ODA를 "필수"로 표기 금지. `cad_policy_gate` 그린 유지(token-free).
+- **침묵 다운그레이드 금지**: DWG 변환 불가/ODA 부재 시 **fail-loud**(사전변환 안내). 조용히 빈 결과/단일파일 폴백 금지 ([[oda_dual_path_slim_gap]] 교훈).
+- **단일쌍 비퇴행**: PR#56 단일 DXF 쌍 동작·산출물 불변(기존 경로 무변경, 분기만 추가).
+- **정답 미조작·스키마 보존**: csv 스켈레톤 = 기존 스키마·사실만(PR#56 규칙 승계).
 
 ## 설계/코드 제약
-- 경량 유지: argparse + 파이프라인 호출 + 포맷. 무거운 customer-evidence 게이트 의존 금지.
-- DXF/지원 경로 우선(가이드에 명시). DWG는 사전변환 안내.
-- 신규 테스트는 결정적(골든쌍, 헤드리스). per-PR 목록 추가(silent-inert 금지).
+- 경량: argparse 입력 분기(파일 vs 폴더, dxf vs dwg) + 파이프라인 호출 + 포맷. 무거운 customer-evidence 게이트 의존 금지.
+- 신규 테스트는 결정적·헤드리스(real ODA 불요 — 변환은 mock/배선 단언). per-PR 목록 유지(silent-inert 금지).
 - 한 반복 = 한 단계.
 
 ## 우선순위 (충돌 시)
-1. 정직성(정답 안 지어냄·재구현 안 함) > 2. 무마찰(운영자 5분) > 3. 결정성 > 4. 단순성 > 5. 편의
+1. 정직성(재구현 안 함·침묵 다운그레이드 안 함) > 2. 정책 준수 > 3. 무마찰(실폴더/DWG 그대로) > 4. 결정성 > 5. 단순성
 
 ## 검증 연결
-- 스키마 보존·정직 = T2. dogfood lint·비퇴행 = T5.
+- 재구현 금지·라우팅 = T-PB1/T-PB2. 정책·dogfood = T-PB5. 비퇴행 = T-PB3.

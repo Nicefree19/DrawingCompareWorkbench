@@ -32,10 +32,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.services.comparison.dwg_backend import DWG_BACKEND_ODA_CONVERTER
+from src.services.comparison.dwg_converter import converter_installation_status
 from src.services.comparison.folder_compare_pipeline import (
     FolderComparePipeline,
     FolderCompareRunRequest,
 )
+
+
+class PilotSpotcheckError(RuntimeError):
+    """Fail-loud error for unusable pilot input (e.g. DWG with no converter)."""
+
 
 # Existing review_ground_truth schema — kept verbatim (see
 # scripts/release_drawing_compare_workbench.py and the customer template).
@@ -108,29 +115,68 @@ def _summary_contains(issue: dict[str, Any]) -> str:
     return ";".join(tokens)
 
 
+def _pair_label(issue: dict[str, Any]) -> str:
+    """Per-pair identity for grouping a folder-batch run (filename stem)."""
+    return str(issue.get("display_label") or issue.get("drawing_number") or "").strip() or "(미상)"
+
+
+def _group_by_pair(issues: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for issue in issues:
+        groups.setdefault(_pair_label(issue), []).append(issue)
+    return groups
+
+
+_TABLE_HEADER = (
+    "| # | 위치 (bbox / 레이어) | 타입·심각도 | 한국어 요약 | "
+    "증감(+추가/-삭제/~수정) | 아는변경? | 검출됨?(Y/N) | 위치정확?(Y/N) | 비고 |"
+)
+_TABLE_SEP = "|---|---|---|---|---|---|---|---|---|"
+
+
+def _detected_row(index: int, issue: dict[str, Any]) -> str:
+    return (
+        f"| {index} | {_location(issue)} | {_change_type(issue)} | "
+        f"{_summary(issue)} | {_delta(issue)} | | | | |"
+    )
+
+
 def build_spotcheck_md(pair_name: str, issues: list[dict[str, Any]]) -> str:
-    """Render the operator spotcheck sheet as Markdown."""
+    """Render the operator spotcheck sheet as Markdown.
+
+    Single pair → one flat table (PR#56 shape preserved). Folder batch (>1
+    pair) → one detected-changes table per pair, grouped by display_label.
+    """
+    groups = _group_by_pair(issues)
+    multi = len(groups) > 1
     lines = [
         f"# 파일럿 스팟체크 — {pair_name}",
         "",
         f"- 총 검출 변경(top_issues): **{len(issues)}**",
+    ]
+    if multi:
+        lines.append(f"- 비교 쌍: **{len(groups)}** (쌍별 섹션)")
+    lines += [
         "- 검출 소스: `artifacts/review_dashboard.json` top_issues " "(실제 비교 산출 — 검출 수/정확도 미가공)",
         "- 판정 기준: 내가 아는 변경이 아래 검출 행에 **누락 0** → 배포 진행 후보 / " "**누락 1건 이상** → 배포 보류·원인 분석",
         "",
         "## 검출된 변경 (자동 나열)",
         "",
-        "| # | 위치 (bbox / 레이어) | 타입·심각도 | 한국어 요약 | "
-        "증감(+추가/-삭제/~수정) | 아는변경? | 검출됨?(Y/N) | 위치정확?(Y/N) | 비고 |",
-        "|---|---|---|---|---|---|---|---|---|",
     ]
-    if issues:
-        for index, issue in enumerate(issues, start=1):
-            lines.append(
-                f"| {index} | {_location(issue)} | {_change_type(issue)} | "
-                f"{_summary(issue)} | {_delta(issue)} | | | | |"
-            )
+    if not issues:
+        lines += [
+            _TABLE_HEADER,
+            _TABLE_SEP,
+            "| — | (검출 0) | — | 비교가 변경을 찾지 못함(동일 도면이거나 " "변경 미검출) | — | | | | |",
+        ]
     else:
-        lines.append("| — | (검출 0) | — | 비교가 변경을 찾지 못함(동일 도면이거나 " "변경 미검출) | — | | | | |")
+        for label, rows in groups.items():
+            if multi:
+                lines += [f"### 쌍: {label} (검출 {len(rows)})", ""]
+            lines += [_TABLE_HEADER, _TABLE_SEP]
+            lines += [_detected_row(index, issue) for index, issue in enumerate(rows, start=1)]
+            if multi:
+                lines.append("")
     lines += [
         "",
         "## 누락 기록 (아는 변경인데 위 표에 없을 때만)",
@@ -175,15 +221,54 @@ def write_ground_truth_csv(path: Path, rows: list[list[str]]) -> None:
         writer.writerows(rows)
 
 
+def _iter_input_files(path: Path):
+    if path.is_dir():
+        yield from (child for child in path.iterdir() if child.is_file())
+    elif path.is_file():
+        yield path
+
+
+def _inputs_include_dwg(before: Path, after: Path) -> bool:
+    return any(
+        file.suffix.lower() == ".dwg"
+        for root in (before, after)
+        for file in _iter_input_files(root)
+    )
+
+
+def _resolve_dwg_backend_mode(before: Path, after: Path) -> str | None:
+    """Wire DWG inputs through the existing approved conversion path.
+
+    Returns the ODA-converter backend mode when a DWG input is present and a
+    local converter is installed, ``None`` for DXF-only input. Raises
+    ``PilotSpotcheckError`` (fail-loud) when a DWG is given but no converter is
+    installed — never a silent empty result or single-file fallback.
+    """
+    if not _inputs_include_dwg(before, after):
+        return None
+    status = converter_installation_status()
+    if not status.get("installed"):
+        raise PilotSpotcheckError(
+            "DWG 입력이 감지됐으나 로컬 DWG 변환기가 설치되어 있지 않습니다.\n"
+            f"  상태: {status.get('message', '(불명)')}\n"
+            "  → DWG를 먼저 DXF로 변환한 뒤 입력하거나, 변환기를 설치한 뒤 다시 실행하세요."
+        )
+    return DWG_BACKEND_ODA_CONVERTER
+
+
 def run_pilot_spotcheck(before: Path, after: Path, output: Path) -> dict[str, Any]:
     """Run the real pipeline and emit the spotcheck sheet + ground-truth skeleton."""
     output.mkdir(parents=True, exist_ok=True)
-    request = FolderCompareRunRequest(before, after, output)
+    dwg_backend_mode = _resolve_dwg_backend_mode(before, after)
+    request = FolderCompareRunRequest(before, after, output, dwg_backend_mode=dwg_backend_mode)
     result = FolderComparePipeline(request).run()
     output_dir = Path(result.output_dir)
 
     issues = _load_top_issues(output_dir)
-    pair_name = f"{before.stem} → {after.stem}"
+    if before.is_dir() or after.is_dir():
+        pair_name = f"{before.name}/ ↔ {after.name}/ (폴더 배치)"
+    else:
+        pair_name = f"{before.stem} → {after.stem}"
 
     spotcheck_path = output_dir / "pilot_spotcheck.md"
     spotcheck_path.write_text(build_spotcheck_md(pair_name, issues), encoding="utf-8")
@@ -214,13 +299,14 @@ def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdout()
     parser = argparse.ArgumentParser(
         description=(
-            "실 도면 1쌍으로 무마찰 파일럿 dry-run을 돕는 경량 러너. "
-            "실제 비교(FolderComparePipeline)를 돌려 검출 변경 표와 "
-            "ground-truth 스켈레톤을 산출한다. DXF/지원 포맷 우선 (DWG는 사전 변환)."
+            "실 도면으로 무마찰 파일럿 dry-run을 돕는 경량 러너. 실제 비교"
+            "(FolderComparePipeline)를 돌려 검출 변경 표와 ground-truth 스켈레톤을 "
+            "산출한다. 단일 쌍(파일) 또는 폴더(다중 쌍, 파일명으로 자동 매칭)를 받는다. "
+            "DXF 우선 — DWG는 로컬 변환기 설치 시 자동 변환, 없으면 사전 변환 안내."
         )
     )
-    parser.add_argument("before", type=Path, help="이전(개정 전) 도면 경로")
-    parser.add_argument("after", type=Path, help="이후(개정 후) 도면 경로")
+    parser.add_argument("before", type=Path, help="이전(개정 전) 도면 파일 또는 폴더")
+    parser.add_argument("after", type=Path, help="이후(개정 후) 도면 파일 또는 폴더")
     parser.add_argument(
         "-o",
         "--output",
@@ -232,9 +318,13 @@ def main(argv: list[str] | None = None) -> int:
 
     for label, path in (("before", args.before), ("after", args.after)):
         if not path.exists():
-            parser.error(f"{label} 도면을 찾을 수 없음: {path}")
+            parser.error(f"{label} 경로를 찾을 수 없음: {path}")
 
-    summary = run_pilot_spotcheck(args.before, args.after, args.output)
+    try:
+        summary = run_pilot_spotcheck(args.before, args.after, args.output)
+    except PilotSpotcheckError as exc:
+        print(f"[실패] {exc}", file=sys.stderr)
+        return 2
 
     print(f"검출 변경: {summary['detected_count']}건")
     print(f"스팟체크 시트: {summary['spotcheck_md']}")
