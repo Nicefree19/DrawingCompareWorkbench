@@ -1,29 +1,30 @@
 # GOAL — 핵심 목표
 
 ## 한 줄 정의
-**lint/format가 PR 변경 .py에 대해 CI 게이트**되게 한다 — 새 스타일 드리프트 차단, 기존 백로그(black 160·isort 112)는 비차단, mypy 설정 잔재 정리.
+**실 도면 1쌍으로 ~5분 dry-run이 가능한 무마찰 파일럿 러너** — 검출된 변경을 자동 나열한 spotcheck 시트 + ground-truth 스켈레톤을 한 번에 산출, 골든으로 결정적 검증.
 
 ## 배경/맥락
-BDC-2(tech-debt audit): black/isort/mypy가 설치·설정됐으나 **CI 실행 0** (.github/workflows에 lint step 없음). CI-enforcement 캡스톤(테스트 게이트)의 **품질-인프라 짝** — 테스트는 게이트되나 스타일/타입은 미강제.
+신뢰성/품질-인프라 아크(7 PR) 완료. 모든 cold review의 **P0(최고 레버) = 외부 구조검토자 dry-run으로 ground-truth 수집** — 8개월째 미실행([[cold_critique_2026_06_17]]). `review_ground_truth.csv`는 헤더만, `INTERNAL_PILOT_SPOTCHECK.md`는 빈 표.
 
-**백로그 실측(2026-06-26)**: `black --check src/` = 160 파일, `isort --check-only src/` = 112 파일. → **전체 일괄 게이트 불가**(red-wall + 160파일 reformat은 모놀리스 freeze 라인-실링 충돌 + 거대 diff). 정직한 범위 = **changed-files-only**(만지는 파일만 깨끗하게).
+실제 dry-run은 사람(구조 엔지니어)만 가능하지만 **마찰을 AI가 제거**할 수 있다: 기존 도구 `prepare_drawing_compare_customer_evidence.py`는 무거운 customer-evidence 머신(P5-G 게이트)이라 5분 파일럿엔 부적합. **경량 러너**로 "도면 2개 → 검출 변경 표 + 정답 스켈레톤"을 만들면, 사용자는 *아는 변경 검출 여부만 마킹*하면 된다.
 
-**mypy 잔재**: `pyproject [[tool.mypy.overrides]]`가 `src.core.parsers.unified_mgt_parser`·`src.core.validators.*` 등 **이 standalone 레포에 없는 모듈** 참조(monorepo 잔재, 실측 MISSING). → 정리 필요.
+이건 더 많은 내부 하드닝이 아니라 **제품의 진짜 미지(실도면서 작동하는가)를 줄이는** 작업이다.
 
 ## 검증 가능한 종료조건 (DoD)
-- [ ] **L1 (changed-files lint 게이트)**: CI가 PR 변경 .py에 `black --check` + `isort --check-only` 실행(전체 아님), `pull_request` 스코프. · 검증: 깨끗한 diff pass, 일부러 망친 변경파일 fail(로컬 재현)
-- [ ] **L2 (mypy 설정 정정)**: 존재하지 않는 모듈 override 제거(또는 실존 clean 모듈로 교체). · 검증: `python -m mypy --version` + 설정 파싱 OK + 잔재 override 0
-- [ ] **L3 (meta-guard)**: lint step이 워크플로에 존재함을 단언(silent-inert 방지) — `cad_policy_gate.check_ci_gate` 확장 or 전용 테스트. · 검증: lint step 제거 시뮬 → violation/fail
-- [ ] **L4 (no regression)**: 기존 step(테스트·golden·diff-check·policy) 보존 · `cad_policy_gate` 그린 · 워크플로 YAML 유효. · 검증: grep + gate
+- [x] **PE1 (러너)**: `scripts/run_pilot_spotcheck.py <before> <after> -o <out>`가 **실제 compare**(FolderComparePipeline 재사용) 실행 → `pilot_spotcheck.md` 산출: 검출 변경 행(위치·타입·한국어 요약) + 운영자 칸(아는변경/검출Y-N/위치정확Y-N/비고). · 검증: 골든쌍 실행→md 존재+검출행
+- [x] **PE2 (정답 스켈레톤)**: 동일 실행이 `review_ground_truth.csv` 스켈레톤(검출 기반 행, **기존 스키마** 재사용)을 산출. · 검증: csv 헤더=기존 스키마 + 검출행
+- [x] **PE3 (결정적 테스트)**: 골든 1쌍서 spotcheck가 알려진 변경을 나열·csv 스켈레톤 매칭. · 검증: pytest
+- [x] **PE4 (운영자 가이드)**: "이 명령 1줄 → 표 채우기" 1-page (INTERNAL_PILOT_SPOTCHECK.md 갱신 or 신규). · 검증: 가이드에 실행 명령 + 판정 기준
+- [x] **PE5 (no regression + dogfood)**: 신규 .py **black/isort clean**(방금 머지한 changed-files lint 통과) · 신규 테스트 per-PR 목록 추가 · `cad_policy_gate` 그린. · 검증: black --check + gate + 워크플로 grep
 
 ## 범위 밖
-- **전체 코드베이스 일괄 reformat**(160/112 churn, 모놀리스 freeze 충돌) — changed-files만.
-- **mypy 게이팅**(설정 정정만; 게이트는 설정 안정화 후 별도).
-- pylint · pre-commit 훅(선택, 별도).
-- workflow_dispatch full-suite.
+- **실제 dry-run 수행**(사람·실도면).
+- DWG 변환 환경(ODA) — DXF/지원 경로만.
+- 정확도/검출 로직 변경(분식 금지).
+- 무거운 customer-evidence 게이트 재구현.
 
 ## 산출물
-- `.github/workflows/cad-format-regression.yml` (changed-files lint step)
-- `pyproject.toml` (mypy override 정정)
-- `scripts/cad_policy_gate.py` + test (메타-가드, 해당 시)
-- 완료 보고(워크플로 diff·lint 동작·DoD 충족표)
+- `scripts/run_pilot_spotcheck.py` (경량 러너)
+- `tests/unit/scripts/test_run_pilot_spotcheck.py` (결정적, black-clean)
+- `docs/INTERNAL_PILOT_SPOTCHECK.md` 갱신(실행 가이드)
+- 워크플로 per-PR 목록 + 완료 보고
