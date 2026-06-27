@@ -74,6 +74,7 @@ jobs:
             tests\unit\services\comparison\test_zone_vector_renderer.py `
             tests\unit\services\comparison\test_change_zones.py `
             tests\unit\services\comparison\test_canonical_text_recall.py `
+            tests\unit\services\comparison\test_accuracy_metrics.py `
             tests\unit\services\comparison\test_e2e_pipeline_smoke.py `
             tests\unit\scripts\test_release_environment_check.py `
             tests\unit\scripts\test_build_spec_bundling.py `

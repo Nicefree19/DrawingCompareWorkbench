@@ -16,6 +16,7 @@ from src.services.comparison.accuracy_metrics import (
     AccuracyMetrics,
     ExpectedChange,
     MatchReport,
+    _entity_types_compatible,
     compute_metrics,
     expected_change_from_dict,
     expected_change_to_dict,
@@ -23,7 +24,6 @@ from src.services.comparison.accuracy_metrics import (
 )
 from src.services.comparison.base import ChangeRecord, ChangeType
 from src.services.comparison.dxf_comparator import DxfChange, DxfChangeType
-
 
 # ---------------------------------------------------------------------------
 # 테스트용 헬퍼 — 실제 DxfChange / ChangeRecord 인스턴스 빌더
@@ -163,11 +163,13 @@ def test_strict_type_rejects_mismatched():
 def test_strict_type_modified_cosmetic_alias():
     """modified ↔ cosmetic은 strict 모드에서도 매칭 (Phase O3 cosmetic)."""
     truth = [ExpectedChange(location=(100.0, 100.0), change_type="cosmetic")]
-    predicted = [_dxf(
-        location=(100.0, 100.0),
-        change_type=DxfChangeType.MODIFIED,
-        change_category="cosmetic",
-    )]
+    predicted = [
+        _dxf(
+            location=(100.0, 100.0),
+            change_type=DxfChangeType.MODIFIED,
+            change_category="cosmetic",
+        )
+    ]
 
     report = match_changes_to_truth(predicted, truth, location_tol=0.5, strict_type=True)
     assert report.tp_count == 1
@@ -239,9 +241,7 @@ def test_only_predicted_no_truth():
 
 def test_only_truth_no_predicted():
     """예측 0건, truth 3건 → recall=0, precision은 None."""
-    truth = [
-        ExpectedChange(location=(float(i), 0.0), change_type="modified") for i in range(3)
-    ]
+    truth = [ExpectedChange(location=(float(i), 0.0), change_type="modified") for i in range(3)]
     report = match_changes_to_truth([], truth)
     metrics = compute_metrics(report)
 
@@ -331,3 +331,68 @@ def test_greedy_matching_prefers_closer():
     # 매칭된 truth는 거리 0짜리
     matched_expected = report.true_positives[0][1]
     assert matched_expected.location == (100.0, 100.0)
+
+
+# ---------------------------------------------------------------------------
+# 시나리오 — 블록-속성 entity_type synonym (golden 07: block_reference == attrib)
+# ---------------------------------------------------------------------------
+
+
+def test_entity_types_compatible_block_family():
+    # 같은 블록-속성 family는 호환 (엔진 block_reference == truth attrib)
+    assert _entity_types_compatible("block_reference", "attrib")
+    assert _entity_types_compatible("attrib", "insert")
+    assert _entity_types_compatible("block_reference", "block_reference")  # exact
+    # 비-family는 정확 일치만 (무차별 완화 금지)
+    assert not _entity_types_compatible("line", "attrib")
+    assert not _entity_types_compatible("text", "attrib")  # text는 family 밖
+    assert _entity_types_compatible("line", "line")  # 비-family도 exact는 OK
+
+
+def test_block_reference_prediction_matches_attrib_truth():
+    """golden 07: 엔진이 block_reference로 검출한 블록 속성 변경이 attrib truth와 매칭."""
+    predicted = [_dxf(location=(500.0, 400.0), entity_type="block_reference", layer="0")]
+    truth = [
+        ExpectedChange(
+            location=(500.0, 400.0),
+            change_type="modified",
+            entity_type="attrib",
+            layer="TEXT_LAYER",
+            tolerance_mm=1.0,
+        )
+    ]
+    report = match_changes_to_truth(predicted, truth, location_tol=1.0, strict_type=False)
+    assert report.tp_count == 1
+    assert report.fn_count == 0
+
+
+def test_unrelated_entity_type_still_rejected():
+    """비-family 타입(line)은 같은 위치라도 attrib truth와 매칭 안 됨 (과매칭 방지)."""
+    predicted = [_dxf(location=(500.0, 400.0), entity_type="line")]
+    truth = [
+        ExpectedChange(
+            location=(500.0, 400.0),
+            change_type="modified",
+            entity_type="attrib",
+            tolerance_mm=1.0,
+        )
+    ]
+    report = match_changes_to_truth(predicted, truth, location_tol=1.0, strict_type=False)
+    assert report.tp_count == 0
+    assert report.fn_count == 1
+
+
+def test_block_family_still_respects_distance():
+    """family 호환이어도 위치 게이트는 그대로 — 먼 block_reference는 비매칭."""
+    predicted = [_dxf(location=(900.0, 900.0), entity_type="block_reference")]
+    truth = [
+        ExpectedChange(
+            location=(500.0, 400.0),
+            change_type="modified",
+            entity_type="attrib",
+            tolerance_mm=1.0,
+        )
+    ]
+    report = match_changes_to_truth(predicted, truth, location_tol=1.0, strict_type=False)
+    assert report.tp_count == 0
+    assert report.fn_count == 1

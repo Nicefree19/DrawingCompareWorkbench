@@ -1,47 +1,46 @@
 # TEST_CRITERIA — 검증 시나리오
 
-> ⚠️ 실제 실행 명령 + 기대 결과. 외부 신호(종료코드·파일·단언·헤더)만 통과 증거.
+> ⚠️ 실제 실행 명령 + 기대 결과. 외부 신호(종료코드·measure 리포트·단언)만 통과 증거.
 
 ## 단일 진입점
 ```bash
-# 실-ODA e2e 포함 전체 (로컬 ODA 설치 시 비-skip)
-python -m pytest tests/unit/scripts/test_run_pilot_spotcheck.py -q
-# fixture 헤더/크기
-python -c "import pathlib; p=pathlib.Path('tests/data/comparison/golden/dxf/02_single_modification/dwg/before.dwg'); b=p.read_bytes(); print('AC1032' if b[:6]==b'AC1032' else b[:6], len(b))"
-# dogfood + 정책 + 골든 floor
-python -m black --check scripts/run_pilot_spotcheck.py tests/unit/scripts/test_run_pilot_spotcheck.py
-python -m isort --check-only scripts/run_pilot_spotcheck.py tests/unit/scripts/test_run_pilot_spotcheck.py
+# synonym 단위테스트
+python -m pytest tests/unit/services/comparison/test_accuracy_metrics.py -q
+# 전체 골든 measure (07 회복 + only-07 + noise_fp=0)
+python scripts/measure_golden_accuracy_baseline.py --out-json build/reports/golden-accuracy.json --out-md build/reports/golden-accuracy.md --max-noise-fp 0 --min-precision 0.50 --min-recall 0.68
+# dogfood + 정책
+python -m black --check <수정/신규 .py>
+python -m isort --check-only <수정/신규 .py>
 python scripts/cad_policy_gate.py
-python scripts/measure_golden_accuracy_baseline.py --out-json build/reports/golden-accuracy.json --max-noise-fp 0 --min-precision 0.50 --min-recall 0.68
 ```
 
 ## 개별 시나리오
 
-### T-DF1. 폴더-DWG 변환 수정 → DF1
-- 실행: 실 AC1032 DWG **폴더** 쌍으로 `run_pilot_spotcheck`(e2e 테스트 내, 로컬 ODA)
-- 기대: 변환 발화→compare 정상→`detected_count ≥ 1`, BEAM 변경 surface. (수정 전: preflight AC1032 실패)
-- 연결 DoD: DF1
+### T-SC1. synonym 매칭 → SC1
+- 실행: synonym 단위테스트
+- 기대: `entity_type="block_reference"` 예측이 `entity_type="attrib"` truth와 **동일 위치서 매칭**(TP). 무관 타입(line vs attrib)은 비매칭. 위치 먼 경우 비매칭(거리 게이트 병존).
+- 연결 DoD: SC1
 
-### T-DF2. 커밋 fixture → DF2
-- 실행: 단일 진입점의 fixture 헤더/크기 명령
-- 기대: `before.dwg`/`after.dwg` 존재, 헤더 `AC1032`, <100KB/파일.
-- 연결 DoD: DF2
+### T-SC2. 07 recall 회복 → SC2
+- 실행: 전체 골든 measure
+- 기대: `07_block_attribute_text_change` per-pair `r=1.000`(이전 0.000). aggregate recall 상승(≈0.786→~0.86).
+- 연결 DoD: SC2
 
-### T-DF3. 실-ODA e2e → DF3
-- 실행: `pytest test_run_pilot_spotcheck.py`(로컬 ODA 설치 → 비-skip)
-- 기대: 단일 DWG 쌍 + DWG 폴더 e2e 둘 다 PASS(skip 아님), BEAM 검출 단언. STATUS에 "비-skip 실행" 증거.
-- 연결 DoD: DF3
+### T-SC3. only-07 + noise 무회귀 → SC3
+- 실행: measure 전/후 per-pair 리포트 비교
+- 기대: 07 외 14개 fixture의 tp/fp/fn **불변**, `noise_fp=0` 유지. 변화는 07 한 줄.
+- 연결 DoD: SC3
 
-### T-DF4. 단일 DWG 비퇴행 + mock 보존 → DF4
-- 실행: 동일 pytest
-- 기대: 기존 mock 단위테스트(`_resolve_dwg_backend_mode` 등) 전량 통과. 단일 DWG 경로 불변.
-- 연결 DoD: DF4
+### T-SC4. 결정적 → SC4
+- 실행: `pytest test_accuracy_metrics.py`(+골든 07 회복 단언 테스트)
+- 기대: 2회 동일 PASS.
+- 연결 DoD: SC4
 
-### T-DF5. dogfood + 정책 + 골든 floor → DF5
-- 실행: black/isort --check + `cad_policy_gate` + `measure_golden_accuracy_baseline`(floor) + per-PR grep
-- 기대: 신규/수정 .py clean; gate `passed`; 골든 floor 통과(noise_fp 0·p≥0.50·r≥0.68 유지); per-PR 목록에 e2e 포함.
-- 연결 DoD: DF5
+### T-SC5. dogfood + 정책 + floor → SC5
+- 실행: black/isort --check + `cad_policy_gate` + measure floor + 기존 정확도 테스트
+- 기대: 신규/수정 .py clean; gate `passed`; floor exit 0(noise_fp 0·p≥0.50·r≥0.68); 기존 테스트 통과; per-PR 목록 갱신.
+- 연결 DoD: SC5
 
 ## 통과 기준
-- [x] T-DF1~DF5 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
-- [x] 변환 재구현 0·공유경로 비퇴행·실 DWG 비-skip 실행 STATUS에 확인
+- [x] T-SC1~SC5 PASS + 출력 요약을 STATUS "검증 로그"에 증거 기록
+- [x] 엔진 실검출 입증·검출 무변경·only-07 변화 STATUS에 확인
