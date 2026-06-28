@@ -112,6 +112,22 @@ a = Analysis(
         "vllm",
         "wandb",
         "xgboost",
+        # Transitive dead weight — verified 0 imports in src/ and not loaded by
+        # the core compare path (dwg_differ/import_pipeline/folder_compare_pipeline/
+        # dxf_comparator). The v0.9.2 pilot bundle carried these unused: llvmlite
+        # ~85 MB, imageio_ffmpeg ~84 MB (ffmpeg.exe), av ~78 MB, plus dask/
+        # distributed/h5py/gevent/psycopg2. Excluding trims ~250 MB. (onnxruntime
+        # and sklearn are intentionally NOT excluded — they ARE imported, even if
+        # the onnx model file is absent at runtime.)
+        "llvmlite",
+        "numba",
+        "imageio_ffmpeg",
+        "av",
+        "dask",
+        "distributed",
+        "h5py",
+        "gevent",
+        "psycopg2",
     ],
     noarchive=False,
     optimize=0,
