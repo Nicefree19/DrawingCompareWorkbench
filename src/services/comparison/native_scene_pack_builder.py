@@ -248,7 +248,7 @@ def _text_primitive(
     value = str(value)
     if xy is None or not value.strip():
         return None
-    if height <= 0:
+    if not math.isfinite(height) or height <= 0:
         height = 2.5
     primitive: dict[str, Any] = {
         "id": str(entity.get("id") or ""),
@@ -439,7 +439,9 @@ def _bbox_rectangle_segments(entity: Mapping[str, Any]) -> List[_Segment]:
         y1 = float(bbox["max_y"])
     except (KeyError, TypeError, ValueError):
         return []
-    if x1 <= x0 and y1 <= y0:
+    if x1 <= x0 or y1 <= y0:
+        # Degenerate in EITHER axis (zero width or height) -> no rectangle; the
+        # entity is then counted unsupported (not silently rendered as a line).
         return []
     return [
         [x0, y0, x1, y0],

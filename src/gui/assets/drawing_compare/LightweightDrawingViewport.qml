@@ -410,9 +410,12 @@ Item {
                     var tx = prim.x, ty = prim.y
                     if (typeof tx !== "number" || typeof ty !== "number") continue
                     if (tx < vxmin || tx > vxmax || ty < vymin || ty > vymax) { __culled += 1; continue }
-                    var th = (typeof prim.height === "number" && prim.height > 0) ? prim.height : 2.5
+                    // Untrusted decoded primitive: guard against NaN/Infinity
+                    // height and runaway string length wedging the paint thread.
+                    var th = (typeof prim.height === "number" && isFinite(prim.height) && prim.height > 0)
+                             ? Math.min(prim.height, 1.0e6) : 2.5
                     if (th * s < 5.0) { __culled += 1; continue }
-                    var label = prim.text ? String(prim.text) : ""
+                    var label = prim.text ? String(prim.text).substring(0, 4096) : ""
                     if (label.length === 0) continue
                     ctx.save()
                     ctx.translate(tx, ty)

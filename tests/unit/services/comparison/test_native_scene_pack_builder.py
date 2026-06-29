@@ -245,6 +245,36 @@ def test_build_native_scene_pack_renders_hatch_boundary_box() -> None:
     assert pack.metadata.get("partial_render_entity_type_counts", {}).get("hatch") == 1
 
 
+def test_build_native_scene_pack_rejects_degenerate_bbox_no_silent_drop() -> None:
+    # A HATCH/INSERT whose decoded bbox is degenerate in EITHER axis (zero width
+    # OR zero height) must NOT render as a collapsed line; it is counted
+    # unsupported (no silent drop), per the boundary-box OR guard.
+    doc = _canonical_doc(
+        entities=[
+            {  # zero width
+                "id": "h:zerow", "type": "hatch", "layer_id": "layer:0",
+                "bbox": {"min_x": 1.0, "min_y": 2.0, "max_x": 1.0, "max_y": 8.0},
+                "geometry": {"type": "hatch", "pattern": "ANSI31", "solid": False, "num_paths": 1},
+            },
+            {  # zero height
+                "id": "ins:zeroh", "type": "insert", "layer_id": "layer:0",
+                "bbox": {"min_x": 0.0, "min_y": 5.0, "max_x": 4.0, "max_y": 5.0},
+                "geometry": {"type": "insert", "insert": {"x": 0.0, "y": 5.0}, "scale": {"x": 1.0, "y": 1.0}, "rotation_deg": 0.0, "block_name": "B"},
+            },
+        ],
+        extents={"min_x": 0.0, "min_y": 0.0, "max_x": 4.0, "max_y": 8.0},
+    )
+
+    pack = build_native_scene_pack(doc)
+
+    assert pack.display_primitives == []  # nothing rendered as collapsed geometry
+    assert pack.metadata["unsupported_entity_type_counts"] == {"hatch": 1, "insert": 1}
+    # conservation: every entity is rendered or counted unsupported (no vanish).
+    assert pack.metadata["primitive_count"] + sum(
+        pack.metadata["unsupported_entity_type_counts"].values()
+    ) == len(doc["entities"])
+
+
 def test_native_render_color_and_linetype_carried_into_primitives() -> None:
     # R2 (Fork A): the AC1032 reader resolves ACI color + linetype into
     # canonical ``style``; the producer must carry them into each primitive's

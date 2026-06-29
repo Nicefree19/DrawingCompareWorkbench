@@ -1827,6 +1827,10 @@ def _decode_spline_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
     """
 
     scenario = reader.read_bit_long()  # BL: 1 = control points, 2 = fit points
+    if scenario not in (1, 2):
+        # Untrusted bitstream: an out-of-range scenario would otherwise fall
+        # through to the control-point branch and decode garbage. Fail closed.
+        raise DwgBinaryReadError(f"SPLINE scenario {scenario} out of range (expected 1 or 2)")
     reader.read_bit_long()             # BL: splineflags1 (R2013+)
     reader.read_bit_long()             # BL: knotparam (R2013+)
     degree = reader.read_bit_long()    # BL: degree

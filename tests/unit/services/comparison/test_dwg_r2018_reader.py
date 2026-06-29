@@ -961,6 +961,10 @@ def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: 
         assert handled not in unsupported, (handled, unsupported)
     # POINT remains unsupported (counted, never silently dropped).
     assert unsupported.get("point") == table.type_counts.get("POINT")
+    # Strong no-silent-drop invariant: every decoded entity is either rendered as
+    # a primitive or counted unsupported -- nothing vanishes (catches a per-entity
+    # silent drop that the lower-bound check above would miss).
+    assert primitive_count + sum(unsupported.values()) == len(document["entities"])
     # The scene bbox spans the decoded geometry.
     min_x, min_y, max_x, max_y = pack.bbox
     assert max_x > min_x and max_y > min_y
