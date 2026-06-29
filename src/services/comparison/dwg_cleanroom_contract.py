@@ -50,6 +50,19 @@ _VERSIONED_SECTION_MAP_CONTRACTS = {
             "record an approved AC1024 section-map format contract before decoding"
         ),
     ),
+    "AC1027": DwgCleanRoomFormatContract(
+        version_code="AC1027",
+        family="AutoCAD 2013/2014/2015/2016/2017",
+        contract_id=CLEANROOM_CONTRACT_ID,
+        approval_status="blocked",
+        blocking_stage_detail=BLOCKING_STAGE_DETAIL,
+        decoder_provenance="internal/public-approved-only",
+        approved_reference_available=False,
+        required_approval_evidence=_REQUIRED_APPROVAL_EVIDENCE,
+        next_safe_step=(
+            "record an approved AC1027 section-map format contract before decoding"
+        ),
+    ),
     "AC1032": DwgCleanRoomFormatContract(
         version_code="AC1032",
         family="AutoCAD 2018+",

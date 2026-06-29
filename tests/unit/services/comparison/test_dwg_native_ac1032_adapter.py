@@ -303,6 +303,33 @@ def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
     assert hatch["bbox"]["max_x"] == 4.0 and hatch["bbox"]["max_y"] == 3.0
 
 
+def test_native_unsupported_safety_surfaces_partial_decode() -> None:
+    # S1 (graceful fallback / no silent partial): an entity the native adapter
+    # cannot map to geometry (e.g. SPLINE/LEADER) must be VISIBLY flagged so the
+    # viewer/compare can badge a partial decode — never silently treated as a
+    # complete drawing ([[silent_fallback_pattern]]).
+    from src.services.comparison.dwg_importer import DwgAdapterEntity
+    from src.services.comparison.dwg_native_ac1032_adapter import (
+        native_decode_partial_summary,
+    )
+
+    supported = [
+        DwgAdapterEntity(raw_type="LINE", geometry={"start": (0, 0, 0), "end": (1, 0, 0)}, layer="0", handle="1", style={}),
+        DwgAdapterEntity(raw_type="POINT", geometry={"location": (0, 0, 0)}, layer="0", handle="2", style={}),
+    ]
+    clean = native_decode_partial_summary(supported)
+    assert clean["partial_native_decode"] is False
+    assert clean["unsupported_native_entity_types"] == []
+
+    with_unsupported = supported + [
+        DwgAdapterEntity(raw_type="SPLINE", geometry={}, layer="0", handle="3", style={}),
+        DwgAdapterEntity(raw_type="LEADER", geometry={}, layer="0", handle="4", style={}),
+    ]
+    flagged = native_decode_partial_summary(with_unsupported)
+    assert flagged["partial_native_decode"] is True
+    assert flagged["unsupported_native_entity_types"] == ["LEADER", "SPLINE"]
+
+
 def test_real_ac1032_opt_in_product_path_diffs_and_clouds(monkeypatch: pytest.MonkeyPatch) -> None:
     # End-to-end capstone: a real AC1032 imported through the OPT-IN PRODUCT path
     # (DwgImporter + native adapter, not the diagnostic build_r2018_canonical_document)

@@ -537,6 +537,41 @@ _GT_HATCH = {
 }
 
 
+# ---- DoD-E1: SPLINE (0x24) + LEADER (0x2D) clean-room geometry decode ----
+#
+# Ground truth was extracted OFFLINE from the ODA-converted DXF (validation-only,
+# never from product code):
+#   1. ODAFileConverter "26.10.0" converted sample_AC1032.dwg -> ACAD2018 DXF.
+#   2. ezdxf read the modelspace SPLINE/LEADER entities; constants below are the
+#      exact control points / degree / knots (SPLINE) and stored vertices (LEADER)
+#      ODA reports, keyed by the entity handle (== the common-entity-data handle).
+# The native clean-room decoder must reproduce these without any ODA/ezdxf call.
+#
+# SPLINE: only the non-periodic control-point scenario (handle 0x433) is decoded
+# 1:1. The closed/periodic spline (0x434) uses the R2013+ periodic encoding the
+# decoder does not yet reverse (fail-closed -> the entity is skipped, never given
+# wrong geometry); see _decode_spline_geometry for the honest partial note.
+#
+# LEADER: the DWG stores 3 leader-line vertices; ODA's DXF reports 4 because it
+# inserts a derived hookline vertex (has_hookline=1) between the last two. The
+# native decoder reproduces the 3 STORED vertices exactly (DWG ground truth); the
+# GT below is those 3 stored points (= ezdxf vertices 0, 1, and 3).
+_GT_SPLINE = {
+    0x433: {"degree": 3, "n_ctrl": 4,
+            "ctrl": [(250.458790783, 1.157147022, 0.0),
+                     (254.71377111, 11.986104202, 0.0),
+                     (259.387964087, 1.234244353, 0.0),
+                     (259.22455111, 11.01862739, 0.0)],
+            "knots": [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]},
+}
+_GT_LEADER = {
+    0x512: {"n_points": 3,
+            "points": [(717.868715432, 2.941179455, 0.0),
+                       (729.268117078, 48.538786038, 0.0),
+                       (740.398750025, 14.071812402, 0.0)]},
+}
+
+
 def _approx(actual, expected, tol=1e-6):
     return abs(actual - expected) <= tol
 
@@ -704,6 +739,73 @@ def test_real_ac1032_decoded_entity_handle_matches_handle_map() -> None:
     assert checked >= 50
 
 
+def test_real_ac1032_spline_decode_and_leader_decode_match_ground_truth() -> None:
+    # DoD-E1: the native clean-room decoder reproduces the ODA ground truth for
+    # SPLINE (control points + degree + knots) and LEADER (stored vertices) within
+    # ε ≤ 1e-6 — the GT constants above were extracted from the ODA-converted DXF
+    # via ezdxf (validation-only), keyed by handle.
+    if not _PRIMARY_SAMPLE.exists():
+        pytest.skip(f"local AC1032 sample not present: {_PRIMARY_SAMPLE}")
+
+    table = read_r2018_entities(_PRIMARY_SAMPLE.read_bytes())
+    assert table.status == "decoded", table.message
+    # Both new types decode (the sample has SPLINE(0x24)=2, LEADER(0x2D)=1; the
+    # periodic spline 0x434 is fail-closed, so at least one SPLINE survives).
+    assert table.type_counts.get("SPLINE", 0) >= 1, table.type_counts
+    assert table.type_counts.get("LEADER", 0) >= 1, table.type_counts
+
+    by_handle = {e.handle: e for e in table.entities}
+
+    # SPLINE: control points (each x/y/z), degree, and the knot vector, all 1:1.
+    for handle, expected in _GT_SPLINE.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "SPLINE", entity.type_name
+        assert entity.geometry["degree"] == expected["degree"], entity.geometry
+        ctrl = entity.geometry["control_points"]
+        assert len(ctrl) == expected["n_ctrl"], entity.geometry
+        for got, want in zip(ctrl, expected["ctrl"]):
+            assert all(_approx(a, b) for a, b in zip(got, want)), (f"{handle:#x}", got, want)
+        knots = entity.geometry["knots"]
+        assert len(knots) == len(expected["knots"]), entity.geometry
+        for got, want in zip(knots, expected["knots"]):
+            assert _approx(got, want), (f"{handle:#x}", got, want)
+
+    # LEADER: the stored leader-line vertices, 1:1 (ODA's derived hookline vertex
+    # is excluded — the native decode reproduces what the DWG actually stores).
+    for handle, expected in _GT_LEADER.items():
+        entity = by_handle[handle]
+        assert entity.type_name == "LEADER", entity.type_name
+        points = entity.geometry["points"]
+        assert len(points) == expected["n_points"], entity.geometry
+        for got, want in zip(points, expected["points"]):
+            assert all(_approx(a, b) for a, b in zip(got, want)), (f"{handle:#x}", got, want)
+
+
+def test_spline_decode_and_leader_decode_canonical_round_trips_geometry() -> None:
+    # DoD-E1 (canonical bridge): a decoded SPLINE/LEADER converts to a
+    # canonical-drawing/v1 entity carrying the decoded geometry as {x,y,z} points.
+    spline = r2018_entity_to_canonical(
+        R2018Entity(0x433, 0x24, "SPLINE",
+                    {"degree": 3,
+                     "control_points": [(0.0, 0.0, 0.0), (1.0, 2.0, 0.0), (3.0, 1.0, 0.0)],
+                     "fit_points": [], "knots": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                     "closed": False})
+    )
+    assert spline["type"] == "spline" and spline["handle"] == "433"
+    assert spline["geometry"]["degree"] == 3
+    assert spline["geometry"]["control_points"][1] == {"x": 1.0, "y": 2.0, "z": 0.0}
+    # bbox spans the control points.
+    assert spline["bbox"] == {"min_x": 0.0, "min_y": 0.0, "max_x": 3.0, "max_y": 2.0}
+
+    leader = r2018_entity_to_canonical(
+        R2018Entity(0x512, 0x2D, "LEADER",
+                    {"points": [(10.0, 5.0, 0.0), (20.0, 15.0, 0.0), (25.0, 15.0, 0.0)]})
+    )
+    assert leader["type"] == "leader" and leader["handle"] == "512"
+    assert leader["geometry"]["points"][0] == {"x": 10.0, "y": 5.0, "z": 0.0}
+    assert leader["bbox"] == {"min_x": 10.0, "min_y": 5.0, "max_x": 25.0, "max_y": 15.0}
+
+
 def test_decode_r2018_entity_returns_none_on_unframable_offset() -> None:
     # Fail-closed: a buffer of zeros frames no object, so geometry decode returns
     # None rather than raising or inventing geometry.
@@ -836,7 +938,11 @@ def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: 
 
     raw = sample.read_bytes()
     table = read_r2018_entities(raw)
-    expected_primitives = sum(
+    # R1 (Fork A renderer fidelity): the producer now renders the base line
+    # types AND the richer decoded types (ELLIPSE/HATCH/INSERT as lines;
+    # TEXT/MTEXT/DIMENSION as text primitives), so it emits AT LEAST the base
+    # line-type count and strictly more when the sample carries rich entities.
+    base_line_primitives = sum(
         table.type_counts.get(k, 0) for k in ("LINE", "CIRCLE", "ARC", "LWPOLYLINE")
     )
 
@@ -846,24 +952,29 @@ def test_real_ac1032_canonical_document_renders_through_viewport_seam(tmp_path: 
     assert "extents" in document
 
     pack = build_native_scene_pack(document)
-    # LINE/CIRCLE/ARC flatten to viewport line primitives; POINT is counted
-    # unsupported, never silently dropped.
-    assert pack.metadata["primitive_count"] == expected_primitives
-    assert pack.metadata["unsupported_entity_type_counts"].get("point") == table.type_counts.get("POINT")
+    primitive_count = pack.metadata["primitive_count"]
+    assert primitive_count >= base_line_primitives
+    # The previously-unsupported rich types are no longer silently dropped — they
+    # are rendered now, so they must NOT appear in the unsupported counts.
+    unsupported = pack.metadata["unsupported_entity_type_counts"]
+    for handled in ("ellipse", "hatch", "text", "mtext", "dimension", "insert"):
+        assert handled not in unsupported, (handled, unsupported)
+    # POINT remains unsupported (counted, never silently dropped).
+    assert unsupported.get("point") == table.type_counts.get("POINT")
     # The scene bbox spans the decoded geometry.
     min_x, min_y, max_x, max_y = pack.bbox
     assert max_x > min_x and max_y > min_y
 
     ref = build_native_scene_pack_ref(document, tmp_path)
     assert Path(ref.overview_lod0_path).exists()
-    assert ref.primitive_count == expected_primitives
+    assert ref.primitive_count == primitive_count
 
     source = resolve_viewer_primitive_source(ref)
     assert source.ok is True
     assert source.degraded is False
     assert source.render_mode == "skeleton_preview"
     assert source.provenance["producer_id"] == "native_scene_pack"
-    assert len(source.primitives) == expected_primitives
+    assert len(source.primitives) == primitive_count
     assert source.world_bbox == pack.bbox
 
 

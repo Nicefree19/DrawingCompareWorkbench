@@ -1,19 +1,22 @@
-"""Experimental, opt-in read-only AC1032 (R2018) native DWG adapter.
+"""Experimental, opt-in read-only AC1032 (R2018) / AC1027 (R2013) native DWG adapter.
 
 This wraps the diagnostic clean-room R2018 reader (``dwg_r2018_reader``) as a
-``DwgImporterAdapter`` so an AC1032 DWG can flow through the existing
-import -> canonical -> compare pipeline with ZERO commercial-converter / ezdxf
-calls.
+``DwgImporterAdapter`` so an AC1032 (R2018) OR AC1027 (R2013) DWG can flow through
+the existing import -> canonical -> compare pipeline with ZERO commercial-converter
+/ ezdxf calls. AC1027 shares the SAME R2004+ container, R2010+ Common Entity Data,
+and R2007+ string stream as AC1032 (verified 1:1 vs ODA-converted DXF ground
+truth), so the single R2018 decode path handles both versions verbatim.
 
-OPT-IN ONLY.  The adapter is default-inert: ``supports_version(AC1032)`` is True
-only when ``DRAWING_COMPARE_DWG_AC1032_NATIVE`` is set to a truthy value.  With
-it unset (the default), an AC1032 file reports unsupported, so the pipeline's
-existing default path handles it exactly as before.  Non-AC1032 versions always
-delegate to the fallback adapter (typically the AC1015 native adapter), so the
-default selection is unchanged when the opt-in is off.
+OPT-IN ONLY.  The adapter is default-inert: ``supports_version`` is True for an
+AC1032/AC1027 file only when ``DRAWING_COMPARE_DWG_AC1032_NATIVE`` is set to a
+truthy value (the SAME opt-in switch governs both versions).  With it unset (the
+default), an AC1032/AC1027 file reports unsupported, so the pipeline's existing
+default path handles it exactly as before.  Other versions always delegate to the
+fallback adapter (typically the AC1015 native adapter), so the default selection
+is unchanged when the opt-in is off.
 
-The clean-room format contract for AC1032 remains ``blocked``; this adapter is
-diagnostic/experimental and makes no DWG support claim.
+The clean-room format contract for AC1032 and AC1027 both remain ``blocked``; this
+adapter is diagnostic/experimental and makes no DWG support claim.
 """
 from __future__ import annotations
 
@@ -31,7 +34,11 @@ from .dwg_importer import (
     DwgImporterAdapter,
     DwgVersionInfo,
 )
-from .dwg_r2018_reader import R2018_VERSION_CODE, R2018Entity, read_r2018_entities
+from .dwg_r2018_reader import (
+    ACCEPTED_VERSION_CODES,
+    R2018Entity,
+    read_r2018_entities,
+)
 
 
 #: Opt-in switch.  Unset/falsey keeps the native AC1032 decode path disabled and
@@ -204,13 +211,34 @@ def _build_unique_block_names(block_names: Dict[int, str]) -> Dict[int, str]:
     return unique
 
 
-class DwgNativeAc1032Adapter(DwgImporterAdapter):
-    """Experimental opt-in AC1032 native adapter (clean-room R2018 reader).
+def native_decode_partial_summary(
+    entities: "List[DwgAdapterEntity]",
+) -> Dict[str, Any]:
+    """Surface entity types decoded structurally but NOT geometrically mapped.
 
-    Default-inert: ``supports_version(AC1032)`` is True only when the opt-in env
-    is set, so with it unset an AC1032 file reports unsupported and the pipeline's
-    existing default path handles it unchanged.  Non-AC1032 versions delegate to
-    the fallback adapter (typically the AC1015 native adapter).
+    A mapped entity with empty geometry (e.g. SPLINE/LEADER/WIPEOUT — types the
+    clean-room reader does not yet decode to geometry) means the native decode is
+    PARTIAL. This summary makes that explicit so the viewer/compare can badge a
+    "partial native" state, never silently presenting an incomplete drawing as
+    complete ([[silent_fallback_pattern]]).
+    """
+
+    unsupported = sorted({e.raw_type for e in entities if not e.geometry})
+    return {
+        "partial_native_decode": bool(unsupported),
+        "unsupported_native_entity_types": unsupported,
+    }
+
+
+class DwgNativeAc1032Adapter(DwgImporterAdapter):
+    """Experimental opt-in AC1032/AC1027 native adapter (clean-room R2018 reader).
+
+    Default-inert: ``supports_version`` is True for an AC1032 (R2018) or AC1027
+    (R2013) file only when the opt-in env is set (the SAME switch for both), so
+    with it unset such a file reports unsupported and the pipeline's existing
+    default path handles it unchanged.  Other versions delegate to the fallback
+    adapter (typically the AC1015 native adapter). AC1027 reuses the AC1032
+    decode path verbatim — the R2004+ container family is genuinely shared.
     """
 
     name = "native-ac1032"
@@ -226,19 +254,21 @@ class DwgNativeAc1032Adapter(DwgImporterAdapter):
     def is_available(self) -> bool:
         return True
 
-    def _handles_ac1032(self, version: DwgVersionInfo) -> bool:
-        return version.code == R2018_VERSION_CODE and ac1032_native_opt_in()
+    def _handles_native_version(self, version: DwgVersionInfo) -> bool:
+        # AC1032 (R2018) and AC1027 (R2013) share the R2004+ container family and
+        # are both gated behind the single experimental opt-in.
+        return version.code in ACCEPTED_VERSION_CODES and ac1032_native_opt_in()
 
     def supports_version(self, version: DwgVersionInfo) -> bool:
-        if self._handles_ac1032(version):
+        if self._handles_native_version(version):
             return True
         if self.fallback_adapter is not None:
             return self.fallback_adapter.supports_version(version)
         return False
 
     def read_file(self, path: str | Path, version: DwgVersionInfo) -> DwgAdapterDrawing:
-        if self._handles_ac1032(version):
-            return self._read_ac1032(Path(path), version)
+        if self._handles_native_version(version):
+            return self._read_native(Path(path), version)
         if self.fallback_adapter is not None:
             return self.fallback_adapter.read_file(path, version)
         raise DwgImportError(
@@ -247,8 +277,10 @@ class DwgNativeAc1032Adapter(DwgImporterAdapter):
             details={"adapter": self.name, "path": str(path)},
         )
 
-    def _read_ac1032(self, path: Path, version: DwgVersionInfo) -> DwgAdapterDrawing:
-        table = read_r2018_entities(path.read_bytes())
+    def _read_native(self, path: Path, version: DwgVersionInfo) -> DwgAdapterDrawing:
+        # Pass the detected version code through so the navigator validates against
+        # the actual container version (AC1032 or AC1027); the decode path is shared.
+        table = read_r2018_entities(path.read_bytes(), version_code=version.code)
         if table.status != "decoded":
             raise DwgImportError(
                 DwgFailureCode.ADAPTER_FAILED,
@@ -288,6 +320,8 @@ class DwgNativeAc1032Adapter(DwgImporterAdapter):
             )
             for owner_handle, ents in block_entities.items()
         ]
+        all_mapped = model_space + [e for ents in block_entities.values() for e in ents]
+        partial_summary = native_decode_partial_summary(all_mapped)
         return DwgAdapterDrawing(
             header={"$ACADVER": version.code},
             model_space=model_space,
@@ -299,6 +333,9 @@ class DwgNativeAc1032Adapter(DwgImporterAdapter):
                 "type_counts": dict(table.type_counts),
                 "model_space_entity_count": len(model_space),
                 "block_definition_count": len(blocks),
+                # No silent partial decode: types decoded structurally but not
+                # geometrically mapped are surfaced so the UI/compare can badge them.
+                **partial_summary,
             },
         )
 
@@ -307,5 +344,6 @@ __all__ = [
     "AC1032_NATIVE_OPT_IN_ENV",
     "DwgNativeAc1032Adapter",
     "ac1032_native_opt_in",
+    "native_decode_partial_summary",
     "set_ac1032_native_opt_in",
 ]

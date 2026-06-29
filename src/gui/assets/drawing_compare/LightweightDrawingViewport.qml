@@ -401,6 +401,29 @@ Item {
                     }
                     ctx.stroke()
                     __drawn += 1
+                } else if (t === "text") {
+                    // Native TEXT/MTEXT/DIMENSION label. The context is in world
+                    // coords with Y flipped (scale s,-s); counter-flip so glyphs
+                    // are upright, and set the font in world units so it scales
+                    // with zoom. Skip when too small to read at this zoom.
+                    if (batchN > 0) { ctx.stroke(); batchN = 0 }
+                    var tx = prim.x, ty = prim.y
+                    if (typeof tx !== "number" || typeof ty !== "number") continue
+                    if (tx < vxmin || tx > vxmax || ty < vymin || ty > vymax) { __culled += 1; continue }
+                    var th = (typeof prim.height === "number" && prim.height > 0) ? prim.height : 2.5
+                    if (th * s < 5.0) { __culled += 1; continue }
+                    var label = prim.text ? String(prim.text) : ""
+                    if (label.length === 0) continue
+                    ctx.save()
+                    ctx.translate(tx, ty)
+                    ctx.scale(1, -1)
+                    var rot = (typeof prim.rotation === "number") ? prim.rotation : 0
+                    if (rot) ctx.rotate(-rot * Math.PI / 180.0)
+                    ctx.fillStyle = color
+                    ctx.font = th + "px 'Malgun Gothic','Segoe UI',sans-serif"
+                    ctx.fillText(label, 0, 0)
+                    ctx.restore()
+                    __drawn += 1
                 }
             }
             if (batchN > 0) ctx.stroke()
