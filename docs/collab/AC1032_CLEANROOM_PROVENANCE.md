@@ -50,3 +50,29 @@ It is **not** a support claim and does **not** enable default AC1032 import.
   bytes at offset 0x80 reproduces the `AcFssFcAJMB\0` magic on two independent
   real AC1032 files, and the decoded section-page-map address lands inside the
   file bounds. This confirms the container is navigable from the public spec.
+
+## AC1027 (R2013) back-expansion (DoD-V1, 2026-06-29)
+
+- **Finding**: AC1027 (R2013, the AutoCAD 2013-2017 file code) uses the SAME
+  R2004+ container, R2010+ Common Entity Data, and R2007+ string stream as
+  AC1032 (R2018). The existing clean-room R2018 decode chain therefore applies
+  to AC1027 verbatim once the version gate accepts it — no new format
+  reverse-engineering was needed.
+- **Verification (clean-room, ODA-as-oracle-only)**: ODAFileConverter 26.10.0
+  converted the local AC1027 sample to an ACAD2018 DXF OFFLINE; ezdxf read the
+  ground-truth geometry (validation-only, never product code). The native
+  clean-room decoder reproduced every supported entity type
+  (LINE/CIRCLE/ARC/POINT/LWPOLYLINE/TEXT/MTEXT/INSERT/DIMENSION/HATCH/ELLIPSE/
+  SPLINE/LEADER) within the AC1032 tolerances (coords 1e-6, angles 1e-4,
+  measurement 1e-5) on `sample_AC1027.dwg` — the same drawing content as
+  `sample_AC1032.dwg`, so the entity handles match the AC1032 golden test 1:1.
+  Real AC1027 corpus also decodes: `example_2013.dwg` (171 entities) and the real
+  Korean P5 PSRC pair (`..._2013.dwg` / `..._r1_2013.dwg`: 5851 / 6874 entities).
+- **No R2013 delta observed**: across the corpus there was NO R2013-specific
+  field-layout difference vs R2018 in any decoder. Should a future R2013 sample
+  expose one, the per-version `version_code` threading already lets a decoder
+  fail-closed (skip the entity) rather than emit wrong geometry.
+- **Still gated**: `dwg_cleanroom_contract.py` AC1027 entry is `blocked`
+  (`approved_reference_available=False`), mirroring AC1024/AC1032. The native
+  AC1027 path is OFF by default behind the SAME experimental opt-in env as
+  AC1032 (`DRAWING_COMPARE_DWG_AC1032_NATIVE`). No support claim is made.

@@ -26,6 +26,17 @@ from typing import Any, Dict, List, Optional, Tuple
 from .dwg_binary_reader import DwgBinaryReader, DwgBinaryReadError
 
 R2018_VERSION_CODE = "AC1032"
+#: AC1027 (R2013) shares the SAME R2004+ container, R2010+ Common Entity Data,
+#: and R2007+ string stream as R2018 (AC1032) — empirically verified 1:1 against
+#: ODA-converted DXF ground truth on real AC1027 samples (every supported entity
+#: type decodes within tolerance, no R2013-specific field-layout delta observed).
+#: So the existing R2018 decode chain applies verbatim once the gate accepts it.
+#: See ``docs/collab/AC1032_CLEANROOM_PROVENANCE.md``.
+R2013_VERSION_CODE = "AC1027"
+#: Version codes the navigator/decoder accepts as the shared R2004+ ("R2018")
+#: container family. Truly different formats (e.g. AC1015/AC1024) remain rejected
+#: by the version gate. The clean-room contract for both stays ``blocked``.
+ACCEPTED_VERSION_CODES = frozenset({R2018_VERSION_CODE, R2013_VERSION_CODE})
 
 #: The R2004+ file header is a 0x6C-byte LCG-obfuscated block at this offset.
 R2004_HEADER_OFFSET = 0x80
@@ -38,14 +49,14 @@ R2004_HEADER_MAGIC = b"AcFssFcAJMB\x00"
 SECTION_PAGE_ADDRESS_BASE = 0x100
 
 # Verified decrypted-header field offsets (little-endian; RL = u32, RLL = u64).
-_OFF_LAST_SECTION_PAGE_ID = 0x28          # RL
+_OFF_LAST_SECTION_PAGE_ID = 0x28  # RL
 _OFF_LAST_SECTION_PAGE_END_ADDRESS = 0x2C  # RLL
-_OFF_SECOND_HEADER_ADDRESS = 0x34          # RLL
-_OFF_SECTION_PAGE_MAP_ID = 0x50            # RL
-_OFF_SECTION_PAGE_MAP_ADDRESS = 0x54       # RLL (+ SECTION_PAGE_ADDRESS_BASE)
-_OFF_SECTION_MAP_ID = 0x5C                 # RL
-_OFF_SECTION_PAGE_ARRAY_SIZE = 0x60        # RL
-_OFF_GAP_ARRAY_SIZE = 0x64                 # RL
+_OFF_SECOND_HEADER_ADDRESS = 0x34  # RLL
+_OFF_SECTION_PAGE_MAP_ID = 0x50  # RL
+_OFF_SECTION_PAGE_MAP_ADDRESS = 0x54  # RLL (+ SECTION_PAGE_ADDRESS_BASE)
+_OFF_SECTION_MAP_ID = 0x5C  # RL
+_OFF_SECTION_PAGE_ARRAY_SIZE = 0x60  # RL
+_OFF_GAP_ARRAY_SIZE = 0x64  # RL
 
 
 @dataclass(frozen=True)
@@ -107,7 +118,16 @@ def inspect_r2018_container(
         )
 
     actual_version = raw[:6].decode("ascii", errors="replace")
-    if actual_version != version_code:
+    # Accept the requested version code OR any other member of the shared R2004+
+    # ("R2018") container family (currently AC1032 + AC1027). A caller that passes
+    # the detected code (e.g. AC1027) navigates that file; a caller still passing
+    # the AC1032 default also navigates an AC1027 file because the container is
+    # genuinely shared (verified 1:1 vs ODA GT). Truly different formats (AC1015,
+    # AC1024, ...) remain rejected as ``wrong_version`` — the relaxation is scoped
+    # to the empirically-shared family, NOT a blanket bypass.
+    if actual_version != version_code and (
+        version_code not in ACCEPTED_VERSION_CODES or actual_version not in ACCEPTED_VERSION_CODES
+    ):
         return DwgR2018ContainerDiagnostic(
             version_code=version_code,
             status="wrong_version",
@@ -137,14 +157,18 @@ def inspect_r2018_container(
     in_bounds = 0 < section_page_map_file_offset < size
     fields: Dict[str, Any] = {
         "last_section_page_id": struct.unpack_from("<I", decrypted, _OFF_LAST_SECTION_PAGE_ID)[0],
-        "last_section_page_end_address": struct.unpack_from("<Q", decrypted, _OFF_LAST_SECTION_PAGE_END_ADDRESS)[0],
+        "last_section_page_end_address": struct.unpack_from(
+            "<Q", decrypted, _OFF_LAST_SECTION_PAGE_END_ADDRESS
+        )[0],
         "second_header_address": struct.unpack_from("<Q", decrypted, _OFF_SECOND_HEADER_ADDRESS)[0],
         "section_page_map_id": struct.unpack_from("<I", decrypted, _OFF_SECTION_PAGE_MAP_ID)[0],
         "section_page_map_address": section_page_map_address,
         "section_page_map_file_offset": section_page_map_file_offset,
         "section_page_map_in_bounds": in_bounds,
         "section_map_id": struct.unpack_from("<I", decrypted, _OFF_SECTION_MAP_ID)[0],
-        "section_page_array_size": struct.unpack_from("<I", decrypted, _OFF_SECTION_PAGE_ARRAY_SIZE)[0],
+        "section_page_array_size": struct.unpack_from(
+            "<I", decrypted, _OFF_SECTION_PAGE_ARRAY_SIZE
+        )[0],
         "gap_array_size": struct.unpack_from("<I", decrypted, _OFF_GAP_ARRAY_SIZE)[0],
     }
     if in_bounds:
@@ -625,9 +649,7 @@ def read_r2004_data_section(
         target = min(slot, section.size - start_offset)
         if target <= 0:
             continue
-        decompressed = decompress_r2004(
-            raw[body_offset : body_offset + compressed_size], target
-        )
+        decompressed = decompress_r2004(raw[body_offset : body_offset + compressed_size], target)
         buffer[start_offset : start_offset + len(decompressed)] = decompressed
     return bytes(buffer)
 
@@ -659,9 +681,7 @@ def read_r2018_object_type(reader: DwgBinaryReader) -> int:
     return reader.read_bits(16)
 
 
-def _frame_r2018_object(
-    objects_buffer: bytes, offset: int
-) -> "Tuple[int, int, int] | None":
+def _frame_r2018_object(objects_buffer: bytes, offset: int) -> "Tuple[int, int, int] | None":
     """Frame one object at ``offset`` without decoding its geometry.
 
     Returns ``(object_size, header_bytes, object_type)`` when a sane object
@@ -892,9 +912,7 @@ def read_r2018_handle_map(
     objects = read_r2004_data_section(
         data, section_name="AcDb:AcDbObjects", version_code=version_code
     )
-    handles = read_r2004_data_section(
-        data, section_name="AcDb:Handles", version_code=version_code
-    )
+    handles = read_r2004_data_section(data, section_name="AcDb:Handles", version_code=version_code)
     pairs, info = parse_r2018_handle_map(handles)
     object_size = len(objects)
     in_bounds = sum(1 for _handle, offset in pairs if 0 <= offset < object_size)
@@ -936,7 +954,9 @@ class R2018ObjectTable:
     framed_count: int
     unframed_count: int
     type_counts: Dict[int, int] = field(default_factory=dict)
-    objects: List[Tuple[int, int, int, int]] = field(default_factory=list)  # (handle, offset, size, type)
+    objects: List[Tuple[int, int, int, int]] = field(
+        default_factory=list
+    )  # (handle, offset, size, type)
     message: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1078,27 +1098,29 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     if reader.read_bit():  # B: graphic image present
         raise DwgBinaryReadError("entity proxy graphic image is not supported")
     entmode = reader.read_bits(2)  # BB: entity mode (0=block-owned, 1=paper, 2=model)
-    reader.read_bit_long()         # BL: number of reactors
-    reader.read_bit()              # B: XDictionary-missing flag (R2004+)
-    reader.read_bit()              # B: no-links flag (R2004+ always 1)
+    reader.read_bit_long()  # BL: number of reactors
+    reader.read_bit()  # B: XDictionary-missing flag (R2004+)
+    reader.read_bit()  # B: no-links flag (R2004+ always 1)
     color = reader.read_bit_short() & 0xFFFF  # ENC: entity colour number + flags
-    color_index = color & 0x1FFF   # ACI index with the 0x8000/0x4000/0x2000 flags masked
+    color_index = color & 0x1FFF  # ACI index with the 0x8000/0x4000/0x2000 flags masked
     if (color & 0x8000) and not (color & 0x4000):
-        reader.read_bit_long()     # complex colour: RGB value in the data stream
+        reader.read_bit_long()  # complex colour: RGB value in the data stream
     if color & 0x2000:
-        reader.read_bit_long()     # colour transparency
-    reader.read_bit_double()       # BD: linetype scale
+        reader.read_bit_long()  # colour transparency
+    reader.read_bit_double()  # BD: linetype scale
     ltype_flags = reader.read_bits(2)  # BB: linetype flags (see R2018CommonHeader)
-    reader.read_bits(2)            # BB: plotstyle flags
-    reader.read_bits(2)            # BB: material flags (R2007+)
-    reader.read_bits(8)            # RC: shadow flags
-    reader.read_bit()              # B: has full visual style (R2010+)
-    reader.read_bit()              # B: has face visual style (R2010+)
-    reader.read_bit()              # B: has edge visual style (R2010+)
-    reader.read_bit_short()        # BS: invisibility flag
-    reader.read_bits(8)            # RC: lineweight
+    reader.read_bits(2)  # BB: plotstyle flags
+    reader.read_bits(2)  # BB: material flags (R2007+)
+    reader.read_bits(8)  # RC: shadow flags
+    reader.read_bit()  # B: has full visual style (R2010+)
+    reader.read_bit()  # B: has face visual style (R2010+)
+    reader.read_bit()  # B: has edge visual style (R2010+)
+    reader.read_bit_short()  # BS: invisibility flag
+    reader.read_bits(8)  # RC: lineweight
     return R2018CommonHeader(
-        handle=handle.value, ltype_flags=ltype_flags, color_index=color_index,
+        handle=handle.value,
+        ltype_flags=ltype_flags,
+        color_index=color_index,
         entmode=entmode,
     )
 
@@ -1152,9 +1174,9 @@ def _decode_ellipse_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
     reader.read_bit_double()  # extrusion x ...
     reader.read_bit_double()
     reader.read_bit_double()
-    ratio = reader.read_bit_double()        # minor / major axis ratio
+    ratio = reader.read_bit_double()  # minor / major axis ratio
     start_param = reader.read_bit_double()  # start parameter (radians)
-    end_param = reader.read_bit_double()    # end parameter (radians)
+    end_param = reader.read_bit_double()  # end parameter (radians)
     return {
         "center": center,
         "major_axis": major_axis,
@@ -1178,13 +1200,15 @@ _LWPOLY_CLOSED = 0x200  # verified against ODA ground truth (closed flags 0x200/
 def _decode_lwpolyline_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
     flag = reader.read_bit_short()
     if flag & _LWPOLY_HAS_CONST_WIDTH:
-        reader.read_bit_double()           # constant width
+        reader.read_bit_double()  # constant width
     if flag & _LWPOLY_HAS_ELEVATION:
-        reader.read_bit_double()           # elevation
+        reader.read_bit_double()  # elevation
     if flag & _LWPOLY_HAS_THICKNESS:
-        reader.read_bit_double()           # thickness
-    if flag & _LWPOLY_HAS_EXTRUSION:       # extrusion 3BD
-        reader.read_bit_double(); reader.read_bit_double(); reader.read_bit_double()
+        reader.read_bit_double()  # thickness
+    if flag & _LWPOLY_HAS_EXTRUSION:  # extrusion 3BD
+        reader.read_bit_double()
+        reader.read_bit_double()
+        reader.read_bit_double()
     numpoints = reader.read_bit_long()
     if numpoints <= 0:
         raise DwgBinaryReadError(f"LWPOLYLINE vertex count {numpoints} is not positive")
@@ -1270,9 +1294,7 @@ def _read_text_string_value(
     Returns ``''`` when no string stream is present or on a malformed read.
     """
 
-    window = _string_stream_window(
-        objects_buffer, data_start_byte, object_size, handle_stream_bits
-    )
+    window = _string_stream_window(objects_buffer, data_start_byte, object_size, handle_stream_bits)
     if window is None:
         return ""
     start, _end = window
@@ -1303,9 +1325,7 @@ def _read_string_stream_values(
     so far on any malformed count (an empty list when there is no string stream).
     """
 
-    window = _string_stream_window(
-        objects_buffer, data_start_byte, object_size, handle_stream_bits
-    )
+    window = _string_stream_window(objects_buffer, data_start_byte, object_size, handle_stream_bits)
     if window is None:
         return []
     start, end = window
@@ -1319,8 +1339,7 @@ def _read_string_stream_values(
                 break
             values.append(
                 "".join(
-                    chr(reader.read_bits(8) | (reader.read_bits(8) << 8))
-                    for _ in range(char_count)
+                    chr(reader.read_bits(8) | (reader.read_bits(8) << 8)) for _ in range(char_count)
                 )
             )
     except DwgBinaryReadError:
@@ -1363,8 +1382,12 @@ def _decode_mtext_geometry(reader: DwgBinaryReader, text_value: str) -> Dict[str
     ix = reader.read_bit_double()
     iy = reader.read_bit_double()
     reader.read_bit_double()  # insertion point 3BD
-    reader.read_bit_double(); reader.read_bit_double(); reader.read_bit_double()  # extrusion 3BD
-    reader.read_bit_double(); reader.read_bit_double(); reader.read_bit_double()  # x-axis dir 3BD
+    reader.read_bit_double()
+    reader.read_bit_double()
+    reader.read_bit_double()  # extrusion 3BD
+    reader.read_bit_double()
+    reader.read_bit_double()
+    reader.read_bit_double()  # x-axis dir 3BD
     reader.read_bit_double()  # reference rectangle width
     reader.read_bit_double()  # reference rectangle height (R2007+)
     height = reader.read_bit_double()  # text height
@@ -1440,9 +1463,7 @@ def _read_handle_stream_refs(
     return refs
 
 
-def _record_name_if_type(
-    objects_buffer: bytes, offset: int, expected_type: int
-) -> "Optional[str]":
+def _record_name_if_type(objects_buffer: bytes, offset: int, expected_type: int) -> "Optional[str]":
     """Return the record's first string-stream value (its name) when the object
     at ``offset`` frames as ``expected_type``, else ``None`` (fail-closed)."""
 
@@ -1476,9 +1497,7 @@ def _resolve_insert_block_name(
         offset = handle_map.get(value)
         if offset is None:
             continue
-        candidate = _record_name_if_type(
-            objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE
-        )
+        candidate = _record_name_if_type(objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE)
         if candidate:
             name = candidate  # keep the last (the inserted block, not the owner)
     return name
@@ -1499,9 +1518,7 @@ def _resolve_insert_block_handle(
         offset = handle_map.get(value)
         if offset is None:
             continue
-        if _record_name_if_type(
-            objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE
-        ) is not None:
+        if _record_name_if_type(objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE) is not None:
             handle = value  # keep the last (the inserted block, not the owner)
     return handle
 
@@ -1546,9 +1563,7 @@ def _resolve_owner_block_handle(
         offset = handle_map.get(value)
         if offset is None:
             continue
-        if _record_name_if_type(
-            objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE
-        ) is not None:
+        if _record_name_if_type(objects_buffer, offset, _BLOCK_HEADER_OBJECT_TYPE) is not None:
             return value
     return 0
 
@@ -1617,20 +1632,20 @@ def _decode_dimension_geometry(reader: DwgBinaryReader, text_value: str) -> Dict
     recomputed ``get_measurement()``.
     """
 
-    reader.read_bits(8)                # RC: version (0 = R2010)
-    reader.read_bit_double()           # BD: extrusion x ...
-    reader.read_bit_double()           # BD: extrusion y
-    reader.read_bit_double()           # BD: extrusion z
-    tmx = _read_raw_double(reader)     # 2RD: text midpoint
+    reader.read_bits(8)  # RC: version (0 = R2010)
+    reader.read_bit_double()  # BD: extrusion x ...
+    reader.read_bit_double()  # BD: extrusion y
+    reader.read_bit_double()  # BD: extrusion z
+    tmx = _read_raw_double(reader)  # 2RD: text midpoint
     tmy = _read_raw_double(reader)
-    reader.read_bit_double()           # BD: elevation
-    reader.read_bits(8)                # RC: flags 1
+    reader.read_bit_double()  # BD: elevation
+    reader.read_bits(8)  # RC: flags 1
     # User text TV lives in the string stream (R2007+); absent from the data stream.
-    for _ in range(6):                 # BD x6: text rot, horiz dir, ins X/Y/Z-scale,
-        reader.read_bit_double()       #        ins rotation
-    reader.read_bit_short()            # BS: attachment point (R2000+)
-    reader.read_bit_short()            # BS: linespacing style
-    reader.read_bit_double()           # BD: linespacing factor
+    for _ in range(6):  # BD x6: text rot, horiz dir, ins X/Y/Z-scale,
+        reader.read_bit_double()  #        ins rotation
+    reader.read_bit_short()  # BS: attachment point (R2000+)
+    reader.read_bit_short()  # BS: linespacing style
+    reader.read_bit_double()  # BD: linespacing factor
     measurement = reader.read_bit_double()  # BD: actual measurement
     return {
         "text_midpoint": (tmx, tmy, 0.0),
@@ -1662,73 +1677,74 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
     conservative bound).
     """
 
-    is_gradient = reader.read_bit_long()      # BL: is gradient fill
-    reader.read_bit_long()                    # BL: reserved
-    reader.read_bit_double()                  # BD: gradient angle
-    reader.read_bit_double()                  # BD: gradient shift
-    reader.read_bit_long()                    # BL: single-colour gradient
-    reader.read_bit_double()                  # BD: gradient tint
+    is_gradient = reader.read_bit_long()  # BL: is gradient fill
+    reader.read_bit_long()  # BL: reserved
+    reader.read_bit_double()  # BD: gradient angle
+    reader.read_bit_double()  # BD: gradient shift
+    reader.read_bit_long()  # BL: single-colour gradient
+    reader.read_bit_double()  # BD: gradient tint
     num_grad_colors = reader.read_bit_long()  # BL: number of gradient colours
     if not 0 <= num_grad_colors <= 256:
         raise DwgBinaryReadError(f"HATCH gradient colour count {num_grad_colors} insane")
     for _ in range(num_grad_colors):
-        reader.read_bit_double()              # BD: unknown double
-        reader.read_bit_short()               # BS: unknown short
-        reader.read_bit_long()                # BL: RGB colour
-        reader.read_bits(8)                   # RC: ignored colour byte
+        reader.read_bit_double()  # BD: unknown double
+        reader.read_bit_short()  # BS: unknown short
+        reader.read_bit_long()  # BL: RGB colour
+        reader.read_bits(8)  # RC: ignored colour byte
     # Gradient name TV -> string stream (no bits here).
-    reader.read_bit_double()                  # BD: Z coord (X, Y always 0)
-    reader.read_bit_double()                  # BD: extrusion x ...
+    reader.read_bit_double()  # BD: Z coord (X, Y always 0)
+    reader.read_bit_double()  # BD: extrusion x ...
     reader.read_bit_double()
     reader.read_bit_double()
     # Pattern name TV -> string stream (no bits here).
-    solid = reader.read_bit()                 # B: solid fill
-    associative = reader.read_bit()           # B: associative
-    num_paths = reader.read_bit_long()        # BL: number of boundary paths
+    solid = reader.read_bit()  # B: solid fill
+    associative = reader.read_bit()  # B: associative
+    num_paths = reader.read_bit_long()  # BL: number of boundary paths
     if not 0 <= num_paths <= _HATCH_MAX_COUNT:
         raise DwgBinaryReadError(f"HATCH path count {num_paths} insane")
 
     xs: List[float] = []
     ys: List[float] = []
     for _ in range(num_paths):
-        path_flag = reader.read_bit_long()    # BL: path flag (bit 1 = polyline)
-        if not (path_flag & 2):               # edge-based path
+        path_flag = reader.read_bit_long()  # BL: path flag (bit 1 = polyline)
+        if not (path_flag & 2):  # edge-based path
             num_segs = reader.read_bit_long()
             if not 0 <= num_segs <= _HATCH_MAX_COUNT:
                 raise DwgBinaryReadError(f"HATCH segment count {num_segs} insane")
             for _ in range(num_segs):
                 edge_type = reader.read_bits(8)  # RC: edge type
-                if edge_type == 1:               # LINE: two endpoints (2RD each)
+                if edge_type == 1:  # LINE: two endpoints (2RD each)
                     x0, y0 = _read_raw_double(reader), _read_raw_double(reader)
                     x1, y1 = _read_raw_double(reader), _read_raw_double(reader)
                     xs += [x0, x1]
                     ys += [y0, y1]
-                elif edge_type == 2:             # CIRCULAR ARC
+                elif edge_type == 2:  # CIRCULAR ARC
                     cx, cy = _read_raw_double(reader), _read_raw_double(reader)
                     radius = reader.read_bit_double()
-                    reader.read_bit_double()     # start angle
-                    reader.read_bit_double()     # end angle
-                    reader.read_bit()            # is counter-clockwise
+                    reader.read_bit_double()  # start angle
+                    reader.read_bit_double()  # end angle
+                    reader.read_bit()  # is counter-clockwise
                     xs += [cx - radius, cx + radius]
                     ys += [cy - radius, cy + radius]
-                elif edge_type == 3:             # ELLIPTICAL ARC
+                elif edge_type == 3:  # ELLIPTICAL ARC
                     cx, cy = _read_raw_double(reader), _read_raw_double(reader)
                     ex, ey = _read_raw_double(reader), _read_raw_double(reader)  # major axis end
-                    reader.read_bit_double()     # minor/major ratio
-                    reader.read_bit_double()     # start angle
-                    reader.read_bit_double()     # end angle
-                    reader.read_bit()            # is counter-clockwise
+                    reader.read_bit_double()  # minor/major ratio
+                    reader.read_bit_double()  # start angle
+                    reader.read_bit_double()  # end angle
+                    reader.read_bit()  # is counter-clockwise
                     major = math.hypot(ex, ey)
                     xs += [cx - major, cx + major]
                     ys += [cy - major, cy + major]
-                elif edge_type == 4:             # SPLINE
-                    reader.read_bit_long()       # degree
+                elif edge_type == 4:  # SPLINE
+                    reader.read_bit_long()  # degree
                     is_rational = reader.read_bit()
-                    reader.read_bit()            # is periodic
+                    reader.read_bit()  # is periodic
                     num_knots = reader.read_bit_long()
                     num_ctrl = reader.read_bit_long()
-                    if not (0 <= num_knots <= _HATCH_MAX_COUNT
-                            and 0 <= num_ctrl <= _HATCH_MAX_COUNT):
+                    if not (
+                        0 <= num_knots <= _HATCH_MAX_COUNT and 0 <= num_ctrl <= _HATCH_MAX_COUNT
+                    ):
                         raise DwgBinaryReadError("HATCH spline knot/control counts insane")
                     for _ in range(num_knots):
                         reader.read_bit_double()  # knot value
@@ -1744,15 +1760,15 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
                     for _ in range(num_fit):
                         _read_raw_double(reader)
                         _read_raw_double(reader)
-                    _read_raw_double(reader)     # start tangent (2RD)
+                    _read_raw_double(reader)  # start tangent (2RD)
                     _read_raw_double(reader)
-                    _read_raw_double(reader)     # end tangent (2RD)
+                    _read_raw_double(reader)  # end tangent (2RD)
                     _read_raw_double(reader)
                 else:
                     raise DwgBinaryReadError(f"HATCH unknown edge type {edge_type}")
-        else:                                  # polyline path
+        else:  # polyline path
             has_bulges = reader.read_bit()
-            reader.read_bit()                  # closed
+            reader.read_bit()  # closed
             num_segs = reader.read_bit_long()
             if not 0 <= num_segs <= _HATCH_MAX_COUNT:
                 raise DwgBinaryReadError(f"HATCH polyline vertex count {num_segs} insane")
@@ -1761,8 +1777,8 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
                 xs.append(x0)
                 ys.append(y0)
                 if has_bulges:
-                    reader.read_bit_double()   # bulge
-        reader.read_bit_long()                 # BL: number of boundary object handles
+                    reader.read_bit_double()  # bulge
+        reader.read_bit_long()  # BL: number of boundary object handles
 
     bbox = None
     if xs:
@@ -1779,6 +1795,105 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
     }
 
 
+#: SPLINE (ODA spec 20.4.74, fixed type id 0x24) + LEADER (ODA spec 20.4.57,
+#: fixed type id 0x2D). Runaway guard for the stored knot/point counts.
+SPLINE_OBJECT_TYPE = 0x24
+LEADER_OBJECT_TYPE = 0x2D
+_SPLINE_MAX_COUNT = 100_000
+
+
+def _decode_spline_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    """Decode SPLINE (ODA spec 20.4.74) control points / fit points + degree.
+
+    Field order (R2013+ AC1032): ``scenario`` BL, ``splineflags1`` BL,
+    ``knotparam`` BL, ``degree`` BL. Scenario 2 (fit points) reads the fit
+    tolerance + begin/end tangents + ``numfitpts`` BL and that many 3BD. Scenario
+    1 (control points) reads ``rational``/``closed``/``periodic`` flags, the knot
+    + control tolerances (BD), ``numknots`` BL, ``numctrlpts`` BL, the
+    ``weighted`` flag (B), then the knot values (BD) and the control points (3BD,
+    each followed by a weight BD when weighted).
+
+    Validated 1:1 against ODA ground truth on the non-periodic control-point
+    scenario (control points, degree, knot vector match within 1e-6). The
+    closed/periodic R2013+ encoding stores its control points under a different
+    field layout this decoder does not yet reverse; such a spline yields insane
+    counts and fail-closes (``DwgBinaryReadError`` -> the entity is skipped, never
+    given fabricated geometry). Honest partial — see the DoD-E1 note.
+    """
+
+    scenario = reader.read_bit_long()  # BL: 1 = control points, 2 = fit points
+    if scenario not in (1, 2):
+        # Untrusted bitstream: an out-of-range scenario would otherwise fall
+        # through to the control-point branch and decode garbage. Fail closed.
+        raise DwgBinaryReadError(f"SPLINE scenario {scenario} out of range (expected 1 or 2)")
+    reader.read_bit_long()  # BL: splineflags1 (R2013+)
+    reader.read_bit_long()  # BL: knotparam (R2013+)
+    degree = reader.read_bit_long()  # BL: degree
+    control_points: List[Tuple[float, float, float]] = []
+    fit_points: List[Tuple[float, float, float]] = []
+    knots: List[float] = []
+    closed = False
+    if scenario == 2:  # fit-point scenario
+        reader.read_bit_double()  # BD: fit tolerance
+        for _ in range(6):  # 3BD begin tangent + 3BD end tangent
+            reader.read_bit_double()
+        num_fit = reader.read_bit_long()
+        if not 0 <= num_fit <= _SPLINE_MAX_COUNT:
+            raise DwgBinaryReadError(f"SPLINE fit-point count {num_fit} insane")
+        for _ in range(num_fit):
+            fit_points.append(
+                (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+            )
+    else:  # control-point scenario (scenario == 1)
+        reader.read_bit()  # B: rational
+        closed = bool(reader.read_bit())  # B: closed
+        reader.read_bit()  # B: periodic
+        reader.read_bit_double()  # BD: knot tolerance
+        reader.read_bit_double()  # BD: control tolerance
+        num_knots = reader.read_bit_long()
+        num_ctrl = reader.read_bit_long()
+        if not (0 <= num_knots <= _SPLINE_MAX_COUNT and 0 <= num_ctrl <= _SPLINE_MAX_COUNT):
+            raise DwgBinaryReadError(f"SPLINE knot/control counts {num_knots}/{num_ctrl} insane")
+        weighted = reader.read_bit()  # B: weights present
+        knots = [reader.read_bit_double() for _ in range(num_knots)]
+        for _ in range(num_ctrl):
+            point = (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+            if weighted:
+                reader.read_bit_double()  # BD: weight
+            control_points.append(point)
+    return {
+        "degree": degree,
+        "control_points": control_points,
+        "fit_points": fit_points,
+        "knots": knots,
+        "closed": closed,
+    }
+
+
+def _decode_leader_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
+    """Decode LEADER (ODA spec 20.4.57): the stored leader-line vertices.
+
+    Field order: ``unknown`` B, ``annotation type`` BL, ``path type`` BL,
+    ``numpts`` BL, then ``numpts`` 3BD vertices. The trailing fields (box height,
+    origin, extrusion, directions, hookline flags) are not needed for the diff,
+    which keys on the leader vertices. Validated 1:1 against ODA ground truth on
+    the stored vertices (ODA's DXF inserts an extra derived hookline vertex when
+    has_hookline is set; the native decode reproduces the STORED vertices, which
+    are exactly what the DWG holds)."""
+
+    reader.read_bit()  # B: unknown bit
+    reader.read_bit_long()  # BL: annotation type
+    reader.read_bit_long()  # BL: path type
+    num_points = reader.read_bit_long()
+    if not 0 < num_points <= _SPLINE_MAX_COUNT:
+        raise DwgBinaryReadError(f"LEADER point count {num_points} insane")
+    points = [
+        (reader.read_bit_double(), reader.read_bit_double(), reader.read_bit_double())
+        for _ in range(num_points)
+    ]
+    return {"points": points}
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
@@ -1786,6 +1901,8 @@ _ENTITY_GEOMETRY_DECODERS = {
     0x13: ("LINE", _decode_line_geometry),
     0x1B: ("POINT", _decode_point_geometry),
     0x23: ("ELLIPSE", _decode_ellipse_geometry),
+    0x24: ("SPLINE", _decode_spline_geometry),
+    0x2D: ("LEADER", _decode_leader_geometry),
     0x4D: ("LWPOLYLINE", _decode_lwpolyline_geometry),
 }
 
@@ -1923,12 +2040,8 @@ def decode_r2018_entity(
                 )
             if header.entmode == 0:
                 # Block-owned entity: its owner is the first BLOCK_HEADER ref.
-                owner_handle = _resolve_owner_block_handle(
-                    objects_buffer, handle_map, refs
-                )
-        linetype = _resolve_entity_linetype(
-            objects_buffer, handle_map, refs, header.ltype_flags
-        )
+                owner_handle = _resolve_owner_block_handle(objects_buffer, handle_map, refs)
+        linetype = _resolve_entity_linetype(objects_buffer, handle_map, refs, header.ltype_flags)
     except DwgBinaryReadError:
         return None
     return R2018Entity(
@@ -2047,6 +2160,8 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "INSERT": "insert",  # block reference; carries the block name for the diff
     "DIMENSION": "dimension",  # carries the measured value the structural diff cares about
     "HATCH": "hatch",  # carries the pattern + boundary bbox (fills/section poche)
+    "SPLINE": "spline",  # carries control/fit points + degree + knots (curve geometry)
+    "LEADER": "leader",  # carries the leader-line vertices
 }
 
 
@@ -2097,6 +2212,15 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
         # measurement-text midpoint (a point box, like POINT).
         xs = [geometry["text_midpoint"][0]]
         ys = [geometry["text_midpoint"][1]]
+    elif entity.type_name == "SPLINE":
+        # The control-point hull bounds the curve (a conservative bound); fall back
+        # to the fit points when only those decoded.
+        points = geometry["control_points"] or geometry["fit_points"]
+        xs = [point[0] for point in points] or [0.0]
+        ys = [point[1] for point in points] or [0.0]
+    elif entity.type_name == "LEADER":
+        xs = [point[0] for point in geometry["points"]]
+        ys = [point[1] for point in geometry["points"]]
     else:  # POINT
         xs = [geometry["location"][0]]
         ys = [geometry["location"][1]]
@@ -2208,6 +2332,20 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "associative": geometry["associative"],
             "num_paths": geometry["num_paths"],
         }
+    elif entity.type_name == "SPLINE":
+        out["geometry"] = {
+            "type": "spline",
+            "degree": geometry["degree"],
+            "closed": geometry["closed"],
+            "control_points": [_canonical_point(point) for point in geometry["control_points"]],
+            "fit_points": [_canonical_point(point) for point in geometry["fit_points"]],
+            "knots": list(geometry["knots"]),
+        }
+    elif entity.type_name == "LEADER":
+        out["geometry"] = {
+            "type": "leader",
+            "points": [_canonical_point(point) for point in geometry["points"]],
+        }
     else:  # POINT
         out["geometry"] = {"type": "point", "location": _canonical_point(geometry["location"])}
     return out
@@ -2265,6 +2403,8 @@ def build_r2018_canonical_document(
 
 __all__ = [
     "R2018_VERSION_CODE",
+    "R2013_VERSION_CODE",
+    "ACCEPTED_VERSION_CODES",
     "R2004_HEADER_OFFSET",
     "R2004_HEADER_LENGTH",
     "R2004_HEADER_MAGIC",
