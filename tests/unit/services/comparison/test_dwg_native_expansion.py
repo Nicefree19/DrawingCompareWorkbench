@@ -99,9 +99,7 @@ def test_real_ac1032_polyline2d_decode_round_trips_to_canonical() -> None:
         _AC1032_SAMPLE.read_bytes(), version_code=R2018_VERSION_CODE
     )
     handle_hex = f"{_GT_POLYLINE_3D_HANDLE:X}"
-    poly = next(
-        (e for e in doc["entities"] if e.get("handle") == handle_hex), None
-    )
+    poly = next((e for e in doc["entities"] if e.get("handle") == handle_hex), None)
     assert poly is not None, "legacy polyline missing from canonical document"
     assert poly["type"] == "polyline"
     assert len(poly["geometry"]["vertices"]) == len(_GT_POLYLINE_3D_VERTICES)
@@ -147,9 +145,7 @@ def test_real_ac1032_hatch_boundary_matches_ground_truth() -> None:
         _AC1032_SAMPLE.read_bytes(), version_code=R2018_VERSION_CODE
     )
     handle_hex = f"{_GT_HATCH_HANDLE:X}"
-    hatch = next(
-        (e for e in doc["entities"] if e.get("handle") == handle_hex), None
-    )
+    hatch = next((e for e in doc["entities"] if e.get("handle") == handle_hex), None)
     assert hatch is not None, "target HATCH missing from canonical document"
     assert hatch["type"] == "hatch"
     loops = hatch["geometry"].get("boundary_loops")
@@ -158,8 +154,7 @@ def test_real_ac1032_hatch_boundary_matches_ground_truth() -> None:
     # Every ODA corner must be matched by a decoded boundary vertex within 1e-3.
     for want in _GT_HATCH_BOUNDARY:
         assert any(
-            _approx(px, want[0], 1e-3) and _approx(py, want[1], 1e-3)
-            for px, py in points
+            _approx(px, want[0], 1e-3) and _approx(py, want[1], 1e-3) for px, py in points
         ), (want, points)
 
 
@@ -240,15 +235,17 @@ def _geometry_signature(entity) -> tuple:
     g = entity.geometry
     name = entity.type_name
     if name == "LINE":
-        return ("LINE", tuple(round(c, 3) for c in g["start"]),
-                tuple(round(c, 3) for c in g["end"]))
+        return (
+            "LINE",
+            tuple(round(c, 3) for c in g["start"]),
+            tuple(round(c, 3) for c in g["end"]),
+        )
     if name in ("CIRCLE", "ARC"):
         return (name, tuple(round(c, 3) for c in g["center"]), round(g["radius"], 3))
     if name == "POINT":
         return ("POINT", tuple(round(c, 3) for c in g["location"]))
     if name == "POLYLINE":
-        return ("POLYLINE",
-                tuple(tuple(round(c, 3) for c in v) for v in (g.get("vertices") or [])))
+        return ("POLYLINE", tuple(tuple(round(c, 3) for c in v) for v in (g.get("vertices") or [])))
     if name == "ELLIPSE":
         return ("ELLIPSE", tuple(round(c, 3) for c in g["center"]))
     if name in ("TEXT", "MTEXT"):
@@ -271,9 +268,7 @@ def test_real_ac1024_polyline3d_decode_matches_ground_truth() -> None:
     if not _AC1024_SAMPLE.exists():
         pytest.skip(f"local AC1024 sample not present: {_AC1024_SAMPLE}")
 
-    table = read_r2018_entities(
-        _AC1024_SAMPLE.read_bytes(), version_code=R2010_VERSION_CODE
-    )
+    table = read_r2018_entities(_AC1024_SAMPLE.read_bytes(), version_code=R2010_VERSION_CODE)
     assert table.status == "decoded", table.message
     by = {e.handle: e for e in table.entities}
     assert _GT_POLYLINE_3D_HANDLE in by, sorted(f"{h:X}" for h in by)
@@ -317,9 +312,7 @@ def test_real_ac1024_emits_no_garbage_geometry() -> None:
 
     import math
 
-    table = read_r2018_entities(
-        _AC1024_SAMPLE.read_bytes(), version_code=R2010_VERSION_CODE
-    )
+    table = read_r2018_entities(_AC1024_SAMPLE.read_bytes(), version_code=R2010_VERSION_CODE)
 
     def _coords(value):
         if isinstance(value, bool):
