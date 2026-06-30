@@ -32,7 +32,10 @@ from pathlib import Path
 
 import pytest
 
+from src.services.comparison.dwg_cleanroom_contract import contract_for_version
 from src.services.comparison.dwg_r2018_reader import (
+    ACCEPTED_VERSION_CODES,
+    R2010_VERSION_CODE,
     R2018_VERSION_CODE,
     build_r2018_canonical_document,
     read_r2018_entities,
@@ -40,6 +43,7 @@ from src.services.comparison.dwg_r2018_reader import (
 from src.services.comparison.native_scene_pack_builder import build_native_scene_pack
 
 _AC1032_SAMPLE = Path(".local/native_cad_real_samples/acadsharp/sample_AC1032.dwg")
+_AC1024_SAMPLE = Path(".local/native_cad_real_samples/acadsharp/sample_AC1024.dwg")
 
 
 def _approx(actual: float, expected: float, tol: float = 1e-6) -> bool:
@@ -219,3 +223,116 @@ def test_real_ac1032_insert_expansion_populates_blocks_and_expands() -> None:
     # Expanded => flagged as a real block expansion, NOT the marker-box partial.
     assert props.get("render") != "insert_marker", props
     assert props.get("expanded_block") == _GT_INSERT_BLOCK, props
+
+
+# ---------------------------------------------------------------------------
+# X4 — AC1024 (R2010) back-expansion.
+# sample_AC1024.dwg is the SAME drawing as sample_AC1032.dwg (proven: the
+# POLYLINE 0x42B vertices are byte-identical), saved in the older R2010 format.
+# R2010 needs a version-gated Common-Entity-Data branch (2 visual-style bits, a
+# different ENC colour layout). Validated 247/247 entity geometries against the
+# AC1032 decode (itself ODA-validated elsewhere) — see tx4_FINDINGS.md.
+# ---------------------------------------------------------------------------
+
+
+def _geometry_signature(entity) -> tuple:
+    """A rounded, comparable geometry signature for a decoded entity."""
+    g = entity.geometry
+    name = entity.type_name
+    if name == "LINE":
+        return ("LINE", tuple(round(c, 3) for c in g["start"]),
+                tuple(round(c, 3) for c in g["end"]))
+    if name in ("CIRCLE", "ARC"):
+        return (name, tuple(round(c, 3) for c in g["center"]), round(g["radius"], 3))
+    if name == "POINT":
+        return ("POINT", tuple(round(c, 3) for c in g["location"]))
+    if name == "POLYLINE":
+        return ("POLYLINE",
+                tuple(tuple(round(c, 3) for c in v) for v in (g.get("vertices") or [])))
+    if name == "ELLIPSE":
+        return ("ELLIPSE", tuple(round(c, 3) for c in g["center"]))
+    if name in ("TEXT", "MTEXT"):
+        return (name, round(g.get("insert", (0, 0, 0))[0], 2))
+    return (name,)
+
+
+def test_ac1024_r2010_is_accepted_but_contract_stays_blocked() -> None:
+    # The decode gate accepts AC1024 (read-only back-expansion); the clean-room
+    # contract is independent and MUST remain blocked (HITL), exactly like AC1027.
+    assert R2010_VERSION_CODE in ACCEPTED_VERSION_CODES
+    assert contract_for_version(R2010_VERSION_CODE).approval_status == "blocked"
+
+
+def test_real_ac1024_polyline3d_decode_matches_ground_truth() -> None:
+    # The X3 POLYLINE ground truth (ODA-converted) is valid for AC1024 too (same
+    # drawing). The R2010 branch decodes the owned VERTEX_3D children to the exact
+    # 5 vertices within 1e-6 — before the R2010 branch this produced 1 garbage
+    # vertex (R2010 framing delta) — see negatives/tx4_probe1.log.
+    if not _AC1024_SAMPLE.exists():
+        pytest.skip(f"local AC1024 sample not present: {_AC1024_SAMPLE}")
+
+    table = read_r2018_entities(
+        _AC1024_SAMPLE.read_bytes(), version_code=R2010_VERSION_CODE
+    )
+    assert table.status == "decoded", table.message
+    by = {e.handle: e for e in table.entities}
+    assert _GT_POLYLINE_3D_HANDLE in by, sorted(f"{h:X}" for h in by)
+    poly = by[_GT_POLYLINE_3D_HANDLE]
+    assert poly.type_name == "POLYLINE", poly.type_name
+    verts = poly.geometry["vertices"]
+    assert len(verts) == len(_GT_POLYLINE_3D_VERTICES), verts
+    for got, want in zip(verts, _GT_POLYLINE_3D_VERTICES):
+        assert all(_approx(a, b) for a, b in zip(got, want)), (got, want)
+
+
+def test_real_ac1024_back_expansion_matches_validated_ac1032_decode() -> None:
+    # Whole-drawing invariant: AC1024 and AC1032 are the same drawing, so every
+    # shared handle's geometry from the R2010 back-expansion must equal the
+    # (ODA-validated) AC1032 decode. Confirms the R2010 branch is correct beyond
+    # the single POLYLINE, across LINE/CIRCLE/ARC/POINT/HATCH/etc.
+    if not _AC1024_SAMPLE.exists() or not _AC1032_SAMPLE.exists():
+        pytest.skip("local AC1024/AC1032 samples not present")
+
+    t24 = read_r2018_entities(_AC1024_SAMPLE.read_bytes(), version_code=R2010_VERSION_CODE)
+    t32 = read_r2018_entities(_AC1032_SAMPLE.read_bytes(), version_code=R2018_VERSION_CODE)
+    assert t24.status == "decoded" and t32.status == "decoded"
+    h24 = {e.handle: e for e in t24.entities}
+    h32 = {e.handle: e for e in t32.entities}
+    shared = sorted(set(h24) & set(h32))
+    assert len(shared) >= 200, f"too few shared handles: {len(shared)}"
+    mismatches = [
+        f"0x{hd:X}: {_geometry_signature(h24[hd])} != {_geometry_signature(h32[hd])}"
+        for hd in shared
+        if h24[hd].type_name != h32[hd].type_name
+        or _geometry_signature(h24[hd]) != _geometry_signature(h32[hd])
+    ]
+    assert not mismatches, mismatches[:8]
+
+
+def test_real_ac1024_emits_no_garbage_geometry() -> None:
+    # Fail-closed guard: every decoded coordinate is finite and sane. A mis-decoded
+    # R2010 entity drops rather than emitting absurd geometry (e.g. 1e+131).
+    if not _AC1024_SAMPLE.exists():
+        pytest.skip(f"local AC1024 sample not present: {_AC1024_SAMPLE}")
+
+    import math
+
+    table = read_r2018_entities(
+        _AC1024_SAMPLE.read_bytes(), version_code=R2010_VERSION_CODE
+    )
+
+    def _coords(value):
+        if isinstance(value, bool):
+            return
+        if isinstance(value, float):
+            yield value
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from _coords(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from _coords(item)
+
+    for entity in table.entities:
+        for coord in _coords(entity.geometry):
+            assert math.isfinite(coord) and abs(coord) <= 1e13, (entity.handle, coord)

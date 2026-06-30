@@ -33,10 +33,21 @@ R2018_VERSION_CODE = "AC1032"
 #: So the existing R2018 decode chain applies verbatim once the gate accepts it.
 #: See ``docs/collab/AC1032_CLEANROOM_PROVENANCE.md``.
 R2013_VERSION_CODE = "AC1027"
-#: Version codes the navigator/decoder accepts as the shared R2004+ ("R2018")
-#: container family. Truly different formats (e.g. AC1015/AC1024) remain rejected
-#: by the version gate. The clean-room contract for both stays ``blocked``.
-ACCEPTED_VERSION_CODES = frozenset({R2018_VERSION_CODE, R2013_VERSION_CODE})
+#: AC1024 (R2010) shares the R2004+ container + handle map + string stream, but its
+#: per-entity Common Entity Data has version-specific deltas (2 visual-style bits
+#: instead of 3; a different ENC entity-colour layout — see ``_parse_common_entity_header``).
+#: These are decoded by the R2010 branch, gated on the DETECTED file version (not the
+#: requested gate code), and validated 1:1 against ODA-converted DXF ground truth on a
+#: real AC1024 sample (247/247 entity geometries exact). See
+#: ``.harness/own_viewer_expansion_20260629/negatives/tx4_FINDINGS.md``.
+R2010_VERSION_CODE = "AC1024"
+#: Version codes the navigator/decoder accepts as the shared R2004+ container family.
+#: Truly different formats (e.g. AC1015/AC1021) remain rejected by the version gate.
+#: The clean-room contract for AC1024/AC1027/AC1032 stays ``blocked`` (HITL) regardless —
+#: accepting a code here enables read-only decode, NOT product opt-in/sign-off.
+ACCEPTED_VERSION_CODES = frozenset(
+    {R2018_VERSION_CODE, R2013_VERSION_CODE, R2010_VERSION_CODE}
+)
 
 #: The R2004+ file header is a 0x6C-byte LCG-obfuscated block at this offset.
 R2004_HEADER_OFFSET = 0x80
@@ -1074,13 +1085,73 @@ class R2018CommonHeader:
     entmode: int = 2
 
 
-def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
-    """Consume the R2010+ Common Entity Data, positioning at entity geometry.
+def _read_r2010_entity_color(reader: DwgBinaryReader) -> int:
+    """Read the R2010 (AC1024) ENC entity colour and return the ACI index.
 
-    Implements ODA spec 20.4.1 (Common Entity Data) for R2018; the field order
-    is validated 1:1 against ODA ground truth on real AC1032 entities. Returns
-    the object's own handle value and its linetype flags. The reader must already
-    be positioned past the object type.
+    R2010 packs a complex (RGB) colour differently from R2013+/R2018: it is
+    ``[1 lead bit][16-bit LE value][BL rgb][BL transparency iff value&0x2000]
+    [1 trailing bit]`` where the value's ``0x8000`` marks complex. Detection is
+    confirmed by the trailing BL's top byte being a colour-method byte (0xC0-0xC3,
+    i.e. an RGB colour); otherwise the leading-bit interpretation is rewound and a
+    plain ``BS`` colour is read (a *simple* colour, whose transparency flag is
+    ``0x4000`` in R2010 — not the ``0x2000`` used inside the complex value). Derived
+    empirically and validated 247/247 vs ODA GT — see tx4_FINDINGS.md.
+    """
+
+    save = reader.tell_bits()
+    reader.read_bit()  # lead bit (absent from the R2018 BS form)
+    raw16 = reader.read_bits(8) | (reader.read_bits(8) << 8)
+    if (raw16 & 0x8000) and not (raw16 & 0x4000):
+        before_rgb = reader.tell_bits()
+        try:
+            rgb = reader.read_bit_long() & 0xFFFFFFFF
+        except DwgBinaryReadError:
+            rgb = 0
+        if 0xC0 <= ((rgb >> 24) & 0xFF) <= 0xC3:  # RGB colour-method byte => complex
+            if raw16 & 0x2000:
+                reader.read_bit_long()  # colour transparency
+            reader.read_bit()           # trailing bit unique to the R2010 complex form
+            return raw16 & 0x1FFF
+        reader.seek_bits(before_rgb)    # not an RGB BL: fall through to the simple form
+    reader.seek_bits(save)
+    color = reader.read_bit_short() & 0xFFFF
+    if (color & 0x8000) and not (color & 0x4000):
+        reader.read_bit_long()          # complex colour in the plain-BS form (rare)
+    if color & 0x4000:
+        reader.read_bit_long()          # R2010 simple-colour transparency (flag 0x4000)
+    return color & 0x1FFF
+
+
+def _read_r2010_invis_lineweight(reader: DwgBinaryReader) -> None:
+    """Consume the R2010 invisibility + lineweight tail.
+
+    The invisibility is a ``BS``; when it uses the 16-bit form (opcode 00) there is
+    NO trailing lineweight ``RC`` (the only place R2010 diverges from R2018 here).
+    Validated against ODA GT (entity 0x697) — see tx4_FINDINGS.md.
+    """
+
+    opcode = reader.read_bits(2)
+    if opcode == 0:
+        reader.read_bits(16)            # 16-bit invisibility; no lineweight follows
+    elif opcode == 1:
+        reader.read_bits(8)             # 8-bit invisibility value
+        reader.read_bits(8)             # RC lineweight
+    else:                               # opcode 2 (=0) / 3 (=256): no value bits
+        reader.read_bits(8)             # RC lineweight
+
+
+def _parse_common_entity_header(
+    reader: DwgBinaryReader, *, is_r2010: bool = False
+) -> R2018CommonHeader:
+    """Consume the Common Entity Data, positioning at entity geometry.
+
+    Implements ODA spec 20.4.1 (Common Entity Data). The field order is validated
+    1:1 against ODA ground truth on real AC1032/AC1027 entities. When ``is_r2010``
+    (a detected AC1024 file), three version deltas apply: a different ENC colour
+    layout (``_read_r2010_entity_color``), only 2 visual-style presence bits (no
+    "edge" bit), and the invis/lineweight tail of ``_read_r2010_invis_lineweight``.
+    Returns the object's own handle value and its linetype flags; the reader must
+    already be positioned past the object type.
 
     Caveat: the R2013+ "has data-store binary data" bit is intentionally omitted
     — it is absent on files without a data-store section (confirmed on the
@@ -1102,12 +1173,15 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     reader.read_bit_long()         # BL: number of reactors
     reader.read_bit()              # B: XDictionary-missing flag (R2004+)
     reader.read_bit()              # B: no-links flag (R2004+ always 1)
-    color = reader.read_bit_short() & 0xFFFF  # ENC: entity colour number + flags
-    color_index = color & 0x1FFF   # ACI index with the 0x8000/0x4000/0x2000 flags masked
-    if (color & 0x8000) and not (color & 0x4000):
-        reader.read_bit_long()     # complex colour: RGB value in the data stream
-    if color & 0x2000:
-        reader.read_bit_long()     # colour transparency
+    if is_r2010:
+        color_index = _read_r2010_entity_color(reader)
+    else:
+        color = reader.read_bit_short() & 0xFFFF  # ENC: entity colour number + flags
+        color_index = color & 0x1FFF   # ACI index, 0x8000/0x4000/0x2000 flags masked
+        if (color & 0x8000) and not (color & 0x4000):
+            reader.read_bit_long()     # complex colour: RGB value in the data stream
+        if color & 0x2000:
+            reader.read_bit_long()     # colour transparency
     reader.read_bit_double()       # BD: linetype scale
     ltype_flags = reader.read_bits(2)  # BB: linetype flags (see R2018CommonHeader)
     reader.read_bits(2)            # BB: plotstyle flags
@@ -1115,9 +1189,13 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     reader.read_bits(8)            # RC: shadow flags
     reader.read_bit()              # B: has full visual style (R2010+)
     reader.read_bit()              # B: has face visual style (R2010+)
-    reader.read_bit()              # B: has edge visual style (R2010+)
-    reader.read_bit_short()        # BS: invisibility flag
-    reader.read_bits(8)            # RC: lineweight
+    if not is_r2010:
+        reader.read_bit()          # B: has edge visual style (R2013+ only)
+    if is_r2010:
+        _read_r2010_invis_lineweight(reader)
+    else:
+        reader.read_bit_short()    # BS: invisibility flag
+        reader.read_bits(8)        # RC: lineweight
     return R2018CommonHeader(
         handle=handle.value, ltype_flags=ltype_flags, color_index=color_index,
         entmode=entmode,
@@ -2038,7 +2116,7 @@ def _decode_polyline3d_header(reader: DwgBinaryReader) -> Dict[str, Any]:
 
 
 def _decode_outline_vertex_point(
-    objects_buffer: bytes, offset: int, object_type: int
+    objects_buffer: bytes, offset: int, object_type: int, *, is_r2010: bool = False
 ) -> "Optional[Tuple[float, float, float]]":
     """Decode the point of an owned VERTEX_2D/VERTEX_3D child at ``offset``.
 
@@ -2055,7 +2133,7 @@ def _decode_outline_vertex_point(
     reader = DwgBinaryReader(objects_buffer, offset=offset + header_bytes, length=object_size)
     try:
         read_r2018_object_type(reader)
-        _parse_common_entity_header(reader)
+        _parse_common_entity_header(reader, is_r2010=is_r2010)
         reader.read_bits(8)  # RC: vertex flags
         return (
             reader.read_bit_double(),
@@ -2070,6 +2148,8 @@ def _assemble_polyline_vertices(
     objects_buffer: bytes,
     handle_map: "Optional[Dict[int, int]]",
     refs: List[int],
+    *,
+    is_r2010: bool = False,
 ) -> List[Tuple[float, float, float]]:
     """Assemble a legacy POLYLINE's vertices from its owned-object handle refs.
 
@@ -2089,7 +2169,9 @@ def _assemble_polyline_vertices(
         frame = _frame_r2018_object(objects_buffer, offset)
         if frame is None or frame[2] not in _OUTLINE_VERTEX_OBJECT_TYPES:
             continue
-        point = _decode_outline_vertex_point(objects_buffer, offset, frame[2])
+        point = _decode_outline_vertex_point(
+            objects_buffer, offset, frame[2], is_r2010=is_r2010
+        )
         if point is not None:
             points.append(point)
     return points
@@ -2146,11 +2228,30 @@ class R2018Entity:
         }
 
 
+#: Generous coordinate sanity bound. Real CAD geometry never approaches this; a
+#: value beyond it (or non-finite) means a mis-decoded bit stream.
+_COORD_SANITY_BOUND = 1e13
+
+
+def _geometry_coords_sane(value: Any) -> bool:
+    """True if every float reachable inside ``value`` is finite and within bound."""
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value) and abs(value) <= _COORD_SANITY_BOUND
+    if isinstance(value, (list, tuple)):
+        return all(_geometry_coords_sane(item) for item in value)
+    if isinstance(value, dict):
+        return all(_geometry_coords_sane(item) for item in value.values())
+    return True
+
+
 def decode_r2018_entity(
     objects_buffer: bytes | bytearray | memoryview,
     offset: int,
     *,
     handle_map: "Optional[Dict[int, int]]" = None,
+    is_r2010: bool = False,
 ) -> "Optional[R2018Entity]":
     """Decode the geometry of a supported entity at ``offset`` in the buffer.
 
@@ -2159,6 +2260,8 @@ def decode_r2018_entity(
     or any malformed/unsupported field (fail-closed). ``handle_map`` (handle ->
     object offset) resolves the entity's layer name (and an INSERT's block name);
     without it the entity decodes with an empty ``layer`` (and ``block_name``).
+    ``is_r2010`` selects the AC1024 Common-Entity-Data layout (see
+    ``_parse_common_entity_header``).
     """
 
     frame = _frame_r2018_object(objects_buffer, offset)
@@ -2185,7 +2288,7 @@ def decode_r2018_entity(
     reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
     try:
         read_r2018_object_type(reader)  # advance past the object type
-        header = _parse_common_entity_header(reader)
+        header = _parse_common_entity_header(reader, is_r2010=is_r2010)
         handle = header.handle
         # The handle-stream size (the MC consumed at framing) locates both the
         # R2007+ string stream and the trailing handle references; read it once.
@@ -2253,7 +2356,7 @@ def decode_r2018_entity(
             if is_legacy_polyline:
                 # Assemble the owned VERTEX children (in handle-stream order).
                 geometry["vertices"] = _assemble_polyline_vertices(
-                    objects_buffer, handle_map, refs
+                    objects_buffer, handle_map, refs, is_r2010=is_r2010
                 )
             if header.entmode == 0:
                 # Block-owned entity: its owner is the first BLOCK_HEADER ref.
@@ -2264,6 +2367,12 @@ def decode_r2018_entity(
             objects_buffer, handle_map, refs, header.ltype_flags
         )
     except DwgBinaryReadError:
+        return None
+    # Fail-closed sanity gate: a mis-decoded bit stream surfaces as non-finite or
+    # absurdly large coordinates. Drop such an entity rather than emit garbage
+    # geometry — defends the back-expanded R2010 path against any entity/colour
+    # combination outside the validation sample. See tx4_FINDINGS.md.
+    if not _geometry_coords_sane(geometry):
         return None
     return R2018Entity(
         handle=handle,
@@ -2325,6 +2434,13 @@ def read_r2018_entities(
             message=handle_map.message,
         )
 
+    # The per-entity Common Entity Data layout is selected by the DETECTED file
+    # version, not the requested gate code: an AC1024 (R2010) file navigates the
+    # shared container but needs the R2010 entity decode (see
+    # ``_parse_common_entity_header``). AC1027/AC1032 share the R2018 layout.
+    actual_version = bytes(data)[:6].decode("ascii", errors="replace")
+    is_r2010 = actual_version == R2010_VERSION_CODE
+
     objects = read_r2004_data_section(
         data, section_name="AcDb:AcDbObjects", version_code=version_code
     )
@@ -2337,7 +2453,9 @@ def read_r2018_entities(
     for _handle, offset in handle_map.entries:
         if not 0 <= offset < object_size:
             continue
-        entity = decode_r2018_entity(objects, offset, handle_map=offset_by_handle)
+        entity = decode_r2018_entity(
+            objects, offset, handle_map=offset_by_handle, is_r2010=is_r2010
+        )
         if entity is None:
             # Non-graphical object: capture BLOCK_HEADER names so the importer
             # can group block-owned entities under their block definition.
