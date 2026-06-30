@@ -41,8 +41,18 @@ DEFAULT_CIRCLE_SEGMENTS = 64
 #: doc does not carry boundary loops) and is therefore tagged ``partial`` — an
 #: honest, visible degraded render rather than a silent drop ([[silent_fallback_pattern]]).
 SUPPORTED_ENTITY_TYPES = frozenset(
-    {"line", "circle", "arc", "polyline", "ellipse", "hatch",
-     "text", "mtext", "dimension", "insert"}
+    {
+        "line",
+        "circle",
+        "arc",
+        "polyline",
+        "ellipse",
+        "hatch",
+        "text",
+        "mtext",
+        "dimension",
+        "insert",
+    }
 )
 
 #: Types emitted as a ``text`` primitive (positioned label) rather than ``lines``.
@@ -445,9 +455,7 @@ def _ellipse_segments(geometry: Mapping[str, Any], circle_segments: int) -> List
     ]
 
 
-def _block_local_segments(
-    blocks: Any, circle_segments: int
-) -> dict[str, List[_Segment]]:
+def _block_local_segments(blocks: Any, circle_segments: int) -> dict[str, List[_Segment]]:
     """Pre-flatten each block definition's entities into block-LOCAL line segments.
 
     Keyed by block name. A block entity that does not flatten to ``lines`` (TEXT/
@@ -533,9 +541,7 @@ def _transform_insert_segments(
     return out
 
 
-def _hatch_boundary_segments(
-    geometry: Mapping[str, Any]
-) -> Tuple[List[_Segment], bool]:
+def _hatch_boundary_segments(geometry: Mapping[str, Any]) -> Tuple[List[_Segment], bool]:
     """Build line segments from a HATCH's decoded boundary loops.
 
     Each loop is a vertex polyline; consecutive vertices become segments and a
