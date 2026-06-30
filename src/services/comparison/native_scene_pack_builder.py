@@ -41,8 +41,18 @@ DEFAULT_CIRCLE_SEGMENTS = 64
 #: doc does not carry boundary loops) and is therefore tagged ``partial`` — an
 #: honest, visible degraded render rather than a silent drop ([[silent_fallback_pattern]]).
 SUPPORTED_ENTITY_TYPES = frozenset(
-    {"line", "circle", "arc", "polyline", "ellipse", "hatch",
-     "text", "mtext", "dimension", "insert"}
+    {
+        "line",
+        "circle",
+        "arc",
+        "polyline",
+        "ellipse",
+        "hatch",
+        "text",
+        "mtext",
+        "dimension",
+        "insert",
+    }
 )
 
 #: Types emitted as a ``text`` primitive (positioned label) rather than ``lines``.

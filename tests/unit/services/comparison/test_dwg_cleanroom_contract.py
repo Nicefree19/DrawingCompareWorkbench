@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from src.services.comparison.dwg_cleanroom_contract import (
-    CLEANROOM_CONTRACT_ID,
     BLOCKING_STAGE_DETAIL,
+    CLEANROOM_CONTRACT_ID,
     contract_for_version,
     versioned_section_map_contracts,
 )

@@ -30,16 +30,11 @@ from .dwg_importer import (
     DwgAdapterDrawing,
     DwgAdapterEntity,
     DwgFailureCode,
-    DwgImportError,
     DwgImporterAdapter,
+    DwgImportError,
     DwgVersionInfo,
 )
-from .dwg_r2018_reader import (
-    ACCEPTED_VERSION_CODES,
-    R2018Entity,
-    read_r2018_entities,
-)
-
+from .dwg_r2018_reader import ACCEPTED_VERSION_CODES, R2018Entity, read_r2018_entities
 
 #: Opt-in switch.  Unset/falsey keeps the native AC1032 decode path disabled and
 #: the product's default DWG path unchanged.
@@ -150,9 +145,7 @@ def _adapter_entity(
         # essential for anonymous *U/*D blocks that share a raw name.
         block_name = geometry["block_name"]
         if unique_block_names:
-            block_name = unique_block_names.get(
-                geometry.get("block_handle") or 0, block_name
-            )
+            block_name = unique_block_names.get(geometry.get("block_handle") or 0, block_name)
         mapped = {
             "insert": geometry["insert"],
             "scale": geometry["scale"],

@@ -33,7 +33,6 @@ from src.services.comparison.dwg_native_ac1032_adapter import (
 from src.services.comparison.dwg_native_reader import DwgNativeAc1015Adapter
 from src.services.comparison.revision_marker import revcloud_geometry_from_bbox
 
-
 _AC1032 = DwgVersionInfo("AC1032", "AutoCAD 2018+", "R2018", False)
 _AC1015 = DwgVersionInfo("AC1015", "AutoCAD 2000", "R15", True)
 _SAMPLE = Path(".local/native_cad_real_samples/acadsharp/sample_AC1032.dwg")
@@ -145,9 +144,7 @@ def test_real_ac1032_imports_through_pipeline_zero_oda(monkeypatch: pytest.Monke
     version = DwgVersionDetector.detect_file(_SAMPLE)
     assert version.code == "AC1032"
 
-    adapter = DwgNativeAc1032Adapter(
-        fallback_adapter=DwgNativeAc1015Adapter()
-    )
+    adapter = DwgNativeAc1032Adapter(fallback_adapter=DwgNativeAc1015Adapter())
     drawing = adapter.read_file(_SAMPLE, version)
     assert isinstance(drawing, DwgAdapterDrawing)
     assert len(drawing.model_space) > 100  # decoded entities passed to the importer
@@ -164,7 +161,12 @@ def test_real_ac1032_imports_through_pipeline_zero_oda(monkeypatch: pytest.Monke
     dimension = next(e for e in canonical["entities"] if e["type"] == "dimension")
     assert dimension["geometry"]["measurement"] is not None
     assert dimension["geometry"]["dimension_type"] in {
-        "linear", "aligned", "angular", "diameter", "radius", "ordinate"
+        "linear",
+        "aligned",
+        "angular",
+        "diameter",
+        "radius",
+        "ordinate",
     }
     hatch = next(e for e in canonical["entities"] if e["type"] == "hatch")
     assert hatch["geometry"]["pattern_name"]  # non-empty, upper-cased
@@ -172,18 +174,14 @@ def test_real_ac1032_imports_through_pipeline_zero_oda(monkeypatch: pytest.Monke
     # Linetype (handle-stream resolved) reaches the canonical style; named
     # linetypes from the LTYPE records appear alongside the well-known tokens.
     style_linetypes = {
-        e.get("style", {}).get("linetype")
-        for e in canonical["entities"]
-        if e.get("style")
+        e.get("style", {}).get("linetype") for e in canonical["entities"] if e.get("style")
     }
     assert "BYLAYER" in style_linetypes
     assert "ACAD_ISO02W100" in style_linetypes  # a named LTYPE resolved via the handle stream
 
     # ENC entity colour (ACI index) reaches the canonical style too.
     style_colors = {
-        e.get("style", {}).get("color")
-        for e in canonical["entities"]
-        if e.get("style")
+        e.get("style", {}).get("color") for e in canonical["entities"] if e.get("style")
     }
     assert 256 in style_colors  # BYLAYER is the common default
     assert any(isinstance(c, int) and 0 < c < 256 for c in style_colors)  # an explicit ACI
@@ -262,26 +260,43 @@ def test_map_entity_emits_dimension_hatch_point_payloads() -> None:
 
     drawing = DwgAdapterDrawing(
         model_space=[
-            DwgAdapterEntity(raw_type="POINT", geometry={"location": (1.0, 2.0, 0.0)},
-                             layer="0", handle="1"),
+            DwgAdapterEntity(
+                raw_type="POINT", geometry={"location": (1.0, 2.0, 0.0)}, layer="0", handle="1"
+            ),
             DwgAdapterEntity(
                 raw_type="DIMENSION",
-                geometry={"text_midpoint": (5.0, 6.0, 0.0), "measurement": 42.5,
-                          "dimtype": 0, "text": ""},
-                layer="0", handle="2",
+                geometry={
+                    "text_midpoint": (5.0, 6.0, 0.0),
+                    "measurement": 42.5,
+                    "dimtype": 0,
+                    "text": "",
+                },
+                layer="0",
+                handle="2",
             ),
             DwgAdapterEntity(
                 raw_type="HATCH",
-                geometry={"pattern": "ansi31", "solid": True, "is_gradient": False,
-                          "gradient_name": "LINEAR",
-                          "bbox": {"min_x": 0.0, "min_y": 0.0, "max_x": 4.0, "max_y": 3.0}},
-                layer="0", handle="3",
+                geometry={
+                    "pattern": "ansi31",
+                    "solid": True,
+                    "is_gradient": False,
+                    "gradient_name": "LINEAR",
+                    "bbox": {"min_x": 0.0, "min_y": 0.0, "max_x": 4.0, "max_y": 3.0},
+                },
+                layer="0",
+                handle="3",
             ),
             DwgAdapterEntity(
                 raw_type="ELLIPSE",
-                geometry={"center": (1.0, 2.0, 0.0), "major_axis": (3.0, 0.0, 0.0),
-                          "ratio": 0.5, "start_param": 0.0, "end_param": 6.283185},
-                layer="0", handle="4",
+                geometry={
+                    "center": (1.0, 2.0, 0.0),
+                    "major_axis": (3.0, 0.0, 0.0),
+                    "ratio": 0.5,
+                    "start_param": 0.0,
+                    "end_param": 6.283185,
+                },
+                layer="0",
+                handle="4",
             ),
         ]
     )
@@ -309,13 +324,19 @@ def test_native_unsupported_safety_surfaces_partial_decode() -> None:
     # viewer/compare can badge a partial decode — never silently treated as a
     # complete drawing ([[silent_fallback_pattern]]).
     from src.services.comparison.dwg_importer import DwgAdapterEntity
-    from src.services.comparison.dwg_native_ac1032_adapter import (
-        native_decode_partial_summary,
-    )
+    from src.services.comparison.dwg_native_ac1032_adapter import native_decode_partial_summary
 
     supported = [
-        DwgAdapterEntity(raw_type="LINE", geometry={"start": (0, 0, 0), "end": (1, 0, 0)}, layer="0", handle="1", style={}),
-        DwgAdapterEntity(raw_type="POINT", geometry={"location": (0, 0, 0)}, layer="0", handle="2", style={}),
+        DwgAdapterEntity(
+            raw_type="LINE",
+            geometry={"start": (0, 0, 0), "end": (1, 0, 0)},
+            layer="0",
+            handle="1",
+            style={},
+        ),
+        DwgAdapterEntity(
+            raw_type="POINT", geometry={"location": (0, 0, 0)}, layer="0", handle="2", style={}
+        ),
     ]
     clean = native_decode_partial_summary(supported)
     assert clean["partial_native_decode"] is False
@@ -362,13 +383,20 @@ def test_real_ac1032_opt_in_product_path_diffs_and_clouds(monkeypatch: pytest.Mo
     moved["geometry"]["end"]["y"] += 30.0
     sx, ex = moved["geometry"]["start"]["x"], moved["geometry"]["end"]["x"]
     sy, ey = moved["geometry"]["start"]["y"], moved["geometry"]["end"]["y"]
-    moved["bbox"] = {"min_x": min(sx, ex), "min_y": min(sy, ey),
-                     "max_x": max(sx, ex), "max_y": max(sy, ey)}
+    moved["bbox"] = {
+        "min_x": min(sx, ex),
+        "min_y": min(sy, ey),
+        "max_x": max(sx, ex),
+        "max_y": max(sy, ey),
+    }
     centroid = ((min(sx, ex) + max(sx, ex)) / 2.0, (min(sy, ey) + max(sy, ey)) / 2.0)
 
     diff = engine.compare(before, after)
-    edits = (diff.summary_counts["added"] + diff.summary_counts["removed"]
-             + diff.summary_counts["modified"])
+    edits = (
+        diff.summary_counts["added"]
+        + diff.summary_counts["removed"]
+        + diff.summary_counts["modified"]
+    )
     assert 1 <= edits <= 4, diff.summary_counts
     assert diff.summary_counts["unchanged"] >= len(before["entities"]) - 4
 
@@ -376,10 +404,12 @@ def test_real_ac1032_opt_in_product_path_diffs_and_clouds(monkeypatch: pytest.Mo
     result = ComparisonResult(source_a="before.dwg", source_b="after.dwg")
     for record in diff.to_change_records():
         result.add_change(record)
-    zones = build_change_zones(result, pair_id="P1", drawing_number="P1",
-                               options=ChangeZoneOptions(cluster_distance=120.0))
+    zones = build_change_zones(
+        result, pair_id="P1", drawing_number="P1", options=ChangeZoneOptions(cluster_distance=120.0)
+    )
     covering = [
-        z for z in zones
+        z
+        for z in zones
         if z.bbox[0] <= centroid[0] <= z.bbox[2] and z.bbox[1] <= centroid[1] <= z.bbox[3]
     ]
     assert covering, f"no change zone covers the moved line at {centroid}"

@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-
 CLEANROOM_CONTRACT_ID = "DWG-CLEANROOM-SECTION-MAP-CONTRACT-v1"
 BLOCKING_STAGE_DETAIL = "approved_format_contract_required"
 
@@ -46,9 +45,7 @@ _VERSIONED_SECTION_MAP_CONTRACTS = {
         decoder_provenance="internal/public-approved-only",
         approved_reference_available=False,
         required_approval_evidence=_REQUIRED_APPROVAL_EVIDENCE,
-        next_safe_step=(
-            "record an approved AC1024 section-map format contract before decoding"
-        ),
+        next_safe_step=("record an approved AC1024 section-map format contract before decoding"),
     ),
     "AC1027": DwgCleanRoomFormatContract(
         version_code="AC1027",
@@ -59,9 +56,7 @@ _VERSIONED_SECTION_MAP_CONTRACTS = {
         decoder_provenance="internal/public-approved-only",
         approved_reference_available=False,
         required_approval_evidence=_REQUIRED_APPROVAL_EVIDENCE,
-        next_safe_step=(
-            "record an approved AC1027 section-map format contract before decoding"
-        ),
+        next_safe_step=("record an approved AC1027 section-map format contract before decoding"),
     ),
     "AC1032": DwgCleanRoomFormatContract(
         version_code="AC1032",
@@ -72,9 +67,7 @@ _VERSIONED_SECTION_MAP_CONTRACTS = {
         decoder_provenance="internal/public-approved-only",
         approved_reference_available=False,
         required_approval_evidence=_REQUIRED_APPROVAL_EVIDENCE,
-        next_safe_step=(
-            "record an approved AC1032 section-map format contract before decoding"
-        ),
+        next_safe_step=("record an approved AC1032 section-map format contract before decoding"),
     ),
 }
 

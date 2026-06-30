@@ -17,6 +17,12 @@ from pathlib import Path
 
 import pytest
 
+from src.services.comparison.base import ComparisonResult
+from src.services.comparison.change_zones import ChangeZoneOptions, build_change_zones
+from src.services.comparison.drawing_compare_engine import (
+    DrawingCompareEngine,
+    DrawingCompareOptions,
+)
 from src.services.comparison.dwg_r2018_reader import (
     R2004_HEADER_LENGTH,
     R2004_HEADER_MAGIC,
@@ -36,12 +42,6 @@ from src.services.comparison.dwg_r2018_reader import (
     read_r2018_handle_map,
     read_r2018_object_run,
     read_r2018_object_table,
-)
-from src.services.comparison.base import ComparisonResult
-from src.services.comparison.change_zones import ChangeZoneOptions, build_change_zones
-from src.services.comparison.drawing_compare_engine import (
-    DrawingCompareEngine,
-    DrawingCompareOptions,
 )
 from src.services.comparison.native_scene_pack_builder import (
     build_native_scene_pack,
@@ -124,7 +124,9 @@ def test_inspect_r2018_rejects_wrong_version() -> None:
 def test_inspect_r2018_flags_magic_mismatch_on_garbage() -> None:
     data = bytearray(0x200)
     data[0:6] = b"AC1032"
-    data[R2004_HEADER_OFFSET : R2004_HEADER_OFFSET + R2004_HEADER_LENGTH] = b"\x11" * R2004_HEADER_LENGTH
+    data[R2004_HEADER_OFFSET : R2004_HEADER_OFFSET + R2004_HEADER_LENGTH] = (
+        b"\x11" * R2004_HEADER_LENGTH
+    )
 
     diag = inspect_r2018_container(bytes(data))
 
@@ -158,13 +160,7 @@ def test_real_ac1032_container_is_navigable(sample: Path) -> None:
 def test_decompress_r2004_handcrafted_stream() -> None:
     # 0x05 -> initial literal length 8 ("ABCDEFGH"); 0x4C/0x01 -> back-copy 3
     # ("ABC") from offset 7; trailing literal length 0x01 -> 4 ("WXYZ"); 0x11 end.
-    stream = bytes(
-        [0x05]
-        + list(b"ABCDEFGH")
-        + [0x4C, 0x01, 0x01]
-        + list(b"WXYZ")
-        + [0x11]
-    )
+    stream = bytes([0x05] + list(b"ABCDEFGH") + [0x4C, 0x01, 0x01] + list(b"WXYZ") + [0x11])
 
     out = decompress_r2004(stream, decompressed_size=15)
 
@@ -415,14 +411,20 @@ def test_real_ac1032_object_table_high_coverage_on_primary_sample() -> None:
 # ODA dependency at test time). The native clean-room decoder must reproduce it.
 _PRIMARY_SAMPLE = REAL_AC1032_SAMPLES[0]
 _GT_LINES = {
-    0x2C7: ((3.592533998909389, 1.477241896180196, 0.0),
-            (6.863547033979557, 1.477241896180196, 0.0)),
-    0x517: ((330.2890594765796, 2.941179455067987, 0.0),
-            (364.4872644138525, 37.13938439234094, 0.0)),
+    0x2C7: (
+        (3.592533998909389, 1.477241896180196, 0.0),
+        (6.863547033979557, 1.477241896180196, 0.0),
+    ),
+    0x517: (
+        (330.2890594765796, 2.941179455067987, 0.0),
+        (364.4872644138525, 37.13938439234094, 0.0),
+    ),
     # true colour (0x8000) + non-zero Z flag — exercises the complex-colour and
     # Z-coordinate branches.
-    0x99E: ((18.96130506894906, -124.7749383365533, 0.0),
-            (23.96130506894906, -119.7749383365533, 0.0)),
+    0x99E: (
+        (18.96130506894906, -124.7749383365533, 0.0),
+        (23.96130506894906, -119.7749383365533, 0.0),
+    ),
 }
 _GT_CIRCLES = {
     0x51D: ((569.6764940374901, 25.73998274658328), 11.39940164575765),
@@ -431,29 +433,44 @@ _GT_CIRCLES = {
     0x99F: ((30.20357222512345, -119.9668664522385), 2.382841759818497),
 }
 _GT_ARC = {
-    0x320: ((56.35179242595231, 4.697601732518876), 3.044494390598889,
-            341.0435453511963, 161.0435453511958),
+    0x320: (
+        (56.35179242595231, 4.697601732518876),
+        3.044494390598889,
+        341.0435453511963,
+        161.0435453511958,
+    ),
 }
 _GT_ELLIPSE = {
     # centre, major-axis vector, axis ratio, start/end params (radians).
-    0x321: {"center": (68.000517, 4.18521), "major": (-5.101255, 0.0),
-            "ratio": 0.640373, "start": 0.0, "end": 6.283185},
+    0x321: {
+        "center": (68.000517, 4.18521),
+        "major": (-5.101255, 0.0),
+        "ratio": 0.640373,
+        "start": 0.0,
+        "end": 6.283185,
+    },
 }
 _GT_POINT = {
     0x28E: (1.494404150136852, 1.491325898678436, 0.0),
 }
 _GT_LWPOLY = {
     # open 5-vertex polyline, no bulges.
-    0x2E2: {"closed": False, "nverts": 5,
-            "v0": (12.140516195, 1.379831194), "vlast": (12.914494994, 2.771889577)},
+    0x2E2: {
+        "closed": False,
+        "nverts": 5,
+        "v0": (12.140516195, 1.379831194),
+        "vlast": (12.914494994, 2.771889577),
+    },
     # closed 7-vertex polyline whose second vertex carries an arc bulge.
-    0x2E4: {"closed": True, "nverts": 7,
-            "v0": (28.005636844, 0.361304863), "bulge1": -0.799559497},
+    0x2E4: {"closed": True, "nverts": 7, "v0": (28.005636844, 0.361304863), "bulge1": -0.799559497},
 }
 _GT_TEXT = {
     # simple single-line TEXT (no EED) — exercises the string-stream value decode.
-    0x3B9: {"insert": (147.819447119, 2.8549753), "height": 1.0,
-            "text": "Hello this is a single line text"},
+    0x3B9: {
+        "insert": (147.819447119, 2.8549753),
+        "height": 1.0,
+        "text": "Hello this is a single line text",
+    },
     # TEXT carrying XData (EED) — exercises the EED appid-handle parse in the
     # common header (without it this object's header fails to parse).
     0x915: {"insert": (21.232079808, -70.793260346), "height": 1.0, "text": "XData 3Real"},
@@ -461,20 +478,34 @@ _GT_TEXT = {
 _GT_MTEXT = {
     # multi-line MTEXT — the native value keeps the raw newline (ODA's DXF shows
     # it as ^J); a single TV read from the string stream.
-    0x3EC: {"insert": (183.588928079, 5.226370718), "height": 1.0,
-            "text": "this is a Mtext\nwith multiple lines in it"},
+    0x3EC: {
+        "insert": (183.588928079, 5.226370718),
+        "height": 1.0,
+        "text": "this is a Mtext\nwith multiple lines in it",
+    },
     # single-line MTEXT with a non-default height.
-    0x513: {"insert": (741.023750025, 14.696812402), "height": 1.424925206,
-            "text": "Sample annotation"},
+    0x513: {
+        "insert": (741.023750025, 14.696812402),
+        "height": 1.424925206,
+        "text": "Sample annotation",
+    },
 }
 _GT_INSERT = {
     # block references whose name resolves through the handle stream -> the BLOCK
     # HEADER's string-stream name. (Anonymous '*U' blocks are excluded — their
     # raw stored name is '*U', which ODA's DXF renders with an index suffix.)
-    0x704: {"insert": (920.679626663, 16.352853774), "xscale": 0.363373695,
-            "rotation": 0.0, "block_name": "MyBlock"},
-    0x783: {"insert": (-208.14953277, 8.990124366), "xscale": 1.217889265,
-            "rotation": 0.0, "block_name": "my_block_v2"},
+    0x704: {
+        "insert": (920.679626663, 16.352853774),
+        "xscale": 0.363373695,
+        "rotation": 0.0,
+        "block_name": "MyBlock",
+    },
+    0x783: {
+        "insert": (-208.14953277, 8.990124366),
+        "xscale": 1.217889265,
+        "rotation": 0.0,
+        "block_name": "my_block_v2",
+    },
 }
 _GT_DIM = {
     # One per dimension subtype (object types 0x14-0x1A), covering the shared
@@ -482,21 +513,21 @@ _GT_DIM = {
     # group 42) — the field the DWG holds, not ezdxf's recomputed get_measurement
     # (which converts angular to degrees and re-derives the aligned/2-line cases).
     # ``dimtype`` is the DXF dimension-type code ezdxf reports for the subtype.
-    0x514: {"dimtype": 0, "tm": (339.065951088, 34.45477396), "meas": 46.715616708},   # LINEAR
+    0x514: {"dimtype": 0, "tm": (339.065951088, 34.45477396), "meas": 46.715616708},  # LINEAR
     0x527: {"dimtype": 1, "tm": (390.757369259, 33.668082839), "meas": 48.363565231},  # ALIGNED
-    0x516: {"dimtype": 2, "tm": (527.000217858, 31.588370182), "meas": 1.647568218},   # ANG2Ln (rad)
+    0x516: {"dimtype": 2, "tm": (527.000217858, 31.588370182), "meas": 1.647568218},  # ANG2Ln (rad)
     0x522: {"dimtype": 3, "tm": (626.673502266, 25.739982747), "meas": 45.597606583},  # DIAMETER
     0x51F: {"dimtype": 4, "tm": (583.348482182, 42.420551074), "meas": 11.399401646},  # RADIUS
-    0x515: {"dimtype": 5, "tm": (470.64204095, 31.939054011), "meas": 1.647568218},    # ANG3Pt (rad)
-    0x525: {"dimtype": 6, "tm": (706.46879441, 16.46796855), "meas": 102.594614812},   # ORDINATE
+    0x515: {"dimtype": 5, "tm": (470.64204095, 31.939054011), "meas": 1.647568218},  # ANG3Pt (rad)
+    0x525: {"dimtype": 6, "tm": (706.46879441, 16.46796855), "meas": 102.594614812},  # ORDINATE
 }
 _GT_LAYER = {
     # handle -> layer name; entities on distinct layers across types. The layer is
     # resolved from the entity's handle stream (the reference to a LAYER record).
-    0x28E: "0",               # POINT on the default layer
-    0x517: "Layer2",          # LINE
-    0x513: "Layer1",          # MTEXT
-    0x299: "Layer_Lock",      # POINT
+    0x28E: "0",  # POINT on the default layer
+    0x517: "Layer2",  # LINE
+    0x513: "Layer1",  # MTEXT
+    0x299: "Layer_Lock",  # POINT
     0x757: "Layer_color_80",  # TEXT
 }
 _GT_LINETYPE = {
@@ -504,12 +535,12 @@ _GT_LINETYPE = {
     # well-known names (flags 0/1/2) are the ACAD upper-case tokens (ezdxf reports
     # them as ByLayer/ByBlock/Continuous — same value, different case); flag-3
     # names come from the LTYPE record and match ODA exactly.
-    0x28E: "BYLAYER",          # flags 0
-    0x298: "BYBLOCK",          # flags 1
-    0x299: "CONTINUOUS",       # flags 2
-    0x29B: "ACAD_ISO02W100",   # flags 3 (named record)
-    0x694: "GAS_LINE",         # flags 3
-    0x695: "TRACKS",           # flags 3
+    0x28E: "BYLAYER",  # flags 0
+    0x298: "BYBLOCK",  # flags 1
+    0x299: "CONTINUOUS",  # flags 2
+    0x29B: "ACAD_ISO02W100",  # flags 3 (named record)
+    0x694: "GAS_LINE",  # flags 3
+    0x695: "TRACKS",  # flags 3
 }
 _GT_COLOR = {
     # handle -> ACI colour index (the ENC flag bits masked off), matching the DXF
@@ -517,8 +548,8 @@ _GT_COLOR = {
     # two complex ENC encodings (0x8000 true colour, 0x4000 AcDbColor), whose ACI
     # index part is decoded the same way.
     0x28E: 256,  # BYLAYER (no ENC flags)
-    0x99E: 82,   # true-colour entity (ENC 0x8000) — ACI index part is 82
-    0x99F: 42,   # AcDbColor entity (ENC 0x4000) — ACI index part is 42
+    0x99E: 82,  # true-colour entity (ENC 0x8000) — ACI index part is 82
+    0x99F: 42,  # AcDbColor entity (ENC 0x4000) — ACI index part is 42
 }
 _GT_HATCH = {
     # handle -> hatch summary. pattern/gradient names are TVs in the string stream;
@@ -526,14 +557,30 @@ _GT_HATCH = {
     # hatches validate the pattern name; gradient hatches validate the gradient
     # name (ezdxf normalises their group-2 pattern to 'SOLID', but the DWG stores
     # a raw extended name, so the pattern is not asserted for those).
-    0x35A: {"pattern": "ANSI31", "solid": False, "is_gradient": False,
-            "bbox": (102.7458, 0.0853, 123.1991, 13.7101)},
-    0x36E: {"pattern": "AR-PARQ1", "solid": False, "is_gradient": False,
-            "bbox": (102.7458, 17.3141, 123.1991, 30.9389)},
-    0x371: {"gradient_name": "LINEAR", "solid": True, "is_gradient": True,
-            "bbox": (102.7458, 33.4672, 123.1991, 47.092)},
-    0x376: {"gradient_name": "SPHERICAL", "solid": True, "is_gradient": True,
-            "bbox": (102.7458, 49.5097, 123.1991, 63.1344)},
+    0x35A: {
+        "pattern": "ANSI31",
+        "solid": False,
+        "is_gradient": False,
+        "bbox": (102.7458, 0.0853, 123.1991, 13.7101),
+    },
+    0x36E: {
+        "pattern": "AR-PARQ1",
+        "solid": False,
+        "is_gradient": False,
+        "bbox": (102.7458, 17.3141, 123.1991, 30.9389),
+    },
+    0x371: {
+        "gradient_name": "LINEAR",
+        "solid": True,
+        "is_gradient": True,
+        "bbox": (102.7458, 33.4672, 123.1991, 47.092),
+    },
+    0x376: {
+        "gradient_name": "SPHERICAL",
+        "solid": True,
+        "is_gradient": True,
+        "bbox": (102.7458, 49.5097, 123.1991, 63.1344),
+    },
 }
 
 
@@ -557,18 +604,27 @@ _GT_HATCH = {
 # native decoder reproduces the 3 STORED vertices exactly (DWG ground truth); the
 # GT below is those 3 stored points (= ezdxf vertices 0, 1, and 3).
 _GT_SPLINE = {
-    0x433: {"degree": 3, "n_ctrl": 4,
-            "ctrl": [(250.458790783, 1.157147022, 0.0),
-                     (254.71377111, 11.986104202, 0.0),
-                     (259.387964087, 1.234244353, 0.0),
-                     (259.22455111, 11.01862739, 0.0)],
-            "knots": [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]},
+    0x433: {
+        "degree": 3,
+        "n_ctrl": 4,
+        "ctrl": [
+            (250.458790783, 1.157147022, 0.0),
+            (254.71377111, 11.986104202, 0.0),
+            (259.387964087, 1.234244353, 0.0),
+            (259.22455111, 11.01862739, 0.0),
+        ],
+        "knots": [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+    },
 }
 _GT_LEADER = {
-    0x512: {"n_points": 3,
-            "points": [(717.868715432, 2.941179455, 0.0),
-                       (729.268117078, 48.538786038, 0.0),
-                       (740.398750025, 14.071812402, 0.0)]},
+    0x512: {
+        "n_points": 3,
+        "points": [
+            (717.868715432, 2.941179455, 0.0),
+            (729.268117078, 48.538786038, 0.0),
+            (740.398750025, 14.071812402, 0.0),
+        ],
+    },
 }
 
 
@@ -585,8 +641,19 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     assert table.status == "decoded", table.message
     # A substantial number of entities decode across all four supported types.
     assert table.decoded_count >= 50, table.type_counts
-    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT",
-                 "INSERT", "DIMENSION", "HATCH", "ELLIPSE"):
+    for kind in (
+        "LINE",
+        "CIRCLE",
+        "ARC",
+        "POINT",
+        "LWPOLYLINE",
+        "TEXT",
+        "MTEXT",
+        "INSERT",
+        "DIMENSION",
+        "HATCH",
+        "ELLIPSE",
+    ):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by_handle = {e.handle: e for e in table.entities}
@@ -686,15 +753,17 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
     for handle, expected_layer in _GT_LAYER.items():
         assert by_handle[handle].layer == expected_layer, by_handle[handle]
     # Every decoded entity resolves a (non-empty) layer name — '0' at minimum.
-    assert all(e.layer for e in table.entities), \
-        [f"{e.handle:#x}" for e in table.entities if not e.layer]
+    assert all(e.layer for e in table.entities), [
+        f"{e.handle:#x}" for e in table.entities if not e.layer
+    ]
 
     # Linetype from the common-header flags (+ the LTYPE record for flag 3).
     for handle, expected_linetype in _GT_LINETYPE.items():
         assert by_handle[handle].linetype == expected_linetype, by_handle[handle]
     # Every decoded entity resolves a (non-empty) linetype — BYLAYER at minimum.
-    assert all(e.linetype for e in table.entities), \
-        [f"{e.handle:#x}" for e in table.entities if not e.linetype]
+    assert all(e.linetype for e in table.entities), [
+        f"{e.handle:#x}" for e in table.entities if not e.linetype
+    ]
 
     # ENC entity colour ACI index (the flag bits masked off).
     for handle, expected_color in _GT_COLOR.items():
@@ -707,7 +776,7 @@ def test_real_ac1032_decodes_entity_geometry_matches_ground_truth() -> None:
         assert entity.type_name == "HATCH"
         assert entity.geometry["solid"] is expected["solid"], entity.geometry
         assert entity.geometry["is_gradient"] is expected["is_gradient"], entity.geometry
-        if "pattern" in expected:        # non-gradient: pattern name is exact
+        if "pattern" in expected:  # non-gradient: pattern name is exact
             assert entity.geometry["pattern"] == expected["pattern"], entity.geometry
         if "gradient_name" in expected:  # gradient: gradient name is exact
             assert entity.geometry["gradient_name"] == expected["gradient_name"], entity.geometry
@@ -785,11 +854,18 @@ def test_spline_decode_and_leader_decode_canonical_round_trips_geometry() -> Non
     # DoD-E1 (canonical bridge): a decoded SPLINE/LEADER converts to a
     # canonical-drawing/v1 entity carrying the decoded geometry as {x,y,z} points.
     spline = r2018_entity_to_canonical(
-        R2018Entity(0x433, 0x24, "SPLINE",
-                    {"degree": 3,
-                     "control_points": [(0.0, 0.0, 0.0), (1.0, 2.0, 0.0), (3.0, 1.0, 0.0)],
-                     "fit_points": [], "knots": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-                     "closed": False})
+        R2018Entity(
+            0x433,
+            0x24,
+            "SPLINE",
+            {
+                "degree": 3,
+                "control_points": [(0.0, 0.0, 0.0), (1.0, 2.0, 0.0), (3.0, 1.0, 0.0)],
+                "fit_points": [],
+                "knots": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                "closed": False,
+            },
+        )
     )
     assert spline["type"] == "spline" and spline["handle"] == "433"
     assert spline["geometry"]["degree"] == 3
@@ -798,8 +874,12 @@ def test_spline_decode_and_leader_decode_canonical_round_trips_geometry() -> Non
     assert spline["bbox"] == {"min_x": 0.0, "min_y": 0.0, "max_x": 3.0, "max_y": 2.0}
 
     leader = r2018_entity_to_canonical(
-        R2018Entity(0x512, 0x2D, "LEADER",
-                    {"points": [(10.0, 5.0, 0.0), (20.0, 15.0, 0.0), (25.0, 15.0, 0.0)]})
+        R2018Entity(
+            0x512,
+            0x2D,
+            "LEADER",
+            {"points": [(10.0, 5.0, 0.0), (20.0, 15.0, 0.0), (25.0, 15.0, 0.0)]},
+        )
     )
     assert leader["type"] == "leader" and leader["handle"] == "512"
     assert leader["geometry"]["points"][0] == {"x": 10.0, "y": 5.0, "z": 0.0}
@@ -817,8 +897,15 @@ def test_decode_r2018_entity_returns_none_on_unframable_offset() -> None:
 
 def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     line = r2018_entity_to_canonical(
-        R2018Entity(0x2C7, 0x13, "LINE", {"start": (1.0, 2.0, 0.0), "end": (3.0, 4.0, 0.0)},
-                    layer="S-BEAM", linetype="DASHED", color=3)
+        R2018Entity(
+            0x2C7,
+            0x13,
+            "LINE",
+            {"start": (1.0, 2.0, 0.0), "end": (3.0, 4.0, 0.0)},
+            layer="S-BEAM",
+            linetype="DASHED",
+            color=3,
+        )
     )
     assert line["type"] == "line" and line["handle"] == "2C7"
     assert line["geometry"]["start"] == {"x": 1.0, "y": 2.0, "z": 0.0}
@@ -835,17 +922,34 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert circle["geometry"]["radius"] == 2.5
 
     arc = r2018_entity_to_canonical(
-        R2018Entity(0x11, 0x11, "ARC",
-                    {"center": (0.0, 0.0, 0.0), "radius": 5.0,
-                     "start_angle_deg": 0.0, "end_angle_deg": 90.0})
+        R2018Entity(
+            0x11,
+            0x11,
+            "ARC",
+            {
+                "center": (0.0, 0.0, 0.0),
+                "radius": 5.0,
+                "start_angle_deg": 0.0,
+                "end_angle_deg": 90.0,
+            },
+        )
     )
     assert arc["type"] == "arc"
     assert arc["geometry"]["start_angle_deg"] == 0.0 and arc["geometry"]["end_angle_deg"] == 90.0
 
     ellipse = r2018_entity_to_canonical(
-        R2018Entity(0x23, 0x23, "ELLIPSE",
-                    {"center": (1.0, 2.0, 0.0), "major_axis": (3.0, 0.0, 0.0),
-                     "ratio": 0.5, "start_param": 0.0, "end_param": 6.283185})
+        R2018Entity(
+            0x23,
+            0x23,
+            "ELLIPSE",
+            {
+                "center": (1.0, 2.0, 0.0),
+                "major_axis": (3.0, 0.0, 0.0),
+                "ratio": 0.5,
+                "start_param": 0.0,
+                "end_param": 6.283185,
+            },
+        )
     )
     assert ellipse["type"] == "ellipse"  # diagnostic keeps the params (producer counts visible)
     assert ellipse["geometry"]["center"] == {"x": 1.0, "y": 2.0, "z": 0.0}
@@ -860,9 +964,12 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert point["geometry"]["location"] == {"x": 7.0, "y": 8.0, "z": 0.0}
 
     poly = r2018_entity_to_canonical(
-        R2018Entity(0x4D, 0x4D, "LWPOLYLINE",
-                    {"vertices": [(0.0, 0.0), (1.0, 2.0), (3.0, 0.0)],
-                     "bulges": [], "closed": True})
+        R2018Entity(
+            0x4D,
+            0x4D,
+            "LWPOLYLINE",
+            {"vertices": [(0.0, 0.0), (1.0, 2.0), (3.0, 0.0)], "bulges": [], "closed": True},
+        )
     )
     assert poly["type"] == "polyline"
     assert poly["geometry"]["closed"] is True
@@ -871,8 +978,12 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert poly["geometry"]["vertices"][1]["point"] == {"x": 1.0, "y": 2.0, "z": 0.0}
 
     text = r2018_entity_to_canonical(
-        R2018Entity(0x3B9, 0x01, "TEXT",
-                    {"insert": (5.0, 6.0, 0.0), "height": 2.5, "rotation_deg": 0.0, "text": "H-400"})
+        R2018Entity(
+            0x3B9,
+            0x01,
+            "TEXT",
+            {"insert": (5.0, 6.0, 0.0), "height": 2.5, "rotation_deg": 0.0, "text": "H-400"},
+        )
     )
     assert text["type"] == "text"
     assert text["geometry"]["insert"] == {"x": 5.0, "y": 6.0, "z": 0.0}
@@ -881,8 +992,9 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert text["geometry"]["canonical_text"] == "H-400"
 
     mtext = r2018_entity_to_canonical(
-        R2018Entity(0x2C, 0x2C, "MTEXT",
-                    {"insert": (9.0, 8.0, 0.0), "height": 1.5, "text": "line1\nline2"})
+        R2018Entity(
+            0x2C, 0x2C, "MTEXT", {"insert": (9.0, 8.0, 0.0), "height": 1.5, "text": "line1\nline2"}
+        )
     )
     assert mtext["type"] == "mtext"
     assert mtext["geometry"]["insert"] == {"x": 9.0, "y": 8.0, "z": 0.0}
@@ -891,9 +1003,17 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert mtext["geometry"]["canonical_text"] == "line1\nline2"
 
     insert = r2018_entity_to_canonical(
-        R2018Entity(0x704, 0x07, "INSERT",
-                    {"insert": (10.0, 20.0, 0.0), "scale": (2.0, 2.0, 1.0),
-                     "rotation_deg": 90.0, "block_name": "DETAIL-A"})
+        R2018Entity(
+            0x704,
+            0x07,
+            "INSERT",
+            {
+                "insert": (10.0, 20.0, 0.0),
+                "scale": (2.0, 2.0, 1.0),
+                "rotation_deg": 90.0,
+                "block_name": "DETAIL-A",
+            },
+        )
     )
     assert insert["type"] == "insert"
     assert insert["geometry"]["insert"] == {"x": 10.0, "y": 20.0, "z": 0.0}
@@ -902,9 +1022,12 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert insert["geometry"]["block_name"] == "DETAIL-A"
 
     dimension = r2018_entity_to_canonical(
-        R2018Entity(0x514, 0x15, "DIMENSION",
-                    {"text_midpoint": (339.0, 34.0, 0.0), "measurement": 46.71,
-                     "dimtype": 0, "text": ""})
+        R2018Entity(
+            0x514,
+            0x15,
+            "DIMENSION",
+            {"text_midpoint": (339.0, 34.0, 0.0), "measurement": 46.71, "dimtype": 0, "text": ""},
+        )
     )
     assert dimension["type"] == "dimension"  # producer counts this as unsupported (visible)
     assert dimension["geometry"]["text_midpoint"] == {"x": 339.0, "y": 34.0, "z": 0.0}
@@ -914,17 +1037,32 @@ def test_r2018_entity_to_canonical_maps_geometry_to_viewer_points() -> None:
     assert dimension["bbox"] == {"min_x": 339.0, "min_y": 34.0, "max_x": 339.0, "max_y": 34.0}
 
     hatch = r2018_entity_to_canonical(
-        R2018Entity(0x35A, 0x4E, "HATCH",
-                    {"pattern": "ANSI31", "gradient_name": "LINEAR", "is_gradient": False,
-                     "solid": False, "associative": True, "num_paths": 1,
-                     "bbox": {"min_x": 1.0, "min_y": 2.0, "max_x": 5.0, "max_y": 6.0}},
-                    layer="S-HATCH")
+        R2018Entity(
+            0x35A,
+            0x4E,
+            "HATCH",
+            {
+                "pattern": "ANSI31",
+                "gradient_name": "LINEAR",
+                "is_gradient": False,
+                "solid": False,
+                "associative": True,
+                "num_paths": 1,
+                "bbox": {"min_x": 1.0, "min_y": 2.0, "max_x": 5.0, "max_y": 6.0},
+            },
+            layer="S-HATCH",
+        )
     )
     assert hatch["type"] == "hatch"  # producer counts this as unsupported (visible)
     assert hatch["geometry"]["pattern"] == "ANSI31"
     assert hatch["geometry"]["solid"] is False
     assert hatch["geometry"]["num_paths"] == 1
-    assert hatch["bbox"] == {"min_x": 1.0, "min_y": 2.0, "max_x": 5.0, "max_y": 6.0}  # boundary extent
+    assert hatch["bbox"] == {
+        "min_x": 1.0,
+        "min_y": 2.0,
+        "max_x": 5.0,
+        "max_y": 6.0,
+    }  # boundary extent
     assert hatch["layer_id"] == "S-HATCH"
 
 
@@ -1003,29 +1141,41 @@ def test_real_ac1032_canonical_pair_diffs_and_clouds_the_change() -> None:
     moved["geometry"]["end"]["y"] += 30.0
     sx, ex = moved["geometry"]["start"]["x"], moved["geometry"]["end"]["x"]
     sy, ey = moved["geometry"]["start"]["y"], moved["geometry"]["end"]["y"]
-    moved["bbox"] = {"min_x": min(sx, ex), "min_y": min(sy, ey),
-                     "max_x": max(sx, ex), "max_y": max(sy, ey)}
+    moved["bbox"] = {
+        "min_x": min(sx, ex),
+        "min_y": min(sy, ey),
+        "max_x": max(sx, ex),
+        "max_y": max(sy, ey),
+    }
     moved_centroid = ((min(sx, ex) + max(sx, ex)) / 2.0, (min(sy, ey) + max(sy, ey)) / 2.0)
 
     # Existing canonical diff engine on own-reader canonical.
-    diff = DrawingCompareEngine(DrawingCompareOptions(include_unchanged=False)).compare(before, after)
+    diff = DrawingCompareEngine(DrawingCompareOptions(include_unchanged=False)).compare(
+        before, after
+    )
     # The matcher pairs the unchanged majority (proves own canonical diffs cleanly)
     # and isolates the single edit.
     assert diff.summary_counts["unchanged"] >= len(before["entities"]) - 5
-    edited = diff.summary_counts["added"] + diff.summary_counts["removed"] + diff.summary_counts["modified"]
+    edited = (
+        diff.summary_counts["added"]
+        + diff.summary_counts["removed"]
+        + diff.summary_counts["modified"]
+    )
     assert 1 <= edited <= 4, diff.summary_counts
 
     # Diff -> change records -> change zones (existing engine).
     result = ComparisonResult(source_a="before.dwg", source_b="after.dwg")
     for record in diff.to_change_records():
         result.add_change(record)
-    zones = build_change_zones(result, pair_id="P1", drawing_number="P1",
-                               options=ChangeZoneOptions(cluster_distance=120.0))
+    zones = build_change_zones(
+        result, pair_id="P1", drawing_number="P1", options=ChangeZoneOptions(cluster_distance=120.0)
+    )
     assert zones, "the edit must produce at least one change zone"
 
     # The zone that covers the edit anchors a revision cloud.
     covering = [
-        z for z in zones
+        z
+        for z in zones
         if z.bbox[0] <= moved_centroid[0] <= z.bbox[2]
         and z.bbox[1] <= moved_centroid[1] <= z.bbox[3]
     ]

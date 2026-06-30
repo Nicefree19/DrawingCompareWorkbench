@@ -38,11 +38,7 @@ from src.services.comparison.drawing_compare_engine import (
     DrawingCompareEngine,
     DrawingCompareOptions,
 )
-from src.services.comparison.dwg_importer import (
-    DwgImporter,
-    DwgVersionDetector,
-    DwgVersionInfo,
-)
+from src.services.comparison.dwg_importer import DwgImporter, DwgVersionDetector, DwgVersionInfo
 from src.services.comparison.dwg_native_ac1032_adapter import (
     AC1032_NATIVE_OPT_IN_ENV,
     DwgNativeAc1032Adapter,
@@ -64,13 +60,19 @@ _AC1027 = DwgVersionInfo("AC1027", "AutoCAD 2013/2014/2015/2016/2017", "R2013", 
 
 # Ground truth extracted OFFLINE from the ODA-converted DXF (see module docstring).
 _GT_LINES = {
-    0x2C7: ((3.592533998909389, 1.477241896180196, 0.0),
-            (6.863547033979557, 1.477241896180196, 0.0)),
-    0x517: ((330.2890594765796, 2.941179455067987, 0.0),
-            (364.4872644138525, 37.13938439234094, 0.0)),
+    0x2C7: (
+        (3.592533998909389, 1.477241896180196, 0.0),
+        (6.863547033979557, 1.477241896180196, 0.0),
+    ),
+    0x517: (
+        (330.2890594765796, 2.941179455067987, 0.0),
+        (364.4872644138525, 37.13938439234094, 0.0),
+    ),
     # true colour (0x8000) + non-zero Z flag.
-    0x99E: ((18.96130506894906, -124.7749383365533, 0.0),
-            (23.96130506894906, -119.7749383365533, 0.0)),
+    0x99E: (
+        (18.96130506894906, -124.7749383365533, 0.0),
+        (23.96130506894906, -119.7749383365533, 0.0),
+    ),
 }
 _GT_CIRCLES = {
     0x51D: ((569.6764940374901, 25.73998274658328), 11.39940164575765),
@@ -78,13 +80,21 @@ _GT_CIRCLES = {
     0x99F: ((30.20357222512345, -119.9668664522385), 2.382841759818497),
 }
 _GT_ARC = {
-    0x320: ((56.35179242595231, 4.697601732518876), 3.044494390598889,
-            341.0435453511963, 161.0435453511958),
+    0x320: (
+        (56.35179242595231, 4.697601732518876),
+        3.044494390598889,
+        341.0435453511963,
+        161.0435453511958,
+    ),
 }
 _GT_ELLIPSE = {
-    0x321: {"center": (68.00051689353697, 4.185210497355278),
-            "major": (-5.101255306291787, 0.0),
-            "ratio": 0.6403727385155383, "start": 0.0, "end": 6.283185307179586},
+    0x321: {
+        "center": (68.00051689353697, 4.185210497355278),
+        "major": (-5.101255306291787, 0.0),
+        "ratio": 0.6403727385155383,
+        "start": 0.0,
+        "end": 6.283185307179586,
+    },
 }
 _GT_POINT = {
     0x28E: (1.494404150136852, 1.491325898678436, 0.0),
@@ -94,46 +104,83 @@ _GT_LWPOLY = {
     0x2E4: {"closed": True, "nverts": 7, "v0": (28.00563684412818, 0.3613048628239071)},
 }
 _GT_TEXT = {
-    0x3B9: {"insert": (147.8194471194604, 2.854975299808757), "height": 1.0,
-            "text": "Hello this is a single line text"},
-    0x915: {"insert": (21.23207980849656, -70.79326034621432), "height": 1.0,
-            "text": "XData 3Real"},  # EED/XData path
+    0x3B9: {
+        "insert": (147.8194471194604, 2.854975299808757),
+        "height": 1.0,
+        "text": "Hello this is a single line text",
+    },
+    0x915: {
+        "insert": (21.23207980849656, -70.79326034621432),
+        "height": 1.0,
+        "text": "XData 3Real",
+    },  # EED/XData path
 }
 _GT_MTEXT = {
-    0x3EC: {"insert": (183.5889280790414, 5.226370718413136), "height": 1.0,
-            "text": "this is a Mtext\nwith multiple lines in it"},
-    0x513: {"insert": (741.0237500252849, 14.69681240225556), "height": 1.424925205719706,
-            "text": "Sample annotation"},
+    0x3EC: {
+        "insert": (183.5889280790414, 5.226370718413136),
+        "height": 1.0,
+        "text": "this is a Mtext\nwith multiple lines in it",
+    },
+    0x513: {
+        "insert": (741.0237500252849, 14.69681240225556),
+        "height": 1.424925205719706,
+        "text": "Sample annotation",
+    },
 }
 _GT_INSERT = {
-    0x704: {"insert": (920.6796266627233, 16.35285377389053), "xscale": 0.3633736948472006,
-            "rotation": 0.0, "block_name": "MyBlock"},
-    0x783: {"insert": (-208.1495327696078, 8.990124365984101), "xscale": 1.217889264582384,
-            "rotation": 0.0, "block_name": "my_block_v2"},
+    0x704: {
+        "insert": (920.6796266627233, 16.35285377389053),
+        "xscale": 0.3633736948472006,
+        "rotation": 0.0,
+        "block_name": "MyBlock",
+    },
+    0x783: {
+        "insert": (-208.1495327696078, 8.990124365984101),
+        "xscale": 1.217889264582384,
+        "rotation": 0.0,
+        "block_name": "my_block_v2",
+    },
 }
 _GT_DIM = {
-    0x514: {"dimtype": 0, "tm": (339.0659510877516, 34.45477396013389), "meas": 46.71561670814134},  # 0x514=1300 LINEAR
-    0x527: {"dimtype": 1, "tm": (390.7573692587501, 33.66808283895858), "meas": 48.36356523110595},  # 0x527=1319 ALIGNED
+    0x514: {
+        "dimtype": 0,
+        "tm": (339.0659510877516, 34.45477396013389),
+        "meas": 46.71561670814134,
+    },  # 0x514=1300 LINEAR
+    0x527: {
+        "dimtype": 1,
+        "tm": (390.7573692587501, 33.66808283895858),
+        "meas": 48.36356523110595,
+    },  # 0x527=1319 ALIGNED
 }
 _GT_SPLINE = {
-    0x433: {"degree": 3, "n_ctrl": 4,
-            "ctrl": [(250.4587907832241, 1.157147022223159, 0.0),
-                     (254.7137711095261, 11.98610420237003, 0.0),
-                     (259.3879640869438, 1.234244352797873, 0.0),
-                     (259.2245511100041, 11.0186273898506, 0.0)],
-            "knots": [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]},
+    0x433: {
+        "degree": 3,
+        "n_ctrl": 4,
+        "ctrl": [
+            (250.4587907832241, 1.157147022223159, 0.0),
+            (254.7137711095261, 11.98610420237003, 0.0),
+            (259.3879640869438, 1.234244352797873, 0.0),
+            (259.2245511100041, 11.0186273898506, 0.0),
+        ],
+        "knots": [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+    },
 }
 _GT_LEADER = {
     # The DWG stores 3 leader-line vertices; ODA's DXF reports 4 (derived hookline
     # vertex). The native decode reproduces the 3 STORED vertices (DWG truth).
-    0x512: {"n_points": 3,
-            "points": [(717.8687154323397, 2.941179455067987, 0.0),
-                       (729.2681170780972, 48.53878603809859, 0.0),
-                       (740.3987500252849, 14.07181240225556, 0.0)]},
+    0x512: {
+        "n_points": 3,
+        "points": [
+            (717.8687154323397, 2.941179455067987, 0.0),
+            (729.2681170780972, 48.53878603809859, 0.0),
+            (740.3987500252849, 14.07181240225556, 0.0),
+        ],
+    },
 }
 _GT_LAYER = {
-    0x517: "Layer2",   # LINE
-    0x513: "Layer1",   # MTEXT
+    0x517: "Layer2",  # LINE
+    0x513: "Layer1",  # MTEXT
 }
 
 
@@ -165,8 +212,21 @@ def test_real_ac1027_decode_matches_ground_truth() -> None:
     table = read_r2018_entities(_AC1027_SAMPLE.read_bytes(), version_code=R2013_VERSION_CODE)
     assert table.status == "decoded", table.message
     assert table.decoded_count >= 200, table.type_counts
-    for kind in ("LINE", "CIRCLE", "ARC", "POINT", "LWPOLYLINE", "TEXT", "MTEXT",
-                 "INSERT", "DIMENSION", "HATCH", "ELLIPSE", "SPLINE", "LEADER"):
+    for kind in (
+        "LINE",
+        "CIRCLE",
+        "ARC",
+        "POINT",
+        "LWPOLYLINE",
+        "TEXT",
+        "MTEXT",
+        "INSERT",
+        "DIMENSION",
+        "HATCH",
+        "ELLIPSE",
+        "SPLINE",
+        "LEADER",
+    ):
         assert table.type_counts.get(kind, 0) > 0, table.type_counts
 
     by = {e.handle: e for e in table.entities}
@@ -288,8 +348,11 @@ def test_real_ac1027_opt_in_product_path_diffs_and_clouds(monkeypatch: pytest.Mo
 
     # (1) self-compare => no false positives.
     self_diff = engine.compare(before, copy.deepcopy(before))
-    self_edits = (self_diff.summary_counts["added"] + self_diff.summary_counts["removed"]
-                  + self_diff.summary_counts["modified"])
+    self_edits = (
+        self_diff.summary_counts["added"]
+        + self_diff.summary_counts["removed"]
+        + self_diff.summary_counts["modified"]
+    )
     assert self_edits == 0, self_diff.summary_counts
 
     # (2) one edit detected + isolated.
@@ -299,23 +362,34 @@ def test_real_ac1027_opt_in_product_path_diffs_and_clouds(monkeypatch: pytest.Mo
     moved["geometry"]["end"]["y"] += 30.0
     sx, ex = moved["geometry"]["start"]["x"], moved["geometry"]["end"]["x"]
     sy, ey = moved["geometry"]["start"]["y"], moved["geometry"]["end"]["y"]
-    moved["bbox"] = {"min_x": min(sx, ex), "min_y": min(sy, ey),
-                     "max_x": max(sx, ex), "max_y": max(sy, ey)}
+    moved["bbox"] = {
+        "min_x": min(sx, ex),
+        "min_y": min(sy, ey),
+        "max_x": max(sx, ex),
+        "max_y": max(sy, ey),
+    }
     centroid = ((min(sx, ex) + max(sx, ex)) / 2.0, (min(sy, ey) + max(sy, ey)) / 2.0)
 
     diff = engine.compare(before, after)
-    edits = (diff.summary_counts["added"] + diff.summary_counts["removed"]
-             + diff.summary_counts["modified"])
+    edits = (
+        diff.summary_counts["added"]
+        + diff.summary_counts["removed"]
+        + diff.summary_counts["modified"]
+    )
     assert 1 <= edits <= 4, diff.summary_counts
 
     # (3) edit drives a change zone + a revision cloud covering it.
     result = ComparisonResult(source_a="before.dwg", source_b="after.dwg")
     for record in diff.to_change_records():
         result.add_change(record)
-    zones = build_change_zones(result, pair_id="P1", drawing_number="P1",
-                               options=ChangeZoneOptions(cluster_distance=120.0))
-    covering = [z for z in zones
-                if z.bbox[0] <= centroid[0] <= z.bbox[2] and z.bbox[1] <= centroid[1] <= z.bbox[3]]
+    zones = build_change_zones(
+        result, pair_id="P1", drawing_number="P1", options=ChangeZoneOptions(cluster_distance=120.0)
+    )
+    covering = [
+        z
+        for z in zones
+        if z.bbox[0] <= centroid[0] <= z.bbox[2] and z.bbox[1] <= centroid[1] <= z.bbox[3]
+    ]
     assert covering, f"no change zone covers the moved line at {centroid}"
     cloud = revcloud_geometry_from_bbox(covering[0].bbox)
     assert len(cloud.vertices) >= 4
