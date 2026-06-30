@@ -33,10 +33,19 @@ R2018_VERSION_CODE = "AC1032"
 #: So the existing R2018 decode chain applies verbatim once the gate accepts it.
 #: See ``docs/collab/AC1032_CLEANROOM_PROVENANCE.md``.
 R2013_VERSION_CODE = "AC1027"
-#: Version codes the navigator/decoder accepts as the shared R2004+ ("R2018")
-#: container family. Truly different formats (e.g. AC1015/AC1024) remain rejected
-#: by the version gate. The clean-room contract for both stays ``blocked``.
-ACCEPTED_VERSION_CODES = frozenset({R2018_VERSION_CODE, R2013_VERSION_CODE})
+#: AC1024 (R2010) shares the R2004+ container + handle map + string stream, but its
+#: per-entity Common Entity Data has version-specific deltas (2 visual-style bits
+#: instead of 3; a different ENC entity-colour layout — see ``_parse_common_entity_header``).
+#: These are decoded by the R2010 branch, gated on the DETECTED file version (not the
+#: requested gate code), and validated 1:1 against ODA-converted DXF ground truth on a
+#: real AC1024 sample (247/247 entity geometries exact). See
+#: ``.harness/own_viewer_expansion_20260629/negatives/tx4_FINDINGS.md``.
+R2010_VERSION_CODE = "AC1024"
+#: Version codes the navigator/decoder accepts as the shared R2004+ container family.
+#: Truly different formats (e.g. AC1015/AC1021) remain rejected by the version gate.
+#: The clean-room contract for AC1024/AC1027/AC1032 stays ``blocked`` (HITL) regardless —
+#: accepting a code here enables read-only decode, NOT product opt-in/sign-off.
+ACCEPTED_VERSION_CODES = frozenset({R2018_VERSION_CODE, R2013_VERSION_CODE, R2010_VERSION_CODE})
 
 #: The R2004+ file header is a 0x6C-byte LCG-obfuscated block at this offset.
 R2004_HEADER_OFFSET = 0x80
@@ -1073,13 +1082,73 @@ class R2018CommonHeader:
     entmode: int = 2
 
 
-def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
-    """Consume the R2010+ Common Entity Data, positioning at entity geometry.
+def _read_r2010_entity_color(reader: DwgBinaryReader) -> int:
+    """Read the R2010 (AC1024) ENC entity colour and return the ACI index.
 
-    Implements ODA spec 20.4.1 (Common Entity Data) for R2018; the field order
-    is validated 1:1 against ODA ground truth on real AC1032 entities. Returns
-    the object's own handle value and its linetype flags. The reader must already
-    be positioned past the object type.
+    R2010 packs a complex (RGB) colour differently from R2013+/R2018: it is
+    ``[1 lead bit][16-bit LE value][BL rgb][BL transparency iff value&0x2000]
+    [1 trailing bit]`` where the value's ``0x8000`` marks complex. Detection is
+    confirmed by the trailing BL's top byte being a colour-method byte (0xC0-0xC3,
+    i.e. an RGB colour); otherwise the leading-bit interpretation is rewound and a
+    plain ``BS`` colour is read (a *simple* colour, whose transparency flag is
+    ``0x4000`` in R2010 — not the ``0x2000`` used inside the complex value). Derived
+    empirically and validated 247/247 vs ODA GT — see tx4_FINDINGS.md.
+    """
+
+    save = reader.tell_bits()
+    reader.read_bit()  # lead bit (absent from the R2018 BS form)
+    raw16 = reader.read_bits(8) | (reader.read_bits(8) << 8)
+    if (raw16 & 0x8000) and not (raw16 & 0x4000):
+        before_rgb = reader.tell_bits()
+        try:
+            rgb = reader.read_bit_long() & 0xFFFFFFFF
+        except DwgBinaryReadError:
+            rgb = 0
+        if 0xC0 <= ((rgb >> 24) & 0xFF) <= 0xC3:  # RGB colour-method byte => complex
+            if raw16 & 0x2000:
+                reader.read_bit_long()  # colour transparency
+            reader.read_bit()  # trailing bit unique to the R2010 complex form
+            return raw16 & 0x1FFF
+        reader.seek_bits(before_rgb)  # not an RGB BL: fall through to the simple form
+    reader.seek_bits(save)
+    color = reader.read_bit_short() & 0xFFFF
+    if (color & 0x8000) and not (color & 0x4000):
+        reader.read_bit_long()  # complex colour in the plain-BS form (rare)
+    if color & 0x4000:
+        reader.read_bit_long()  # R2010 simple-colour transparency (flag 0x4000)
+    return color & 0x1FFF
+
+
+def _read_r2010_invis_lineweight(reader: DwgBinaryReader) -> None:
+    """Consume the R2010 invisibility + lineweight tail.
+
+    The invisibility is a ``BS``; when it uses the 16-bit form (opcode 00) there is
+    NO trailing lineweight ``RC`` (the only place R2010 diverges from R2018 here).
+    Validated against ODA GT (entity 0x697) — see tx4_FINDINGS.md.
+    """
+
+    opcode = reader.read_bits(2)
+    if opcode == 0:
+        reader.read_bits(16)  # 16-bit invisibility; no lineweight follows
+    elif opcode == 1:
+        reader.read_bits(8)  # 8-bit invisibility value
+        reader.read_bits(8)  # RC lineweight
+    else:  # opcode 2 (=0) / 3 (=256): no value bits
+        reader.read_bits(8)  # RC lineweight
+
+
+def _parse_common_entity_header(
+    reader: DwgBinaryReader, *, is_r2010: bool = False
+) -> R2018CommonHeader:
+    """Consume the Common Entity Data, positioning at entity geometry.
+
+    Implements ODA spec 20.4.1 (Common Entity Data). The field order is validated
+    1:1 against ODA ground truth on real AC1032/AC1027 entities. When ``is_r2010``
+    (a detected AC1024 file), three version deltas apply: a different ENC colour
+    layout (``_read_r2010_entity_color``), only 2 visual-style presence bits (no
+    "edge" bit), and the invis/lineweight tail of ``_read_r2010_invis_lineweight``.
+    Returns the object's own handle value and its linetype flags; the reader must
+    already be positioned past the object type.
 
     Caveat: the R2013+ "has data-store binary data" bit is intentionally omitted
     — it is absent on files without a data-store section (confirmed on the
@@ -1101,12 +1170,15 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     reader.read_bit_long()  # BL: number of reactors
     reader.read_bit()  # B: XDictionary-missing flag (R2004+)
     reader.read_bit()  # B: no-links flag (R2004+ always 1)
-    color = reader.read_bit_short() & 0xFFFF  # ENC: entity colour number + flags
-    color_index = color & 0x1FFF  # ACI index with the 0x8000/0x4000/0x2000 flags masked
-    if (color & 0x8000) and not (color & 0x4000):
-        reader.read_bit_long()  # complex colour: RGB value in the data stream
-    if color & 0x2000:
-        reader.read_bit_long()  # colour transparency
+    if is_r2010:
+        color_index = _read_r2010_entity_color(reader)
+    else:
+        color = reader.read_bit_short() & 0xFFFF  # ENC: entity colour number + flags
+        color_index = color & 0x1FFF  # ACI index, 0x8000/0x4000/0x2000 flags masked
+        if (color & 0x8000) and not (color & 0x4000):
+            reader.read_bit_long()  # complex colour: RGB value in the data stream
+        if color & 0x2000:
+            reader.read_bit_long()  # colour transparency
     reader.read_bit_double()  # BD: linetype scale
     ltype_flags = reader.read_bits(2)  # BB: linetype flags (see R2018CommonHeader)
     reader.read_bits(2)  # BB: plotstyle flags
@@ -1114,9 +1186,13 @@ def _parse_common_entity_header(reader: DwgBinaryReader) -> R2018CommonHeader:
     reader.read_bits(8)  # RC: shadow flags
     reader.read_bit()  # B: has full visual style (R2010+)
     reader.read_bit()  # B: has face visual style (R2010+)
-    reader.read_bit()  # B: has edge visual style (R2010+)
-    reader.read_bit_short()  # BS: invisibility flag
-    reader.read_bits(8)  # RC: lineweight
+    if not is_r2010:
+        reader.read_bit()  # B: has edge visual style (R2013+ only)
+    if is_r2010:
+        _read_r2010_invis_lineweight(reader)
+    else:
+        reader.read_bit_short()  # BS: invisibility flag
+        reader.read_bits(8)  # RC: lineweight
     return R2018CommonHeader(
         handle=handle.value,
         ltype_flags=ltype_flags,
@@ -1438,14 +1514,29 @@ def _decode_insert_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
 
 
 def _read_handle_stream_refs(
-    objects_buffer: bytes, data_start_byte: int, object_size: int, handle_stream_bits: int
+    objects_buffer: bytes,
+    data_start_byte: int,
+    object_size: int,
+    handle_stream_bits: int,
+    *,
+    own_handle: int = 0,
 ) -> List[int]:
     """Read every handle reference in the object's trailing handle stream.
 
     The handle stream is the last ``handle_stream_bits`` bits of the object body;
-    each reference is a code + counter + value. Relative-encoded references give a
-    delta rather than an absolute handle, but those are filtered out by the block
-    lookup, so the raw values are sufficient. Fail-closed on a malformed stream.
+    each reference is a 4-bit code + 4-bit counter + ``counter`` value bytes. The
+    code determines how the stored value maps to the absolute handle (public DWG
+    spec 2.13 "Handle references"):
+
+    * code 2/3/4/5 — the value IS the absolute handle (soft/hard owner/pointer).
+    * code 6 — ``own_handle + 1``;   code 8 — ``own_handle - 1``.
+    * code 10 (0xA) — ``own_handle + value``;  code 12 (0xC) — ``own_handle - value``.
+
+    Resolving the relative codes (vs the previous raw-value behaviour) is what lets
+    a block-owned entity's owner reference (commonly code 12, e.g. ``own-5``) point
+    at its owning BLOCK_HEADER — required for block-definition grouping / INSERT
+    expansion. ``own_handle`` defaults to 0 (no relative resolution) for callers
+    that only need absolute refs. Fail-closed on a malformed stream.
     """
 
     refs: List[int] = []
@@ -1457,7 +1548,19 @@ def _read_handle_stream_refs(
     try:
         reader.seek_bits(start)
         while total_bits - reader.tell_bits() >= 8:
-            refs.append(reader.read_handle().value)
+            ref = reader.read_handle()
+            if ref.code in (0x06, 0x08, 0x0A, 0x0C) and own_handle:
+                if ref.code == 0x06:
+                    resolved = own_handle + 1
+                elif ref.code == 0x08:
+                    resolved = own_handle - 1
+                elif ref.code == 0x0A:
+                    resolved = own_handle + ref.value
+                else:  # 0x0C
+                    resolved = own_handle - ref.value
+                refs.append(resolved)
+            else:
+                refs.append(ref.value)
     except DwgBinaryReadError:
         pass
     return refs
@@ -1662,6 +1765,36 @@ HATCH_OBJECT_TYPE = 0x4E
 _HATCH_MAX_COUNT = 1_000_000
 
 
+#: Straight segments per full 2*pi when tessellating a HATCH arc boundary edge.
+_HATCH_ARC_SEGMENTS = 64
+
+
+def _tessellate_arc_points(
+    cx: float, cy: float, radius: float, start_rad: float, end_rad: float, ccw: bool
+) -> List[Tuple[float, float]]:
+    """Sample a circular-arc boundary edge into (x, y) points (endpoints incl.).
+
+    Mirrors the scene-pack arc tessellation so the carried boundary vertices land
+    on the true arc (not just its bounding box). Proportional segment count keeps
+    the boundary smooth while bounded."""
+
+    sweep = end_rad - start_rad
+    if ccw:
+        while sweep <= 0:
+            sweep += 2.0 * math.pi
+    else:
+        while sweep >= 0:
+            sweep -= 2.0 * math.pi
+    steps = max(2, int(abs(sweep) / (2.0 * math.pi) * _HATCH_ARC_SEGMENTS) + 1)
+    return [
+        (
+            cx + radius * math.cos(start_rad + sweep * k / steps),
+            cy + radius * math.sin(start_rad + sweep * k / steps),
+        )
+        for k in range(steps + 1)
+    ]
+
+
 def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[str, Any]:
     """Decode HATCH (ODA spec 20.4.75): the gradient prefix, solid/associative
     flags, and the boundary loops, from which a world bbox is computed.
@@ -1669,12 +1802,14 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
     The two TV fields (gradient name, then the pattern Name) live in the R2007+
     string stream and are passed in as ``strings`` (the pattern Name is the last
     TV). Only the diff-relevant summary is kept — pattern + gradient name/flag,
-    solid/associative flags, path count, and the boundary bbox; the hatch pattern
-    line definitions after the loops are not read. All four boundary edge types
-    (LINE / CIRCULAR ARC / ELLIPTICAL ARC / SPLINE) and the polyline path are
-    decoded per spec; LINE boundaries are validated 1:1 against ODA ground truth
-    (the bbox matches), and arcs contribute their full-circle extent (a
-    conservative bound).
+    solid/associative flags, path count, the boundary bbox, AND the boundary loop
+    vertices (``boundary_loops``). The hatch pattern line definitions after the
+    loops are not read. All four boundary edge types (LINE / CIRCULAR ARC /
+    ELLIPTICAL ARC / SPLINE) and the polyline path are decoded per spec; LINE/ARC
+    edges and the polyline path carry EXACT (tessellated) boundary vertices
+    (validated 1:1 against ODA ground truth), while ELLIPTICAL-ARC / SPLINE edges
+    only contribute their conservative extent and flag the loop ``approximate``
+    (an honest partial — those loops are NOT emitted as exact boundary geometry).
     """
 
     is_gradient = reader.read_bit_long()  # BL: is gradient fill
@@ -1705,8 +1840,21 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
 
     xs: List[float] = []
     ys: List[float] = []
+    boundary_loops: List[Dict[str, Any]] = []
+
+    def _add(px: float, py: float, loop_pts: List[Tuple[float, float]]) -> None:
+        # Append a boundary vertex, deduping the shared endpoint between chained
+        # edges so the carried loop is a clean vertex polyline.
+        xs.append(px)
+        ys.append(py)
+        if not loop_pts or abs(loop_pts[-1][0] - px) > 1e-9 or abs(loop_pts[-1][1] - py) > 1e-9:
+            loop_pts.append((px, py))
+
     for _ in range(num_paths):
         path_flag = reader.read_bit_long()  # BL: path flag (bit 1 = polyline)
+        loop_pts: List[Tuple[float, float]] = []
+        loop_exact = True  # cleared by elliptical-arc / spline edges
+        loop_closed = bool(path_flag & 1)
         if not (path_flag & 2):  # edge-based path
             num_segs = reader.read_bit_long()
             if not 0 <= num_segs <= _HATCH_MAX_COUNT:
@@ -1716,16 +1864,16 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
                 if edge_type == 1:  # LINE: two endpoints (2RD each)
                     x0, y0 = _read_raw_double(reader), _read_raw_double(reader)
                     x1, y1 = _read_raw_double(reader), _read_raw_double(reader)
-                    xs += [x0, x1]
-                    ys += [y0, y1]
+                    _add(x0, y0, loop_pts)
+                    _add(x1, y1, loop_pts)
                 elif edge_type == 2:  # CIRCULAR ARC
                     cx, cy = _read_raw_double(reader), _read_raw_double(reader)
                     radius = reader.read_bit_double()
-                    reader.read_bit_double()  # start angle
-                    reader.read_bit_double()  # end angle
-                    reader.read_bit()  # is counter-clockwise
-                    xs += [cx - radius, cx + radius]
-                    ys += [cy - radius, cy + radius]
+                    start_a = reader.read_bit_double()  # start angle
+                    end_a = reader.read_bit_double()  # end angle
+                    ccw = bool(reader.read_bit())  # is counter-clockwise
+                    for px, py in _tessellate_arc_points(cx, cy, radius, start_a, end_a, ccw):
+                        _add(px, py, loop_pts)
                 elif edge_type == 3:  # ELLIPTICAL ARC
                     cx, cy = _read_raw_double(reader), _read_raw_double(reader)
                     ex, ey = _read_raw_double(reader), _read_raw_double(reader)  # major axis end
@@ -1734,8 +1882,11 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
                     reader.read_bit_double()  # end angle
                     reader.read_bit()  # is counter-clockwise
                     major = math.hypot(ex, ey)
+                    # Conservative extent only; the exact elliptical arc is not
+                    # tessellated, so the loop is flagged approximate (fail-closed).
                     xs += [cx - major, cx + major]
                     ys += [cy - major, cy + major]
+                    loop_exact = False
                 elif edge_type == 4:  # SPLINE
                     reader.read_bit_long()  # degree
                     is_rational = reader.read_bit()
@@ -1764,21 +1915,30 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
                     _read_raw_double(reader)
                     _read_raw_double(reader)  # end tangent (2RD)
                     _read_raw_double(reader)
+                    # The control hull only approximates the curve; flag the loop.
+                    loop_exact = False
                 else:
                     raise DwgBinaryReadError(f"HATCH unknown edge type {edge_type}")
         else:  # polyline path
             has_bulges = reader.read_bit()
-            reader.read_bit()  # closed
+            loop_closed = bool(reader.read_bit())  # closed
             num_segs = reader.read_bit_long()
             if not 0 <= num_segs <= _HATCH_MAX_COUNT:
                 raise DwgBinaryReadError(f"HATCH polyline vertex count {num_segs} insane")
             for _ in range(num_segs):
                 x0, y0 = _read_raw_double(reader), _read_raw_double(reader)
-                xs.append(x0)
-                ys.append(y0)
+                _add(x0, y0, loop_pts)
                 if has_bulges:
-                    reader.read_bit_double()  # bulge
+                    bulge = reader.read_bit_double()  # bulge
+                    if abs(bulge) > 1e-12:
+                        # A bulged segment is a circular arc; the straight chord we
+                        # carry only approximates it, so flag the loop.
+                        loop_exact = False
         reader.read_bit_long()  # BL: number of boundary object handles
+        if loop_pts:
+            boundary_loops.append(
+                {"vertices": loop_pts, "closed": loop_closed, "exact": loop_exact}
+            )
 
     bbox = None
     if xs:
@@ -1792,6 +1952,9 @@ def _decode_hatch_geometry(reader: DwgBinaryReader, strings: List[str]) -> Dict[
         "associative": bool(associative),
         "num_paths": num_paths,
         "bbox": bbox,
+        # Per-loop boundary vertices (LINE/ARC/polyline edges exact; elliptical /
+        # spline edges flag the loop ``exact=False`` — an honest partial).
+        "boundary_loops": boundary_loops,
     }
 
 
@@ -1894,6 +2057,113 @@ def _decode_leader_geometry(reader: DwgBinaryReader) -> Dict[str, Any]:
     return {"points": points}
 
 
+#: Legacy (pre-LWPOLYLINE) POLYLINE family — ODA spec 20.3 fixed type ids. The
+#: header object carries no vertices itself; its vertices are owned VERTEX child
+#: objects (referenced from the handle stream) terminated by a SEQEND (0x06).
+POLYLINE_2D_OBJECT_TYPE = 0x0F  # ODA 20.4.32 (old 2D polyline)
+POLYLINE_3D_OBJECT_TYPE = 0x10  # ODA 20.4.33 (3D polyline)
+#: VERTEX child object types whose decoded point contributes to the outline.
+#: VERTEX_2D (0x0A) / VERTEX_3D (0x0B) carry the vertex location; the mesh/pface
+#: vertex variants (0x0C-0x0E) are NOT plain outline vertices and are excluded.
+VERTEX_2D_OBJECT_TYPE = 0x0A
+VERTEX_3D_OBJECT_TYPE = 0x0B
+SEQEND_OBJECT_TYPE = 0x06
+_LEGACY_POLYLINE_OBJECT_TYPES = frozenset({POLYLINE_2D_OBJECT_TYPE, POLYLINE_3D_OBJECT_TYPE})
+_OUTLINE_VERTEX_OBJECT_TYPES = frozenset({VERTEX_2D_OBJECT_TYPE, VERTEX_3D_OBJECT_TYPE})
+
+
+def _decode_polyline2d_header(reader: DwgBinaryReader) -> Dict[str, Any]:
+    """Consume the POLYLINE_2D data stream (ODA 20.4.32) up to the owned-object
+    references, returning the closed flag.
+
+    Field order (R2010+): ``flags`` BS, ``curvetype`` BS, ``start width`` BD,
+    ``end width`` BD, ``thickness`` BT, ``elevation`` BD, ``extrusion`` BE. The
+    owned VERTEX handles + SEQEND live in the handle stream (resolved by the
+    caller). Bit 0 of ``flags`` is the closed flag. We do not need the widths /
+    elevation / extrusion for the outline, but they MUST be consumed so the
+    handle-stream offset stays correct (it does not, here, since vertices come
+    from the handle stream, but we keep the read for spec fidelity / future use)."""
+
+    flags = reader.read_bit_short()
+    reader.read_bit_short()  # BS: curve type
+    reader.read_bit_double()  # BD: start width
+    reader.read_bit_double()  # BD: end width
+    _read_bit_thickness(reader)  # BT: thickness
+    reader.read_bit_double()  # BD: elevation
+    _read_bit_extrusion(reader)  # BE: extrusion
+    return {"closed": bool(flags & 0x01), "is_3d": False}
+
+
+def _decode_polyline3d_header(reader: DwgBinaryReader) -> Dict[str, Any]:
+    """Consume the POLYLINE_3D data stream (ODA 20.4.33): two RC flag bytes. The
+    owned VERTEX_3D handles + SEQEND live in the handle stream. ``flags1`` bit 0
+    marks a closed polyline (verified against ODA ground truth)."""
+
+    flags1 = reader.read_bits(8)  # RC: splined/closed flags
+    reader.read_bits(8)  # RC: closed/other flags
+    return {"closed": bool(flags1 & 0x02), "is_3d": True}
+
+
+def _decode_outline_vertex_point(
+    objects_buffer: bytes, offset: int, object_type: int, *, is_r2010: bool = False
+) -> "Optional[Tuple[float, float, float]]":
+    """Decode the point of an owned VERTEX_2D/VERTEX_3D child at ``offset``.
+
+    VERTEX_2D (ODA 20.4.30): ``flags`` RC then ``point`` 3BD (start/end width,
+    bulge, vertexid, tangent follow but are not needed for the outline).
+    VERTEX_3D (ODA 20.4.31): ``flags`` RC then ``point`` 3BD. Returns ``None``
+    (fail-closed) when the object does not frame as the expected vertex type or
+    the point cannot be decoded."""
+
+    frame = _frame_r2018_object(objects_buffer, offset)
+    if frame is None or frame[2] != object_type:
+        return None
+    object_size, header_bytes, _type = frame
+    reader = DwgBinaryReader(objects_buffer, offset=offset + header_bytes, length=object_size)
+    try:
+        read_r2018_object_type(reader)
+        _parse_common_entity_header(reader, is_r2010=is_r2010)
+        reader.read_bits(8)  # RC: vertex flags
+        return (
+            reader.read_bit_double(),
+            reader.read_bit_double(),
+            reader.read_bit_double(),
+        )
+    except DwgBinaryReadError:
+        return None
+
+
+def _assemble_polyline_vertices(
+    objects_buffer: bytes,
+    handle_map: "Optional[Dict[int, int]]",
+    refs: List[int],
+    *,
+    is_r2010: bool = False,
+) -> List[Tuple[float, float, float]]:
+    """Assemble a legacy POLYLINE's vertices from its owned-object handle refs.
+
+    The POLYLINE header references (in its handle stream) its owner, then its
+    owned VERTEX children, then the SEQEND. We decode every ref that frames as an
+    outline VERTEX (0x0A/0x0B) in handle-stream order — the SEQEND, owner and any
+    non-vertex refs are skipped (they do not frame as a vertex). Returns the
+    points in order; an empty list when no vertices resolve (fail-closed)."""
+
+    if not handle_map:
+        return []
+    points: List[Tuple[float, float, float]] = []
+    for value in refs:
+        offset = handle_map.get(value)
+        if offset is None:
+            continue
+        frame = _frame_r2018_object(objects_buffer, offset)
+        if frame is None or frame[2] not in _OUTLINE_VERTEX_OBJECT_TYPES:
+            continue
+        point = _decode_outline_vertex_point(objects_buffer, offset, frame[2], is_r2010=is_r2010)
+        if point is not None:
+            points.append(point)
+    return points
+
+
 #: object type -> (canonical name, geometry decoder). Spec 20.3 fixed type ids.
 _ENTITY_GEOMETRY_DECODERS = {
     0x11: ("ARC", _decode_arc_geometry),
@@ -1945,11 +2215,30 @@ class R2018Entity:
         }
 
 
+#: Generous coordinate sanity bound. Real CAD geometry never approaches this; a
+#: value beyond it (or non-finite) means a mis-decoded bit stream.
+_COORD_SANITY_BOUND = 1e13
+
+
+def _geometry_coords_sane(value: Any) -> bool:
+    """True if every float reachable inside ``value`` is finite and within bound."""
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value) and abs(value) <= _COORD_SANITY_BOUND
+    if isinstance(value, (list, tuple)):
+        return all(_geometry_coords_sane(item) for item in value)
+    if isinstance(value, dict):
+        return all(_geometry_coords_sane(item) for item in value.values())
+    return True
+
+
 def decode_r2018_entity(
     objects_buffer: bytes | bytearray | memoryview,
     offset: int,
     *,
     handle_map: "Optional[Dict[int, int]]" = None,
+    is_r2010: bool = False,
 ) -> "Optional[R2018Entity]":
     """Decode the geometry of a supported entity at ``offset`` in the buffer.
 
@@ -1958,6 +2247,8 @@ def decode_r2018_entity(
     or any malformed/unsupported field (fail-closed). ``handle_map`` (handle ->
     object offset) resolves the entity's layer name (and an INSERT's block name);
     without it the entity decodes with an empty ``layer`` (and ``block_name``).
+    ``is_r2010`` selects the AC1024 Common-Entity-Data layout (see
+    ``_parse_common_entity_header``).
     """
 
     frame = _frame_r2018_object(objects_buffer, offset)
@@ -1970,19 +2261,21 @@ def decode_r2018_entity(
     dimtype = _DIMENSION_OBJECT_TYPES.get(object_type)
     is_dimension = dimtype is not None
     is_hatch = object_type == HATCH_OBJECT_TYPE
+    is_legacy_polyline = object_type in _LEGACY_POLYLINE_OBJECT_TYPES
     if (
         string_decoder is None
         and geometry_decoder is None
         and not is_insert
         and not is_dimension
         and not is_hatch
+        and not is_legacy_polyline
     ):
         return None
     data_start_byte = offset + header_bytes
     reader = DwgBinaryReader(objects_buffer, offset=data_start_byte, length=object_size)
     try:
         read_r2018_object_type(reader)  # advance past the object type
-        header = _parse_common_entity_header(reader)
+        header = _parse_common_entity_header(reader, is_r2010=is_r2010)
         handle = header.handle
         # The handle-stream size (the MC consumed at framing) locates both the
         # R2007+ string stream and the trailing handle references; read it once.
@@ -2016,6 +2309,15 @@ def decode_r2018_entity(
             )
             geometry = _decode_hatch_geometry(reader, strings)
             type_name = "HATCH"
+        elif is_legacy_polyline:
+            # Legacy POLYLINE_2D/3D: the header carries no vertices; they are owned
+            # VERTEX children resolved from the handle stream below.
+            if object_type == POLYLINE_3D_OBJECT_TYPE:
+                geometry = _decode_polyline3d_header(reader)
+            else:
+                geometry = _decode_polyline2d_header(reader)
+            geometry["vertices"] = []  # filled from owned VERTEX children below
+            type_name = "POLYLINE"
         else:
             type_name, decode = geometry_decoder
             geometry = decode(reader)
@@ -2038,11 +2340,22 @@ def decode_r2018_entity(
                 geometry["block_handle"] = _resolve_insert_block_handle(
                     objects_buffer, handle_map, refs
                 )
+            if is_legacy_polyline:
+                # Assemble the owned VERTEX children (in handle-stream order).
+                geometry["vertices"] = _assemble_polyline_vertices(
+                    objects_buffer, handle_map, refs, is_r2010=is_r2010
+                )
             if header.entmode == 0:
                 # Block-owned entity: its owner is the first BLOCK_HEADER ref.
                 owner_handle = _resolve_owner_block_handle(objects_buffer, handle_map, refs)
         linetype = _resolve_entity_linetype(objects_buffer, handle_map, refs, header.ltype_flags)
     except DwgBinaryReadError:
+        return None
+    # Fail-closed sanity gate: a mis-decoded bit stream surfaces as non-finite or
+    # absurdly large coordinates. Drop such an entity rather than emit garbage
+    # geometry — defends the back-expanded R2010 path against any entity/colour
+    # combination outside the validation sample. See tx4_FINDINGS.md.
+    if not _geometry_coords_sane(geometry):
         return None
     return R2018Entity(
         handle=handle,
@@ -2104,6 +2417,13 @@ def read_r2018_entities(
             message=handle_map.message,
         )
 
+    # The per-entity Common Entity Data layout is selected by the DETECTED file
+    # version, not the requested gate code: an AC1024 (R2010) file navigates the
+    # shared container but needs the R2010 entity decode (see
+    # ``_parse_common_entity_header``). AC1027/AC1032 share the R2018 layout.
+    actual_version = bytes(data)[:6].decode("ascii", errors="replace")
+    is_r2010 = actual_version == R2010_VERSION_CODE
+
     objects = read_r2004_data_section(
         data, section_name="AcDb:AcDbObjects", version_code=version_code
     )
@@ -2116,7 +2436,9 @@ def read_r2018_entities(
     for _handle, offset in handle_map.entries:
         if not 0 <= offset < object_size:
             continue
-        entity = decode_r2018_entity(objects, offset, handle_map=offset_by_handle)
+        entity = decode_r2018_entity(
+            objects, offset, handle_map=offset_by_handle, is_r2010=is_r2010
+        )
         if entity is None:
             # Non-graphical object: capture BLOCK_HEADER names so the importer
             # can group block-owned entities under their block definition.
@@ -2150,6 +2472,7 @@ _CANONICAL_ENTITY_TYPE_NAMES = {
     "CIRCLE": "circle",
     "ARC": "arc",
     "LWPOLYLINE": "polyline",
+    "POLYLINE": "polyline",  # legacy POLYLINE_2D/3D, vertices from owned children
     "ELLIPSE": "ellipse",  # product path tessellates to a polyline; diagnostic keeps params
     # POINT/TEXT/MTEXT/DIMENSION/HATCH are not rendered by the scene-pack producer
     # (counted unsupported, visible) but TEXT/MTEXT/DIMENSION/HATCH carry the value
@@ -2192,6 +2515,10 @@ def _r2018_entity_bbox(entity: R2018Entity) -> Dict[str, float]:
     elif entity.type_name == "LWPOLYLINE":
         xs = [vertex[0] for vertex in geometry["vertices"]]
         ys = [vertex[1] for vertex in geometry["vertices"]]
+    elif entity.type_name == "POLYLINE":
+        # Legacy POLYLINE vertices are (x, y, z) tuples from owned VERTEX children.
+        xs = [vertex[0] for vertex in geometry["vertices"]] or [0.0]
+        ys = [vertex[1] for vertex in geometry["vertices"]] or [0.0]
     elif entity.type_name in ("TEXT", "MTEXT"):
         ix, iy = geometry["insert"][0], geometry["insert"][1]
         height = geometry["height"]
@@ -2288,6 +2615,16 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             ],
             "closed": geometry["closed"],
         }
+    elif entity.type_name == "POLYLINE":
+        # Legacy POLYLINE_2D/3D: vertices are (x, y, z) from owned VERTEX children.
+        out["geometry"] = {
+            "type": "polyline",
+            "vertices": [
+                {"point": {"x": vx, "y": vy, "z": vz}, "bulge": 0.0}
+                for (vx, vy, vz) in geometry["vertices"]
+            ],
+            "closed": geometry["closed"],
+        }
     elif entity.type_name == "TEXT":
         out["geometry"] = {
             "type": "text",
@@ -2331,6 +2668,16 @@ def r2018_entity_to_canonical(entity: R2018Entity) -> Dict[str, Any]:
             "solid": geometry["solid"],
             "associative": geometry["associative"],
             "num_paths": geometry["num_paths"],
+            # Real boundary loops (LINE/ARC/polyline edges carry exact vertices;
+            # elliptical/spline edges flag ``exact=False`` — see _decode_hatch_geometry).
+            "boundary_loops": [
+                {
+                    "vertices": [{"x": vx, "y": vy, "z": 0.0} for (vx, vy) in loop["vertices"]],
+                    "closed": loop["closed"],
+                    "exact": loop["exact"],
+                }
+                for loop in geometry.get("boundary_loops", [])
+            ],
         }
     elif entity.type_name == "SPLINE":
         out["geometry"] = {
@@ -2363,6 +2710,99 @@ def _r2018_entities_extents(entities: List[R2018Entity]) -> "Optional[Dict[str, 
     }
 
 
+def _unique_block_name(handle: int, raw_name: str, name_counts: Dict[str, int]) -> str:
+    """A UNIQUE canonical block name for a BLOCK_HEADER handle.
+
+    Mirrors ``dwg_native_ac1032_adapter._build_unique_block_names``: named blocks
+    keep their name; anonymous (``*U``/``*D`` …), empty, or duplicated names get a
+    handle suffix so distinct anonymous blocks stay distinct."""
+
+    nm = (raw_name or "").strip()
+    if not nm or nm.startswith("*") or name_counts.get(nm, 0) > 1:
+        return f"{nm or 'BLK'}_{handle:X}"
+    return nm
+
+
+def _resolve_block_owner_relative(
+    objects_buffer: bytes, handle_map: Dict[int, int], entity: R2018Entity
+) -> int:
+    """Resolve a block-owned entity's owner BLOCK_HEADER handle, RESOLVING RELATIVE
+    handle codes against the entity's own handle.
+
+    ``R2018Entity.owner_handle`` (set by ``decode_r2018_entity``) resolves only
+    ABSOLUTE owner refs, so it is 0 for the common case where the owner is a
+    relative reference (code 12, e.g. ``own-N``). This re-reads the entity's
+    handle stream with relative resolution to recover the owner — scoped to the
+    diagnostic canonical's block grouping so it does NOT change the shared
+    ``owner_handle`` the product adapter consumes. Returns 0 (fail-closed) when no
+    BLOCK_HEADER owner resolves."""
+
+    offset = handle_map.get(entity.handle)
+    if offset is None:
+        return entity.owner_handle  # fall back to whatever the decode resolved
+    frame = _frame_r2018_object(objects_buffer, offset)
+    if frame is None:
+        return entity.owner_handle
+    object_size, header_bytes, _type = frame
+    framing = DwgBinaryReader(objects_buffer, offset=offset)
+    framing.read_modular_short()
+    handle_stream_bits = framing.read_modular_char()
+    refs = _read_handle_stream_refs(
+        objects_buffer,
+        offset + header_bytes,
+        object_size,
+        handle_stream_bits,
+        own_handle=entity.handle,
+    )
+    owner = _resolve_owner_block_handle(objects_buffer, handle_map, refs)
+    return owner or entity.owner_handle
+
+
+def _build_canonical_blocks(
+    table: R2018EntityTable,
+    objects_buffer: "Optional[bytes]" = None,
+    handle_map: "Optional[Dict[int, int]]" = None,
+) -> List[Dict[str, Any]]:
+    """Group block-owned entities (entmode==0) into canonical block definitions.
+
+    Mirrors the product adapter's block grouping: each block-owned entity is keyed
+    by its owner BLOCK_HEADER handle; the block name is the UNIQUE name (matching
+    what an INSERT's ``block_name`` resolves to via its block_handle). When the raw
+    ``objects_buffer`` + ``handle_map`` are given, owners are resolved with RELATIVE
+    handle codes (recovering the common code-12 owner ref that the shared
+    ``owner_handle`` misses) — scoped to this diagnostic path only. Returns
+    ``[{"name", "handle", "entities": [canonical entity …]}]``. Diagnostic: the
+    top-level ``entities`` list still carries every decoded entity unchanged; this
+    is an ADDITIONAL definition map the INSERT expansion consumes."""
+
+    name_counts: Dict[str, int] = {}
+    for nm in table.block_names.values():
+        name_counts[nm] = name_counts.get(nm, 0) + 1
+
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for entity in table.entities:
+        if entity.entmode != 0:
+            continue
+        if objects_buffer is not None and handle_map is not None:
+            owner = _resolve_block_owner_relative(objects_buffer, handle_map, entity)
+        else:
+            owner = entity.owner_handle
+        if owner:
+            grouped.setdefault(owner, []).append(r2018_entity_to_canonical(entity))
+
+    blocks: List[Dict[str, Any]] = []
+    for owner_handle, ents in grouped.items():
+        raw_name = table.block_names.get(owner_handle, "")
+        blocks.append(
+            {
+                "name": _unique_block_name(owner_handle, raw_name, name_counts),
+                "handle": f"{owner_handle:X}",
+                "entities": ents,
+            }
+        )
+    return blocks
+
+
 def build_r2018_canonical_document(
     data: bytes | bytearray | memoryview,
     *,
@@ -2376,11 +2816,30 @@ def build_r2018_canonical_document(
     primitives — so the own clean-room reader can drive the same render seam the
     ezdxf path uses, with ZERO ODA/ezdxf calls. Diagnostic-only: it is NOT wired
     to the product import pipeline and carries no support claim.
+
+    ``blocks`` carries the block definitions (entmode==0 entities grouped by owner)
+    so an INSERT can expand its block geometry; the top-level ``entities`` list is
+    unchanged (still every decoded entity) so existing per-entity invariants hold.
     """
 
     table = read_r2018_entities(data, version_code=version_code)
     entities = [r2018_entity_to_canonical(entity) for entity in table.entities]
     extents = _r2018_entities_extents(table.entities)
+    # Resolve block owners (with relative handle codes) for the block-definition
+    # grouping the INSERT expansion consumes. Fail-closed: if the section re-read
+    # fails the blocks simply stay empty (the INSERT then renders its marker box).
+    objects_buffer: "Optional[bytes]" = None
+    offset_by_handle: "Optional[Dict[int, int]]" = None
+    if table.status == "decoded":
+        try:
+            objects_buffer = read_r2004_data_section(
+                data, section_name="AcDb:AcDbObjects", version_code=version_code
+            )
+            handle_map = read_r2018_handle_map(data, version_code=version_code)
+            offset_by_handle = {h: o for h, o in handle_map.entries}
+        except (ValueError, DwgBinaryReadError):
+            objects_buffer = None
+            offset_by_handle = None
     document: Dict[str, Any] = {
         "schema_version": "canonical-drawing/v1",
         "drawing": {
@@ -2388,7 +2847,7 @@ def build_r2018_canonical_document(
             "importer": {"name": "native-ac1032-spike", "backend": "native"},
         },
         "layers": [],
-        "blocks": [],
+        "blocks": _build_canonical_blocks(table, objects_buffer, offset_by_handle),
         "entities": entities,
         "import_report": {
             "status": table.status,
@@ -2417,6 +2876,11 @@ __all__ = [
     "OBJECT_SECTION_LEADING_RL",
     "OBJECT_RUN_START_OFFSET",
     "MAX_R2004_OBJECT_BYTES",
+    "POLYLINE_2D_OBJECT_TYPE",
+    "POLYLINE_3D_OBJECT_TYPE",
+    "VERTEX_2D_OBJECT_TYPE",
+    "VERTEX_3D_OBJECT_TYPE",
+    "SEQEND_OBJECT_TYPE",
     "HANDLE_MAP_SECTION_SIZE_BYTES",
     "HANDLE_MAP_SECTION_CRC_BYTES",
     "DwgR2018ContainerDiagnostic",

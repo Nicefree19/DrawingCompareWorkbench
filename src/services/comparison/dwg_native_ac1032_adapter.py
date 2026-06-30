@@ -272,7 +272,9 @@ class DwgNativeAc1032Adapter(DwgImporterAdapter):
 
     def _read_native(self, path: Path, version: DwgVersionInfo) -> DwgAdapterDrawing:
         # Pass the detected version code through so the navigator validates against
-        # the actual container version (AC1032 or AC1027); the decode path is shared.
+        # the actual container version (AC1032 / AC1027 / AC1024). AC1032 and AC1027
+        # share the R2018 entity layout; AC1024 (R2010) uses the version-gated R2010
+        # branch that ``read_r2018_entities`` selects from the detected file version.
         table = read_r2018_entities(path.read_bytes(), version_code=version.code)
         if table.status != "decoded":
             raise DwgImportError(

@@ -90,13 +90,16 @@ def build_native_scene_pack(
     """
 
     entities = [e for e in (doc.get("entities") or []) if isinstance(e, Mapping)]
+    # Block definitions let an INSERT expand its block geometry (transformed)
+    # instead of rendering a marker box. Pre-flatten each block to local segments.
+    block_segments = _block_local_segments(doc.get("blocks"), circle_segments)
     display_primitives: List[dict[str, Any]] = []
     unsupported: dict[str, int] = {}
     partial: dict[str, int] = {}
 
     for entity in entities:
         etype = str(entity.get("type") or "").lower()
-        primitive = _entity_to_primitive(entity, etype, circle_segments)
+        primitive = _entity_to_primitive(entity, etype, circle_segments, block_segments)
         if primitive is None:
             unsupported[etype or "?"] = unsupported.get(etype or "?", 0) + 1
             continue
@@ -176,7 +179,10 @@ def build_native_scene_pack_ref(
 
 
 def _entity_to_primitive(
-    entity: Mapping[str, Any], etype: str, circle_segments: int
+    entity: Mapping[str, Any],
+    etype: str,
+    circle_segments: int,
+    block_segments: Optional[Mapping[str, List[_Segment]]] = None,
 ) -> Optional[dict[str, Any]]:
     geometry = entity.get("geometry")
     if not isinstance(geometry, Mapping):
@@ -185,6 +191,7 @@ def _entity_to_primitive(
         return _text_primitive(entity, etype, geometry)
     partial = False
     render = ""
+    expanded_block = ""
     if etype == "line":
         segments = _line_segments(geometry)
     elif etype == "polyline":
@@ -196,16 +203,29 @@ def _entity_to_primitive(
     elif etype == "ellipse":
         segments = _ellipse_segments(geometry, circle_segments)
     elif etype == "hatch":
-        # Boundary loops are not carried in canonical (only the decoded world
-        # bbox); render the boundary extent rectangle as an honest partial.
-        segments = _bbox_rectangle_segments(entity)
-        partial, render = True, "boundary_box"
+        # Prefer the real decoded boundary loops; fall back to the boundary-extent
+        # rectangle only when canonical carries no loops (honest partial). A loop
+        # with an inexact edge (elliptical-arc / spline / bulge) keeps the partial
+        # flag even though the lines render — never claims exact when it is not.
+        segments, full_boundary = _hatch_boundary_segments(geometry)
+        if segments:
+            if not full_boundary:
+                partial, render = True, "boundary_loops_approx"
+        else:
+            segments = _bbox_rectangle_segments(entity)
+            partial, render = True, "boundary_box"
     elif etype == "insert":
-        # Block definitions are not carried in canonical (blocks=[]); render the
-        # insert marker box (decoded insert bbox) as an honest partial — full
-        # block expansion is a documented follow-up.
-        segments = _bbox_rectangle_segments(entity)
-        partial, render = True, "insert_marker"
+        # Expand the referenced block's geometry (transformed by insert/scale/
+        # rotation) when a block definition is available; otherwise fall back to
+        # the insert marker box (honest partial — block defs absent).
+        block_name = str(geometry.get("block_name") or "")
+        local = block_segments.get(block_name) if block_segments else None
+        if local:
+            segments = _transform_insert_segments(local, geometry)
+            expanded_block = block_name
+        else:
+            segments = _bbox_rectangle_segments(entity)
+            partial, render = True, "insert_marker"
     else:
         return None
     if not segments:
@@ -221,6 +241,8 @@ def _entity_to_primitive(
     if partial:
         properties["partial"] = True
         properties["render"] = render
+    if expanded_block:
+        properties["expanded_block"] = expanded_block
     if properties:
         primitive["properties"] = properties
     return primitive
@@ -431,6 +453,133 @@ def _ellipse_segments(geometry: Mapping[str, Any], circle_segments: int) -> List
         [points[i][0], points[i][1], points[i + 1][0], points[i + 1][1]]
         for i in range(len(points) - 1)
     ]
+
+
+def _block_local_segments(blocks: Any, circle_segments: int) -> dict[str, List[_Segment]]:
+    """Pre-flatten each block definition's entities into block-LOCAL line segments.
+
+    Keyed by block name. A block entity that does not flatten to ``lines`` (TEXT/
+    DIMENSION/nested INSERT/unsupported) is skipped here — block expansion renders
+    only the directly-flattenable line geometry (an honest subset; the marker-box
+    fallback still applies when a block yields no segments). Returns ``{}`` when no
+    blocks are present."""
+
+    out: dict[str, List[_Segment]] = {}
+    if not isinstance(blocks, (list, tuple)):
+        return out
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        name = str(block.get("name") or "")
+        if not name:
+            continue
+        segments: List[_Segment] = []
+        for entity in block.get("entities") or []:
+            if not isinstance(entity, Mapping):
+                continue
+            etype = str(entity.get("type") or "").lower()
+            geometry = entity.get("geometry")
+            if not isinstance(geometry, Mapping):
+                continue
+            if etype == "line":
+                segments.extend(_line_segments(geometry))
+            elif etype == "polyline":
+                segments.extend(_polyline_segments(geometry))
+            elif etype == "circle":
+                segments.extend(_circle_segments(geometry, circle_segments))
+            elif etype == "arc":
+                segments.extend(_arc_segments(geometry, circle_segments))
+            elif etype == "ellipse":
+                segments.extend(_ellipse_segments(geometry, circle_segments))
+            # TEXT/DIMENSION/nested-INSERT/HATCH/unsupported are not expanded here.
+        if segments:
+            out[name] = segments
+    return out
+
+
+def _transform_insert_segments(
+    local_segments: List[_Segment], geometry: Mapping[str, Any]
+) -> List[_Segment]:
+    """Transform block-local segments by an INSERT's insertion/scale/rotation.
+
+    World = insertion + R(rotation) · S(scale) · local. Matches the standard DWG
+    INSERT placement (uniform 2D transform; the Z scale is irrelevant for the 2D
+    line skeleton). Non-finite / zero transforms fall back to identity-ish safe
+    values so a degenerate INSERT still renders its block at the insertion point."""
+
+    insert = _point_xy(geometry.get("insert")) or (0.0, 0.0)
+    scale = geometry.get("scale")
+    sx = sy = 1.0
+    if isinstance(scale, Mapping):
+        try:
+            sx = float(scale.get("x"))
+            sy = float(scale.get("y"))
+        except (TypeError, ValueError):
+            sx = sy = 1.0
+    if not math.isfinite(sx) or sx == 0.0:
+        sx = 1.0
+    if not math.isfinite(sy) or sy == 0.0:
+        sy = 1.0
+    try:
+        rotation = math.radians(float(geometry.get("rotation_deg") or 0.0))
+    except (TypeError, ValueError):
+        rotation = 0.0
+    cos_r, sin_r = math.cos(rotation), math.sin(rotation)
+    ox, oy = insert
+
+    def xf(x: float, y: float) -> Tuple[float, float]:
+        lx, ly = x * sx, y * sy
+        return (ox + lx * cos_r - ly * sin_r, oy + lx * sin_r + ly * cos_r)
+
+    out: List[_Segment] = []
+    for seg in local_segments:
+        if len(seg) < 4:
+            continue
+        x0, y0 = xf(seg[0], seg[1])
+        x1, y1 = xf(seg[2], seg[3])
+        out.append([x0, y0, x1, y1])
+    return out
+
+
+def _hatch_boundary_segments(geometry: Mapping[str, Any]) -> Tuple[List[_Segment], bool]:
+    """Build line segments from a HATCH's decoded boundary loops.
+
+    Each loop is a vertex polyline; consecutive vertices become segments and a
+    closed loop adds the closing segment. Returns ``(segments, full_boundary)``
+    where ``full_boundary`` is True only when at least one loop rendered AND every
+    rendered loop is ``exact`` (LINE/ARC/polyline edges). A loop with an inexact
+    edge (elliptical-arc / spline / bulged) still renders its vertex chain but
+    marks the boundary not-full so the primitive stays flagged ``partial`` — an
+    honest degraded render, never a silent claim of fidelity
+    ([[silent_fallback_pattern]]).
+    """
+
+    loops = geometry.get("boundary_loops")
+    if not isinstance(loops, (list, tuple)) or not loops:
+        return [], False
+    segments: List[_Segment] = []
+    all_exact = True
+    rendered_any = False
+    for loop in loops:
+        if not isinstance(loop, Mapping):
+            continue
+        points: List[Tuple[float, float]] = []
+        for vertex in loop.get("vertices") or []:
+            point = _point_xy(vertex)
+            if point is not None:
+                points.append(point)
+        if len(points) < 2:
+            continue
+        rendered_any = True
+        if not loop.get("exact", True):
+            all_exact = False
+        for i in range(len(points) - 1):
+            segments.append([points[i][0], points[i][1], points[i + 1][0], points[i + 1][1]])
+        if loop.get("closed") and len(points) >= 3:
+            segments.append([points[-1][0], points[-1][1], points[0][0], points[0][1]])
+    if not rendered_any:
+        return [], False
+    return segments, all_exact
 
 
 def _bbox_rectangle_segments(entity: Mapping[str, Any]) -> List[_Segment]:
