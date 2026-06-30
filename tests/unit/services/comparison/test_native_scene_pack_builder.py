@@ -29,12 +29,12 @@ from src.services.comparison.viewer_primitive_source import resolve_viewer_primi
 # below runs the full native-import -> producer -> evidence chain when it is
 # present and skips visibly otherwise, so CI proves producer logic via the
 # hand-built canonical docs while local runs prove the real-sample chain.
-REAL_AC1015_SAMPLE = Path(
-    ".local/native_cad_real_samples/nextgis_dwg_samples/line_2000.dwg"
-)
+REAL_AC1015_SAMPLE = Path(".local/native_cad_real_samples/nextgis_dwg_samples/line_2000.dwg")
 
 
-def _canonical_doc(entities: list[dict[str, Any]], extents: dict[str, Any] | None) -> dict[str, Any]:
+def _canonical_doc(
+    entities: list[dict[str, Any]], extents: dict[str, Any] | None
+) -> dict[str, Any]:
     doc: dict[str, Any] = {
         "schema_version": "canonical-drawing/v1",
         "drawing": {
@@ -58,10 +58,45 @@ def _entity(entity_id: str, etype: str, geometry: dict[str, Any]) -> dict[str, A
 def test_build_native_scene_pack_flattens_each_geometry_type() -> None:
     doc = _canonical_doc(
         entities=[
-            _entity("line:1", "line", {"type": "line", "start": {"x": 0.0, "y": 0.0, "z": 0.0}, "end": {"x": 10.0, "y": 0.0, "z": 0.0}}),
-            _entity("circle:1", "circle", {"type": "circle", "center": {"x": 5.0, "y": 5.0, "z": 0.0}, "radius": 2.5}),
-            _entity("arc:1", "arc", {"type": "arc", "center": {"x": 0.0, "y": 0.0, "z": 0.0}, "radius": 5.0, "start_angle_deg": 0.0, "end_angle_deg": 90.0, "sweep_direction": "ccw"}),
-            _entity("poly:1", "polyline", {"type": "polyline", "vertices": [{"point": {"x": 0.0, "y": 0.0}}, {"point": {"x": 1.0, "y": 1.0}}, {"point": {"x": 2.0, "y": 0.0}}], "closed": False}),
+            _entity(
+                "line:1",
+                "line",
+                {
+                    "type": "line",
+                    "start": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "end": {"x": 10.0, "y": 0.0, "z": 0.0},
+                },
+            ),
+            _entity(
+                "circle:1",
+                "circle",
+                {"type": "circle", "center": {"x": 5.0, "y": 5.0, "z": 0.0}, "radius": 2.5},
+            ),
+            _entity(
+                "arc:1",
+                "arc",
+                {
+                    "type": "arc",
+                    "center": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "radius": 5.0,
+                    "start_angle_deg": 0.0,
+                    "end_angle_deg": 90.0,
+                    "sweep_direction": "ccw",
+                },
+            ),
+            _entity(
+                "poly:1",
+                "polyline",
+                {
+                    "type": "polyline",
+                    "vertices": [
+                        {"point": {"x": 0.0, "y": 0.0}},
+                        {"point": {"x": 1.0, "y": 1.0}},
+                        {"point": {"x": 2.0, "y": 0.0}},
+                    ],
+                    "closed": False,
+                },
+            ),
         ],
         extents={"min_x": -5.0, "min_y": -5.0, "max_x": 10.0, "max_y": 10.0},
     )
@@ -90,7 +125,11 @@ def test_build_native_scene_pack_counts_unsupported_types_without_dropping_silen
     # counted (no silent drop), not rendered as a wrong shape.
     doc = _canonical_doc(
         entities=[
-            _entity("line:1", "line", {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 1.0, "y": 0.0}}),
+            _entity(
+                "line:1",
+                "line",
+                {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 1.0, "y": 0.0}},
+            ),
             _entity("pt:1", "point", {"type": "point", "location": {"x": 0.0, "y": 0.0}}),
             _entity("face:1", "3dface", {"type": "3dface", "points": []}),
         ],
@@ -107,7 +146,11 @@ def test_build_native_scene_pack_counts_unsupported_types_without_dropping_silen
 def test_build_native_scene_pack_falls_back_to_primitive_bbox_without_extents() -> None:
     doc = _canonical_doc(
         entities=[
-            _entity("line:1", "line", {"type": "line", "start": {"x": 2.0, "y": 3.0}, "end": {"x": 8.0, "y": 9.0}}),
+            _entity(
+                "line:1",
+                "line",
+                {"type": "line", "start": {"x": 2.0, "y": 3.0}, "end": {"x": 8.0, "y": 9.0}},
+            ),
         ],
         extents=None,
     )
@@ -120,8 +163,16 @@ def test_build_native_scene_pack_falls_back_to_primitive_bbox_without_extents() 
 def test_native_scene_pack_feeds_real_viewer_evidence_packet() -> None:
     doc = _canonical_doc(
         entities=[
-            _entity("line:1", "line", {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 10.0, "y": 10.0}}),
-            _entity("circle:1", "circle", {"type": "circle", "center": {"x": 5.0, "y": 5.0}, "radius": 5.0}),
+            _entity(
+                "line:1",
+                "line",
+                {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 10.0, "y": 10.0}},
+            ),
+            _entity(
+                "circle:1",
+                "circle",
+                {"type": "circle", "center": {"x": 5.0, "y": 5.0}, "radius": 5.0},
+            ),
         ],
         extents={"min_x": 0.0, "min_y": 0.0, "max_x": 10.0, "max_y": 10.0},
     )
@@ -154,8 +205,16 @@ def test_native_scene_pack_ref_renders_through_viewport_seam(tmp_path: Path) -> 
     # the native producer, not a degraded fallback.
     doc = _canonical_doc(
         entities=[
-            _entity("line:1", "line", {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 10.0, "y": 5.0}}),
-            _entity("circle:1", "circle", {"type": "circle", "center": {"x": 5.0, "y": 5.0}, "radius": 3.0}),
+            _entity(
+                "line:1",
+                "line",
+                {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 10.0, "y": 5.0}},
+            ),
+            _entity(
+                "circle:1",
+                "circle",
+                {"type": "circle", "center": {"x": 5.0, "y": 5.0}, "radius": 3.0},
+            ),
         ],
         extents={"min_x": 0.0, "min_y": 0.0, "max_x": 10.0, "max_y": 10.0},
     )
@@ -252,14 +311,24 @@ def test_build_native_scene_pack_rejects_degenerate_bbox_no_silent_drop() -> Non
     doc = _canonical_doc(
         entities=[
             {  # zero width
-                "id": "h:zerow", "type": "hatch", "layer_id": "layer:0",
+                "id": "h:zerow",
+                "type": "hatch",
+                "layer_id": "layer:0",
                 "bbox": {"min_x": 1.0, "min_y": 2.0, "max_x": 1.0, "max_y": 8.0},
                 "geometry": {"type": "hatch", "pattern": "ANSI31", "solid": False, "num_paths": 1},
             },
             {  # zero height
-                "id": "ins:zeroh", "type": "insert", "layer_id": "layer:0",
+                "id": "ins:zeroh",
+                "type": "insert",
+                "layer_id": "layer:0",
                 "bbox": {"min_x": 0.0, "min_y": 5.0, "max_x": 4.0, "max_y": 5.0},
-                "geometry": {"type": "insert", "insert": {"x": 0.0, "y": 5.0}, "scale": {"x": 1.0, "y": 1.0}, "rotation_deg": 0.0, "block_name": "B"},
+                "geometry": {
+                    "type": "insert",
+                    "insert": {"x": 0.0, "y": 5.0},
+                    "scale": {"x": 1.0, "y": 1.0},
+                    "rotation_deg": 0.0,
+                    "block_name": "B",
+                },
             },
         ],
         extents={"min_x": 0.0, "min_y": 0.0, "max_x": 4.0, "max_y": 8.0},
@@ -283,14 +352,26 @@ def test_native_render_color_and_linetype_carried_into_primitives() -> None:
     doc = _canonical_doc(
         entities=[
             {
-                "id": "line:red", "type": "line", "layer_id": "layer:0",
+                "id": "line:red",
+                "type": "line",
+                "layer_id": "layer:0",
                 "style": {"color": 1, "linetype": "DASHED"},
-                "geometry": {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 1.0, "y": 0.0}},
+                "geometry": {
+                    "type": "line",
+                    "start": {"x": 0.0, "y": 0.0},
+                    "end": {"x": 1.0, "y": 0.0},
+                },
             },
             {
-                "id": "line:blue", "type": "line", "layer_id": "layer:0",
+                "id": "line:blue",
+                "type": "line",
+                "layer_id": "layer:0",
                 "style": {"color": 5, "linetype": "CONTINUOUS"},
-                "geometry": {"type": "line", "start": {"x": 0.0, "y": 1.0}, "end": {"x": 1.0, "y": 1.0}},
+                "geometry": {
+                    "type": "line",
+                    "start": {"x": 0.0, "y": 1.0},
+                    "end": {"x": 1.0, "y": 1.0},
+                },
             },
         ],
         extents={"min_x": 0.0, "min_y": 0.0, "max_x": 1.0, "max_y": 1.0},
@@ -314,9 +395,15 @@ def test_native_render_color_bylayer_falls_back_to_default_ink() -> None:
     doc = _canonical_doc(
         entities=[
             {
-                "id": "line:bylayer", "type": "line", "layer_id": "layer:0",
+                "id": "line:bylayer",
+                "type": "line",
+                "layer_id": "layer:0",
                 "style": {"color": 256, "linetype": "BYLAYER"},
-                "geometry": {"type": "line", "start": {"x": 0.0, "y": 0.0}, "end": {"x": 1.0, "y": 0.0}},
+                "geometry": {
+                    "type": "line",
+                    "start": {"x": 0.0, "y": 0.0},
+                    "end": {"x": 1.0, "y": 0.0},
+                },
             },
         ],
         extents={"min_x": 0.0, "min_y": 0.0, "max_x": 1.0, "max_y": 0.0},
@@ -332,13 +419,50 @@ def test_build_native_scene_pack_emits_text_dimension_insert_primitives() -> Non
     # box (block expansion is a documented follow-up). Nothing silently dropped.
     doc = _canonical_doc(
         entities=[
-            _entity("text:1", "text", {"type": "text", "insert": {"x": 1.0, "y": 2.0, "z": 0.0}, "height": 2.5, "rotation_deg": 0.0, "text": "H-400"}),
-            _entity("mtext:1", "mtext", {"type": "mtext", "insert": {"x": 3.0, "y": 4.0, "z": 0.0}, "height": 3.0, "text": "철근 D25"}),
-            _entity("dim:1", "dimension", {"type": "dimension", "text_midpoint": {"x": 5.0, "y": 6.0, "z": 0.0}, "measurement": 1234.5, "dimtype": 0, "text": ""}),
+            _entity(
+                "text:1",
+                "text",
+                {
+                    "type": "text",
+                    "insert": {"x": 1.0, "y": 2.0, "z": 0.0},
+                    "height": 2.5,
+                    "rotation_deg": 0.0,
+                    "text": "H-400",
+                },
+            ),
+            _entity(
+                "mtext:1",
+                "mtext",
+                {
+                    "type": "mtext",
+                    "insert": {"x": 3.0, "y": 4.0, "z": 0.0},
+                    "height": 3.0,
+                    "text": "철근 D25",
+                },
+            ),
+            _entity(
+                "dim:1",
+                "dimension",
+                {
+                    "type": "dimension",
+                    "text_midpoint": {"x": 5.0, "y": 6.0, "z": 0.0},
+                    "measurement": 1234.5,
+                    "dimtype": 0,
+                    "text": "",
+                },
+            ),
             {
-                "id": "ins:1", "type": "insert", "layer_id": "layer:0",
+                "id": "ins:1",
+                "type": "insert",
+                "layer_id": "layer:0",
                 "bbox": {"min_x": 0.0, "min_y": 0.0, "max_x": 2.0, "max_y": 2.0},
-                "geometry": {"type": "insert", "insert": {"x": 1.0, "y": 1.0}, "scale": {"x": 1.0, "y": 1.0}, "rotation_deg": 0.0, "block_name": "COL"},
+                "geometry": {
+                    "type": "insert",
+                    "insert": {"x": 1.0, "y": 1.0},
+                    "scale": {"x": 1.0, "y": 1.0},
+                    "rotation_deg": 0.0,
+                    "block_name": "COL",
+                },
             },
         ],
         extents={"min_x": 0.0, "min_y": 0.0, "max_x": 6.0, "max_y": 6.0},
@@ -384,7 +508,12 @@ def test_real_native_import_produces_real_viewer_evidence() -> None:
         "change_type": "added",
         "priority_rank": 1,
         "old_bbox": None,
-        "bbox": {"min_x": ext["min_x"], "min_y": ext["min_y"], "max_x": ext["max_x"], "max_y": ext["max_y"]},
+        "bbox": {
+            "min_x": ext["min_x"],
+            "min_y": ext["min_y"],
+            "max_x": ext["max_x"],
+            "max_y": ext["max_y"],
+        },
     }
     evidence = native_scene_viewer_evidence_payload(
         pack, change_overlays=[overlay], import_report=doc["import_report"]
