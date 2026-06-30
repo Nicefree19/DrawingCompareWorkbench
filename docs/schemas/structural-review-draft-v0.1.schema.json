@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://senvex.local/schemas/structural-review-draft-v0.1.schema.json",
+  "title": "Structural Review Draft v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "draft_id",
+    "source_run_id",
+    "source_packet_schema",
+    "status",
+    "language",
+    "draft_type",
+    "safety",
+    "basis",
+    "draft",
+    "artifact_paths"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "structural-review-draft/v0.1"
+    },
+    "draft_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "source_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_packet_schema": {
+      "const": "structural-drawing-evidence/v0.1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["drafted", "blocked"]
+    },
+    "language": {
+      "type": "string",
+      "enum": ["ko", "en"]
+    },
+    "draft_type": {
+      "type": "string",
+      "enum": ["review_note", "rfi_reply", "checklist_findings"]
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "llm_used",
+        "auto_submit_allowed",
+        "human_review_required",
+        "judgment_level",
+        "source_limited"
+      ],
+      "properties": {
+        "llm_used": {"type": "boolean"},
+        "auto_submit_allowed": {"type": "boolean"},
+        "human_review_required": {"type": "boolean"},
+        "judgment_level": {"const": "issue_suggestion_only"},
+        "source_limited": {"type": "boolean"}
+      }
+    },
+    "basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question",
+        "source_health",
+        "issue_suggestion_count",
+        "evidence_count",
+        "evidence_ids"
+      ],
+      "properties": {
+        "question": {"type": "string"},
+        "source_health": {"type": "string"},
+        "issue_suggestion_count": {"type": "integer", "minimum": 0},
+        "evidence_count": {"type": "integer", "minimum": 0},
+        "evidence_ids": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "draft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject",
+        "body",
+        "review_checklist",
+        "evidence_references",
+        "limitations"
+      ],
+      "properties": {
+        "subject": {"type": "string"},
+        "body": {"type": "string"},
+        "review_checklist": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "evidence_references": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidence_id", "anchor_text", "layer", "domain_tags"],
+            "properties": {
+              "evidence_id": {"type": "string"},
+              "anchor_text": {"type": "string"},
+              "layer": {"type": ["string", "null"]},
+              "domain_tags": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            }
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "artifact_paths": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    }
+  }
+}
