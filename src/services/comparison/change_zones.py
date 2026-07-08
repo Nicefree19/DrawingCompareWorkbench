@@ -86,10 +86,25 @@ class ChangeZoneOptions:
     # ("기둥", "보", "가새", "벽") 도 ``is_structural_layer`` helper 가 잡음.
     # 이 fnmatch 튜플은 외부 caller (export_profiles 등) 호환성 위해 유지.
     structural_layer_patterns: Tuple[str, ...] = (
-        "*BEAM*", "*COL*", "*COLUMN*", "*BRACE*", "*BRACING*",
-        "*GIRDER*", "*TRUSS*", "*WALL*", "*SLAB*", "*PLATE*",
-        "*FOOTING*", "*FOUNDATION*", "*PILE*", "*FRAME*",
-        "*GR_*", "*BM_*", "*CL_*", "*WL_*", "*FT_*",
+        "*BEAM*",
+        "*COL*",
+        "*COLUMN*",
+        "*BRACE*",
+        "*BRACING*",
+        "*GIRDER*",
+        "*TRUSS*",
+        "*WALL*",
+        "*SLAB*",
+        "*PLATE*",
+        "*FOOTING*",
+        "*FOUNDATION*",
+        "*PILE*",
+        "*FRAME*",
+        "*GR_*",
+        "*BM_*",
+        "*CL_*",
+        "*WL_*",
+        "*FT_*",
     )
 
 
@@ -381,9 +396,9 @@ def build_change_zones(
     if zone_input.warning:
         result.metadata["change_zone_warning"] = zone_input.warning
     if zone_input.block_definition_skipped:
-        result.metadata["change_zone_block_definition_skipped_count"] = (
-            zone_input.block_definition_skipped
-        )
+        result.metadata[
+            "change_zone_block_definition_skipped_count"
+        ] = zone_input.block_definition_skipped
     envelopes = zone_input.envelopes
 
     if not envelopes:
@@ -436,6 +451,35 @@ def build_change_zones(
     return zones
 
 
+# Relocation distance cap (2026-06-18, rebar AC1024 robustness): a relocation is
+# a move WITHIN the drawing, so the from→to distance cannot plausibly exceed the
+# drawing's content extent. Without a cap, a size-identical deleted/added pair was
+# linked regardless of distance — a 160×160 mm stray hatch (a runaway block-local
+# ±34.9M-coord entity inserted on one side) got "relocation"-linked to a same-size
+# add 34.8 KM away. Cap at FACTOR × the ROBUST centroid diagonal (IQR-fenced so the
+# strays themselves don't inflate the cap), floored for tiny/clean drawings.
+_RELOCATION_DIST_CAP_FACTOR = 2.0
+_RELOCATION_DIST_CAP_FLOOR = 500_000.0  # mm
+
+
+def _robust_span(values: Sequence[float]) -> float:
+    """Span of ``values`` after dropping Tukey far outliers (k=3) — so a few
+    runaway coordinates don't dominate. Falls back to the full span for < 4."""
+
+    vals = sorted(float(v) for v in values)
+    n = len(vals)
+    if n == 0:
+        return 0.0
+    if n < 4:
+        return vals[-1] - vals[0]
+    q1 = vals[n // 4]
+    q3 = vals[(3 * n) // 4]
+    iqr = q3 - q1
+    lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
+    kept = [v for v in vals if lo <= v <= hi]
+    return (kept[-1] - kept[0]) if len(kept) >= 2 else (vals[-1] - vals[0])
+
+
 def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
     """Link size-identical deleted↔added zone pairs as probable relocations.
 
@@ -462,12 +506,12 @@ def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
     """
 
     deleted = [
-        z for z in zones
+        z
+        for z in zones
         if z.change_type == "deleted" and z.deleted_count > 0 and z.added_count == 0
     ]
     added = [
-        z for z in zones
-        if z.change_type == "added" and z.added_count > 0 and z.deleted_count == 0
+        z for z in zones if z.change_type == "added" and z.added_count > 0 and z.deleted_count == 0
     ]
     if not deleted or not added:
         return 0
@@ -475,6 +519,17 @@ def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
     def _dims(zone: "DrawingChangeZone") -> Tuple[float, float]:
         box = zone.bbox
         return (float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
+
+    # A move can't exceed the drawing's (robust) content extent — cap the link
+    # distance so runaway strays aren't paired across the whole inflated space.
+    dist_cap = max(
+        _RELOCATION_DIST_CAP_FACTOR
+        * math.hypot(
+            _robust_span([float(z.centroid[0]) for z in zones]),
+            _robust_span([float(z.centroid[1]) for z in zones]),
+        ),
+        _RELOCATION_DIST_CAP_FLOOR,
+    )
 
     candidates: list[tuple[float, float, "DrawingChangeZone", "DrawingChangeZone"]] = []
     for d_zone in deleted:
@@ -492,6 +547,10 @@ def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
                 float(a_zone.centroid[0]) - float(d_zone.centroid[0]),
                 float(a_zone.centroid[1]) - float(d_zone.centroid[1]),
             )
+            # Reject implausibly far "moves" (runaway-stray false links). A real
+            # relocation stays within the content; a 34.8 km pair is a stray.
+            if dist > dist_cap:
+                continue
             candidates.append((size_diff, dist, d_zone, a_zone))
 
     candidates.sort(key=lambda item: (item[0], item[1]))
@@ -508,22 +567,24 @@ def link_relocation_zone_pairs(zones: Sequence["DrawingChangeZone"]) -> int:
             float(a_zone.centroid[0]) - float(d_zone.centroid[0]),
             float(a_zone.centroid[1]) - float(d_zone.centroid[1]),
         ]
-        d_zone.metadata.update({
-            "relocation_pair_id": pair_id,
-            "relocation_role": "from",
-            "relocation_counterpart": a_zone.zone_id,
-            "relocation_counterpart_bbox": [float(v) for v in a_zone.bbox],
-            "relocation_offset": offset,
-        })
-        a_zone.metadata.update({
-            "relocation_pair_id": pair_id,
-            "relocation_role": "to",
-            "relocation_counterpart": d_zone.zone_id,
-            "relocation_counterpart_bbox": [
-                float(v) for v in (d_zone.old_bbox or d_zone.bbox)
-            ],
-            "relocation_offset": offset,
-        })
+        d_zone.metadata.update(
+            {
+                "relocation_pair_id": pair_id,
+                "relocation_role": "from",
+                "relocation_counterpart": a_zone.zone_id,
+                "relocation_counterpart_bbox": [float(v) for v in a_zone.bbox],
+                "relocation_offset": offset,
+            }
+        )
+        a_zone.metadata.update(
+            {
+                "relocation_pair_id": pair_id,
+                "relocation_role": "to",
+                "relocation_counterpart": d_zone.zone_id,
+                "relocation_counterpart_bbox": [float(v) for v in (d_zone.old_bbox or d_zone.bbox)],
+                "relocation_offset": offset,
+            }
+        )
     return pairs
 
 
@@ -553,10 +614,7 @@ def _zone_input_from_result(
     truncated = bool((result.metadata or {}).get("truncated_changes"))
     warning = ""
     if truncated:
-        warning = (
-            "change zones use retained detailed change records; "
-            "stream metadata is missing"
-        )
+        warning = "change zones use retained detailed change records; " "stream metadata is missing"
     return _ZoneInput(
         envelopes=envelopes,
         source="memory",
@@ -605,7 +663,9 @@ def _zone_input_from_stream(
                 change = _change_record_from_stream_record(record)
                 if _change_ignored(change, zone_options):
                     continue
-                if zone_options.suppress_block_definition_zones and _is_block_definition_change(change):
+                if zone_options.suppress_block_definition_zones and _is_block_definition_change(
+                    change
+                ):
                     block_definition_skipped += 1
                     continue
                 envelopes.append(
@@ -734,14 +794,18 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
     new_data = getattr(change, "new_data", None)
     if new_data is None:
         new_data = getattr(change, "new_value", None)
-    location = _location_point(getattr(change, "location", None)) or _point_from_metadata(metadata, "x", "y")
+    location = _location_point(getattr(change, "location", None)) or _point_from_metadata(
+        metadata, "x", "y"
+    )
     old_location = _location_point(getattr(change, "old_location", None)) or _point_from_metadata(
         metadata,
         "old_x",
         "old_y",
     )
     metadata_bbox = _bbox_from_metadata(metadata, ChangeZoneOptions())
-    bbox = metadata_bbox or _bbox_for_stream_change(change_type, entity_type, old_data, new_data, location)
+    bbox = metadata_bbox or _bbox_for_stream_change(
+        change_type, entity_type, old_data, new_data, location
+    )
     old_bbox = _bbox_for_stream_old_change(entity_type, old_data, old_location)
     if old_bbox is None and metadata_bbox is not None and change_type in {"deleted", "modified"}:
         old_bbox = metadata_bbox
@@ -800,7 +864,8 @@ def change_to_stream_record(change: Any, *, pair_id: str = "", index: int = 0) -
         "geometry": geometry,
         "location": list(location) if location else None,
         "old_location": list(old_location) if old_location else None,
-        "change_category": getattr(change, "change_category", None) or metadata.get("change_category"),
+        "change_category": getattr(change, "change_category", None)
+        or metadata.get("change_category"),
         "change_detail": getattr(change, "change_detail", None) or metadata.get("change_detail"),
         "entity_space": entity_space or None,
         "page": metadata.get("page"),
@@ -1115,8 +1180,12 @@ def export_change_artifacts(
         result_by_pair[pair_id] = result
         artifact.zone_count = len(zones)
         artifact.zone_input_source = result.metadata.get("change_zone_input_source", "memory")
-        artifact.zone_input_count = int(result.metadata.get("change_zone_input_count", len(result.changes)) or 0)
-        artifact.zone_coverage_complete = bool(result.metadata.get("change_zone_coverage_complete", True))
+        artifact.zone_input_count = int(
+            result.metadata.get("change_zone_input_count", len(result.changes)) or 0
+        )
+        artifact.zone_coverage_complete = bool(
+            result.metadata.get("change_zone_coverage_complete", True)
+        )
         if (result.metadata or {}).get("truncated_changes"):
             if result.metadata.get("change_zone_input_source") == "stream":
                 warning = (
@@ -1164,7 +1233,9 @@ def export_change_artifacts(
                     export_before_marks=export_before_marks,
                 )
     for artifact in artifacts:
-        artifact.cloud_region_count = int(artifact.cloud_region_count or len(regions_by_pair.get(artifact.pair_id, [])))
+        artifact.cloud_region_count = int(
+            artifact.cloud_region_count or len(regions_by_pair.get(artifact.pair_id, []))
+        )
         artifact.cloud_omitted_zone_count = int(
             artifact.cloud_omitted_zone_count or omitted_by_pair.get(artifact.pair_id, 0)
         )
@@ -1259,7 +1330,9 @@ def export_executive_review_from_artifacts(
             f"manifest raw_change_count={raw_change_count} differs from change_zones.csv sum={computed_raw}"
         )
     if zone_count != len(zone_rows):
-        warnings.append(f"manifest zone_count={zone_count} differs from change_zones.csv rows={len(zone_rows)}")
+        warnings.append(
+            f"manifest zone_count={zone_count} differs from change_zones.csv rows={len(zone_rows)}"
+        )
 
     paths = {
         "executive_review_html": str(artifact_dir / "executive_review.html"),
@@ -1301,7 +1374,9 @@ def _build_cloud_regions_by_pair(
 ) -> tuple[dict[str, list[CloudMarkRegion]], list[tuple[DrawingChangeZone, str]]]:
     mode = (options.export_mode or "selected").lower()
     if mode == "off":
-        return {}, [(zone, "cloud_export_off") for zones in zones_by_pair.values() for zone in zones]
+        return {}, [
+            (zone, "cloud_export_off") for zones in zones_by_pair.values() for zone in zones
+        ]
 
     selected_keys = {key.strip() for key in options.selected_zone_keys if key.strip()}
     regions_by_pair: dict[str, list[CloudMarkRegion]] = {}
@@ -1334,9 +1409,7 @@ def _build_cloud_regions_by_pair(
 
     if mode == "selected" and options.max_regions_total > 0:
         all_regions = [
-            (pair_id, region)
-            for pair_id, regions in regions_by_pair.items()
-            for region in regions
+            (pair_id, region) for pair_id, regions in regions_by_pair.items() for region in regions
         ]
         all_regions = sorted(all_regions, key=lambda item: _cloud_region_sort_key(item[1]))
         keep_pairs = all_regions[: int(options.max_regions_total)]
@@ -1445,7 +1518,9 @@ def _build_cloud_region(
         region_id=region_id,
         pair_id=pair_id,
         pair_uuid=pair_id,
-        display_label=(zones[0].display_label if zones else "") or (zones[0].drawing_number if zones else "") or pair_id,
+        display_label=(zones[0].display_label if zones else "")
+        or (zones[0].drawing_number if zones else "")
+        or pair_id,
         drawing_number=zones[0].drawing_number if zones else "",
         change_type=change_type,
         severity=severity,
@@ -1600,9 +1675,8 @@ def _split_mega_group(
     bbox = _union_bboxes([item.bbox for item in group])
     span_x = abs(float(bbox[2]) - float(bbox[0]))
     span_y = abs(float(bbox[3]) - float(bbox[1]))
-    needs_split = (
-        (max_raw > 0 and len(group) > max_raw)
-        or (max_span > 0 and max(span_x, span_y) > max_span and len(group) > 1)
+    needs_split = (max_raw > 0 and len(group) > max_raw) or (
+        max_span > 0 and max(span_x, span_y) > max_span and len(group) > 1
     )
     if not needs_split:
         return [(list(group), {})]
@@ -1705,10 +1779,8 @@ def _compute_zone_noise_score(
     # 적용하여 customized 호출자의 단일 entity zone 이 모두 폐기됨.
     if options.structural_layer_patterns is None or options.structural_layer_patterns:
         from .structural_layer_patterns import is_structural_layer  # local import
-        layers = [
-            str((e.change.metadata or {}).get("layer") or "")
-            for e in envelopes
-        ]
+
+        layers = [str((e.change.metadata or {}).get("layer") or "") for e in envelopes]
         is_structural = any(is_structural_layer(layer) for layer in layers)
         if not is_structural:
             score += 0.2
@@ -1730,14 +1802,15 @@ def _build_zone(
     old_boxes = [item.old_bbox for item in envelopes if item.old_bbox is not None]
     old_bbox = _union_bboxes(old_boxes) if old_boxes else None
     type_counts = Counter(_change_type_value(item.change.change_type) for item in envelopes)
-    layer_counts = Counter(str((item.change.metadata or {}).get("layer") or "") for item in envelopes)
+    layer_counts = Counter(
+        str((item.change.metadata or {}).get("layer") or "") for item in envelopes
+    )
     entity_counts = Counter(
         str((item.change.metadata or {}).get("entity_type") or "") for item in envelopes
     )
 
     has_moved_origin = any(
-        _change_has_moved_origin(item.change, item.bbox, item.old_bbox)
-        for item in envelopes
+        _change_has_moved_origin(item.change, item.bbox, item.old_bbox) for item in envelopes
     )
     change_type = _zone_change_type(type_counts, has_moved_origin)
     added = int(type_counts.get("added", 0))
@@ -1755,7 +1828,9 @@ def _build_zone(
 
     bbox = _inflate_bbox(_ensure_min_bbox(bbox, options.min_marker_size), options.bbox_margin)
     if old_bbox:
-        old_bbox = _inflate_bbox(_ensure_min_bbox(old_bbox, options.min_marker_size), options.bbox_margin)
+        old_bbox = _inflate_bbox(
+            _ensure_min_bbox(old_bbox, options.min_marker_size), options.bbox_margin
+        )
 
     return DrawingChangeZone(
         zone_id=zone_id,
@@ -1776,7 +1851,8 @@ def _build_zone(
         layers=tuple(sorted(layer for layer in layer_counts if layer)),
         entity_types=tuple(sorted(entity for entity in entity_counts if entity)),
         representative_change_keys=tuple(
-            item.change.key for item in sorted(envelopes, key=lambda item: item.index)[
+            item.change.key
+            for item in sorted(envelopes, key=lambda item: item.index)[
                 : options.max_representative_changes
             ]
         ),
@@ -1801,9 +1877,7 @@ def _build_zone(
     )
 
 
-def _geometry_points_from_entity_data(
-    entity_type: str, data: Any
-) -> Optional[dict[str, Any]]:
+def _geometry_points_from_entity_data(entity_type: str, data: Any) -> Optional[dict[str, Any]]:
     """Return ``{"type", "points"}`` (CAD-world mm) for a single LINE / polyline
     entity, else None. Shared by the memory path and the change-zone stream (B3).
     """
@@ -1882,9 +1956,7 @@ def _zone_text_evidence(envelopes: Sequence[_ChangeEnvelope]) -> dict[str, Any]:
             out["new_text"] = new_values[0]
             out["new_content"] = new_values[0]
         pair_summaries = [
-            f"{old or '(none)'} -> {new or '(none)'}"
-            for old, new in pairs[:3]
-            if old != new
+            f"{old or '(none)'} -> {new or '(none)'}" for old, new in pairs[:3] if old != new
         ]
         if pair_summaries:
             out["reason_text"] = " | ".join(pair_summaries)
@@ -1938,9 +2010,8 @@ def _change_ignored(change: ChangeRecord, options: ChangeZoneOptions) -> bool:
         # ``*REV*`` 와일드카드가 ``REVERSE`` / ``OVERRIDE`` / ``REVENUE``
         # 같은 layer 까지 잡아 silent drop 하던 문제 해결.
         try:
-            from src.services.comparison.title_block_layer_patterns import (
-                is_title_block_layer,
-            )
+            from src.services.comparison.title_block_layer_patterns import is_title_block_layer
+
             if is_title_block_layer(layer):
                 return True
         except Exception:
@@ -1969,7 +2040,12 @@ def _bbox_from_entity_data(
         end = _point(data.get("end"))
         if start and end:
             return _ensure_min_bbox(
-                (min(start[0], end[0]), min(start[1], end[1]), max(start[0], end[0]), max(start[1], end[1])),
+                (
+                    min(start[0], end[0]),
+                    min(start[1], end[1]),
+                    max(start[0], end[0]),
+                    max(start[1], end[1]),
+                ),
                 options.min_marker_size,
             )
     if entity_type in {"CIRCLE", "ARC"}:
@@ -2019,7 +2095,9 @@ def _bbox_from_metadata(metadata: dict[str, Any], options: ChangeZoneOptions) ->
         h = float(metadata.get("h") or options.min_marker_size)
         if _metadata_uses_top_left_bbox(metadata):
             return _ensure_min_bbox((x, y, x + w, y + h), options.min_marker_size)
-        return _ensure_min_bbox((x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0), options.min_marker_size)
+        return _ensure_min_bbox(
+            (x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0), options.min_marker_size
+        )
     except Exception:
         return None
 
@@ -2352,11 +2430,7 @@ _RELOCATION_METADATA_KEYS = (
 def _relocation_payload(zone: "DrawingChangeZone") -> dict[str, Any]:
     """Compact relocation-link dict from zone metadata (for CSV/overlay)."""
 
-    return {
-        key: zone.metadata[key]
-        for key in _RELOCATION_METADATA_KEYS
-        if key in zone.metadata
-    }
+    return {key: zone.metadata[key] for key in _RELOCATION_METADATA_KEYS if key in zone.metadata}
 
 
 def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> None:
@@ -2470,9 +2544,7 @@ def _write_change_zones_csv(path: Path, zones: Sequence[DrawingChangeZone]) -> N
                     "zone_coverage_complete": zone.metadata.get("zone_coverage_complete", ""),
                     "reasons": " | ".join(zone.reasons),
                     "geometry": (
-                        json.dumps(zone.geometry, separators=(",", ":"))
-                        if zone.geometry
-                        else ""
+                        json.dumps(zone.geometry, separators=(",", ":")) if zone.geometry else ""
                     ),
                     "relocation": (
                         json.dumps(_relocation_payload(zone), separators=(",", ":"))
@@ -2740,7 +2812,9 @@ def _summarize_executive_drawings(
         layer_counters[key].update(_split_layers(row.get("layers")))
 
     for key, summary in summaries.items():
-        summary["top_layers"] = " | ".join(layer for layer, _count in layer_counters[key].most_common(4))
+        summary["top_layers"] = " | ".join(
+            layer for layer, _count in layer_counters[key].most_common(4)
+        )
     return sorted(
         summaries.values(),
         key=lambda item: (
@@ -2822,7 +2896,9 @@ def _summarize_repeated_layer_patterns(zone_rows: Sequence[dict[str, Any]]) -> l
             layer_counters[label].update(matched_layers)
     for label, summary in summaries.items():
         summary["affected_drawing_count"] = len(drawings_by_pattern[label])
-        summary["top_layers"] = " | ".join(layer for layer, _count in layer_counters[label].most_common(5))
+        summary["top_layers"] = " | ".join(
+            layer for layer, _count in layer_counters[label].most_common(5)
+        )
     return sorted(
         summaries.values(),
         key=lambda item: (-_int_cell(item.get("raw_change_count")), str(item.get("pattern") or "")),
@@ -3186,6 +3262,8 @@ def _relative_link(index_path: Path, target: Optional[str]) -> str:
     if not target:
         return ""
     try:
-        return str(Path(target).resolve().relative_to(index_path.parent.resolve())).replace("\\", "/")
+        return str(Path(target).resolve().relative_to(index_path.parent.resolve())).replace(
+            "\\", "/"
+        )
     except Exception:
         return str(target).replace("\\", "/")

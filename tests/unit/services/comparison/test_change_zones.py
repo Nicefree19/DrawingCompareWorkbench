@@ -18,7 +18,6 @@ from src.services.comparison.change_zones import (
     export_executive_review_from_artifacts,
     write_change_zone_stream,
 )
-from src.services.comparison.review_dashboard import export_review_dashboard
 from src.services.comparison.drawing_batch import (
     BatchCompareItemResult,
     BatchCompareSummary,
@@ -28,6 +27,7 @@ from src.services.comparison.drawing_batch import (
     MatchStatus,
     parse_filename_identity,
 )
+from src.services.comparison.review_dashboard import export_review_dashboard
 
 
 def _result(changes: list[ChangeRecord]) -> ComparisonResult:
@@ -188,10 +188,7 @@ def test_change_zone_csv_roundtrips_geometry_to_overlay(tmp_path: Path) -> None:
     # doesn't revert to a bbox box after the initial preview).
     import csv as _csv
 
-    from src.services.comparison.change_zones import (
-        DrawingChangeZone,
-        _write_change_zones_csv,
-    )
+    from src.services.comparison.change_zones import DrawingChangeZone, _write_change_zones_csv
     from src.services.comparison.viewer_package import _overlay_from_zone_row
 
     geom = {"type": "LINE", "points": [[-45547.0, -109829.0], [77894.0, -60599.0]]}
@@ -710,7 +707,9 @@ def test_selected_cloud_export_caps_regions_and_records_omitted_zones(tmp_path: 
     assert package.artifacts[0].cloud_region_count == 2
     assert package.artifacts[0].cloud_omitted_zone_count == 3
     assert Path(package.artifacts[0].after_marked_dxf).exists()
-    with open(package.output_paths["cloud_omitted_zones_csv"], "r", encoding="utf-8-sig", newline="") as handle:
+    with open(
+        package.output_paths["cloud_omitted_zones_csv"], "r", encoding="utf-8-sig", newline=""
+    ) as handle:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 3
     assert {row["omitted_reason"] for row in rows} == {"max_region_cap"}
@@ -855,20 +854,32 @@ def test_executive_review_is_generated_from_existing_artifacts(tmp_path: Path) -
     assert "원시 변경" in html_text
     assert "도면 변경 검토 요약" in html_text
     assert "S21-0001" in html_text
-    updated_manifest = json.loads((artifact_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
-    assert updated_manifest["output_paths"]["executive_review_html"].endswith("executive_review.html")
-    assert updated_manifest["output_paths"]["review_dashboard_json"].endswith("review_dashboard.json")
+    updated_manifest = json.loads(
+        (artifact_dir / "artifact_manifest.json").read_text(encoding="utf-8")
+    )
+    assert updated_manifest["output_paths"]["executive_review_html"].endswith(
+        "executive_review.html"
+    )
+    assert updated_manifest["output_paths"]["review_dashboard_json"].endswith(
+        "review_dashboard.json"
+    )
 
 
-def test_stream_backed_zones_use_all_records_when_memory_details_are_truncated(tmp_path: Path) -> None:
+def test_stream_backed_zones_use_all_records_when_memory_details_are_truncated(
+    tmp_path: Path,
+) -> None:
     changes = [
-        _line_change(f"line_{index}", ChangeType.ADDED, (index * 1000.0, 0), (index * 1000.0 + 100, 0))
+        _line_change(
+            f"line_{index}", ChangeType.ADDED, (index * 1000.0, 0), (index * 1000.0 + 100, 0)
+        )
         for index in range(5)
     ]
     result = _result(changes[:2])
     result.metadata["change_counts"] = {"added": 5, "deleted": 0, "modified": 0}
     result.metadata["truncated_changes"] = True
-    result.metadata.update(write_change_zone_stream(changes, tmp_path / "zones.jsonl", pair_id="S21-9001"))
+    result.metadata.update(
+        write_change_zone_stream(changes, tmp_path / "zones.jsonl", pair_id="S21-9001")
+    )
 
     zones = build_change_zones(
         result,
@@ -897,7 +908,12 @@ def test_canonical_dict_bboxes_preserve_side_specific_modified_zone() -> None:
             "entity_type": "LINE",
             "bbox": {"min_x": 1000.0, "min_y": 2000.0, "max_x": 1100.5, "max_y": 2000.0},
             "old_bbox": {"min_x": 1000.0, "min_y": 2000.0, "max_x": 1100.0, "max_y": 2000.0},
-            "new_bbox": {"min_x": 151000.5, "min_y": -88000.0, "max_x": 151100.5, "max_y": -88000.0},
+            "new_bbox": {
+                "min_x": 151000.5,
+                "min_y": -88000.0,
+                "max_x": 151100.5,
+                "max_y": -88000.0,
+            },
             "detection_source": "canonical-drawing-compare",
             "registered_reorigin": True,
         },
@@ -938,7 +954,9 @@ def test_stream_text_evidence_reaches_review_queue_summary(tmp_path: Path) -> No
         },
     )
     result = _result([change])
-    result.metadata.update(write_change_zone_stream([change], tmp_path / "zones.jsonl", pair_id="S21-9001"))
+    result.metadata.update(
+        write_change_zone_stream([change], tmp_path / "zones.jsonl", pair_id="S21-9001")
+    )
 
     package = export_change_artifacts(
         _summary_for_result(tmp_path, result),
@@ -1114,6 +1132,36 @@ def test_relocation_ambiguity_resolved_by_nearest_centroid() -> None:
     assert "relocation_pair_id" not in far.metadata
 
 
+def test_relocation_distance_cap_rejects_runaway_stray_pair() -> None:
+    """Rebar AC1024 robustness (rebar_36km_stray_entity_rootcause): a stray entity
+    (block-local ±34.9M coord, inserted on one side only) was 'relocation'-linked
+    to a same-size add 34.8 KM away. With in-content zones establishing the robust
+    extent, a pair beyond it is rejected — a real move can't exceed the drawing."""
+    from src.services.comparison.change_zones import link_relocation_zone_pairs
+
+    # 10 in-content zones (modified → not link candidates) fix the robust extent
+    # at ~a few-k mm around x~600k, so the single 35M stray is a far outlier.
+    zones = [
+        _reloc_zone(
+            f"M{i}", "modified", (600000.0 + i * 200, 0.0, 600400.0 + i * 200, 200.0), count=99
+        )
+        for i in range(10)
+    ]
+    # Legit near move within content (~5 m) — must link.
+    d_near = _reloc_zone("D-near", "deleted", (600000.0, 0.0, 600160.0, 160.0), count=7)
+    a_near = _reloc_zone("A-near", "added", (605000.0, 0.0, 605160.0, 160.0), count=7)
+    # Runaway stray del at 35 M + same-size add in content — must NOT link.
+    d_stray = _reloc_zone("D-stray", "deleted", (35000000.0, 0.0, 35000160.0, 160.0), count=8)
+    a_other = _reloc_zone("A-other", "added", (601000.0, 0.0, 601160.0, 160.0), count=8)
+
+    linked = link_relocation_zone_pairs([*zones, d_near, a_near, d_stray, a_other])
+
+    assert linked == 1  # only the near, in-content pair
+    assert d_near.metadata.get("relocation_counterpart") == "A-near"
+    assert "relocation_pair_id" not in d_stray.metadata  # 34.8 km stray rejected
+    assert "relocation_pair_id" not in a_other.metadata
+
+
 def test_build_change_zones_links_relocation_and_counts_it() -> None:
     # End-to-end through build_change_zones: two far-apart same-size groups
     # (deleted vs added) get linked and the result metadata records the count.
@@ -1173,8 +1221,6 @@ def test_location_point_rejects_prose_strings() -> None:
 
     assert _location_point("page 1") is None
     assert _location_point("page 1: (123, 456)") is None
-    assert _location_point("(516460.35, -107284.12)") == pytest.approx(
-        (516460.35, -107284.12)
-    )
+    assert _location_point("(516460.35, -107284.12)") == pytest.approx((516460.35, -107284.12))
     assert _location_point("500.0,400.0") == pytest.approx((500.0, 400.0))
     assert _location_point((10.0, 20.0)) == (10.0, 20.0)
