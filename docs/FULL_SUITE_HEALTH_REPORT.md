@@ -10,14 +10,14 @@ PR #68 merges.
 | Evidence | Value |
 |---|---|
 | Workflow | `.github/workflows/full-suite-health.yml` (`workflow_dispatch`) |
-| GitHub run | `28908447851` |
-| URL | `https://github.com/Nicefree19/DrawingCompareWorkbench/actions/runs/28908447851` |
+| GitHub run (Full Suite Health) | `28908912548` — conclusion `success`, exit `0` |
+| URL | `https://github.com/Nicefree19/DrawingCompareWorkbench/actions/runs/28908912548` |
 | Branch / PR | `fix/full-suite-remediation-and-p5-research` / #68 |
-| Target headSha | `5653b6ce3b65aab1c5f7bdece52519e49025bf46` |
-| Run window | Created `2026-07-08T00:29:15Z`; completed `2026-07-08T00:34:47Z` |
-| Conclusion / exit | GitHub conclusion `success`; exit `0` |
-| Local JUnit artifact | `build\reports\full-suite-health_28908447851\full-suite-junit.xml` |
+| Target headSha | `2b10eaadce6d5ce26570243d403d9565078b4865` (branch tip, post-formatting) |
+| Local JUnit artifact | `build\reports\full-suite-health_28908912548\full-suite-junit.xml` |
 | Counts | `4,227` JUnit cases: `4,183 passed / 0 failed / 0 errors / 44 skipped` |
+| CAD Format Regression (PR gate) | run `28908914295` on the same commit — `success` (black+isort lint of changed `.py` + CAD importer/normalizer/writer/diff subset) |
+| Prior full-suite green | run `28908447851` on `5653b6c` (pre-formatting) — also `success`, identical counts |
 
 How the 11 failures of run `28323513823` were closed:
 
@@ -29,13 +29,15 @@ How the 11 failures of run `28323513823` were closed:
 | `test_korean_workbench_ux` stale wording (2) | Assertions realigned to the post-extraction module / README contract. Test-only. | `4f02a70` |
 | `test_01_dwg_converter_path` env (1) | `skipUnless(_find_installed_oda_converter())` — SKIPS when the ODA binary is absent (GitHub runner), still RUNS+asserts where installed. | `5653b6c` |
 
-Intermediate proof: run `28907534076` (HEAD `1a2fabd`, before the skip fix)
-already reduced the set to a single failure (`4,183 passed / 1 failed`),
-confirming the schema + drift repairs landed; run `28908447851` then closed the
-last one to `0 failed`.
+Progression: run `28907534076` (HEAD `1a2fabd`, before the skip fix) already
+reduced the 11 failures to a single one (`4,183 passed / 1 failed`), confirming
+the schema + drift repairs landed; run `28908447851` (`5653b6c`) closed the last
+one to `0 failed`; and after black+isort formatting (`2b10eaa`, to satisfy the
+CAD Format Regression lint gate) the final run `28908912548` re-confirmed
+`0 failed` with the CAD Format Regression gate also green on the same commit.
 
-Product behavior unchanged: every fix is a test / schema / gitignore change; no
-`src/` logic was modified.
+Product behavior unchanged: every change is a test / schema / gitignore /
+formatting change; no `src/` logic was modified.
 
 ## Current HEAD Refresh - 2026-06-28
 
