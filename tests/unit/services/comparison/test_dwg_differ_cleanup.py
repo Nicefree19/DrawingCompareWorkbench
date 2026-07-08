@@ -43,6 +43,13 @@ from src.services.comparison.dwg_converter import ODAConverterNotFoundError
 from src.services.comparison.dwg_differ import DwgDiffer
 
 
+def _same_existing_path(left: Path, right: Path) -> bool:
+    try:
+        return left.samefile(right)
+    except OSError:
+        return left.resolve() == right.resolve()
+
+
 class TestDwgDifferCleanup:
     """DwgDiffer 리소스 정리 테스트"""
 
@@ -136,7 +143,7 @@ class TestDwgDifferCleanup:
         second = differ._ensure_dxf(mock_dwg_file)
 
         assert first == second
-        assert first.parent == cache_dir
+        assert _same_existing_path(first.parent, cache_dir)
         assert first.exists()
         assert converter.convert.call_count == 1
 
@@ -157,7 +164,7 @@ class TestDwgDifferCleanup:
 
         resolved = differ._ensure_dxf(source)
 
-        assert resolved == cached
+        assert _same_existing_path(resolved, cached)
         assert differ._dxf_cache_resolution_notes
         assert "using compatible same-stem cache" in differ._dxf_cache_resolution_notes[0]
 

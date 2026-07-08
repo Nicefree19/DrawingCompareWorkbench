@@ -101,6 +101,7 @@ smoke_v*_playwright.js
 !docs/collab/native_cad_version_matrix.json
 !docs/schemas/
 !docs/schemas/structural-drawing-evidence-v0.1.schema.json
+!docs/schemas/structural-review-draft-v0.1.schema.json
 !docs/structural_evidence_fixture_matrix_v0_1.json
 !tests/data/comparison/cad_samples/golden-results.json
 !tests/data/comparison/real_world/*.json
@@ -151,6 +152,7 @@ ai_models/*.pkl
 # 예외: docs/ 디렉토리의 중요 계획/가이드/분석 문서는 커밋 허용
 !docs/*_PLAN.md
 !docs/collab/DWG_NATIVE_REMAINING_EXECUTION_PLAN.md
+!docs/collab/REMAINING_READINESS_CLOSURE_PLAN.md
 !docs/*_GUIDE.md
 !docs/*_ANALYSIS.md
 !docs/*_REPORT.md

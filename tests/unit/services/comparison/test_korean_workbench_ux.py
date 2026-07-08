@@ -8,6 +8,9 @@ from pathlib import Path
 
 SOURCE = Path("src/gui/drawing_compare_workbench.py").read_text(encoding="utf-8")
 SUBPROCESS_SOURCE = Path("src/services/comparison/workbench_subprocess.py").read_text(encoding="utf-8")
+OVERLAY_MODEL_SOURCE = Path("src/gui/workbench_overlay_model.py").read_text(encoding="utf-8")
+DWG_DIFFER_SOURCE = Path("src/services/comparison/dwg_differ.py").read_text(encoding="utf-8")
+README_SOURCE = Path("README.md").read_text(encoding="utf-8")
 
 
 def test_korean_workbench_primary_labels_are_korean() -> None:
@@ -206,7 +209,8 @@ def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:
     light_source = Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
 
     assert "GPU_VIEWER_MAX_VISIBLE_OVERLAYS = 120" in SOURCE
-    assert "GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD = 300" in SOURCE
+    assert "GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD" in SOURCE
+    assert "GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD = 300" in OVERLAY_MODEL_SOURCE
     assert "should_use_focus_only_overlay_mode(len(self._last_overlays))" in SOURCE
     assert 'overlay_display_mode="focus_only"' in SOURCE
     assert "MAX_QML_CHANGE_CLOUD_OVERLAYS = 120" in light_source
@@ -225,8 +229,12 @@ def test_gui_compare_requests_at_least_one_static_preview() -> None:
 
 
 def test_workbench_backend_status_describes_native_dwg_scope_without_oda_requirement() -> None:
-    assert "DWG native import limited to" in SOURCE
-    assert "requires an approved adapter" in SOURCE
+    assert 'dwg_supported_versions = ["AC1015"]' in DWG_DIFFER_SOURCE
+    assert '"dwg_support_scope": "limited-read-only-adapter"' in DWG_DIFFER_SOURCE
+    assert '"legacy_oda_fallback": "disabled_by_default"' in DWG_DIFFER_SOURCE
+    assert "Default native DWG import remains limited to the conservative `AC1015` path." in README_SOURCE
+    assert "configured converter path before making customer-facing claims" in README_SOURCE
+    assert "contract-blocked for customer-facing" in README_SOURCE
     assert "ODA Converter not found; legacy DWG conversion is unavailable." not in SOURCE
 
 

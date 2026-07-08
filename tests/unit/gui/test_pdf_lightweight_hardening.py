@@ -483,6 +483,7 @@ class TestA4PdfPathRaceGuard:
         viewport._pdf_rerender_timer = MagicMock()
         viewport._loaded_pack_path = None
         viewport._primitive_count = 0
+        viewport._color_mode = "light"
 
         result = LightweightDrawingViewport.load_scene_pack(
             viewport,
@@ -521,6 +522,7 @@ class TestA4PdfPathRaceGuard:
         viewport._pdf_rerender_timer = MagicMock()
         viewport._loaded_pack_path = None
         viewport._primitive_count = 0
+        viewport._color_mode = "light"
 
         result = LightweightDrawingViewport.load_scene_pack(viewport, ref)
 
