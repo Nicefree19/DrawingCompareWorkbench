@@ -32,15 +32,21 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-
 from src.services.comparison.base import ComparisonResult
 from src.services.comparison.comparison_config import (
     ComparisonConfig,
-    SensitivityConfig,
     LayerPriorityConfig,
+    SensitivityConfig,
 )
 from src.services.comparison.dwg_converter import ODAConverterNotFoundError
 from src.services.comparison.dwg_differ import DwgDiffer
+
+
+def _same_existing_path(left: Path, right: Path) -> bool:
+    try:
+        return left.samefile(right)
+    except OSError:
+        return left.resolve() == right.resolve()
 
 
 class TestDwgDifferCleanup:
@@ -136,7 +142,7 @@ class TestDwgDifferCleanup:
         second = differ._ensure_dxf(mock_dwg_file)
 
         assert first == second
-        assert first.parent == cache_dir
+        assert _same_existing_path(first.parent, cache_dir)
         assert first.exists()
         assert converter.convert.call_count == 1
 
@@ -157,7 +163,7 @@ class TestDwgDifferCleanup:
 
         resolved = differ._ensure_dxf(source)
 
-        assert resolved == cached
+        assert _same_existing_path(resolved, cached)
         assert differ._dxf_cache_resolution_notes
         assert "using compatible same-stem cache" in differ._dxf_cache_resolution_notes[0]
 
@@ -235,9 +241,7 @@ class TestDwgDifferCleanup:
 
         with patch.object(differ, "_cleanup_temp") as mock_cleanup:
             try:
-                differ.compare_and_mark(
-                    mock_dxf_file, mock_dxf_file, temp_dir / "output.dxf"
-                )
+                differ.compare_and_mark(mock_dxf_file, mock_dxf_file, temp_dir / "output.dxf")
             except Exception:
                 pass
 
@@ -254,9 +258,7 @@ class TestDwgDifferCleanup:
 
         with patch.object(differ, "_cleanup_temp") as mock_cleanup:
             with pytest.raises(Exception, match="DXF read error"):
-                differ.compare_and_mark(
-                    mock_dxf_file, mock_dxf_file, temp_dir / "output.dxf"
-                )
+                differ.compare_and_mark(mock_dxf_file, mock_dxf_file, temp_dir / "output.dxf")
 
             # 예외 발생 후에도 정리 함수가 호출되었는지 확인
             mock_cleanup.assert_called_once()
@@ -297,9 +299,7 @@ class TestDwgDifferCleanup:
 
         with patch.object(differ, "_cleanup_temp") as mock_cleanup:
             with pytest.raises(Exception, match="DXF read error"):
-                differ.export_excel(
-                    mock_dxf_file, mock_dxf_file, temp_dir / "report.xlsx"
-                )
+                differ.export_excel(mock_dxf_file, mock_dxf_file, temp_dir / "report.xlsx")
 
             # 예외 발생 후에도 정리 함수가 호출되었는지 확인
             mock_cleanup.assert_called_once()
@@ -630,8 +630,10 @@ class TestCompareWorkerComparisonConfigIntegration:
         backup = {
             name: sys.modules.get(name)
             for name in (
-                "PySide6", "PySide6.QtCore",
-                "PySide6.QtWidgets", "PySide6.QtGui",
+                "PySide6",
+                "PySide6.QtCore",
+                "PySide6.QtWidgets",
+                "PySide6.QtGui",
                 "src.gui.unified_load_module.workers.compare_worker",
             )
         }

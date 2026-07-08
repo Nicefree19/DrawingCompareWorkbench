@@ -13,24 +13,45 @@ Usage:
 import logging
 import os
 import shutil
-import unittest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 # 프로젝트 루트 경로 추가
 import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 from src.services.comparison.dwg_converter import DwgConverter
-from src.services.comparison.dxf_entity_extractor import DxfEntityExtractor
-from src.services.comparison.dxf_comparator import DxfComparator, DxfChangeType
 from src.services.comparison.dwg_differ import DwgDiffer
+from src.services.comparison.dxf_comparator import DxfChangeType, DxfComparator
+from src.services.comparison.dxf_entity_extractor import DxfEntityExtractor
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Sprint9Test")
+
+
+_ODA_CANDIDATE_PATHS = [
+    r"C:\Program Files\ODA\ODAFileConverter 26.10.0\ODAFileConverter.exe",
+    r"C:\Program Files\ODA\ODAFileConverter 25.12.0\ODAFileConverter.exe",
+    r"C:\Program Files\ODA\ODAFileConverter\ODAFileConverter.exe",
+]
+
+
+def _find_installed_oda_converter():
+    """Return the first ODA File Converter path present on this machine, else None.
+
+    test_01 asserts a real converter is available; when the ODA binary is not
+    installed (e.g. the GitHub windows-latest runner) the test SKIPS instead of
+    failing. Where the binary IS present (local dev) it still runs and asserts,
+    so real-binary coverage is preserved wherever it can actually run.
+    """
+    for candidate in _ODA_CANDIDATE_PATHS:
+        if Path(candidate).exists():
+            return candidate
+    return None
 
 
 class TestSprint9Core(unittest.TestCase):
@@ -40,18 +61,8 @@ class TestSprint9Core(unittest.TestCase):
         self.test_dir = Path("tests/temp_sprint9")
         self.test_dir.mkdir(parents=True, exist_ok=True)
 
-        # ODA 경로 강제 설정 (사용자 경로 기반)
-        self.oda_path = r"C:\Program Files\ODA\ODAFileConverter 26.10.0\ODAFileConverter.exe"
-        if not Path(self.oda_path).exists():
-            # Fallback check
-            check_paths = [
-                r"C:\Program Files\ODA\ODAFileConverter 25.12.0\ODAFileConverter.exe",
-                r"C:\Program Files\ODA\ODAFileConverter\ODAFileConverter.exe",
-            ]
-            for p in check_paths:
-                if Path(p).exists():
-                    self.oda_path = p
-                    break
+        # ODA 경로 설정: 설치돼 있으면 실제 경로, 없으면 기본 경로 문자열
+        self.oda_path = _find_installed_oda_converter() or _ODA_CANDIDATE_PATHS[0]
 
         # 가짜 DWG 파일 생성 (테스트용)
         self.dwg_path = self.test_dir / "test.dwg"
@@ -60,6 +71,10 @@ class TestSprint9Core(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
+    @unittest.skipUnless(
+        _find_installed_oda_converter() is not None,
+        "ODA File Converter binary not installed on this machine (real converter required)",
+    )
     def test_01_dwg_converter_path(self):
         """DwgConverter: ODA 경로 탐색 테스트"""
         logger.info("Testing DwgConverter path detection...")

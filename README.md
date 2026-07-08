@@ -50,11 +50,16 @@ To refresh local-only real-world DWG golden snapshots after intentional changes:
 python scripts\validate_real_world_dwg_samples.py --write-golden
 ```
 
-Native DWG import support is currently limited to `AC1015`. AC1024 and AC1032
-have diagnostic section-map reader shells only; they still do not import
-geometry. For newer real-world DWG files, run
-`python scripts\dwg_native_diagnostics.py` and see
-`docs/DWG_NATIVE_READER_EXTENSION_SPEC.md` before claiming expanded support.
+Default native DWG import remains limited to the conservative `AC1015` path.
+For newer real-world DWG files, use the converted-DXF fallback or an explicitly
+configured converter path before making customer-facing claims.
+
+An experimental, default-off AC1032 clean-room reader is available for internal
+opt-in validation through settings/env. It can decode geometry on covered
+fixtures and real samples, but it remains contract-blocked for customer-facing
+support claims. Run `python scripts\dwg_native_diagnostics.py` and review
+`docs/DWG_NATIVE_READER_EXTENSION_SPEC.md` before describing any expanded DWG
+capability.
 
 ## Policy
 

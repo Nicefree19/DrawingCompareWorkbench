@@ -44,7 +44,8 @@ If no issues are found, say so clearly and list any residual test gaps.
 다음 규칙은 명시적 ADR/사용자 합의로 해제되기 전까지 모든 에이전트(Claude, Codex 포함)에 적용된다.
 
 ### 1. `src/gui/drawing_compare_workbench.py` 줄 추가 동결
-- 이 파일은 현재 **13,198줄**짜리 monolith이며 V2(`DrawingCompareWorkbenchV2` 클래스)가 **유일한** 메인 윈도우다. (줄 수는 항상 `wc -l` 기준으로 적는다 — Python `len(splitlines())` 기반 측정은 다중 줄을 단일 리스트 원소로 넣으면 과소계상된다.)
+- 이 파일은 현재 **13,467줄**짜리 monolith이며 V2(`DrawingCompareWorkbenchV2` 클래스)가 **유일한** 메인 윈도우다. (줄 수는 항상 `wc -l`/물리 라인 기준으로 적고, `scripts/cad_policy_gate.py`의 `splitlines()` 측정 기준도 이 값과 맞춘다.)
+- 2026-06-28: **상태/동결 기준 동기화** — HEAD `a007945` 기준 `src/gui/drawing_compare_workbench.py`를 13,467줄로 재측정하고 `scripts/cad_policy_gate.py`의 `MONOLITH_LINE_CEILINGS`를 같은 값으로 낮춤. 이번 동기화는 monolith 파일을 수정하지 않고, 향후 증가를 즉시 차단하기 위한 기준 정렬이다.
 - 2026-06-17: **#6 순수 review-state 헬퍼 추출** — `review_status_ko`·`count_review_records`를 `workbench_review_state.py`로 이동, V2는 delegator(-15). stateful `_review_records_v2`/`_review_state_path_v2` + set-status UI 메서드는 안전망 미커버라 V2 잔류(stateful ReviewStateController는 보류). 안전망 `test_review_state_characterization.py`(5종)이 검증.
 - 2026-06-17: **#7-A 순수 render-decision 추출** — `is_usable_zone_render_source`+request-id 매처 2종을 `workbench_render_decisions.py`로, V2 delegator(net ~0, 줄수보다 격리/테스트성 가치). 렌더 콜백 본문(워커결과+위젯)은 추출 불가로 V2 잔류. 안전망 `test_render_decisions_characterization.py`(4종).
 - 2026-06-16: 죽은 V1(`DrawingCompareWorkbench`) 클래스와 V1 전용 `ScanWorker`를 제거(-1,021줄). 저장소 전역 검증에서 V1은 인스턴스화·import 0건이고 `ScanWorker`는 V1 span 내부에서만 참조됨이 확인됨. 근거: `docs/TECH_DEBT_AUDIT_REPORT.md` (MONO-1/2).

@@ -30,9 +30,9 @@ from src.services.comparison.safe_unicode import safe_unicode
 
 
 def test_lightweight_pdf_background_image_loads_asynchronously() -> None:
-    qml_source = Path(
-        "src/gui/assets/drawing_compare/LightweightDrawingViewport.qml"
-    ).read_text(encoding="utf-8")
+    qml_source = Path("src/gui/assets/drawing_compare/LightweightDrawingViewport.qml").read_text(
+        encoding="utf-8"
+    )
     image_start = qml_source.index("Image {\n        id: pdfBackground")
     image_end = qml_source.index("    // ---- VECTOR LAYER", image_start)
     image_body = qml_source[image_start:image_end]
@@ -86,9 +86,7 @@ class TestA1SafeUnicodeOnSourcePaths:
 class TestA2SilentExceptReplacement:
     """``_apply_lightweight_pdf_v2`` no longer swallows fidelity errors."""
 
-    def test_set_fidelity_state_exception_is_logged_and_falls_back(
-        self, caplog
-    ):
+    def test_set_fidelity_state_exception_is_logged_and_falls_back(self, caplog):
         # Build a mock viewport that raises on the first state but accepts
         # the fallback — mirrors the hardening branch.
         vp = MagicMock()
@@ -113,7 +111,8 @@ class TestA2SilentExceptReplacement:
             logger.warning(
                 "[PDF lightweight] %s-side set_fidelity_state(exact) "
                 "failed (%s); falling back to relative_only state",
-                side, exc,
+                side,
+                exc,
             )
             vp.set_fidelity_state("relative_only", status_text="PDF · 미리보기 사용 불가")
 
@@ -126,6 +125,7 @@ class TestA4PdfPathRaceGuard:
 
     def test_load_pdf_page_returns_false_when_file_missing(self):
         from src.gui.lightweight_viewport import LightweightDrawingViewport
+
         # Cannot instantiate the full viewport without QGuiApplication, so
         # construct a minimal stand-in. The function under test is the
         # public load_pdf_page contract: missing file → False, no crash.
@@ -143,6 +143,7 @@ class TestA4PdfPathRaceGuard:
 
     def test_load_pdf_page_returns_false_when_path_is_none(self):
         from src.gui.lightweight_viewport import LightweightDrawingViewport
+
         viewport = MagicMock(spec=LightweightDrawingViewport)
         viewport._world_bbox = None
         viewport._side = "before"
@@ -152,9 +153,7 @@ class TestA4PdfPathRaceGuard:
         root = MagicMock()
         viewport._quick.rootObject.return_value = root
 
-        result = LightweightDrawingViewport.load_pdf_page(
-            viewport, None, page_index=0
-        )
+        result = LightweightDrawingViewport.load_pdf_page(viewport, None, page_index=0)
         assert result is False
         assert viewport._pdf_render_state is None
         viewport._pdf_rerender_timer.stop.assert_called_once()
@@ -193,7 +192,9 @@ class TestA4PdfPathRaceGuard:
 
         with (
             patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
-            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch(
+                "src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer
+            ),
             patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
         ):
             result = LightweightDrawingViewport.load_pdf_page(
@@ -245,23 +246,31 @@ class TestA4PdfPathRaceGuard:
 
         with (
             patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
-            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch(
+                "src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer
+            ),
             patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
         ):
-            assert LightweightDrawingViewport.load_pdf_page(
-                viewport,
-                source_pdf,
-                page_index=0,
-                target_dpi=150.0,
-                cache_dir=tmp_path / "cache",
-            ) is True
-            assert LightweightDrawingViewport.load_pdf_page(
-                viewport,
-                source_pdf,
-                page_index=0,
-                target_dpi=150.0,
-                cache_dir=tmp_path / "cache",
-            ) is True
+            assert (
+                LightweightDrawingViewport.load_pdf_page(
+                    viewport,
+                    source_pdf,
+                    page_index=0,
+                    target_dpi=150.0,
+                    cache_dir=tmp_path / "cache",
+                )
+                is True
+            )
+            assert (
+                LightweightDrawingViewport.load_pdf_page(
+                    viewport,
+                    source_pdf,
+                    page_index=0,
+                    target_dpi=150.0,
+                    cache_dir=tmp_path / "cache",
+                )
+                is True
+            )
 
         assert fake_renderer.render_page.call_count == 1
         assert viewport._pdf_render_state["cache_hit"] is True
@@ -298,7 +307,9 @@ class TestA4PdfPathRaceGuard:
 
         with (
             patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
-            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch(
+                "src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer
+            ),
             patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
         ):
             result = LightweightDrawingViewport.load_pdf_page(
@@ -318,10 +329,7 @@ class TestA4PdfPathRaceGuard:
         assert list((tmp_path / "cache").glob("qtpdf_*_dpi100.png"))
 
     def test_prewarm_metadata_fast_path_skips_qtpdf_document_load(self, tmp_path):
-        from src.gui.lightweight_viewport import (
-            LightweightDrawingViewport,
-            prewarm_pdf_page_cache,
-        )
+        from src.gui.lightweight_viewport import LightweightDrawingViewport, prewarm_pdf_page_cache
 
         source_pdf = tmp_path / "large.pdf"
         source_pdf.write_bytes(b"%PDF-1.4\n%test\n")
@@ -346,7 +354,9 @@ class TestA4PdfPathRaceGuard:
 
         with (
             patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
-            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch(
+                "src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer
+            ),
             patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
         ):
             prewarm = prewarm_pdf_page_cache(
@@ -418,7 +428,9 @@ class TestA4PdfPathRaceGuard:
 
         with (
             patch("src.services.comparison.qt_pdf_adapter.is_qt_pdf_available", return_value=True),
-            patch("src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer),
+            patch(
+                "src.services.comparison.qt_pdf_adapter.PdfPageRenderer", return_value=fake_renderer
+            ),
             patch("src.services.comparison.qt_pdf_adapter.prune_pdf_cache"),
         ):
             result = prewarm_pdf_page_cache(
@@ -483,6 +495,7 @@ class TestA4PdfPathRaceGuard:
         viewport._pdf_rerender_timer = MagicMock()
         viewport._loaded_pack_path = None
         viewport._primitive_count = 0
+        viewport._color_mode = "light"
 
         result = LightweightDrawingViewport.load_scene_pack(
             viewport,
@@ -521,6 +534,7 @@ class TestA4PdfPathRaceGuard:
         viewport._pdf_rerender_timer = MagicMock()
         viewport._loaded_pack_path = None
         viewport._primitive_count = 0
+        viewport._color_mode = "light"
 
         result = LightweightDrawingViewport.load_scene_pack(viewport, ref)
 
@@ -546,6 +560,7 @@ class TestA5ThreadAffinityWarning:
         # thread-mismatch warning is GUI-only (requires QApplication).
         pytest.importorskip("PySide6.QtPdf")
         from src.services.comparison.qt_pdf_adapter import PdfPageRenderer
+
         renderer = PdfPageRenderer(Path("C:/no/such/file.pdf"))
         # render_page must not raise even when the path is bogus.
         result = renderer.render_page(0)
@@ -556,9 +571,7 @@ class TestA5ThreadAffinityWarning:
 class TestLightweightQmlFallback:
     """The packaged lightweight viewer must load without optional QSG."""
 
-    def test_qml_root_loads_and_pdf_preview_renders_without_qsg(
-        self, tmp_path, monkeypatch
-    ):
+    def test_qml_root_loads_and_pdf_preview_renders_without_qsg(self, tmp_path, monkeypatch):
         pytest.importorskip("PySide6.QtPdf")
         fitz = pytest.importorskip("fitz")
 
@@ -574,6 +587,7 @@ class TestLightweightQmlFallback:
 
         from PySide6.QtQuickWidgets import QQuickWidget
         from PySide6.QtWidgets import QApplication
+
         from src.gui.lightweight_viewport import LightweightDrawingViewport
 
         app = QApplication.instance() or QApplication([])
@@ -601,9 +615,7 @@ class TestLightweightQmlFallback:
             viewport.deleteLater()
             app.processEvents()
 
-    def test_forced_qsg_env_with_broken_module_uses_canvas_fallback(
-        self, monkeypatch
-    ):
+    def test_forced_qsg_env_with_broken_module_uses_canvas_fallback(self, monkeypatch):
         # T2 (2026-06-11): WORKBENCH_QSG=qsg is now an EXPERIMENTAL opt-in
         # that activates the GPU skeleton when the module imports. The
         # original safety contract stays: a missing/broken module must
@@ -614,12 +626,11 @@ class TestLightweightQmlFallback:
 
         monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
         monkeypatch.setenv("WORKBENCH_QSG", "qsg")
-        monkeypatch.setitem(
-            sys.modules, "src.gui.qsg_line_item", types.ModuleType("broken_qsg")
-        )
+        monkeypatch.setitem(sys.modules, "src.gui.qsg_line_item", types.ModuleType("broken_qsg"))
 
         from PySide6.QtQuickWidgets import QQuickWidget
         from PySide6.QtWidgets import QApplication
+
         from src.gui.lightweight_viewport import LightweightDrawingViewport
 
         app = QApplication.instance() or QApplication([])
@@ -635,9 +646,7 @@ class TestLightweightQmlFallback:
             viewport.deleteLater()
             app.processEvents()
 
-    def test_default_renderer_is_canvas_even_with_qsg_module_available(
-        self, monkeypatch
-    ):
+    def test_default_renderer_is_canvas_even_with_qsg_module_available(self, monkeypatch):
         # T2-B policy: the Python-side QSG path showed nondeterministic
         # native crashes under PySide6 6.10 + QQuickWidget, so WITHOUT the
         # explicit experimental env the renderer stays Canvas (made
@@ -648,6 +657,7 @@ class TestLightweightQmlFallback:
         monkeypatch.delenv("WORKBENCH_QSG", raising=False)
 
         from PySide6.QtWidgets import QApplication
+
         from src.gui.lightweight_viewport import LightweightDrawingViewport
 
         app = QApplication.instance() or QApplication([])
@@ -657,10 +667,7 @@ class TestLightweightQmlFallback:
             assert root is not None
             assert root.property("skeletonRenderer") == "canvas"
             # Module imports fine → this is policy, not a fallback event.
-            assert (
-                "backend_fallback_canvas_skeleton"
-                not in viewport.render_failure_codes()
-            )
+            assert "backend_fallback_canvas_skeleton" not in viewport.render_failure_codes()
             # Offscreen test platform pins the deterministic Immediate
             # strategy; real platforms keep the threaded raster.
             assert root.property("canvasThreadedRaster") is False
@@ -682,9 +689,7 @@ class TestQ2AutoZoomCameraLock:
 
         vp = LightweightDrawingViewport.__new__(LightweightDrawingViewport)
         root = MagicMock()
-        root.property.side_effect = lambda name: {"width": 800.0, "height": 600.0}.get(
-            name, 0.0
-        )
+        root.property.side_effect = lambda name: {"width": 800.0, "height": 600.0}.get(name, 0.0)
         vp._quick = MagicMock()
         vp._quick.rootObject.return_value = root
         return vp, root

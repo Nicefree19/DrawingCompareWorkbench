@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 RUNTIME_REQUIREMENT_FILES = (
@@ -94,7 +93,7 @@ QUARANTINED_CODE_FILES = {
 # (신규 audit 게이트 아님)". Lowering a ceiling after an extraction is expected
 # and encouraged. Counted with the same splitlines() basis the gate reads with.
 MONOLITH_LINE_CEILINGS = {
-    "src/gui/drawing_compare_workbench.py": 13482,
+    "src/gui/drawing_compare_workbench.py": 13467,
     "src/gui/lightweight_viewport.py": 2106,
 }
 FORBIDDEN_CODE_PATTERNS = (
@@ -339,7 +338,9 @@ def check_cad_visual_backend_policy(root: Path) -> list[PolicyViolation]:
                 continue
             for code, pattern, message in FORBIDDEN_VISUAL_BACKEND_PATTERNS:
                 if pattern.search(line):
-                    violations.append(PolicyViolation(rel, line_number, code, message, line.strip()))
+                    violations.append(
+                        PolicyViolation(rel, line_number, code, message, line.strip())
+                    )
     return violations
 
 

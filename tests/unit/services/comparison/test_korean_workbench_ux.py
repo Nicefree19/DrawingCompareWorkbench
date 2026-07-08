@@ -5,9 +5,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 SOURCE = Path("src/gui/drawing_compare_workbench.py").read_text(encoding="utf-8")
-SUBPROCESS_SOURCE = Path("src/services/comparison/workbench_subprocess.py").read_text(encoding="utf-8")
+SUBPROCESS_SOURCE = Path("src/services/comparison/workbench_subprocess.py").read_text(
+    encoding="utf-8"
+)
+OVERLAY_MODEL_SOURCE = Path("src/gui/workbench_overlay_model.py").read_text(encoding="utf-8")
+DWG_DIFFER_SOURCE = Path("src/services/comparison/dwg_differ.py").read_text(encoding="utf-8")
+README_SOURCE = Path("README.md").read_text(encoding="utf-8")
 
 
 def test_korean_workbench_primary_labels_are_korean() -> None:
@@ -53,8 +57,12 @@ def test_korean_workbench_zone_review_viewer_controls_are_declared() -> None:
     assert "render_timeout" in SOURCE
     assert 'if render_status == "rendered":' in SOURCE
     assert "if False and rendered.get" not in SOURCE
-    assert "visibleTiles" in Path("src/gui/assets/drawing_compare/DrawingGpuViewport.qml").read_text(encoding="utf-8")
-    qml_source = Path("src/gui/assets/drawing_compare/DrawingGpuViewport.qml").read_text(encoding="utf-8")
+    assert "visibleTiles" in Path(
+        "src/gui/assets/drawing_compare/DrawingGpuViewport.qml"
+    ).read_text(encoding="utf-8")
+    qml_source = Path("src/gui/assets/drawing_compare/DrawingGpuViewport.qml").read_text(
+        encoding="utf-8"
+    )
     assert "property real sceneWidth" in qml_source
     # The viewer always shows the background image when present (tile mode used
     # to gate it but that left the viewport blank for small tile grids — the
@@ -93,7 +101,9 @@ def test_korean_workbench_zone_review_viewer_controls_are_declared() -> None:
     assert "변경 후 도면에 새 요소가 생겼습니다." in SOURCE
     assert "변경 전 도면에 있던 요소가 사라졌습니다." in SOURCE
     assert "같은 위치 또는 가까운 위치의 요소 속성/형상이 달라졌습니다." in SOURCE
-    qml_source = Path("src/gui/assets/drawing_compare/DrawingGpuViewport.qml").read_text(encoding="utf-8")
+    qml_source = Path("src/gui/assets/drawing_compare/DrawingGpuViewport.qml").read_text(
+        encoding="utf-8"
+    )
     # Selection plumbing: Python still pushes the selected zone id to QML, and the
     # cloud/focus overlay separation (introduced for the customer-grade UX) lets the
     # Repeater render a small focus marker on top of the larger review-area cloud.
@@ -206,7 +216,8 @@ def test_workbench_caps_immediate_qml_overlay_load_for_responsiveness() -> None:
     light_source = Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
 
     assert "GPU_VIEWER_MAX_VISIBLE_OVERLAYS = 120" in SOURCE
-    assert "GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD = 300" in SOURCE
+    assert "GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD" in SOURCE
+    assert "GPU_VIEWER_FOCUS_ONLY_OVERLAY_SOURCE_THRESHOLD = 300" in OVERLAY_MODEL_SOURCE
     assert "should_use_focus_only_overlay_mode(len(self._last_overlays))" in SOURCE
     assert 'overlay_display_mode="focus_only"' in SOURCE
     assert "MAX_QML_CHANGE_CLOUD_OVERLAYS = 120" in light_source
@@ -225,8 +236,15 @@ def test_gui_compare_requests_at_least_one_static_preview() -> None:
 
 
 def test_workbench_backend_status_describes_native_dwg_scope_without_oda_requirement() -> None:
-    assert "DWG native import limited to" in SOURCE
-    assert "requires an approved adapter" in SOURCE
+    assert 'dwg_supported_versions = ["AC1015"]' in DWG_DIFFER_SOURCE
+    assert '"dwg_support_scope": "limited-read-only-adapter"' in DWG_DIFFER_SOURCE
+    assert '"legacy_oda_fallback": "disabled_by_default"' in DWG_DIFFER_SOURCE
+    assert (
+        "Default native DWG import remains limited to the conservative `AC1015` path."
+        in README_SOURCE
+    )
+    assert "configured converter path before making customer-facing claims" in README_SOURCE
+    assert "contract-blocked for customer-facing" in README_SOURCE
     assert "ODA Converter not found; legacy DWG conversion is unavailable." not in SOURCE
 
 
@@ -247,7 +265,10 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     assert "self._lightweight_raster_pairs: set[str] = set()" in SOURCE
     assert "setChecked(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)" in menu_body
     assert "self.act_lightweight_viewer_v2.setVisible(False)" in menu_body
-    assert "self.preview_before_v2.setVisible(not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)" in preview_body
+    assert (
+        "self.preview_before_v2.setVisible(not DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)"
+        in preview_body
+    )
     assert (
         "self.preview_before_lightweight_v2.setVisible(DRAWING_COMPARE_LIGHTWEIGHT_VIEWER_ONLY)"
         in preview_body
@@ -257,7 +278,9 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
     assert "if _viewer_pair_is_pdf(viewer_pair):" in SOURCE
     assert "def _load_lightweight_raster_preview_v2" in SOURCE
     assert "viewport.load_raster_image(" in SOURCE
-    assert "def load_raster_image" in Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
+    assert "def load_raster_image" in Path("src/gui/lightweight_viewport.py").read_text(
+        encoding="utf-8"
+    )
     assert "self._schedule_lightweight_pair_load_v2(pair_id, viewer_pair)" in drawing_body
     assert "self._load_lightweight_raster_preview_v2(pair_id, viewer_pair)" in SOURCE
     assert "pair_id in self._lightweight_raster_pairs" in SOURCE
@@ -277,7 +300,9 @@ def test_workbench_uses_lightweight_viewer_as_single_visible_path() -> None:
 
 def test_one_sided_zone_selection_explains_blank_counterpart_view() -> None:
     light_source = Path("src/gui/lightweight_viewport.py").read_text(encoding="utf-8")
-    qml_source = Path("src/gui/assets/drawing_compare/LightweightDrawingViewport.qml").read_text(encoding="utf-8")
+    qml_source = Path("src/gui/assets/drawing_compare/LightweightDrawingViewport.qml").read_text(
+        encoding="utf-8"
+    )
     focus_start = SOURCE.index("    def _focus_lightweight_on_zone_v2")
     focus_end = SOURCE.index("    def _set_lightweight_zone_side_messages_v2", focus_start)
     focus_body = SOURCE[focus_start:focus_end]
@@ -289,8 +314,8 @@ def test_one_sided_zone_selection_explains_blank_counterpart_view() -> None:
     assert "삭제된 요소 — 같은 위치에 더 이상 없습니다" in SOURCE
     assert "sideMessage" in qml_source
     assert "def set_side_message" in light_source
-    assert "side == \"before\" and match_side == \"b_only\"" in light_source
-    assert "side == \"after\" and match_side == \"a_only\"" in light_source
+    assert 'side == "before" and match_side == "b_only"' in light_source
+    assert 'side == "after" and match_side == "a_only"' in light_source
     assert 'match_side == "b_only"' in focus_body
     assert 'match_side == "a_only"' in focus_body
 
