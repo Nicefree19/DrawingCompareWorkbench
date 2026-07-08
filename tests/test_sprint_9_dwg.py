@@ -13,20 +13,20 @@ Usage:
 import logging
 import os
 import shutil
-import unittest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 # 프로젝트 루트 경로 추가
 import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 from src.services.comparison.dwg_converter import DwgConverter
-from src.services.comparison.dxf_entity_extractor import DxfEntityExtractor
-from src.services.comparison.dxf_comparator import DxfComparator, DxfChangeType
 from src.services.comparison.dwg_differ import DwgDiffer
+from src.services.comparison.dxf_comparator import DxfChangeType, DxfComparator
+from src.services.comparison.dxf_entity_extractor import DxfEntityExtractor
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)

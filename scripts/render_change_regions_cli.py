@@ -51,10 +51,8 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 CAVEATS: List[str] = [
-    "before/after 크롭은 두 도면이 좌표계를 공유한다고 가정한다(한 시트의 리비전엔 참). "
-    "재원점된 도면은 정합 변환이 필요하며 여기서는 적용하지 않는다.",
-    "구역 크롭은 전체 시트 렌더에서 잘라낸다 — 초대형 시트에서 작은 구역은 저해상일 수 있다 "
-    "(구역별 tight 렌더는 후속 개선).",
+    "before/after 크롭은 두 도면이 좌표계를 공유한다고 가정한다(한 시트의 리비전엔 참). " "재원점된 도면은 정합 변환이 필요하며 여기서는 적용하지 않는다.",
+    "구역 크롭은 전체 시트 렌더에서 잘라낸다 — 초대형 시트에서 작은 구역은 저해상일 수 있다 " "(구역별 tight 렌더는 후속 개선).",
 ]
 
 
@@ -96,15 +94,16 @@ def _change_point(ch: Dict[str, Any]) -> Optional[Tuple[float, float]]:
     bbox = meta.get("bbox") if isinstance(meta.get("bbox"), dict) else None
     if bbox:
         try:
-            return ((float(bbox["min_x"]) + float(bbox["max_x"])) / 2.0,
-                    (float(bbox["min_y"]) + float(bbox["max_y"])) / 2.0)
+            return (
+                (float(bbox["min_x"]) + float(bbox["max_x"])) / 2.0,
+                (float(bbox["min_y"]) + float(bbox["max_y"])) / 2.0,
+            )
         except (KeyError, TypeError, ValueError):
             return None
     return None
 
 
-def _cluster(points: List[Tuple[int, float, float]], threshold: float
-             ) -> List[List[int]]:
+def _cluster(points: List[Tuple[int, float, float]], threshold: float) -> List[List[int]]:
     """Greedy spatial clustering by centroid distance. Returns lists of indices."""
     clusters: List[Dict[str, Any]] = []
     for idx, x, y in points:
@@ -122,8 +121,9 @@ def _cluster(points: List[Tuple[int, float, float]], threshold: float
     return [c["idx"] for c in clusters]
 
 
-def _region_bbox(pts: List[Tuple[float, float]], min_mm: float, pad_frac: float
-                 ) -> Tuple[float, float, float, float]:
+def _region_bbox(
+    pts: List[Tuple[float, float]], min_mm: float, pad_frac: float
+) -> Tuple[float, float, float, float]:
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
@@ -176,9 +176,9 @@ def _overlay(crop_a, crop_b):
     ink_a = ga < 245
     ink_b = gb < 245
     out = np.full((h, w, 3), 255, dtype=np.uint8)
-    out[ink_a & ink_b] = (70, 70, 70)      # unchanged ink
-    out[ink_a & ~ink_b] = (220, 30, 30)    # removed (before only) — red
-    out[ink_b & ~ink_a] = (30, 60, 220)    # added (after only) — blue
+    out[ink_a & ink_b] = (70, 70, 70)  # unchanged ink
+    out[ink_a & ~ink_b] = (220, 30, 30)  # removed (before only) — red
+    out[ink_b & ~ink_a] = (30, 60, 220)  # added (after only) — blue
     return out
 
 
@@ -191,8 +191,9 @@ def _save_png(img_rgb, path: Path, max_px: Optional[int] = None) -> Optional[Pat
         edge = max(h, w)
         if edge > max_px:
             scale = max_px / float(edge)
-            arr = cv2.resize(arr, (max(1, int(w * scale)), max(1, int(h * scale))),
-                             interpolation=cv2.INTER_AREA)
+            arr = cv2.resize(
+                arr, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA
+            )
     cv2.imwrite(str(path), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
     return path if path.exists() else None
 
@@ -204,10 +205,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     source_a, source_b = Path(args.source_a), Path(args.source_b)
     for label, path in (("a", source_a), ("b", source_b)):
         if not path.exists():
-            return {"status": "error", "error_code": "FILE_NOT_FOUND",
-                    "message": f"입력 파일 없음 ({label}): {path}"}
+            return {
+                "status": "error",
+                "error_code": "FILE_NOT_FOUND",
+                "message": f"입력 파일 없음 ({label}): {path}",
+            }
 
-    out_dir = Path(args.out_dir) if args.out_dir else Path(tempfile.mkdtemp(prefix="change_regions_"))
+    out_dir = (
+        Path(args.out_dir) if args.out_dir else Path(tempfile.mkdtemp(prefix="change_regions_"))
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
@@ -217,10 +223,12 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     _meta = payload.get("metadata", {}) or {}
     if _meta.get("pipeline_status") == "failed" or _meta.get("error_code"):
         # 정직성: 엔진 fail-closed면 0-region 렌더를 성공으로 위장하지 않는다.
-        return {"status": "error",
-                "error_code": str(_meta.get("error_code") or "ENGINE_PIPELINE_FAILED"),
-                "message": str(_meta.get("message") or "비교 파이프라인 실패(fail-closed)"),
-                "warnings": payload.get("warnings", [])[:6]}
+        return {
+            "status": "error",
+            "error_code": str(_meta.get("error_code") or "ENGINE_PIPELINE_FAILED"),
+            "message": str(_meta.get("message") or "비교 파이프라인 실패(fail-closed)"),
+            "warnings": payload.get("warnings", [])[:6],
+        }
     changes = payload.get("changes", []) or []
 
     # 변경 좌표 수집 + 공간 클러스터링
@@ -235,10 +243,14 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         img_a, tf_a = renderer.render_with_transform(source_a)
         img_b, tf_b = renderer.render_with_transform(source_b)
     except Exception as exc:  # noqa: BLE001 — MemoryError 포함(초대형 시트 풀렌더 OOM)
-        return {"status": "error", "error_code": "RENDER_TOO_LARGE",
-                "message": f"전체 시트 렌더 실패({exc.__class__.__name__}): 초대형 시트로 추정. "
-                           "구역별 tight 렌더(Phase 2)가 필요하다.",
-                "summary": payload.get("summary", {}), "changes_total": len(changes)}
+        return {
+            "status": "error",
+            "error_code": "RENDER_TOO_LARGE",
+            "message": f"전체 시트 렌더 실패({exc.__class__.__name__}): 초대형 시트로 추정. "
+            "구역별 tight 렌더(Phase 2)가 필요하다.",
+            "summary": payload.get("summary", {}),
+            "changes_total": len(changes),
+        }
 
     ov_before = _save_png(img_a, out_dir / "overview_before.png", args.overview_max_px)
     ov_after = _save_png(img_b, out_dir / "overview_after.png", args.overview_max_px)
@@ -260,18 +272,22 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             crop_a = _crop(img_a, tf_a, bbox)
             crop_b = _crop(img_b, tf_b, bbox)
             ov = _overlay(crop_a, crop_b)
-            bpng = _save_png(crop_a, out_dir / f"before_r{ridx}.png") if crop_a is not None else None
+            bpng = (
+                _save_png(crop_a, out_dir / f"before_r{ridx}.png") if crop_a is not None else None
+            )
             apng = _save_png(crop_b, out_dir / f"after_r{ridx}.png") if crop_b is not None else None
             opng = _save_png(ov, out_dir / f"overlay_r{ridx}.png") if ov is not None else None
-            regions_out.append({
-                "region_id": ridx,
-                "bbox_world": [round(v, 1) for v in bbox],
-                "change_count": len(idxs),
-                "change_types": types,
-                "overlay_png": str(opng) if opng else None,
-                "before_png": str(bpng) if bpng else None,
-                "after_png": str(apng) if apng else None,
-            })
+            regions_out.append(
+                {
+                    "region_id": ridx,
+                    "bbox_world": [round(v, 1) for v in bbox],
+                    "change_count": len(idxs),
+                    "change_types": types,
+                    "overlay_png": str(opng) if opng else None,
+                    "before_png": str(bpng) if bpng else None,
+                    "after_png": str(apng) if apng else None,
+                }
+            )
 
     return {
         "status": "ok",
@@ -290,8 +306,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         "warnings": payload.get("warnings", []),
         "caveats": CAVEATS,
         "vision_hint": "각 region의 overlay_png(빨강=삭제/이동전, 파랑=추가/이동후, 회색=불변)를 "
-                       "먼저 보고 무엇이 어떻게 바뀌었는지 판독하라. before_png/after_png는 원본 대조용. "
-                       "구조적 유의성은 KDS/KCS(kcsc-mcp)로 교차검증하라.",
+        "먼저 보고 무엇이 어떻게 바뀌었는지 판독하라. before_png/after_png는 원본 대조용. "
+        "구조적 유의성은 KDS/KCS(kcsc-mcp)로 교차검증하라.",
     }
 
 
@@ -302,8 +318,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:  # noqa: BLE001
         import traceback
 
-        out = {"status": "error", "error_code": exc.__class__.__name__,
-               "message": str(exc), "traceback": traceback.format_exc().splitlines()[-6:]}
+        out = {
+            "status": "error",
+            "error_code": exc.__class__.__name__,
+            "message": str(exc),
+            "traceback": traceback.format_exc().splitlines()[-6:],
+        }
     print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
     return 0 if out.get("status") == "ok" else 2
 

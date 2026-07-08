@@ -57,8 +57,15 @@ ENGINE_NOTES: List[str] = [
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--a", dest="source_a", required=True, help="Before/base file (DXF or DWG)")
-    parser.add_argument("--b", dest="source_b", required=True, help="After/target file (DXF or DWG)")
-    parser.add_argument("--json-out", dest="json_out", default="", help="Optional path to also write the JSON payload")
+    parser.add_argument(
+        "--b", dest="source_b", required=True, help="After/target file (DXF or DWG)"
+    )
+    parser.add_argument(
+        "--json-out",
+        dest="json_out",
+        default="",
+        help="Optional path to also write the JSON payload",
+    )
     parser.add_argument(
         "--max-changes",
         type=int,
@@ -66,7 +73,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Truncate the returned changes[] to this many for token budget (0 = no cap). "
         "Counts/summary always reflect the FULL diff.",
     )
-    parser.add_argument("--include-layers", default="", help="Comma-separated layers to include (default: all)")
+    parser.add_argument(
+        "--include-layers", default="", help="Comma-separated layers to include (default: all)"
+    )
     parser.add_argument("--exclude-layers", default="", help="Comma-separated layers to exclude")
     return parser.parse_args(argv)
 

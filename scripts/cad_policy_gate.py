@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 RUNTIME_REQUIREMENT_FILES = (
@@ -339,7 +338,9 @@ def check_cad_visual_backend_policy(root: Path) -> list[PolicyViolation]:
                 continue
             for code, pattern, message in FORBIDDEN_VISUAL_BACKEND_PATTERNS:
                 if pattern.search(line):
-                    violations.append(PolicyViolation(rel, line_number, code, message, line.strip()))
+                    violations.append(
+                        PolicyViolation(rel, line_number, code, message, line.strip())
+                    )
     return violations
 
 
