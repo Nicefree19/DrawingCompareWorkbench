@@ -1,5 +1,42 @@
 # Full-Suite Health Report
 
+## Current HEAD Refresh - 2026-07-08 (GREEN — full-suite health closed)
+
+Status: **full-suite health is GREEN for the current PR HEAD**
+(`fix/full-suite-remediation-and-p5-research`, PR #68). This closes the
+full-suite freshness + health remediation blocker; it lands on `main` when
+PR #68 merges.
+
+| Evidence | Value |
+|---|---|
+| Workflow | `.github/workflows/full-suite-health.yml` (`workflow_dispatch`) |
+| GitHub run | `28908447851` |
+| URL | `https://github.com/Nicefree19/DrawingCompareWorkbench/actions/runs/28908447851` |
+| Branch / PR | `fix/full-suite-remediation-and-p5-research` / #68 |
+| Target headSha | `5653b6ce3b65aab1c5f7bdece52519e49025bf46` |
+| Run window | Created `2026-07-08T00:29:15Z`; completed `2026-07-08T00:34:47Z` |
+| Conclusion / exit | GitHub conclusion `success`; exit `0` |
+| Local JUnit artifact | `build\reports\full-suite-health_28908447851\full-suite-junit.xml` |
+| Counts | `4,227` JUnit cases: `4,183 passed / 0 failed / 0 errors / 44 skipped` |
+
+How the 11 failures of run `28323513823` were closed:
+
+| Failure group (count) | Resolution | Commit |
+|---|---|---|
+| `test_structural_review_draft_composer` `FileNotFoundError` (4) | Recovered `docs/schemas/structural-review-draft-v0.1.schema.json` from **dangling commit `f5cdfd0`** (never merged to any ref, so `main` and the working tree both lacked it) and tracked it via the existing `.gitignore` exception. | `4f02a70` |
+| `test_pdf_lightweight_hardening` mock (2) | Mock viewport given the required `_color_mode = "light"`. Test-only. | `4f02a70` |
+| `test_dwg_differ_cleanup` path alias (2) | Compare the same filesystem path via `Path.samefile()` (runner `runneradmin` vs `RUNNER~1`). Test-only. | `4f02a70` |
+| `test_korean_workbench_ux` stale wording (2) | Assertions realigned to the post-extraction module / README contract. Test-only. | `4f02a70` |
+| `test_01_dwg_converter_path` env (1) | `skipUnless(_find_installed_oda_converter())` — SKIPS when the ODA binary is absent (GitHub runner), still RUNS+asserts where installed. | `5653b6c` |
+
+Intermediate proof: run `28907534076` (HEAD `1a2fabd`, before the skip fix)
+already reduced the set to a single failure (`4,183 passed / 1 failed`),
+confirming the schema + drift repairs landed; run `28908447851` then closed the
+last one to `0 failed`.
+
+Product behavior unchanged: every fix is a test / schema / gitignore change; no
+`src/` logic was modified.
+
 ## Current HEAD Refresh - 2026-06-28
 
 Status: **fresh current-HEAD evidence recorded; full-suite health is not green**.

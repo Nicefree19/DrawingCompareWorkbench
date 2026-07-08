@@ -1,6 +1,16 @@
 # Current Readiness Blockers
 
-Last updated: 2026-06-28
+Last updated: 2026-06-28 (full-suite row updated 2026-07-08)
+
+> **Update 2026-07-08 (PR #68):** The **Full-suite freshness** row below is now
+> CLOSED for the PR branch. `Full Suite Health` run `28908447851`
+> (HEAD `5653b6c`, branch `fix/full-suite-remediation-and-p5-research`) concluded
+> `success` with `4,183 passed / 0 failed / 0 errors / 44 skipped` — all 11
+> failures of run `28323513823` were remediated (schema recovered from dangling
+> commit `f5cdfd0`, test-drift repairs, and an env-gated skip for the ODA
+> converter test). Evidence: `docs/FULL_SUITE_HEALTH_REPORT.md`. This lands on
+> `main` when PR #68 merges. The other three blockers (customer-grade evidence,
+> AC1032 claim boundary, release-artifact freshness) are unchanged and still open.
 
 Scope decision: **Option B plus bounded freshness probes**. This document records
 the smallest safe next slice after the 2026-06-28 status/freeze sync: make the
