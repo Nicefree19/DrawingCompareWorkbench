@@ -100,7 +100,7 @@ jobs:
           python scripts\measure_golden_accuracy_baseline.py `
             --out-json build\reports\golden-accuracy.json `
             --out-md build\reports\golden-accuracy.md `
-            --max-noise-fp 0 --min-precision 0.50 --min-recall 0.68
+            --max-noise-fp 0 --min-precision 0.70 --min-recall 0.85
 
       - name: Upload CAD regression report
         if: always()
